@@ -184,6 +184,9 @@ private:
             }
             int flag = 1;
             ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+#ifdef SO_NOSIGPIPE
+            ::setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &flag, sizeof(flag));
+#endif
             setNonBlocking(cfd);
 
             auto sess = std::make_unique<FixSession>(

@@ -313,6 +313,9 @@ void TcpGateway::handleAccept() {
         // Configure client socket
         int flag = 1;
         setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+#ifdef SO_NOSIGPIPE
+        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &flag, sizeof(flag));
+#endif
         setNonBlocking(clientFd);
 
         // Register client

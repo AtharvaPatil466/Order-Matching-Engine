@@ -26,6 +26,9 @@ public:
 
         int flag = 1;
         setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+#ifdef SO_NOSIGPIPE
+        setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &flag, sizeof(flag));
+#endif
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;

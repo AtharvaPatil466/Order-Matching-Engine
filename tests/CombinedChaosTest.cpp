@@ -51,6 +51,9 @@ public:
         if (fd_ < 0) return false;
         int flag = 1;
         setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+#ifdef SO_NOSIGPIPE
+        setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &flag, sizeof(flag));
+#endif
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);

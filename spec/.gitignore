@@ -1,0 +1,6 @@
+tla2tools.jar
+states/
+*.toolbox/
+# TLC error-trace artifacts — regenerated on demand
+*_TTrace_*.bin
+*_TTrace_*.tla

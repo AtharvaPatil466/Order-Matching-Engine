@@ -223,7 +223,7 @@ std::string AdminServer::generateOtrResponse(ParticipantId pid) const {
         totalPosition = stats.netPosition;
     }
 
-    double otr = static_cast<double>(totalOrders) / std::max(1ULL, totalTrades);
+    double otr = static_cast<double>(totalOrders) / std::max(static_cast<uint64_t>(1), totalTrades);
     oss << "\"ordersSubmitted\":" << totalOrders << ",";
     oss << "\"tradesExecuted\":" << totalTrades << ",";
     oss << "\"rejectedOrders\":" << totalRejected << ",";

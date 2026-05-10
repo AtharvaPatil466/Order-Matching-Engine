@@ -4,6 +4,7 @@
 #include "StructuredLog.h"
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace OrderMatcher {
 

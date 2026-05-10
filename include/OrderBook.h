@@ -88,7 +88,7 @@ struct ParticipantStats {
     int64_t netPosition = 0;
 
     double getOTR() const {
-        return static_cast<double>(ordersSubmitted) / std::max(1ULL, tradesExecuted);
+        return static_cast<double>(ordersSubmitted) / std::max(static_cast<uint64_t>(1), tradesExecuted);
     }
 };
 

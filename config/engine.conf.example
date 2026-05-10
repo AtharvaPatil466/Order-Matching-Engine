@@ -1,0 +1,55 @@
+# Order Matching Engine — Example Configuration
+#
+# Copy to /etc/orderengine/engine.conf or set OB_* environment variables.
+# Every key can be overridden by an env var with the prefix OB_
+# (e.g. "threads" → OB_THREADS).
+
+# ── Core Engine ──────────────────────────────────────────────────────────────
+threads         = 4
+symbols         = 4
+lean_mode       = false
+
+# ── Networking ───────────────────────────────────────────────────────────────
+admin_port      = 8080
+gateway_port    = 9001
+
+# ── Journaling ───────────────────────────────────────────────────────────────
+journal_path    = /var/lib/orderengine/journal.wal
+checkpoint_entries = 100000
+checkpoint_bytes   = 104857600
+
+# ── Rate Limiting ────────────────────────────────────────────────────────────
+rate_limit_msgs_per_sec = 10000
+rate_limit_burst        = 100
+queue_depth_threshold   = 0.8
+
+# ── Risk Limits ──────────────────────────────────────────────────────────────
+max_order_size   = 1000000
+max_notional     = 100000000
+max_position     = 5000000
+otr_threshold    = 100
+
+# ── Circuit Breakers ─────────────────────────────────────────────────────────
+price_band_pct   = 0.05
+halt_duration_ms = 30000
+
+# ── High Availability ────────────────────────────────────────────────────────
+node_id           = 1
+node_role         = primary
+replication_port  = 9002
+# Backup settings (ignored when node_role=primary):
+# primary_host    = 10.0.0.1
+# primary_replication_port = 9002
+heartbeat_interval_ms = 100
+heartbeat_timeout_ms  = 500
+lease_duration_ms     = 5000
+
+# ── Alerting ─────────────────────────────────────────────────────────────────
+# alert_webhook_url    = https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+# alert_webhook_format = slack
+# alert_min_level      = warning
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log_sink = stderr
+# log_sink = null     (zero-cost, production default)
+# log_sink = stderr   (JSON to stderr, dev/debugging)

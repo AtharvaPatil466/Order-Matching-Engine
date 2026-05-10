@@ -21,11 +21,8 @@ namespace OrderMatcher {
 //
 // This eliminates the need for a producer mutex while remaining lock-free.
 
-#ifdef __cpp_lib_hardware_interference_size
-    constexpr size_t MPSC_CACHE_LINE = std::hardware_destructive_interference_size;
-#else
+    // Hardcode cache line size to 64 bytes to avoid GCC -Winterference-size warnings
     constexpr size_t MPSC_CACHE_LINE = 64;
-#endif
 
 template<typename T>
 class MpscQueue {

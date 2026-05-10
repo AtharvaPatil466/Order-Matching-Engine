@@ -8,11 +8,7 @@
 namespace OrderMatcher {
 
 // Hardware cache line size (typically 64 bytes on x86/ARM)
-#ifdef __cpp_lib_hardware_interference_size
-    constexpr size_t CACHE_LINE_SIZE = std::hardware_destructive_interference_size;
-#else
-    constexpr size_t CACHE_LINE_SIZE = 64;
-#endif
+constexpr size_t CACHE_LINE_SIZE = 64;
 
 template <typename T>
 class RingBuffer {

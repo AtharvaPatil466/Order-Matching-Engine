@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/atharva/Quant Projects/Order Book/build-libfuzzer/cmake_install.cmake",
+		"/Users/atharva/Quant Projects/Order Book/build-libfuzzer/fuzz/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,11 @@
+# libFuzzer auto-grows corpus/ with SHA1-named files containing
+# coverage-finding inputs. They are reproducible from the seeds + the
+# harness, so we don't track them. Hand-curated seeds (named via
+# gen_seeds.sh) stay versioned.
+corpus/[0-9a-f][0-9a-f]*
+
+# libFuzzer crash-saving directory
+crashes/
+
+# Build trees specific to fuzzing
+/build-libfuzzer/

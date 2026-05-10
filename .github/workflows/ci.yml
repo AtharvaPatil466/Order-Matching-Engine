@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Release
+            os: macos-latest
+            build_type: Release
+            sanitizers: "OFF"
+            thread_sanitizer: "OFF"
+          - name: Ubuntu Debug Sanitizers
+            os: ubuntu-latest
+            build_type: Debug
+            sanitizers: "ON"
+            thread_sanitizer: "OFF"
+          - name: Ubuntu ThreadSanitizer
+            os: ubuntu-latest
+            build_type: Debug
+            sanitizers: "OFF"
+            thread_sanitizer: "ON"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DENABLE_SANITIZERS=${{ matrix.sanitizers }}
+          -DENABLE_THREAD_SANITIZER=${{ matrix.thread_sanitizer || 'OFF' }}
+          -DBUILD_TESTS=ON
+          -DBUILD_BENCHMARKS=${{ matrix.thread_sanitizer == 'ON' && 'OFF' || 'ON' }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        if: matrix.thread_sanitizer != 'ON'
+        run: ctest --test-dir build --output-on-failure -L project
+
+      - name: Test under ThreadSanitizer
+        if: matrix.thread_sanitizer == 'ON'
+        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest|PropertyTest'
+
+      - name: Benchmark smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.thread_sanitizer != 'ON'
+        run: |
+          timeout 30s ./build/benchmarks/E2EBenchmark > e2e_benchmark_smoke.txt
+          test -s e2e_benchmark_smoke.txt
+
+      - name: Upload benchmark smoke artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.thread_sanitizer != 'ON'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-benchmark-smoke-${{ matrix.name }}
+          path: e2e_benchmark_smoke.txt

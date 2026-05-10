@@ -1,0 +1,5 @@
+if(EXISTS "/Users/atharva/Quant Projects/Order Book/build-tsan/tests/BenchmarkRegression[1]_tests.cmake")
+  include("/Users/atharva/Quant Projects/Order Book/build-tsan/tests/BenchmarkRegression[1]_tests.cmake")
+else()
+  add_test(BenchmarkRegression_NOT_BUILT BenchmarkRegression_NOT_BUILT)
+endif()

@@ -1,0 +1,29 @@
+build/
+build-chaos/
+bin/
+.DS_Store
+*.o
+*.a
+*.dylib
+*.so
+
+# AI Agents & Assistants
+.claude/
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.cursor/
+.cursorrules
+.windsurfrules
+.kiro/
+.mcp.json
+.opencode.json
+
+# Generated Artifacts
+Project_Overview.md
+Project_Overview.pdf
+
+# IDEs & Tools
+.idea/
+.clangd/
+.vscode/

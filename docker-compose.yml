@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  # ── Primary Matching Engine ──
+  engine-primary:
+    build: .
+    container_name: orderengine-primary
+    command: ["--threads", "4", "--port", "8080", "--symbols", "4"]
+    ports:
+      - "8080:8080"    # Admin HTTP
+      - "9001:9001"    # FIX Gateway
+      - "9002:9002"    # Replication
+    volumes:
+      - journal-primary:/app/journal
+      - ./config/engine.conf.example:/app/config/engine.conf:ro
+    environment:
+      - OB_THREADS=4
+      - OB_JOURNAL_PATH=/app/journal/primary.wal
+      - OB_REPLICATION_PORT=9002
+      - OB_NODE_ROLE=primary
+      - OB_NODE_ID=1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # ── Backup Matching Engine ──
+  engine-backup:
+    build: .
+    container_name: orderengine-backup
+    command: ["--threads", "4", "--port", "8080", "--symbols", "4"]
+    ports:
+      - "8081:8080"    # Admin HTTP (different host port)
+    volumes:
+      - journal-backup:/app/journal
+    environment:
+      - OB_THREADS=4
+      - OB_JOURNAL_PATH=/app/journal/backup.wal
+      - OB_NODE_ROLE=backup
+      - OB_NODE_ID=2
+      - OB_PRIMARY_HOST=engine-primary
+      - OB_PRIMARY_REPLICATION_PORT=9002
+    depends_on:
+      engine-primary:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Market Data Subscriber ──
+  md-subscriber:
+    build: .
+    container_name: orderengine-mdsub
+    entrypoint: ["/app/MdSubscriber"]
+    command: ["orderengine_md"]
+    depends_on:
+      engine-primary:
+        condition: service_healthy
+
+volumes:
+  journal-primary:
+  journal-backup:

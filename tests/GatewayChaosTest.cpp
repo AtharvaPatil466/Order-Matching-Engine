@@ -24,6 +24,10 @@
 #include <unistd.h>
 #include <unordered_set>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 using namespace OrderMatcher;
 
 namespace {
@@ -64,7 +68,7 @@ private:
     bool sendAll(const void* buf, size_t len) {
         auto* p = static_cast<const char*>(buf);
         while (len) {
-            ssize_t n = ::send(fd_, p, len, 0);
+            ssize_t n = ::send(fd_, p, len, MSG_NOSIGNAL);
             if (n <= 0) return false;
             p += n; len -= size_t(n);
         }

@@ -5,11 +5,18 @@
 #include <chrono>
 #include <atomic>
 #include <cstring>
+#include <csignal>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+
+// MSG_NOSIGNAL is Linux-only; define as 0 on macOS/BSD where
+// SO_NOSIGPIPE is used instead.
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 using namespace OrderMatcher;
 
@@ -90,7 +97,7 @@ private:
     bool sendAll(const void* buf, size_t len) {
         auto* ptr = static_cast<const char*>(buf);
         while (len > 0) {
-            ssize_t n = send(fd_, ptr, len, 0);
+            ssize_t n = send(fd_, ptr, len, MSG_NOSIGNAL);
             if (n <= 0) return false;
             ptr += n; len -= static_cast<size_t>(n);
         }

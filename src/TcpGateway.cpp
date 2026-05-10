@@ -7,6 +7,11 @@
 #include <cstring>
 #include <cerrno>
 
+// MSG_NOSIGNAL is Linux-only; on macOS/BSD SO_NOSIGPIPE is set per-socket.
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 namespace OrderMatcher {
 
 namespace {
@@ -217,7 +222,7 @@ void TcpGateway::flushWriteBuffer(int fd) {
     ClientState& state = it->second;
 
     while (!state.writeBuf.empty()) {
-        ssize_t n = send(fd, state.writeBuf.data(), state.writeBuf.size(), 0);
+        ssize_t n = send(fd, state.writeBuf.data(), state.writeBuf.size(), MSG_NOSIGNAL);
         if (n <= 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 addWriteToEventLoop(fd); // register for write-ready

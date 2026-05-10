@@ -38,6 +38,10 @@
 #include <unordered_set>
 #include <vector>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 using namespace OrderMatcher;
 namespace fs = std::filesystem;
 
@@ -74,7 +78,7 @@ private:
     bool sendAll(const void* b, size_t n) {
         auto* p = static_cast<const char*>(b);
         while (n) {
-            ssize_t r = ::send(fd_, p, n, 0);
+            ssize_t r = ::send(fd_, p, n, MSG_NOSIGNAL);
             if (r <= 0) return false;
             p += r; n -= size_t(r);
         }

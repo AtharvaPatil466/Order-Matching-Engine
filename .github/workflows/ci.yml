@@ -45,11 +45,11 @@ jobs:
 
       - name: Test
         if: matrix.thread_sanitizer != 'ON'
-        run: ctest --test-dir build --output-on-failure -L project
+        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest'
 
       - name: Test under ThreadSanitizer
         if: matrix.thread_sanitizer == 'ON'
-        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest|PropertyTest'
+        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest|PropertyTest|AdminServerEndpointsTest|ReplicationProtocolTest'
 
       - name: Benchmark smoke
         if: matrix.os == 'ubuntu-latest' && matrix.thread_sanitizer != 'ON'

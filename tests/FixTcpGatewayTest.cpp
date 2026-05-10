@@ -26,6 +26,10 @@
 #include <unistd.h>
 #include <vector>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 using namespace OrderMatcher;
 
 namespace {
@@ -51,7 +55,7 @@ int connectTo(uint16_t port) {
 
 bool sendAll(int fd, const char* data, size_t len) {
     while (len) {
-        ssize_t n = ::send(fd, data, len, 0);
+        ssize_t n = ::send(fd, data, len, MSG_NOSIGNAL);
         if (n <= 0) return false;
         data += n; len -= size_t(n);
     }

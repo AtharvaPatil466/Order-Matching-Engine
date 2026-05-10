@@ -24,6 +24,10 @@
 #include <thread>
 #include <unistd.h>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 using namespace OrderMatcher;
 
 namespace {
@@ -46,7 +50,7 @@ std::string httpGet(uint16_t port, const std::string& path) {
         return {};
     }
     std::string req = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    ::send(fd, req.data(), req.size(), 0);
+    ::send(fd, req.data(), req.size(), MSG_NOSIGNAL);
 
     std::string out;
     char buf[4096];

@@ -1,5 +1,0 @@
-if(EXISTS "/Users/atharva/Quant Projects/Order Book/build-tsan/tests/UnitTests[1]_tests.cmake")
-  include("/Users/atharva/Quant Projects/Order Book/build-tsan/tests/UnitTests[1]_tests.cmake")
-else()
-  add_test(UnitTests_NOT_BUILT UnitTests_NOT_BUILT)
-endif()

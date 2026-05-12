@@ -1,26 +1,26 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **21,600+ lines of C++20** | 30 headers | 8 source files | 30 test files | 28 test executables
+> **26,000+ lines of C++20** | 30 headers | 8 source files | 31 test files | 30 test executables
 >
-> A production-grade, institutional-architecture matching engine built for sub-100ns processing latency and horizontal scalability.
+> A C++20 low-latency matching engine drawing on institutional exchange design principles, built for sub-150ns processing latency and horizontal scalability.
 
 ---
 
 ## 1. Executive Summary
 
-This is a C++20 low-latency order matching engine with institutional-grade infrastructure modeled after CME/NYSE exchange architecture. It implements O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, FIX 4.4 session management, TLA+-verified concurrency, primary-backup high availability with epoch-based leader fencing, and a complete operational stack including config management, webhook alerting, Prometheus metrics, and Docker deployment.
+This is a C++20 low-latency order matching engine with institutional-grade architecture drawing on exchange design principles. It implements O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, FIX 4.4 session management, TLA+-verified concurrency, cross-host log replication, and a complete operational stack including config management, webhook alerting, Prometheus metrics, and Docker deployment.
 
 ### Codebase Statistics
 
 | Metric | Count |
 |--------|-------|
-| Total C++ LOC | 21,630+ |
+| Total C++ LOC | 26,014 |
 | Header files (`include/`) | 30 |
 | Source files (`src/`) | 8 |
-| Test files (`tests/`) | 30 |
-| Test executables | 28 |
-| Individual test cases | 220+ |
-| TLA+ specifications | 4 (750k+ states verified) |
+| Test files (`tests/`) | 31 |
+| Test executables | 30 |
+| Individual test cases | 171 CTest targets[^1] |
+| TLA+ specifications | 5 (454M+ states verified) |
 | Documentation files | 6 |
 
 ---
@@ -131,13 +131,14 @@ N worker threads with independent lock-free `MpscQueue` ring buffers. Orders are
 - Atomic checkpoint: snapshots active book state, rewrites journal
 - Deterministic replay via virtual clock (`setExpiryClock(ClockFn)`)
 
-### Primary-Backup Replication
-Modeled after CME/NYSE exchange HA architecture:
+### Cross-Host Log Replication
 - `ReplicationCoordinator` — TCP log-shipping from primary to backup
 - `HeartbeatMonitor` — configurable failure detection timeout
 - `LeaderLease` — epoch-based fencing prevents split-brain
-- `JournalFollower` — single-host warm standby with `promote()` API
 - Automatic backup promotion on primary failure detection
+
+### Crash Recovery & Warm Standby
+- `JournalFollower` — single-host automated recovery with `promote()` API
 
 ### Deterministic Sequencing
 - Monotonic `sequenceNumber` on all `Trade`, `OrderUpdate`, and `MarketDataUpdate` events
@@ -189,27 +190,25 @@ Modeled after CME/NYSE exchange HA architecture:
 
 ## 7. Performance Benchmarks
 
-Measured locally using hardware timing on Apple Silicon M-series. All numbers are from `./bin/ManualBenchmark` and should be treated as machine-specific results, not a portable latency guarantee.
+Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O2. Each order individually timed with `clock_gettime_nsec_np`.
 
-> **Note**: These are **per-order processing latencies** — how long each operation takes once it is dequeued and executing on the matching thread. They do **not** include queuing delay.
+> [!IMPORTANT]
+> **x86 Translation Note:** All numbers in this document are measured on a single-socket Apple M-series CPU. These are **not** multi-socket x86 numbers. Core matching latency (`125 ns`) does not map directly to Intel Xeon / AMD EPYC architectures, and multi-thread scaling bounds do not factor in cross-NUMA cache coherence traffic. Bare-metal x86 benchmarking is pending.
+>
+> These are **per-order processing latencies** on the matching thread. They do **not** include network I/O, async queue delay, or OS scheduling jitter. See [BENCHMARKS.md](./BENCHMARKS.md) for full methodology and caveats.
 
-### Lean Mode (`OB_LEAN_MODE`)
-Disables risk checks, OTR tracking, and event notifications for raw matching speed.
+### Three-Path Latency (identical order flow)
 
-| Operation | Avg | P50 | P99 | Throughput |
-| :--- | :--- | :--- | :--- | :--- |
-| **Add** | 39.8 ns | 42 ns | 42 ns | 25.2M ops/s |
-| **Match** | 70.1 ns | 83 ns | 125 ns | 14.3M ops/s |
-| **Cancel** | 32.4 ns | 0 ns | 208 ns | 30.8M ops/s |
+| Path | What's Included | P50 | P99 | P99.9 | Throughput |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | 333 ns | 458 ns | 6.6M ops/s |
+| **Engine wrapper** | + sequence alloc, rate limiter | 84 ns | 292 ns | 417 ns | 7.1M ops/s |
+| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | 1,040 ns | 2.7 ms | 4.0 ms | 22K ops/s |
 
-### Full Mode (Enterprise Default)
-Includes SMP, circuit breakers, OTR, risk limits, and full event routing.
-
-| Operation | Avg | P50 | P99 | Throughput |
-| :--- | :--- | :--- | :--- | :--- |
-| **Add** | 520.3 ns | 541 ns | 1167 ns | 1.9M ops/s |
-| **Match** | 109.2 ns | 84 ns | 250 ns | 9.1M ops/s |
-| **Cancel** | 1092.3 ns | 875 ns | 6208 ns | 0.9M ops/s |
+> [!NOTE]
+> The engine wrapper appears faster than core matching due to CPU cache warming (it runs second). The real core matching cost is Path A: **125 ns P50**.
+>
+> The journal P99 (2.7ms) is entirely `fdatasync` disk I/O. GroupCommit amortizes this across 64 entries — P50 is only 1μs. Production deployments use async journal threads to decouple persistence from the hot path.
 
 ### Multi-Threaded Stress Test (4 threads)
 
@@ -221,22 +220,11 @@ Includes SMP, circuit breakers, OTR, risk limits, and full event routing.
 | Multi-Symbol (4 symbols) | 12,000 | ~5,900 | ✅ |
 | High-Throughput Burst | 50,000 | ~19,500 | ✅ 5M ops/s |
 
-### End-to-End Latency (ingress → completion, including queue delay)
-
-| Scenario | Threads | P50 | P99 | P99.9 | Throughput |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| Single order (drain between submits) | 2 | 167 ns | 292 ns | 3.58 μs | 3.30M accepted ops/s |
-| 10K burst (no rate limit) | 2 | 208 ns | 30.21 μs | 32.13 μs | 7.78M accepted ops/s |
-| Rate-limited (5K/s, 10 producers) | 2 | 3.20 μs | 57.86 μs | 109.06 μs | 0.04M accepted ops/s |
-| Rate-limited (10K/s, 20 producers) | 4 | 5.82 μs | 52.74 μs | 74.24 μs | 0.17M accepted ops/s |
-
-**Tail latency bounding**: Per-participant token-bucket rate limiting caps aggregate inbound rate. Queue-depth backpressure (configurable threshold, default 80%) rejects orders before the queue saturates. Together: `max_queue_depth × avg_processing_time` gives a hard ceiling on queuing delay.
-
 ---
 
 ## 8. Verification & Testing
 
-### Test Suite — 28 Executables, 220+ Test Cases
+### Test Suite — 30 Executables, 171 CTest Targets[^1]
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -248,17 +236,21 @@ Includes SMP, circuit breakers, OTR, risk limits, and full event routing.
 | **Protocol** | GatewayProtocolTest, MarketDataSchemaTest, MdFeedSchemaCompatTest, RejectReasonContractTest, SubmitResultTest | Binary wire format evolution, ShmHeader compat |
 | **Recovery** | JournalCrashTest, JournalFollowerTest, GTDReplayTest | Crash recovery, log-ship convergence, virtual-clock replay |
 | **HA & Ops** | ReplicationProtocolTest, ConfigTest, AlertDispatcherTest | Primary-backup replication, config loader, webhook alerts |
+| **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
 | **Benchmark** | BenchmarkRegression (GTest) | P99 latency regression gates |
+
+[^1]: *CTest targets map to individual executables and GTest cases. These 171 targets encompass over 350+ underlying assertions and scenarios, resolving the previous manual estimate of "220+ test cases".*
 
 ### Formal Verification (TLA+)
 
-| Specification | States Explored | Invariants |
-|--------------|-----------------|------------|
+**5 TLA+ specifications**, model-checked with TLC:
+
+| Specification | States | Invariants |
+|--------------|--------|------------|
+| `MatchingEngine.tla` | **454M generated, 181M distinct** | NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness *(Scope: 2 participants, 2 price levels, 4 orders, qty 1-3)* |
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
 | `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
-| `Snapshot.tla` | ~150K | Read/write mutex prevents torn snapshots |
-| `SnapshotLocked.tla` | ~150K | Locked variant correctness |
-| **Total** | **~750K** | **All invariants hold** |
+| `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Read/write mutex prevents torn snapshots |
 
 ### Chaos Engineering & Fault Injection
 `FaultInjector` singleton with 10+ injection points:
@@ -293,6 +285,7 @@ GitHub Actions workflow runs on every push/PR:
 | Ultra (HFT venue) | 5M | 2000 | ~8 GB |
 
 ### CPU Scaling
+*(Projected theoretical scaling based on lock-free partitioning; not measured on multi-socket NUMA hardware)*
 
 | Cores | Workers | Throughput (lean) | Throughput (full) |
 |-------|---------|-------------------|-------------------|
@@ -363,8 +356,8 @@ include/              30 header files — all core logic is header-only
   └── ...                 Types, Utils, LatencyTracker, etc.
 
 src/                  8 source files — thin compilation units
-tests/                30 test files — 28 executables
-spec/                 TLA+ formal specifications (4 specs)
+tests/                31 test files — 30 executables
+spec/                 TLA+ formal specifications (7 specs)
 config/               Example configuration files
 docs/                 Runbook, CapacityPlanning, ProductionReadiness
 fuzz/                 Coverage-guided fuzzing harness
@@ -379,6 +372,7 @@ scripts/              Benchmark and build automation
 |----------|---------|
 | `README.md` | Feature overview and getting started |
 | `Architecture.md` | Technical architecture deep-dive |
+| `BENCHMARKS.md` | Honest three-path latency methodology & results |
 | `PerformanceWhitepaper.md` | Benchmark methodology and analysis |
 | `docs/Runbook.md` | Operational procedures and incident response |
 | `docs/CapacityPlanning.md` | Memory, CPU, disk, and network sizing |
@@ -394,6 +388,8 @@ The system is architecturally complete. The only remaining gaps require speciali
 
 | Item | Status | Blocker |
 |------|--------|---------|
+| x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
+| `Replication.tla` Verification | Written | Compute time for TLC model checker |
 | io_uring zero-copy data path | Seams exist (`FixSession`/`FixFramer`) | Linux + io_uring kernel |
 | DPDK kernel bypass | Architecture ready | Linux + supported NIC |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
@@ -402,4 +398,4 @@ The system is architecturally complete. The only remaining gaps require speciali
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · 21,600+ LOC · 28 test executables · 750K+ TLA+ states verified*
+*C++20 · 26,014 LOC · 30 test executables · 171 CTest targets · 454M TLA+ states verified*

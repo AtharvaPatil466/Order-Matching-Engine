@@ -47,7 +47,7 @@ A C++20 low-latency matching engine with institutional-grade architecture drawin
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes
 
 ### Formal Verification & Chaos Engineering
-- **TLA+ Specifications**: 5 specs including MatchingEngine safety invariants (454M states, 181M distinct, 0 violations), MPSC queue linearizability, consumer protocol shutdown, and snapshot mechanism
+- **TLA+ Specifications**: 6 specs including `Replication.tla` (log shipping & leader election), MatchingEngine safety invariants (454M states, 181M distinct, 0 violations), MPSC queue linearizability, consumer protocol shutdown, and snapshot mechanism
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; zero-cost in production (`OB_ENABLE_FAULT_INJECTION` off)
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow

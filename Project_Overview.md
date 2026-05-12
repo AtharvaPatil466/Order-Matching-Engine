@@ -243,12 +243,13 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 
 ### Formal Verification (TLA+)
 
-**5 TLA+ specifications**, model-checked with TLC:
+**6 TLA+ specifications**, model-checked with TLC:
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
 | `MatchingEngine.tla` | **454M generated, 181M distinct** | NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness *(Scope: 2 participants, 2 price levels, 4 orders, qty 1-3)* |
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
+| `Replication.tla` | ~1.2M | Leader election & log shipping (no split-brain) |
 | `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
 | `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Read/write mutex prevents torn snapshots |
 

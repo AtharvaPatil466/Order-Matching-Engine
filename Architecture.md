@@ -89,7 +89,7 @@ To scale beyond a single core, the engine utilizes the `ShardedOrderBook`.
 Instead of placing all instruments in one book, instruments are sharded across $N$ instances. Each worker thread runs an independent event loop pinned to a specific CPU core using `CPUAffinity`. Cross-symbol interactions are heavily restricted to maintain this isolation.
 
 ### 3.3 ShadowEngine (Dark Launching)
-For algorithmic testing and capacity planning, the `ShadowEngine` allows cloning production state. It consumes production traffic (via a fork or replay) but suppresses all outbound executions and market data. This allows safe, realistic load testing of new engine versions against live market flow.
+For algorithmic testing and capacity planning, the `ShadowEngine` allows cloning production state. It consumes production traffic (via a fork or replay) but suppresses all outbound executions and market data. By taking a read-only snapshot of the production book and replaying subsequent events from a specific journal offset, the shadow instance accurately mirrors live execution logic without corrupting the production order book or impacting live network egress. This allows safe, realistic load testing of new engine versions against live market flow.
 
 ### 3.4 Regulatory & Compliance Controls
 - **WashTradeDetector (SMP)**: Prevents participants from matching against themselves.

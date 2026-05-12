@@ -68,6 +68,14 @@ private:
 
     alignas(CACHE_LINE_SIZE) std::atomic<size_t> tail_;
     char pad_tail_[CACHE_LINE_SIZE - sizeof(std::atomic<size_t>)];
+
+    // Phase 2, Week 6: Lock-free guarantee assertion.
+    // SPSC ring buffers don't need tagged indices (no ABA risk when
+    // only one thread modifies each index). But we DO verify that the
+    // platform's atomic<size_t> is truly lock-free, since a kernel-
+    // mediated mutex would destroy our latency budget.
+    static_assert(std::atomic<size_t>::is_always_lock_free,
+                  "RingBuffer requires lock-free atomic<size_t> for SPSC correctness");
 };
 
 } // namespace OrderMatcher

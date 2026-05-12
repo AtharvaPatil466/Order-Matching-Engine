@@ -1,4 +1,5 @@
 #include "AdminServer.h"
+#include "LatencyTracker.h"
 #include "Metrics.h"
 #include <iostream>
 #include <sstream>
@@ -144,10 +145,19 @@ void AdminServer::handleConnection(int clientSocket) {
             sym = static_cast<SymbolId>(std::stoul(query.substr(symPos + 9)));
         }
         body = generateBookResponse(sym);
+    } else if (path == "/audit") {
+        // Parse ?symbolId=Y
+        SymbolId sym = 0;
+        size_t symPos = query.find("symbolId=");
+        if (symPos != std::string::npos) {
+            sym = static_cast<SymbolId>(std::stoul(query.substr(symPos + 9)));
+        }
+        body = generateAuditResponse(sym);
     } else {
         body = "{\"status\":\"ok\",\"endpoints\":["
                "\"/metrics\",\"/prometheus\",\"/health\","
-               "\"/otr?participantId=X\",\"/book?symbolId=Y\"]}";
+               "\"/otr?participantId=X\",\"/book?symbolId=Y\","
+               "\"/audit?symbolId=Y\"]}";
     }
 
     std::string resp = buildHttpResponse(body, contentType);
@@ -264,6 +274,52 @@ std::string AdminServer::generateBookResponse(SymbolId sym) const {
     }
     oss << "]}";
     
+    return oss.str();
+}
+std::string AdminServer::generateAuditResponse(SymbolId sym) const {
+    MarketDataSnapshot snap = engine_.getSnapshot(sym, 5);
+
+    std::ostringstream oss;
+    oss << "{\"symbolId\":" << sym << ",";
+    oss << "\"timestamp\":" << nowNs() << ",";
+    oss << "\"bestBid\":" << (snap.bidCount > 0 ? snap.bids[0].price : 0) << ",";
+    oss << "\"bestAsk\":" << (snap.askCount > 0 ? snap.asks[0].price : 0) << ",";
+
+    // Spread
+    Price bestBid = (snap.bidCount > 0) ? snap.bids[0].price : 0;
+    Price bestAsk = (snap.askCount > 0) ? snap.asks[0].price : 0;
+    Price spread = (bestBid > 0 && bestAsk > 0) ? bestAsk - bestBid : 0;
+    oss << "\"spread\":" << spread << ",";
+
+    // Last trade
+    oss << "\"lastTradePrice\":" << snap.lastTradePrice << ",";
+    oss << "\"lastTradeQty\":" << snap.lastTradeQty << ",";
+
+    // 5-level depth
+    oss << "\"depth\":{\"bids\":[";
+    for (size_t i = 0; i < snap.bidCount && i < 5; ++i) {
+        if (i > 0) oss << ",";
+        oss << "{\"price\":" << snap.bids[i].price
+            << ",\"qty\":" << snap.bids[i].totalQuantity
+            << ",\"orders\":" << snap.bids[i].orderCount << "}";
+    }
+    oss << "],\"asks\":[";
+    for (size_t i = 0; i < snap.askCount && i < 5; ++i) {
+        if (i > 0) oss << ",";
+        oss << "{\"price\":" << snap.asks[i].price
+            << ",\"qty\":" << snap.asks[i].totalQuantity
+            << ",\"orders\":" << snap.asks[i].orderCount << "}";
+    }
+    oss << "]},";
+
+    // Active order count (bid levels + ask levels)
+    const OrderBook* book = engine_.getOrderBook(sym);
+    size_t bidLevels = book ? book->getBidLevelsCount() : 0;
+    size_t askLevels = book ? book->getAskLevelsCount() : 0;
+    oss << "\"bidLevels\":" << bidLevels << ",";
+    oss << "\"askLevels\":" << askLevels;
+    oss << "}";
+
     return oss.str();
 }
 

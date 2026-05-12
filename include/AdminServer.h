@@ -26,6 +26,7 @@ private:
     std::string generateHealthResponse() const;
     std::string generateOtrResponse(ParticipantId pid) const;
     std::string generateBookResponse(SymbolId sym) const;
+    std::string generateAuditResponse(SymbolId sym) const;
 
     MatchingEngine& engine_;
     uint16_t port_;

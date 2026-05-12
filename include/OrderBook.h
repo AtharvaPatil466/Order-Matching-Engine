@@ -7,6 +7,9 @@
 #include "FlatHashMap.h"
 #include "EventListener.h"
 #include "RingBuffer.h"
+#include "SelfTradeProtection.h"
+#include "LULDManager.h"
+#include "WashTradeDetector.h"
 #include <functional>
 #include <shared_mutex>
 #include <variant>
@@ -176,6 +179,23 @@ public:
 
     // Risk Management
     void setRiskLimits(ParticipantId participantId, const RiskLimits& limits);
+
+    // ─── Self-Trade Prevention (Phase 4, Week 13) ────────────────────
+    void setSTPMode(ParticipantId participant, STPMode mode) {
+        stpModes_.insert(participant, mode);
+    }
+    STPMode getSTPMode(ParticipantId participant) const {
+        auto* m = stpModes_.find(participant);
+        return m ? *m : STPMode::None;
+    }
+
+    // ─── LULD Volatility Controls (Phase 4, Week 14) ─────────────────
+    LULDManager& getLULDManager() { return luld_; }
+    const LULDManager& getLULDManager() const { return luld_; }
+
+    // ─── Wash Trade Detection (Phase 4, Week 13) ─────────────────────
+    WashTradeDetector& getWashTradeDetector() { return washTradeDetector_; }
+    const WashTradeDetector& getWashTradeDetector() const { return washTradeDetector_; }
 
     // Analytics
     double getVWAP() const { return vwap_; }
@@ -367,6 +387,11 @@ private:
 
     // Trade history — bounded ring buffer (streams out, never reallocates)
     RingBuffer<Trade> tradeHistory_{65536};
+
+    // ─── Phase 4 Compliance ──────────────────────────────────────────
+    FlatHashMap<ParticipantId, STPMode> stpModes_{1024};
+    LULDManager luld_;
+    WashTradeDetector washTradeDetector_;
 };
 
 } // namespace OrderMatcher

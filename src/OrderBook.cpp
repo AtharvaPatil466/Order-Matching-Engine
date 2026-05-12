@@ -140,6 +140,8 @@ bool OrderBook::checkCircuitBreaker(Price price) {
 }
 
 bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
+    // Detect same-participant self-trade. STP mode controls the ACTION
+    // (cancel incoming/resting/both) but detection is always on.
     return incoming.participantId == resting.participantId;
 }
 
@@ -561,7 +563,55 @@ void OrderBook::match(Order* incoming) {
         Order* bookOrder = level->front();
 
         if (checkSMP(*incoming, *bookOrder)) [[unlikely]] {
-            incoming->remainingQty = 0;
+            // Phase 4: mode-aware STP — action depends on participant config
+            STPMode mode = getSTPMode(incoming->participantId);
+            STPResult stp = SelfTradeProtection::check(
+                incoming->participantId, bookOrder->participantId,
+                mode, std::min(incoming->remainingQty,
+                    (bookOrder->type == OrderType::Iceberg)
+                    ? bookOrder->visibleQty : bookOrder->remainingQty));
+
+            switch (stp.action) {
+            case STPResult::Action::CancelIncoming:
+                incoming->remainingQty = 0;
+                break;
+            case STPResult::Action::CancelResting:
+                // Remove the resting order and continue matching
+                bookOrder->status = OrderStatus::Cancelled;
+                notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
+                    bookOrder->initialQty - bookOrder->remainingQty, 0);
+                level->remove(bookOrder);
+                orderLookup_.erase(bookOrder->id);
+                orderPool_.deallocate(bookOrder);
+                if (level->empty()) opposite.eraseBest();
+                continue;  // try next resting order
+            case STPResult::Action::CancelBoth:
+                incoming->remainingQty = 0;
+                bookOrder->status = OrderStatus::Cancelled;
+                notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
+                    bookOrder->initialQty - bookOrder->remainingQty, 0);
+                level->remove(bookOrder);
+                orderLookup_.erase(bookOrder->id);
+                orderPool_.deallocate(bookOrder);
+                if (level->empty()) opposite.eraseBest();
+                break;
+            case STPResult::Action::DecreaseResting:
+                if (stp.decreaseAmount >= bookOrder->remainingQty) {
+                    bookOrder->status = OrderStatus::Cancelled;
+                    notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
+                        bookOrder->initialQty - bookOrder->remainingQty, 0);
+                    level->remove(bookOrder);
+                    orderLookup_.erase(bookOrder->id);
+                    orderPool_.deallocate(bookOrder);
+                    if (level->empty()) opposite.eraseBest();
+                } else {
+                    bookOrder->remainingQty -= stp.decreaseAmount;
+                }
+                continue;  // try next resting order
+            default:
+                incoming->remainingQty = 0;
+                break;
+            }
             break;
         }
 

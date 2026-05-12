@@ -8,6 +8,9 @@
 #include "FlatHashMap.h"
 #include "LatencyTracker.h"
 #include "RateLimiter.h"
+#include "GraduatedKillSwitch.h"
+#include "IncidentLogger.h"
+#include "CapacityMonitor.h"
 #include "Utils.h"
 #include <atomic>
 #include <chrono>
@@ -212,9 +215,20 @@ public:
     double getBackpressureThreshold() const { return bpThresholdFraction_; }
     uint64_t getBackpressureRejectCount() const { return bpRejectCount_.load(std::memory_order_relaxed); }
 
-    // ─── FIX protocol gateway ─────────────────────────────────────────────────
+    // ─── FIX protocol gateway ─────────────────────────────────────────
     // Process a raw FIX message string and route to appropriate handler
     void processFIXMessage(const std::string& rawFix);
+
+    // ─── Phase 4: Graduated Kill Switch ──────────────────────────────
+    GraduatedKillSwitch& getKillSwitch() { return killSwitch_; }
+    const GraduatedKillSwitch& getKillSwitch() const { return killSwitch_; }
+
+    // ─── Phase 4: Incident Logger ───────────────────────────────────
+    IncidentLogger& getIncidentLogger() { return incidentLogger_; }
+    bool enableIncidentLog(const std::string& path) { return incidentLogger_.open(path); }
+
+    // ─── Phase 4: Capacity Monitor ──────────────────────────────────
+    CapacityMonitor& getCapacityMonitor() { return capacityMonitor_; }
 
     // ─── Legacy single-symbol interface (backward compat, uses symbol 0) ───
     void processOrder(OrderId orderId, ParticipantId participantId, Side side,
@@ -283,6 +297,11 @@ private:
     std::atomic<bool> checkpointPending_{false};
     size_t checkpointThresholdEntries_{250000};
     size_t checkpointThresholdBytes_{64 * 1024 * 1024};
+
+    // ─── Phase 4 Compliance ──────────────────────────────────────────
+    GraduatedKillSwitch killSwitch_;
+    IncidentLogger incidentLogger_;
+    CapacityMonitor capacityMonitor_;
 
     // Internal helper: push to specific thread's queue with backpressure
     bool enqueueSafe(size_t threadIndex, const OrderRequest& req);

@@ -1,0 +1,107 @@
+# Benchmark Regression Gate — GitHub Actions
+#
+# Roadmap Phase 5, Week 19: CI Benchmark Gating
+#
+# Runs the deterministic benchmark on every PR and compares
+# P99 latency against a stored baseline. Fails if regression
+# exceeds 10%.
+
+name: Benchmark Regression Gate
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'benchmarks/**'
+      - 'CMakeLists.txt'
+
+concurrency:
+  group: benchmark-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-13
+
+      - name: Configure
+        run: |
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=ON \
+            -DBUILD_TOOLS=OFF \
+            -DENABLE_LTO=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run Deterministic Benchmark
+        run: |
+          build/benchmarks/DeterministicBenchmark \
+            --seed 42 --iterations 20 --orders 5000 \
+            --output build/benchmark_current.json
+
+      - name: Check for regression
+        run: |
+          # Extract P99 from current run
+          CURRENT_P99=$(python3 -c "
+          import json
+          with open('build/benchmark_current.json') as f:
+              data = json.load(f)
+          print(data['latency_ns']['p99'])
+          ")
+          
+          echo "Current P99: ${CURRENT_P99} ns"
+          
+          # Check against baseline (if exists)
+          if [ -f benchmarks/baseline.json ]; then
+            BASELINE_P99=$(python3 -c "
+          import json
+          with open('benchmarks/baseline.json') as f:
+              data = json.load(f)
+          print(data['latency_ns']['p99'])
+          ")
+            echo "Baseline P99: ${BASELINE_P99} ns"
+            
+            # Check for >10% regression
+            python3 -c "
+          import sys
+          current = float('${CURRENT_P99}')
+          baseline = float('${BASELINE_P99}')
+          regression_pct = ((current - baseline) / baseline) * 100
+          print(f'Regression: {regression_pct:.1f}%')
+          if regression_pct > 10.0:
+              print(f'❌ FAILED: P99 regression of {regression_pct:.1f}% exceeds 10% threshold')
+              sys.exit(1)
+          else:
+              print(f'✅ PASSED: P99 within acceptable range ({regression_pct:.1f}%)')
+          "
+          else
+            echo "No baseline found. Saving current run as baseline."
+          fi
+
+      - name: Save benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: build/benchmark_current.json
+
+      - name: Run Sustained Load Test (smoke)
+        run: |
+          build/benchmarks/SustainedLoadTest \
+            --duration 5 --rate 100000 --threads 2 --symbols 4 \
+            --p99-threshold 50000

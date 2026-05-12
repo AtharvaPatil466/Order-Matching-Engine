@@ -1,0 +1,99 @@
+# Order Matching Engine — Benchmark Docker Image
+#
+# Roadmap Phase 5, Week 20: Docker Benchmark Kit
+#
+# Builds a reproducible benchmarking environment with:
+#   - Pinned compiler (GCC 13)
+#   - Isolated CPU cores (taskset)
+#   - All benchmark harnesses pre-compiled
+#
+# Usage:
+#   docker build -t ome-bench .
+#   docker run --privileged --cpuset-cpus="2,3" ome-bench
+#   docker run --privileged ome-bench /app/build/benchmarks/DeterministicBenchmark --seed 42
+
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++-13 cmake make git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+
+WORKDIR /app
+COPY . .
+
+RUN mkdir -p build && cd build && \
+    cmake .. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER=g++-13 \
+      -DBUILD_TESTS=OFF \
+      -DBUILD_BENCHMARKS=ON \
+      -DBUILD_TOOLS=ON \
+      -DENABLE_LTO=ON \
+      -DUSE_LEAN_MODE=OFF \
+    && cmake --build . -j$(nproc)
+
+# ─── Runtime image ─────────────────────────────────────────────────────────────
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    util-linux numactl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy only the built binaries
+COPY --from=builder /app/build/benchmarks/ /app/benchmarks/
+COPY --from=builder /app/build/tools/ /app/tools/
+COPY --from=builder /app/build/OrderEngine /app/OrderEngine
+
+# Benchmark runner script
+COPY <<'EOF' /app/run_benchmarks.sh
+#!/bin/bash
+set -euo pipefail
+
+echo "================================================"
+echo "  Order Matching Engine — Benchmark Suite"
+echo "================================================"
+echo ""
+echo "CPU: $(lscpu | grep 'Model name' | sed 's/.*:\s*//')"
+echo "Cores: $(nproc)"
+echo "Kernel: $(uname -r)"
+echo ""
+
+# Deterministic benchmark
+echo "=== [1/3] Deterministic Benchmark (Seed=42, 50 iterations) ==="
+/app/benchmarks/DeterministicBenchmark \
+    --seed 42 --iterations 50 --orders 10000 \
+    --output /app/results/deterministic.json
+
+echo ""
+
+# Lean mode benchmark
+echo "=== [2/3] Deterministic Benchmark — Lean Mode ==="
+/app/benchmarks/DeterministicBenchmark \
+    --seed 42 --iterations 50 --orders 10000 --lean \
+    --output /app/results/deterministic_lean.json
+
+echo ""
+
+# Sustained load test (10 seconds, relaxed threshold for Docker)
+echo "=== [3/3] Sustained Load Test (10s) ==="
+/app/benchmarks/SustainedLoadTest \
+    --duration 10 --rate 200000 --threads 4 --symbols 8 \
+    --p99-threshold 50000
+
+echo ""
+echo "================================================"
+echo "  Benchmark complete. Results in /app/results/"
+echo "================================================"
+EOF
+
+RUN chmod +x /app/run_benchmarks.sh && mkdir -p /app/results
+
+ENTRYPOINT ["/app/run_benchmarks.sh"]

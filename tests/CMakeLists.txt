@@ -236,3 +236,9 @@ add_test(NAME ReplicationProtocolTest COMMAND ReplicationProtocolTest)
 set_tests_properties(ReplicationProtocolTest PROPERTIES TIMEOUT 60
                      LABELS "project;ha;replication")
 
+# Shadow mode divergence detection test
+add_executable(ShadowModeTest ShadowModeTest.cpp)
+target_link_libraries(ShadowModeTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(ShadowModeTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;shadow;integration")

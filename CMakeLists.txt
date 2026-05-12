@@ -110,3 +110,10 @@ option(BUILD_FUZZERS "Build fuzz harnesses (ASan/UBSan replay always; libFuzzer 
 if(BUILD_FUZZERS)
     add_subdirectory(fuzz)
 endif()
+
+# Tools (Replay CLI, etc.)
+option(BUILD_TOOLS "Build operational tools" ON)
+if(BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()
+

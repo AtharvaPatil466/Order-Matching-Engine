@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -72,6 +73,13 @@ bool waitFor(F predicate, int deadlineMs = 1000) {
 void test_UdpSingleMessageRoundtrip() {
     TEST(UdpSingleMessageRoundtrip) {
         ItchUdpSubscriber sub;
+        std::vector<std::vector<uint8_t>> received;
+        std::mutex mtx;
+        sub.mold().setOnMessage(
+            [&](uint64_t /*seq*/, const uint8_t* d, size_t n) {
+                std::lock_guard<std::mutex> lk(mtx);
+                received.emplace_back(d, d + n);
+            });
         CHECK(sub.start("127.0.0.1", /*port=*/0));
         uint16_t port = sub.boundPort();
         CHECK(port != 0);
@@ -79,17 +87,12 @@ void test_UdpSingleMessageRoundtrip() {
         ItchUdpPublisher pub("FEED");
         CHECK(pub.start("127.0.0.1", port));
 
-        std::vector<std::vector<uint8_t>> received;
-        sub.mold().setOnMessage(
-            [&](uint64_t /*seq*/, const uint8_t* d, size_t n) {
-                received.emplace_back(d, d + n);
-            });
-
         const char* msg = "HELLO_ITCH";
         pub.publish(msg, std::strlen(msg));
         pub.flush();
 
-        CHECK(waitFor([&] { return !received.empty(); }));
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return !received.empty(); }));
+        std::lock_guard<std::mutex> lk(mtx);
         CHECK(received.size() == 1);
         CHECK(std::string(received[0].begin(), received[0].end()) == "HELLO_ITCH");
 
@@ -101,17 +104,18 @@ void test_UdpSingleMessageRoundtrip() {
 void test_UdpBatchedMessagesInOnePacket() {
     TEST(UdpBatchedMessagesInOnePacket) {
         ItchUdpSubscriber sub;
+        std::vector<uint64_t> seqs;
+        std::mutex mtx;
+        sub.mold().setOnMessage(
+            [&](uint64_t seq, const uint8_t*, size_t) {
+                std::lock_guard<std::mutex> lk(mtx);
+                seqs.push_back(seq);
+            });
         CHECK(sub.start("127.0.0.1", 0));
         uint16_t port = sub.boundPort();
 
         ItchUdpPublisher pub("FEED");
         CHECK(pub.start("127.0.0.1", port));
-
-        std::vector<uint64_t> seqs;
-        sub.mold().setOnMessage(
-            [&](uint64_t seq, const uint8_t*, size_t) {
-                seqs.push_back(seq);
-            });
 
         // Batch three messages into a single flush — they should all
         // arrive in a single datagram and be delivered in order.
@@ -120,7 +124,8 @@ void test_UdpBatchedMessagesInOnePacket() {
         pub.publish("C", 1);
         pub.flush();
 
-        CHECK(waitFor([&] { return seqs.size() == 3; }));
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return seqs.size() == 3; }));
+        std::lock_guard<std::mutex> lk(mtx);
         CHECK(seqs[0] == 1 && seqs[1] == 2 && seqs[2] == 3);
         CHECK(pub.datagramsSent() == 1
               && "three batched messages → one datagram on the wire");
@@ -148,16 +153,15 @@ void test_UdpHeartbeatDelivered() {
 void test_UdpEndOfSession() {
     TEST(UdpEndOfSession) {
         ItchUdpSubscriber sub;
+        std::atomic<bool> eosFired{false};
+        sub.mold().setOnEndOfSession([&] { eosFired.store(true); });
         CHECK(sub.start("127.0.0.1", 0));
-
-        bool eosFired = false;
-        sub.mold().setOnEndOfSession([&] { eosFired = true; });
 
         ItchUdpPublisher pub("F");
         CHECK(pub.start("127.0.0.1", sub.boundPort()));
         pub.sendEndOfSession();
 
-        CHECK(waitFor([&] { return eosFired; }));
+        CHECK(waitFor([&] { return eosFired.load(); }));
 
         pub.stop(); sub.stop();
     } END
@@ -168,13 +172,14 @@ void test_UdpItchAddOrderEndToEnd() {
         // Real ITCH frame over real UDP through MoldUDP64. Confirms
         // the bytes preserve byte-exactly through the whole stack.
         ItchUdpSubscriber sub;
-        CHECK(sub.start("127.0.0.1", 0));
-
         std::vector<uint8_t> received;
+        std::mutex mtx;
         sub.mold().setOnMessage(
             [&](uint64_t, const uint8_t* d, size_t n) {
+                std::lock_guard<std::mutex> lk(mtx);
                 received.assign(d, d + n);
             });
+        CHECK(sub.start("127.0.0.1", 0));
 
         ItchUdpPublisher pub("ITCH1");
         CHECK(pub.start("127.0.0.1", sub.boundPort()));
@@ -187,8 +192,9 @@ void test_UdpItchAddOrderEndToEnd() {
         pub.publish(itch, sizeof(itch));
         pub.flush();
 
-        CHECK(waitFor([&] { return received.size() == ITCH_SIZE_ADD_ORDER; }));
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return received.size() == ITCH_SIZE_ADD_ORDER; }));
         // Wire bytes match exactly: type byte, order ref, shares.
+        std::lock_guard<std::mutex> lk(mtx);
         CHECK(received[0] == ITCH_MT_ADD_ORDER);
         CHECK(readU64BE(received.data() + 11) == 12345ULL);
         CHECK(readU32BE(received.data() + 20) == 250);

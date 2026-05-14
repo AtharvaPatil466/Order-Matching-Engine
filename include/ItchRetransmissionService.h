@@ -145,10 +145,11 @@ public:
 
 private:
     void acceptorLoop() {
+        int lfd = listenFd_;
         while (running_.load()) {
             sockaddr_in peer{};
             socklen_t peerLen = sizeof(peer);
-            int fd = ::accept(listenFd_, reinterpret_cast<sockaddr*>(&peer),
+            int fd = ::accept(lfd, reinterpret_cast<sockaddr*>(&peer),
                               &peerLen);
             if (fd < 0) {
                 if (!running_.load()) break;

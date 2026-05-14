@@ -25,8 +25,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <iostream>
+#include <mutex>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <string>
@@ -143,12 +143,14 @@ void test_FeedEmitsAddOnAcceptedOrder() {
         // Wire it: subscriber listens on loopback UDP; feed publishes
         // to that port. Engine event must arrive as ITCH 'A'.
         ItchUdpSubscriber sub;
-        CHECK(sub.start("127.0.0.1", 0));
         std::vector<uint8_t> firstFrame;
+        std::mutex mtx;
         sub.mold().setOnMessage(
             [&](uint64_t, const uint8_t* d, size_t n) {
+                std::lock_guard<std::mutex> lk(mtx);
                 if (firstFrame.empty()) firstFrame.assign(d, d + n);
             });
+        CHECK(sub.start("127.0.0.1", 0));
 
         MatchingEngine engine;
         engine.addSymbol(7);
@@ -162,7 +164,8 @@ void test_FeedEmitsAddOnAcceptedOrder() {
         engine.submitOrder(7, /*id=*/100, /*pid=*/1, Side::Buy,
                            /*price=*/1000, /*qty=*/50, OrderType::Limit);
 
-        CHECK(waitFor([&] { return !firstFrame.empty(); }));
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return !firstFrame.empty(); }));
+        std::lock_guard<std::mutex> lk(mtx);
         CHECK(firstFrame[0] == ITCH_MT_ADD_ORDER);
         CHECK(readU64BE(firstFrame.data() + 11) == 100ULL);
         CHECK(readU32BE(firstFrame.data() + 20) == 50);
@@ -294,12 +297,13 @@ void test_FeedEndToEndGapRecoveryViaRetransmissionService() {
 void test_FeedSystemEventPropagates() {
     TEST(FeedSystemEventPropagates) {
         ItchUdpSubscriber sub;
-        CHECK(sub.start("127.0.0.1", 0));
-
         std::vector<uint8_t> received;
+        std::mutex mtx;
         sub.mold().setOnMessage([&](uint64_t, const uint8_t* d, size_t n) {
+            std::lock_guard<std::mutex> lk(mtx);
             received.assign(d, d + n);
         });
+        CHECK(sub.start("127.0.0.1", 0));
 
         MatchingEngine engine;
         engine.addSymbol(1);
@@ -312,7 +316,8 @@ void test_FeedSystemEventPropagates() {
 
         feed.publishSystemEvent(ITCH_SE_START_OF_MARKET);
 
-        CHECK(waitFor([&] { return !received.empty(); }));
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return !received.empty(); }));
+        std::lock_guard<std::mutex> lk(mtx);
         CHECK(received[0] == ITCH_MT_SYSTEM_EVENT);
         CHECK(received[11] == ITCH_SE_START_OF_MARKET);
 

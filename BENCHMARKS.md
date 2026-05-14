@@ -1,8 +1,8 @@
 # Benchmark Methodology & Results
 
-> **Platform**: Apple Silicon (ARM64) · **Compiler**: Clang C++20 -O2  
-> **Date**: 2026-05-12 · **Seed**: 42  
-> **Tests**: 171/171 passing
+> **Platform**: Apple M3 Pro (ARM64) · **Compiler**: Clang C++20 -O2
+> **Date**: 2026-05-14 · **Seed**: 42
+> **Tests**: 181/181 passing
 
 ## TL;DR
 
@@ -12,6 +12,8 @@
 | Full-stack with journal: **1,040 ns** P50 | GroupCommit batch=64, fdatasync per batch | ✅ Verified |
 | Safety invariants | TLC: 454M states, 181M distinct, 0 violations | ✅ Verified |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
+| **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
+| **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |
 
 ## Methodology
 
@@ -123,6 +125,28 @@ Divergence detected: trade_count mismatch (1 vs 2)
 
 The comparator catches both trade count and counterparty divergence.
 200-order clean run verified zero false positives.
+
+## Binary Codec Microbenchmark
+
+`./bin/BinaryCodecBenchmark` — single-threaded encode/decode rates for the three binary order-entry / market-data protocols. No engine, no transport — isolates the codec cost. 2M iterations per row, M3 Pro / Clang `-O2`.
+
+| Protocol | Operation | Wire size | ns/op | M ops/s | GB/s |
+|----------|-----------|----------:|------:|--------:|-----:|
+| OUCH 4.2 | EnterOrder encode | 49 B | 112.0 | 8.93 | 0.44 |
+| OUCH 4.2 | EnterOrder decode | 49 B | 10.2 | 98.48 | 4.83 |
+| ITCH 5.0 | AddOrder encode | 36 B | 34.1 | 29.36 | 1.06 |
+| **SBE** | **NewOrderV1 encode** | **32 B** | **1.0** | **1015** | **32.49** |
+| **SBE** | **NewOrderV1 decode** | **32 B** | **0.5** | **2128** | **68.10** |
+
+### Why the gap
+
+The 110× difference between OUCH and SBE encode reflects what each protocol asks the CPU to do:
+
+- **OUCH 4.2** carries ASCII-decimal text in 8 of its fixed slots (order token, stock, firm) — every encode runs `snprintf`-equivalent integer formatting. That's hundreds of cycles per field.
+- **ITCH 5.0** has one ASCII slot (stock); the rest are big-endian binary. Faster than OUCH but still pays byte-swap on a little-endian host.
+- **SBE** is little-endian binary (native to x86/ARM), every field is a plain integer write. The codec compiles down to ~24 bytes of moves — at the limit of the timer's resolution.
+
+The 1.0 ns/op SBE encode number is approaching the floor of what's measurable on a 24 MHz TSC. Real impact depends on whether the codec is the bottleneck (it's usually not — the engine dominates), but for venues moving billions of messages per day the difference is real.
 
 ## Sharding (Separate Measurement)
 

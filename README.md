@@ -3,10 +3,12 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![Latency](https://img.shields.io/badge/Matching_P50-125ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-6.6M_ops/s-blue.svg)](#performance)
-[![Tests](https://img.shields.io/badge/Tests-171_CTest_targets-brightgreen.svg)](#verification)
+[![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
+[![Tests](https://img.shields.io/badge/Tests-181_CTest_targets-brightgreen.svg)](#verification)
 [![TLA+](https://img.shields.io/badge/TLA%2B-454M_states_verified-blueviolet.svg)](#formal-verification)
+[![Protocols](https://img.shields.io/badge/Wire_Protocols-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, FIX 4.4 session management, TLA+-verified safety invariants (454M states, 0 violations), cross-host log replication, and a complete operational stack (config management, webhook alerting, Prometheus metrics, Docker deployment). 26K LOC, 30 test executables, 171 CTest targets, 5 TLA+ specifications.
+A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states, 0 violations on `MatchingEngine.tla` + separate proofs for replication / queues / snapshots), cross-host log replication, and a complete operational stack (config management, webhook alerting, Prometheus metrics, Docker deployment). **34K LOC, 51 test executables, 181 CTest targets, 7 TLA+ specifications.**
 
 ## 🚀 Key Features
 
@@ -21,6 +23,22 @@ A C++20 low-latency matching engine with institutional-grade architecture drawin
 - **TCP Gateway**: FIX 4.4 session management with non-blocking I/O via `epoll`/`kqueue`, version negotiation, numeric `OrdRejReason` mapping, and `TransactTime` enforcement
 - **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades
 - **Binary Protocol Versioning**: `GatewayProtocol.h` — 16-byte fixed header with V1/V2 payload evolution, forward+backward compatibility, and `GatewayResponse` ack frames
+
+### Multi-Protocol Order Entry
+All four protocols dispatch into the same `MatchingEngine`. Drop a different session class in front of the gateway loop, and you've changed the wire format without touching the engine.
+
+- **FIX 4.2 / 4.4** (`FixSession.h`): ASCII text + checksum, full session-layer state machine (Logon/Logout/Heartbeat/TestRequest/ResendRequest with `SequenceReset-GapFill`), numeric `OrdRejReason` mapped from internal `RejectReason`, `TransactTime` validation on 4.4 inbound. Version negotiation per accepted `BeginString`.
+- **OUCH 4.2** (`OuchSession.h`, `OuchProtocol.h`): NASDAQ binary order entry. Inbound `O`/`X`/`U` (Enter/Cancel/Replace) → outbound `A`/`J`/`C`/`E`/`U` (Accepted/Rejected/Canceled/Executed/Replaced). Token ↔ engine-orderId reverse-map preserves identity across `submitCancelReplace`. Big-endian fixed-width.
+- **SBE** (`SbeSession.h`, `SbeProtocol.h`): FIX-TG schema-driven binary (CME / ICE style). NewOrder v1/v2 + OrderAck. Forward-compatibility proven by test: **the first 24 bytes of any v2 block encoding match the v1 encoding byte-for-byte** — a v1 reader on a v2 message reads the original fields unchanged, no codec branch.
+- **SoupBinTCP** (`SoupBinTcpSession.h`): the Nasdaq TCP envelope that wraps OUCH on the wire. 3-byte length+type framing, login negotiation, configurable heartbeat / peer-idle (spec defaults 1s/15s), logout handshake. Tested end-to-end with OUCH payload through real TCP loopback (`OuchTcpGatewayTest`).
+
+### Market Data Stack
+- **ITCH 5.0 publisher** (`ItchPublisher.h`): 10 message types — `S` SystemEvent, `R` Stock Directory, `H` Trading Action (engine `TradingState` → wire halt/resume), `A` AddOrder, `E`/`C` Executed, `X` Cancel, `D` Delete, `P` Trade, `Q` Cross Trade. Per-`OrderBook` `EventListener` that looks up resting orders via `book.getOrder()` to populate side/price fields the listener path doesn't carry.
+- **MoldUDP64 multicast** (`MoldUDP64.h`): batched publisher with MTU auto-flush + gap-detecting subscriber. Heartbeat with `nextExpectedSeq` lets subscribers detect silent gaps even during quiet markets. Session-ID mismatch reported separately from gap.
+- **Real UDP transport** (`ItchUdpTransport.h`): `ItchUdpPublisher` writes via `sendto`, `ItchUdpSubscriber` joins multicast group via `IP_ADD_MEMBERSHIP` and runs a recv thread feeding `MoldUDP64Subscriber`. Tested over real 127.0.0.1 sockets (`ItchUdpTransportTest`).
+- **Integrated publish pipeline** (`ItchMarketDataFeed.h`): engine event → ITCH frame → [UDP datagram + journal record]. One per-frame `flush()` so each event lands as its own datagram with a deterministic sequence number.
+- **Gap recovery** (`MoldPacketJournal.h` + `ItchRetransmissionService.h`): bounded ring of journaled MoldUDP64 messages backs a SoupBinTCP-over-TCP retransmission service. End-to-end test exercises: publisher records → subscriber gap → SoupBinTCP login + re-request → byte-exact replay.
+- **Fan-out adapter** (`MultiplexListener.h`): `OrderBook` exposes a single `EventListener` slot; this composes N of them so OUCH + ITCH + structured-log can coexist on the same book.
 
 ### Regulatory & Risk
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy
@@ -83,30 +101,65 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 | Multi-Symbol (4 symbols) | 12,000 | ~5,900 | ✅ |
 | High-Throughput Burst | 50,000 | ~19,500 | ✅ 5M ops/s |
 
+### Binary Codec Performance
+
+`./bin/BinaryCodecBenchmark` — pure encode/decode microbench, no engine, no transport. 2M iterations per row, Apple M3 Pro, Clang `-O2`.
+
+| Codec | Message | ns/op | M ops/s |
+| :--- | :--- | --: | --: |
+| OUCH 4.2 | EnterOrder encode (49B) | 112.0 | 8.9 |
+| OUCH 4.2 | EnterOrder decode (49B) | 10.2 | 98.5 |
+| ITCH 5.0 | AddOrder encode (36B) | 34.1 | 29.4 |
+| **SBE** | **NewOrderV1 encode (32B)** | **1.0** | **1015** |
+| **SBE** | **NewOrderV1 decode (32B)** | **0.5** | **2128** |
+
+The 110× gap between SBE encode and OUCH encode is the cost of OUCH's ASCII-decimal field formatting (`snprintf`-equivalent per integer). SBE's native-endian binary writes are the limit of what's measurable.
+
 ## 🏗️ Architecture
 
 ```
-                     ┌──────────────────┐
-    FIX Gateway ────▶│  MatchingEngine  │◀──── Admin HTTP :8080
-                     │  (order router)  │
-                     └──┬───┬───┬───┬───┘
-                        │   │   │   │
-                    ┌───▼─┐ │ ┌─▼───▼──┐
-                    │ Q[0]│ │ │ Q[1..N] │   MpscQueue per thread
-                    └──┬──┘ │ └──┬──────┘
-                       │    │    │
-                  ┌────▼──┐ │ ┌──▼────┐
-                  │Thread0│ │ │Thread1│     Worker threads
-                  │ BTC,  │ │ │ SOL,  │     (symbol affinity)
-                  │ ETH   │ │ │ AVAX  │
-                  └───────┘ │ └───────┘
-                            │
-                     ┌──────▼──────┐
-                     │  OrderBook  │     FlatPriceMap O(1)
-                     │  ObjectPool │     Intrusive linked lists
-                     │  Journal    │     CRC-32 WAL
-                     └─────────────┘
+        ORDER ENTRY                                MARKET DATA
+        ───────────                                ───────────
+
+  ┌──────────────┐   ┌──────────────┐         ┌──────────────────┐
+  │ FIX 4.2/4.4  │   │   OUCH 4.2   │         │   ITCH 5.0       │
+  │   (text)     │   │   (binary)   │         │   (binary)       │
+  └──────┬───────┘   └──────┬───────┘         └────────▲─────────┘
+         │                  │                          │
+         │            ┌─────▼──────┐                   │
+         │            │ SoupBinTCP │             ┌─────┴──────┐
+         │            │  session   │             │ MoldUDP64  │
+         │            └─────┬──────┘             │ multicast  │
+         │                  │                    └─────▲──────┘
+   ┌─────▼──────┐    ┌──────▼─────┐    ┌────────────┐  │
+   │ FixSession │    │ OuchSession│    │ SbeSession │  │ ItchPublisher
+   └─────┬──────┘    └──────┬─────┘    └─────┬──────┘  │  (per book)
+         │                  │                │         │
+         └──────────────────┼────────────────┘         │
+                            ▼                          │
+                  ┌───────────────────┐                │
+   Admin :8080 ──▶│   MatchingEngine  │────events─────┘
+                  │   (order router)  │
+                  └─┬───┬───┬───┬─────┘
+                    │   │   │   │
+                ┌───▼─┐ │ ┌─▼───▼──┐
+                │ Q[0]│ │ │ Q[1..N]│   MpscQueue per thread
+                └──┬──┘ │ └──┬─────┘
+                   │    │    │
+              ┌────▼──┐ │ ┌──▼────┐
+              │Thread0│ │ │Thread1│    Worker threads
+              │ BTC,  │ │ │ SOL,  │    (symbol affinity)
+              │ ETH   │ │ │ AVAX  │
+              └───────┘ │ └───────┘
+                        │
+                 ┌──────▼──────┐    ┌──────────────┐    ┌─────────────────┐
+                 │  OrderBook  │───▶│ MoldPacket   │◀───│ ItchRetransmit  │
+                 │  ObjectPool │    │   Journal    │    │  Service (TCP)  │
+                 │  Journal    │    └──────────────┘    └─────────────────┘
+                 └─────────────┘     gap recovery        re-request replay
 ```
+
+**Four protocols, one engine.** Drop in a different session class to change the wire format; the engine doesn't know which codec it's driving. The market data side runs in parallel: ITCH frames flow out via MoldUDP64 over UDP multicast, with a SoupBinTCP-based retransmission service backing gap recovery from a bounded packet journal.
 
 See [Architecture.md](./Architecture.md) for the full technical deep-dive.
 See [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) for the remaining work required before treating this as a production exchange component.
@@ -132,11 +185,26 @@ See [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) for the remaini
 ./bin/StressTest              # Multi-threaded stress tests
 ./bin/PropertyTest            # Randomized invariant checks
 ./bin/JournalCrashTest        # Crash recovery validation
-./bin/GatewayProtocolTest     # Binary protocol schema evolution
+./bin/GatewayProtocolTest     # Internal binary protocol schema evolution
 ./bin/GTDReplayTest           # Deterministic expiry replay
 ./bin/MdFeedSchemaCompatTest  # Market data feed compatibility
+
+# Wire protocols
+./bin/OuchSessionTest         # OUCH 4.2 codec + session (25 cases)
+./bin/SoupBinTcpTest          # SoupBinTCP envelope, framer, session (19 cases)
+./bin/OuchTcpGatewayTest      # OUCH + SoupBinTCP over real TCP loopback
+./bin/ItchPublisherTest       # ITCH 5.0 codec + publisher (17 cases)
+./bin/MoldUDP64Test           # MoldUDP64 multicast wrapper + gap detection
+./bin/ItchUdpTransportTest    # ITCH over real UDP loopback
+./bin/ItchRetransmissionTest  # Journal + SoupBinTCP-based gap recovery
+./bin/ItchMarketDataFeedTest  # End-to-end engine → ITCH → UDP + retransmit
+./bin/SbeProtocolTest         # SBE codec, schema versioning, forward-compat
+./bin/SbeSessionTest          # SBE NewOrder → engine + OrderAck
+
+# Benchmarks
 ./bin/ManualBenchmark         # Per-order processing latency
 ./bin/E2EBenchmark            # End-to-end latency (includes queue delay)
+./bin/BinaryCodecBenchmark    # OUCH / ITCH / SBE encode-rate comparison
 ```
 
 ### CI / Hardening
@@ -164,33 +232,36 @@ curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
 
 ## 🧪 Verification
 
-**30 test executables** covering **171 CTest targets**[^1] across 10 categories:
+**51 test executables** (40 in `tests/`, 8 benchmarks, 3 tools) covering **181 CTest targets**[^1] across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
 | **Functional** | ManualTest, UnitTests (GTest) | All order types, matching, cancellation, edge cases |
-| **Stress** | StressTest | 5 multi-threaded scenarios, 4 concurrent producers |
+| **Stress** | StressTest, ShardedBookStressTest, SustainedLoadTest | 5 multi-threaded scenarios, 4 concurrent producers, sustained load degradation detection |
 | **Property** | PropertyTest, JournalReplayPropertyTest, SnapshotConsistencyTest | Randomized invariant checks, replay determinism |
 | **Chaos** | FaultInjectorTest, PoolExhaustionTest, JournalChaosTest, JournalCorruptionTest, GatewayChaosTest, QueueChaosTest, CheckpointChaosTest, CombinedChaosTest | 10+ fault-injection points, short-writes, bit-flips, EAGAIN |
-| **Integration** | GatewayIntegrationTest, FixTcpGatewayTest, AdminServerEndpointsTest | TCP round-trip, FIX session, HTTP endpoints |
-| **Protocol** | GatewayProtocolTest, MarketDataSchemaTest, MdFeedSchemaCompatTest, RejectReasonContractTest, SubmitResultTest | Binary wire format evolution, ShmHeader compat |
-| **Recovery** | JournalCrashTest, JournalFollowerTest, GTDReplayTest | Crash recovery, log-ship convergence, virtual-clock replay |
+| **Integration** | GatewayIntegrationTest, FixTcpGatewayTest, AdminServerEndpointsTest, OuchTcpGatewayTest, ItchUdpTransportTest, ItchMarketDataFeedTest | Real-loopback TCP/UDP round-trip, FIX/OUCH/ITCH session, HTTP endpoints |
+| **Protocol — text** | GatewayProtocolTest, MarketDataSchemaTest, MdFeedSchemaCompatTest, RejectReasonContractTest, SubmitResultTest | Binary wire format evolution, ShmHeader compat |
+| **Protocol — binary** | OuchSessionTest, ItchPublisherTest, SoupBinTcpTest, MoldUDP64Test, SbeProtocolTest, SbeSessionTest | OUCH/ITCH/SBE codec + session layers, SoupBinTCP login/heartbeat, MoldUDP64 gap detection, SBE forward-compat |
+| **Recovery** | JournalCrashTest, JournalFollowerTest, GTDReplayTest, ItchRetransmissionTest | Crash recovery, log-ship convergence, virtual-clock replay, **gap-recovery via SoupBinTCP re-request** |
 | **HA & Ops** | ReplicationProtocolTest, ConfigTest, AlertDispatcherTest | Primary-backup replication, config loader, webhook alerts |
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
-| **Benchmark** | BenchmarkRegression (GTest) | P99 latency regression gates |
+| **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
 
-[^1]: *CTest targets map to individual executables and GTest cases. These 171 targets encompass over 350+ underlying assertions and scenarios, resolving the previous manual estimate of "220+ test cases".*
+[^1]: *CTest targets map to individual executables and GTest cases. The 181 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
 
 ### Formal Verification (TLA+)
 
-**5 TLA+ specifications**, model-checked with TLC:
+**7 TLA+ specifications**, model-checked with TLC:
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
 | `MatchingEngine.tla` | **454M generated, 181M distinct** | NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness *(Model Scope: 2 participants, 2 price levels, 4 orders, qty 1-3)* |
+| `Replication.tla` | written + tested | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain (primary-backup with epoch fencing) |
+| `Refinement.tla` | written | Refinement mapping from spec to implementation behavior |
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
 | `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
-| `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Read/write mutex prevents torn snapshots |
+| `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Read/write mutex prevents torn snapshots (lock spec verifies the fix found via the unlocked spec) |
 
 ### Shadow Mode Validation
 - Dual `OrderBook` instances fed identical order streams
@@ -202,9 +273,11 @@ curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
 | Document | Purpose |
 |----------|---------|
 | [Architecture.md](./Architecture.md) | Full technical deep-dive |
-| [BENCHMARKS.md](./BENCHMARKS.md) | Honest three-path latency methodology & results |
+| [BENCHMARKS.md](./BENCHMARKS.md) | Three-path latency methodology + binary codec results |
 | [PerformanceWhitepaper.md](./PerformanceWhitepaper.md) | Benchmark methodology & analysis |
 | [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results |
+| [docs/Compliance.md](./docs/Compliance.md) | Regulatory mapping (MiFID II / SEC Rule 15c3-5 / Reg NMS) |
+| [docs/MemoryOrderingAudit.md](./docs/MemoryOrderingAudit.md) | Per-site memory-order analysis |
 | [docs/Runbook.md](./docs/Runbook.md) | Operational procedures, incident response |
 | [docs/CapacityPlanning.md](./docs/CapacityPlanning.md) | Memory, CPU, disk, network sizing |
 | [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) | Remaining production checklist |
@@ -212,17 +285,23 @@ curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
 
 ## 🔮 Remaining Work
 
-The only remaining gaps require specialized hardware not available in a standard development environment:
+Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retransmission) is now closed. The honest list of what's still NOT done:
 
 | Item | Status | Blocker |
 |------|--------|---------|
 | x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
-| `Replication.tla` Verification | Written | Compute time for TLC model checker |
-| io_uring zero-copy data path | Seams exist (`FixSession`/`FixFramer`) | Linux + io_uring kernel |
+| `Replication.tla` TLC run | Spec written + tested | Compute time for full model checker run |
+| io_uring zero-copy data path | Portable seams in place (`FixSession`, `OuchSession`, `OuchTcpGateway`) | Linux + io_uring kernel |
 | DPDK kernel bypass | Architecture ready | Linux + supported NIC |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
+| Auction uncross price discovery | Auction state machine exists | Volume-maximization algorithm not implemented |
+| Schema-driven SBE codegen | Hand-coded v1/v2 + forward-compat proven | XML schema → codec generator (tooling) |
+| Cross-host failure-drill validation | Replication protocol verified | Multi-host environment |
+| 24h+ TSan soak | Harness exists (`scripts/tsan_soak.sh`) | Clock time |
+| Regulatory submission (CAT / MiFID RTS 22) | Event pipeline + journal in place | Broker-dealer / venue registration |
+| Clearing integration (DTCC / OCC / CME) | Trade event surface in place | Clearing membership |
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 26K LOC · 30 test executables · 171 CTest targets · 454M TLA+ states verified*
+*C++20 · 34K LOC · 51 test executables · 181 CTest targets · 7 TLA+ specifications · 454M states verified on MatchingEngine.tla*

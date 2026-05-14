@@ -26,8 +26,14 @@ Using `std::list` or `std::vector` for orders at a price level requires dynamic 
 
 ```mermaid
 graph TD
+    subgraph "Order Entry — Four Protocols, One Engine"
+        FIX[FIX 4.2 / 4.4 Session]
+        OUCH[OUCH 4.2 + SoupBinTCP]
+        SBE[SBE Schema-Driven]
+        OuchGW[OuchTcpGateway - real TCP]
+    end
+
     subgraph "Ingress Layer"
-        TCP[TCP FIX 4.4 / Binary Gateway]
         RL[Token Bucket Rate Limiter]
         BR[Batch Risk Validator]
     end
@@ -51,28 +57,50 @@ graph TD
         BK[Backup Node]
     end
 
-    subgraph "Egress"
-        MD[MarketData Publisher - SHM]
+    subgraph "Market Data Egress"
+        MUX[MultiplexListener Fan-out]
+        ITCH[ItchPublisher - per book]
+        SHM[MarketDataPublisher - SHM]
+        UDP[ItchUdpPublisher - MoldUDP64]
+        JRN[MoldPacketJournal]
+        RETX[ItchRetransmissionService - SoupBinTCP/TCP]
         Admin[Admin Server :8080]
     end
 
-    TCP --> RL --> BR --> Hash
+    FIX --> RL
+    OUCH --> OuchGW --> RL
+    SBE --> RL
+    RL --> BR --> Hash
     Hash -->|BTC/ETH| Q1
     Hash -->|SOL/AVAX| Q2
     Q1 --> CB --> OB
     OB --> WAL
     WAL --> REP --> BK
-    OB --> MD
+    OB --> MUX
+    MUX --> ITCH
+    MUX --> SHM
+    ITCH --> UDP
+    ITCH --> JRN
+    JRN --> RETX
 ```
 
 ### The Component Lifecycle
-1. **Ingress**: A TCP payload arrives. The `FixSession` parses it using a zero-copy `FIXParser` or binary framer.
-2. **Pre-Trade Risk**: The order passes through the `RateLimiter` and `BatchRiskValidator` to check limits (Notional, Fat-Finger, Kill Switch).
-3. **Routing**: The `MatchingEngine` hashes the `SymbolId` and pushes the order into the appropriate thread's `MpscQueue`.
-4. **Dequeue & Validate**: The worker thread pops the order. It checks `LULDManager` (Limit Up-Limit Down) bands to ensure the instrument isn't halted.
-5. **Matching**: The `OrderBook` executes matching against resting liquidity. `WashTradeDetector` applies Self-Trade Prevention (e.g., Cancel-Taker).
-6. **Persistence**: The resulting trades and book updates are appended to the `Journal` (Write-Ahead Log).
-7. **Egress**: Updates are pushed to `MarketDataPublisher` (POSIX shared memory) and asynchronously replicated to backup nodes.
+
+**Order entry**:
+1. **Wire framing**: bytes arrive on TCP. The connection's session class (`FixSession` for FIX 4.2/4.4 text, `OuchSession` for NASDAQ OUCH binary, `SbeSession` for FIX-TG SBE) handles framing. OUCH is additionally wrapped in `SoupBinTcpSession` (3-byte length+type envelope, login/heartbeat/logout).
+2. **Pre-Trade Risk**: the order passes through `RateLimiter` and `BatchRiskValidator` (notional, fat-finger, kill-switch).
+3. **Routing**: `MatchingEngine` hashes `SymbolId` and pushes the order into the appropriate thread's `MpscQueue`.
+4. **Dequeue & Validate**: the worker thread pops the order. `LULDManager` (Limit Up-Limit Down) bands verify the instrument isn't halted.
+5. **Matching**: `OrderBook` matches against resting liquidity. `WashTradeDetector` applies Self-Trade Prevention.
+6. **Persistence**: trades and book updates are appended to the `Journal` (Write-Ahead Log).
+
+**Market data egress** (parallel to order entry):
+7. **Fan-out**: every engine event reaches `MultiplexListener`, which dispatches to all registered `EventListener`s simultaneously.
+8. **ITCH encoding**: `ItchPublisher` translates engine events to ITCH 5.0 frames (`A` AddOrder, `E` Executed, `D` Delete, `H` TradingAction reflecting `TradingState`, `R` StockDirectory, `Q` CrossTrade, etc.).
+9. **MoldUDP64 publish**: `ItchUdpPublisher` wraps each frame in a sequenced MoldUDP64 packet and `sendto`s a UDP multicast group. The same frame is recorded in `MoldPacketJournal` keyed by the assigned sequence number.
+10. **Gap recovery**: a subscriber that detects a sequence gap connects to `ItchRetransmissionService` (TCP, SoupBinTCP-framed), sends a re-request packet (`R` tag + start/count), and receives the missing frames byte-exactly as journaled.
+
+The order-entry and market-data paths share no synchronous coupling — a subscriber that's slow or absent never backpressures order matching.
 
 ---
 
@@ -95,6 +123,34 @@ For algorithmic testing and capacity planning, the `ShadowEngine` allows cloning
 - **WashTradeDetector (SMP)**: Prevents participants from matching against themselves.
 - **LULDManager**: Dynamically updates acceptable price bands based on recent trade prices, halting matching if prices gap too quickly.
 - **GraduatedKillSwitch**: Automatically disables trading for participants who breach soft/hard risk limits.
+
+### 3.5 Wire Protocol Stack
+
+Four wire protocols dispatch into the same `MatchingEngine`. The session class is the only thing that changes between them; the engine doesn't know which codec it's driving.
+
+| Protocol | Spec family | Wire format | Endianness | Session layer | Used by |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **FIX 4.2 / 4.4** | FIX Trading Community | ASCII tag=value with SOH delimiter + checksum | n/a (text) | `FixSession.h` — Logon/Heartbeat/ResendRequest state machine, OrdRejReason mapping, TransactTime validation on 4.4 inbound | Most B-Ds and retail brokers |
+| **OUCH 4.2** | NASDAQ | Fixed-width binary, big-endian, ASCII-decimal slots | BE | `OuchSession.h` + `SoupBinTcpSession.h` (3-byte envelope, login, heartbeat, logout) | NASDAQ direct order entry |
+| **ITCH 5.0** | NASDAQ | Fixed-width binary, big-endian | BE | One-way feed (publish only) — `ItchPublisher.h` + `ItchUdpTransport.h` wrapping `MoldUDP64.h` for multicast | NASDAQ market data |
+| **SBE** | FIX-TG | Schema-driven binary, length-prefixed blocks, **forward-compatible** | LE (native) | `SbeSession.h` — versioned `MessageHeader`, `templateId` dispatch | CME, ICE, several modern venues |
+
+**SBE forward-compatibility, in detail**: every SBE message starts with an 8-byte `MessageHeader` that includes the `blockLength` of the fixed-size block that follows. When a v2 schema adds a field at the end of a block:
+- v2 publishers emit `blockLength=v2_size`. Their messages include the new field.
+- v1 readers ignore the unknown trailing bytes (they only read up to `v1_size`).
+- v1 readers see the original fields **byte-identically** because the v1 block IS a prefix of the v2 block. No codec branch, no version dispatch — just `read up to my known size`.
+- v2 readers handle a v1 message by using `blockLength=v1_size` from the header to skip the absent new fields; they fill in documented defaults.
+
+This is proven byte-exactly via test in `SbeProtocolTest`: encoding a struct with the v2 codec, then byte-comparing the first `v1_size` bytes against the v1 encoding of the same field set, asserts equality. This is the property that makes SBE viable for incremental schema evolution at production scale.
+
+**Gap-recovery flow** (market data side):
+1. `MoldUDP64Publisher` assigns a sequence number to each ITCH frame as it enters the batch.
+2. `ItchUdpPublisher::publish()` writes the MoldUDP64 datagram via `sendto`.
+3. The same frame is appended to `MoldPacketJournal` keyed by its sequence.
+4. A subscriber notices `received_seq > expected_seq` and fires `onGapDetected(expected, received)`.
+5. The subscriber's gap handler opens a TCP connection to `ItchRetransmissionService`, completes SoupBinTCP login, and sends a re-request: `[type='R' | start_seq | count]`.
+6. The service looks up the range in `MoldPacketJournal` and streams each found message back as a SoupBinTCP `SequencedData` packet.
+7. The journal is bounded (ring of N most-recent messages); a subscriber too far behind hits the eviction wall and must take a full snapshot from the Glimpse/snapshot service (not implemented here — that's a separate venue concern).
 
 ---
 

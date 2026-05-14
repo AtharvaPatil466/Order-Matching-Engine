@@ -36,3 +36,7 @@ target_link_libraries(ShardedBookStressTest PRIVATE OrderMatcher)
 add_executable(HonestBenchmark HonestBenchmark.cpp)
 target_link_libraries(HonestBenchmark PRIVATE OrderMatcher)
 
+# Binary-codec microbenchmark — comparing OUCH / ITCH / SBE encode rates
+add_executable(BinaryCodecBenchmark BinaryCodecBenchmark.cpp)
+target_link_libraries(BinaryCodecBenchmark PRIVATE OrderMatcher)
+

@@ -196,6 +196,86 @@ add_test(NAME GatewayProtocolTest COMMAND GatewayProtocolTest)
 set_tests_properties(GatewayProtocolTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
+# OUCH 4.2 binary order-entry codec + session-layer tests
+add_executable(OuchSessionTest OuchSessionTest.cpp)
+target_link_libraries(OuchSessionTest PRIVATE OrderMatcher)
+enable_assertions(OuchSessionTest)
+add_test(NAME OuchSessionTest COMMAND OuchSessionTest)
+set_tests_properties(OuchSessionTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol")
+
+# ITCH 5.0 market-data publisher + codec tests
+add_executable(ItchPublisherTest ItchPublisherTest.cpp)
+target_link_libraries(ItchPublisherTest PRIVATE OrderMatcher)
+enable_assertions(ItchPublisherTest)
+add_test(NAME ItchPublisherTest COMMAND ItchPublisherTest)
+set_tests_properties(ItchPublisherTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol")
+
+# SoupBinTCP transport: envelope codec, framer, session state machine
+add_executable(SoupBinTcpTest SoupBinTcpTest.cpp)
+target_link_libraries(SoupBinTcpTest PRIVATE OrderMatcher)
+enable_assertions(SoupBinTcpTest)
+add_test(NAME SoupBinTcpTest COMMAND SoupBinTcpTest)
+set_tests_properties(SoupBinTcpTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol")
+
+# MoldUDP64 multicast transport: header, batched publisher, gap-detecting subscriber
+add_executable(MoldUDP64Test MoldUDP64Test.cpp)
+target_link_libraries(MoldUDP64Test PRIVATE OrderMatcher)
+enable_assertions(MoldUDP64Test)
+add_test(NAME MoldUDP64Test COMMAND MoldUDP64Test)
+set_tests_properties(MoldUDP64Test PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol")
+
+# OUCH-over-SoupBinTCP end-to-end gateway over real loopback TCP
+add_executable(OuchTcpGatewayTest OuchTcpGatewayTest.cpp)
+target_link_libraries(OuchTcpGatewayTest PRIVATE OrderMatcher)
+enable_assertions(OuchTcpGatewayTest)
+add_test(NAME OuchTcpGatewayTest COMMAND OuchTcpGatewayTest)
+set_tests_properties(OuchTcpGatewayTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;integration")
+
+# ITCH-over-MoldUDP64 transport over real loopback UDP
+add_executable(ItchUdpTransportTest ItchUdpTransportTest.cpp)
+target_link_libraries(ItchUdpTransportTest PRIVATE OrderMatcher)
+enable_assertions(ItchUdpTransportTest)
+add_test(NAME ItchUdpTransportTest COMMAND ItchUdpTransportTest)
+set_tests_properties(ItchUdpTransportTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;integration")
+
+# ITCH gap-recovery: journal + retransmission service over loopback TCP
+add_executable(ItchRetransmissionTest ItchRetransmissionTest.cpp)
+target_link_libraries(ItchRetransmissionTest PRIVATE OrderMatcher)
+enable_assertions(ItchRetransmissionTest)
+add_test(NAME ItchRetransmissionTest COMMAND ItchRetransmissionTest)
+set_tests_properties(ItchRetransmissionTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;integration;recovery")
+
+# Integrated MD publish stack: engine → ITCH → UDP + journal → retransmission
+add_executable(ItchMarketDataFeedTest ItchMarketDataFeedTest.cpp)
+target_link_libraries(ItchMarketDataFeedTest PRIVATE OrderMatcher)
+enable_assertions(ItchMarketDataFeedTest)
+add_test(NAME ItchMarketDataFeedTest COMMAND ItchMarketDataFeedTest)
+set_tests_properties(ItchMarketDataFeedTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;integration;recovery")
+
+# SBE — schema-driven binary protocol with forward-compat versioning
+add_executable(SbeProtocolTest SbeProtocolTest.cpp)
+target_link_libraries(SbeProtocolTest PRIVATE OrderMatcher)
+enable_assertions(SbeProtocolTest)
+add_test(NAME SbeProtocolTest COMMAND SbeProtocolTest)
+set_tests_properties(SbeProtocolTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol")
+
+# SBE session: schema-driven NewOrder → engine + OrderAck reply
+add_executable(SbeSessionTest SbeSessionTest.cpp)
+target_link_libraries(SbeSessionTest PRIVATE OrderMatcher)
+enable_assertions(SbeSessionTest)
+add_test(NAME SbeSessionTest COMMAND SbeSessionTest)
+set_tests_properties(SbeSessionTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;integration")
+
 # GTD virtual clock deterministic replay tests
 add_executable(GTDReplayTest GTDReplayTest.cpp)
 target_link_libraries(GTDReplayTest PRIVATE OrderMatcher)

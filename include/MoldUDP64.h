@@ -41,6 +41,7 @@
 
 #include "OuchProtocol.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -236,12 +237,12 @@ public:
     bool feedPacket(const uint8_t* data, size_t len) {
         MoldHeader hdr;
         if (!moldReadHeader(data, len, hdr)) {
-            ++framingErrors_;
+            framingErrors_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         if (!expectedSession_.empty() && hdr.session != expectedSession_) {
             // Different session ID — venue restart or wrong feed.
-            ++sessionMismatches_;
+            sessionMismatches_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
@@ -253,23 +254,25 @@ public:
             // Heartbeat carries no messages and does NOT consume a
             // sequence number. Use the seq field as the "next expected"
             // to detect long-duration silence gaps.
-            if (hdr.sequenceNumber > nextExpectedSeq_) {
-                if (onGap_) onGap_(nextExpectedSeq_, hdr.sequenceNumber);
-                nextExpectedSeq_ = hdr.sequenceNumber;
-                ++gapsObserved_;
+            uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
+            if (hdr.sequenceNumber > expected) {
+                if (onGap_) onGap_(expected, hdr.sequenceNumber);
+                nextExpectedSeq_.store(hdr.sequenceNumber, std::memory_order_relaxed);
+                gapsObserved_.fetch_add(1, std::memory_order_relaxed);
             }
-            ++heartbeatsReceived_;
+            heartbeatsReceived_.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
 
         // Real-data packet. The header's sequence is the seq of the
         // FIRST message in this packet.
         uint64_t firstSeq = hdr.sequenceNumber;
-        if (firstSeq > nextExpectedSeq_) {
-            if (onGap_) onGap_(nextExpectedSeq_, firstSeq);
-            ++gapsObserved_;
-            nextExpectedSeq_ = firstSeq;  // resume from the new data
-        } else if (firstSeq < nextExpectedSeq_) {
+        uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
+        if (firstSeq > expected) {
+            if (onGap_) onGap_(expected, firstSeq);
+            gapsObserved_.fetch_add(1, std::memory_order_relaxed);
+            nextExpectedSeq_.store(firstSeq, std::memory_order_relaxed);  // resume from the new data
+        } else if (firstSeq < expected) {
             // Already-seen messages — duplicate / retransmission.
             // Skip the prefix that we've already processed; deliver
             // only the suffix (if any) that's still new. For an
@@ -288,34 +291,34 @@ public:
                 return false;
             }
             uint64_t thisSeq = firstSeq + i;
-            if (thisSeq >= nextExpectedSeq_) {
+            if (thisSeq >= nextExpectedSeq_.load(std::memory_order_relaxed)) {
                 if (onMessage_) onMessage_(thisSeq, p, mlen);
-                nextExpectedSeq_ = thisSeq + 1;
-                ++messagesDelivered_;
+                nextExpectedSeq_.store(thisSeq + 1, std::memory_order_relaxed);
+                messagesDelivered_.fetch_add(1, std::memory_order_relaxed);
             }
             p += mlen;
         }
         return true;
     }
 
-    uint64_t nextExpectedSequence() const { return nextExpectedSeq_; }
-    uint64_t messagesDelivered()    const { return messagesDelivered_; }
-    uint64_t gapsObserved()         const { return gapsObserved_; }
-    uint64_t heartbeatsReceived()   const { return heartbeatsReceived_; }
-    uint64_t framingErrors()        const { return framingErrors_; }
-    uint64_t sessionMismatches()    const { return sessionMismatches_; }
+    uint64_t nextExpectedSequence() const { return nextExpectedSeq_.load(std::memory_order_relaxed); }
+    uint64_t messagesDelivered()    const { return messagesDelivered_.load(std::memory_order_relaxed); }
+    uint64_t gapsObserved()         const { return gapsObserved_.load(std::memory_order_relaxed); }
+    uint64_t heartbeatsReceived()   const { return heartbeatsReceived_.load(std::memory_order_relaxed); }
+    uint64_t framingErrors()        const { return framingErrors_.load(std::memory_order_relaxed); }
+    uint64_t sessionMismatches()    const { return sessionMismatches_.load(std::memory_order_relaxed); }
 
 private:
     std::string     expectedSession_;
     OnMessage       onMessage_;
     OnGapDetected   onGap_;
     OnEndOfSession  onEos_;
-    uint64_t        nextExpectedSeq_{1};
-    uint64_t        messagesDelivered_{0};
-    uint64_t        gapsObserved_{0};
-    uint64_t        heartbeatsReceived_{0};
-    uint64_t        framingErrors_{0};
-    uint64_t        sessionMismatches_{0};
+    std::atomic<uint64_t> nextExpectedSeq_{1};
+    std::atomic<uint64_t> messagesDelivered_{0};
+    std::atomic<uint64_t> gapsObserved_{0};
+    std::atomic<uint64_t> heartbeatsReceived_{0};
+    std::atomic<uint64_t> framingErrors_{0};
+    std::atomic<uint64_t> sessionMismatches_{0};
 };
 
 }  // namespace OrderMatcher

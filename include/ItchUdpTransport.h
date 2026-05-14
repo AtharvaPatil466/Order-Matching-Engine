@@ -49,7 +49,7 @@ public:
     // to 1, override before start() if you need wider scope.
     bool start(const std::string& destIp, uint16_t destPort,
                uint8_t multicastTtl = 1) {
-        if (running_) return false;
+        if (running_.load(std::memory_order_relaxed)) return false;
         fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd_ < 0) return false;
 
@@ -73,17 +73,17 @@ public:
             [this](std::string_view bytes) {
                 ::sendto(fd_, bytes.data(), bytes.size(), 0,
                          reinterpret_cast<sockaddr*>(&dest_), sizeof(dest_));
-                ++datagramsSent_;
+                datagramsSent_.fetch_add(1, std::memory_order_relaxed);
             },
             mtu_));
 
-        running_ = true;
+        running_.store(true, std::memory_order_relaxed);
         return true;
     }
 
     void stop() {
-        if (!running_) return;
-        running_ = false;
+        if (!running_.load(std::memory_order_relaxed)) return;
+        running_.store(false, std::memory_order_relaxed);
         if (mold_) {
             mold_->flush();          // don't lose buffered messages
         }
@@ -104,16 +104,16 @@ public:
     uint64_t nextSequence() const {
         return mold_ ? mold_->nextSequence() : 1;
     }
-    uint64_t datagramsSent() const { return datagramsSent_; }
+    uint64_t datagramsSent() const { return datagramsSent_.load(std::memory_order_relaxed); }
 
 private:
     std::string                              session_;
     size_t                                   mtu_;
     int                                      fd_{-1};
     sockaddr_in                              dest_{};
-    bool                                     running_{false};
+    std::atomic<bool>                        running_{false};
     std::unique_ptr<MoldUDP64Publisher>      mold_;
-    uint64_t                                 datagramsSent_{0};
+    std::atomic<uint64_t>                    datagramsSent_{0};
 };
 
 // ─── Subscriber ─────────────────────────────────────────────────────────────

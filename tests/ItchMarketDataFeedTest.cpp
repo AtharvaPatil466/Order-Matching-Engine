@@ -165,10 +165,12 @@ void test_FeedEmitsAddOnAcceptedOrder() {
                            /*price=*/1000, /*qty=*/50, OrderType::Limit);
 
         CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return !firstFrame.empty(); }));
-        std::lock_guard<std::mutex> lk(mtx);
-        CHECK(firstFrame[0] == ITCH_MT_ADD_ORDER);
-        CHECK(readU64BE(firstFrame.data() + 11) == 100ULL);
-        CHECK(readU32BE(firstFrame.data() + 20) == 50);
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            CHECK(firstFrame[0] == ITCH_MT_ADD_ORDER);
+            CHECK(readU64BE(firstFrame.data() + 11) == 100ULL);
+            CHECK(readU32BE(firstFrame.data() + 20) == 50);
+        }
 
         CHECK(feed.addsEmitted() == 1);
         CHECK(feed.framesJournaled() == 1);
@@ -317,9 +319,11 @@ void test_FeedSystemEventPropagates() {
         feed.publishSystemEvent(ITCH_SE_START_OF_MARKET);
 
         CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return !received.empty(); }));
-        std::lock_guard<std::mutex> lk(mtx);
-        CHECK(received[0] == ITCH_MT_SYSTEM_EVENT);
-        CHECK(received[11] == ITCH_SE_START_OF_MARKET);
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            CHECK(received[0] == ITCH_MT_SYSTEM_EVENT);
+            CHECK(received[11] == ITCH_SE_START_OF_MARKET);
+        }
 
         feed.stop(); sub.stop();
     } END

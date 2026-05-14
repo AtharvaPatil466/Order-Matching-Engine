@@ -92,9 +92,11 @@ void test_UdpSingleMessageRoundtrip() {
         pub.flush();
 
         CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return !received.empty(); }));
-        std::lock_guard<std::mutex> lk(mtx);
-        CHECK(received.size() == 1);
-        CHECK(std::string(received[0].begin(), received[0].end()) == "HELLO_ITCH");
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            CHECK(received.size() == 1);
+            CHECK(std::string(received[0].begin(), received[0].end()) == "HELLO_ITCH");
+        }
 
         pub.stop();
         sub.stop();
@@ -125,10 +127,12 @@ void test_UdpBatchedMessagesInOnePacket() {
         pub.flush();
 
         CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return seqs.size() == 3; }));
-        std::lock_guard<std::mutex> lk(mtx);
-        CHECK(seqs[0] == 1 && seqs[1] == 2 && seqs[2] == 3);
-        CHECK(pub.datagramsSent() == 1
-              && "three batched messages → one datagram on the wire");
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            CHECK(seqs[0] == 1 && seqs[1] == 2 && seqs[2] == 3);
+            CHECK(pub.datagramsSent() == 1
+                  && "three batched messages → one datagram on the wire");
+        }
 
         pub.stop(); sub.stop();
     } END
@@ -194,11 +198,13 @@ void test_UdpItchAddOrderEndToEnd() {
 
         CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return received.size() == ITCH_SIZE_ADD_ORDER; }));
         // Wire bytes match exactly: type byte, order ref, shares.
-        std::lock_guard<std::mutex> lk(mtx);
-        CHECK(received[0] == ITCH_MT_ADD_ORDER);
-        CHECK(readU64BE(received.data() + 11) == 12345ULL);
-        CHECK(readU32BE(received.data() + 20) == 250);
-        CHECK(received[19] == 'S');
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            CHECK(received[0] == ITCH_MT_ADD_ORDER);
+            CHECK(readU64BE(received.data() + 11) == 12345ULL);
+            CHECK(readU32BE(received.data() + 20) == 250);
+            CHECK(received[19] == 'S');
+        }
 
         pub.stop(); sub.stop();
     } END

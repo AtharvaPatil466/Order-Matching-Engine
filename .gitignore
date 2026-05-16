@@ -20,14 +20,9 @@ GEMINI.md
 .opencode.json
 
 # Generated Artifacts
-Project_Overview.md
-Project_Overview.pdf
-PRODUCTION_ROADMAP.md
-roadmap.md
 
 # Personal / Debug
 tsan_out*.txt
-fix_manual_test.py
 
 # IDEs & Tools
 .idea/

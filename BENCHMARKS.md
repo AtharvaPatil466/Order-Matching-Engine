@@ -1,8 +1,11 @@
 # Benchmark Methodology & Results
 
-> **Platform**: Apple M3 Pro (ARM64) · **Compiler**: Clang C++20 -O2
-> **Date**: 2026-05-29 · **Seed**: 42
-> **Tests**: 395/395 passing
+> **Platform**: Apple M3 Pro (ARM64) · **Compiler**: Clang C++20 -O3 -march=native
+> **Baseline**: commit `5228158` · **Date**: 2026-06-21 · **Seed**: 42
+> **Tests**: 396/396 passing
+> **Verified**: fresh `git clone` → clean build → `ctest` (396/396) → `HonestBenchmark` ×4.
+> Throughput figures are wall-clock and sensitive to machine load; P50 is the
+> stable per-operation number.
 
 ## TL;DR
 
@@ -44,22 +47,22 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 ```
 ── Path A: OrderBook::addOrder() [core matching] ──
   Orders:     50,000
-  Throughput: 6.6M orders/sec
+  Throughput: ~5.0M orders/sec
   P50:    125 ns    P90:    209 ns
   P99:    333 ns    P99.9:  458 ns
   Max:  48,834 ns
 
 ── Path B: MatchingEngine::submitOrder() [+ engine wrapper] ──
   Orders:     50,000
-  Throughput: 7.1M orders/sec
-  P50:     84 ns    P90:    208 ns
+  Throughput: ~5.5M orders/sec
+  P50:    125 ns    P90:    208 ns
   P99:    292 ns    P99.9:  417 ns
   Max:  19,333 ns
 
 ── Path C: MatchingEngine + Journal [GroupCommit batch=64] ──
   Orders:     50,000
-  Throughput: 22,293 orders/sec
-  P50:  1,040 ns    P90:  2,040 ns
+  Throughput: ~7,000 orders/sec
+  P50:    958 ns    P90:  2,040 ns
   P99:  2.7 ms      P99.9: 4.0 ms
   Max:  9.7 ms
 ```

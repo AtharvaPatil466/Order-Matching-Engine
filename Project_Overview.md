@@ -1,6 +1,6 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **46,500+ lines of C++20** | 85 headers | 13 source files | 75 test files | 395 CTest targets
+> **46,500+ lines of C++20** | 85 headers | 13 source files | 75 test files | 396 CTest targets
 >
 > A C++20 low-latency matching engine drawing on institutional exchange design principles, built for sub-150ns processing latency and horizontal scalability.
 
@@ -18,7 +18,7 @@ This is a C++20 low-latency order matching engine with institutional-grade archi
 | Header files (`include/`) | 85 |
 | Source files (`src/`) | 13 |
 | Test files | 75 |
-| Individual test cases | 395 CTest targets |
+| Individual test cases | 396 CTest targets |
 | TLA+ specifications | 12 (454M+ states verified) |
 | Documentation files | 6 (plus architecture/benchmark docs) |
 
@@ -115,7 +115,7 @@ All four protocols dispatch into the same `MatchingEngine`.
 | Feature | Implementation |
 |---------|---------------|
 | **Self-Match Prevention (SMP)** | Cancel-Taker strategy — prevents wash trading |
-| **Circuit Breakers** | Configurable % price band halts (volatility protection) |
+| **Circuit Breakers** | Configurable % price-band breach enters a short LULD-style **volatility auction** (orders accumulate without continuous matching until the reopening uncross) rather than a hard halt; emits a `breaker_trip` audit event |
 | **OTR Monitoring** | Real-time Order-to-Trade ratio tracking per participant |
 | **Kill Switch** | Instant cancellation of all orders per participant across all symbols |
 | **Pre-Trade Risk Limits** | Max order size, notional value, and position limits per participant |
@@ -188,15 +188,15 @@ A self-contained quantitative research layer that runs against the live matching
 
 ## 8. Performance Benchmarks
 
-Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O2. 
+Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O3 -march=native. Numbers below are verified from a **fresh clone of commit `5228158`**; P50 is the stable per-operation figure, while throughput is wall-clock and sensitive to machine load. (Per-order/per-fill structured logging is sink-gated, so the hot path stays allocation-free when no log sink is attached.)
 
 ### Three-Path Latency (identical order flow)
 
-| Path | What's Included | P50 | P99 | P99.9 | Throughput |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | 333 ns | 458 ns | 6.6M ops/s |
-| **Engine wrapper** | + sequence alloc, rate limiter | 84 ns | 292 ns | 417 ns | 7.1M ops/s |
-| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | 1,040 ns | 2.7 ms | 4.0 ms | 22K ops/s |
+| Path | What's Included | P50 | P99 | Throughput |
+| :--- | :--- | :--- | :--- | :--- |
+| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | ~500 ns | ~5.0M ops/s |
+| **Engine wrapper** | + sequence alloc, rate limiter | 125 ns | ~500 ns | ~5.5M ops/s |
+| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | ~958 ns | ~8 ms (fdatasync) | ~7K ops/s |
 
 ### Binary Codec Microbenchmark
 
@@ -211,9 +211,9 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 
 ## 9. Verification & Testing
 
-### Test Suite — 75 Executables, 395 CTest Targets
+### Test Suite — 75 Executables, 396 CTest Targets
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 75 test executables and 395 CTest targets. Key mechanisms:
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 75 test executables and 396 CTest targets. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.
@@ -234,7 +234,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ```
 include/              85 header files — core logic and networking
 src/                  13 source files — thin compilation units
-tests/                75 test files, 395 CTest targets
+tests/                75 test files, 396 CTest targets
 benchmarks/           9 benchmark binaries
 fuzz/                 9 files — coverage-guided fuzzing harnesses
 spec/                 TLA+ formal specifications (12 specs)
@@ -256,4 +256,4 @@ The system is architecturally complete. The main remaining gaps require speciali
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · ~46,500 LOC · 75 test executables · 395 CTest targets · 19 multi-container chaos scenarios · 454M TLA+ states verified on MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · ~46,500 LOC · 75 test executables · 396 CTest targets · 19 multi-container chaos scenarios · 454M TLA+ states verified on MatchingEngine.tla · 12 TLA+ specifications*

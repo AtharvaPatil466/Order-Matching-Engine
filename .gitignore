@@ -1,5 +1,6 @@
 build/
 build-*/
+build_*/
 bin/
 .DS_Store
 *.o
@@ -29,3 +30,9 @@ tsan_out*.txt
 .clangd/
 .vscode/
 .code-review-graph/
+.antigravitycli/
+
+# Python (chaos tests / tooling)
+.venv/
+__pycache__/
+*.pyc

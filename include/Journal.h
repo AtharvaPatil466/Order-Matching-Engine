@@ -113,6 +113,13 @@ public:
                      size_t batchSize = 64)
         : filePath_(filePath), syncPolicy_(syncPolicy),
           batchSize_(batchSize == 0 ? 1 : batchSize) {
+        // A previous rewriteAtomically() that crashed between close()
+        // and rename() can leave a stale "<path>.tmp" sibling. Remove
+        // it on startup so it does not accumulate across restarts and
+        // so a half-written checkpoint cannot be picked up by any
+        // future tool that lists the directory.
+        std::remove((filePath_ + ".tmp").c_str());
+
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
     }
@@ -279,8 +286,22 @@ public:
         return persistedEntries_ >= maxEntries || bytesOnDisk() >= maxBytes;
     }
 
+    void setMaxSizeMb(size_t mb) { maxSizeMb_ = mb; }
+    size_t maxSizeMb() const { return maxSizeMb_; }
+
     uint64_t getSequence() const { return sequence_; }
     const std::string& path() const { return filePath_; }
+
+    // Callback fired once per batch immediately after a successful
+    // commit (entries are fsync-durable on disk). Used to feed
+    // committed entries into the replication coordinator without
+    // intruding on the matching-engine hot path. Receives a pointer
+    // to the prefix of committed entries and the count.
+    //
+    // Lifetime: the entries pointer is only valid for the duration
+    // of the callback. Copy the bytes if you need them longer.
+    using OnCommitFn = std::function<void(const JournalEntry* entries, size_t count)>;
+    void setOnCommit(OnCommitFn fn) { onCommit_ = std::move(fn); }
     size_t bytesOnDisk() const {
         if (!file_) {
             return 0;
@@ -351,6 +372,13 @@ protected:
         }
 
         // Assign sequence numbers + CRCs to the prefix we're about to write.
+        //
+        // offsetof on the pragma-packed JournalEntry is conditionally
+        // supported in C++ (the struct contains scoped enums, so it
+        // technically isn't standard-layout under strict GCC). Clang
+        // and libstdc++-GCC both accept it; if a future toolchain
+        // emits -Winvalid-offsetof, suppress at the build level
+        // rather than rewriting the CRC range.
         for (size_t i = 0; i < toWrite; ++i) {
             batch_[i].sequenceNumber = ++sequence_;
             batch_[i].checksum = computeCRC32(&batch_[i],
@@ -394,6 +422,15 @@ protected:
             "Total journal entries successfully written to disk");
         kEntriesCommitted.increment(actuallyWritten);
 
+        // Fire the commit callback BEFORE erasing the prefix so the
+        // pointer remains valid for the duration of the callback. The
+        // callback runs synchronously on the writer thread — implementers
+        // should keep it short (the replication coordinator queues bytes
+        // for an async send, which is the intended use).
+        if (onCommit_ && actuallyWritten > 0) {
+            onCommit_(batch_.data(), actuallyWritten);
+        }
+
         // Pop the persisted prefix. Anything past it stays in batch_ and
         // will be renumbered on the next commit. To keep that retry pure
         // (no stale CRCs/sequences), zero out those fields now.
@@ -413,8 +450,13 @@ protected:
     }
 
     static uint64_t now() {
+        // steady_clock — monotonic, unaffected by NTP step adjustments.
+        // high_resolution_clock aliases system_clock on libstdc++ and
+        // can move backwards on wall-clock corrections, which would
+        // produce non-monotonic journal timestamps and break audit
+        // replay / latency reconstruction.
         return static_cast<uint64_t>(
-            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            std::chrono::steady_clock::now().time_since_epoch().count());
     }
 
 private:
@@ -492,6 +534,8 @@ private:
     uint64_t sequence_{0};
     size_t persistedEntries_{0};
     std::vector<JournalEntry> batch_;
+    OnCommitFn onCommit_;
+    size_t maxSizeMb_{0};
 };
 
 class GroupCommitJournal : public Journal {

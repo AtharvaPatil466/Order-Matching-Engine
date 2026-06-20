@@ -66,6 +66,15 @@ IntrusiveList contains **no atomic operations**. Protected by `bookLock_`. No ch
 
 **Note on `queueWakeups_`**: The `wait` uses `relaxed`, which is correct because the actual data synchronization happens through the MpscQueue's sequence numbers. The wakeup is just a hint.
 
+## main.cpp — SIGHUP Hot-Reload
+
+| Variable | Operation | Ordering | Status |
+|----------|-----------|----------|--------|
+| `g_reload_config` (static atomic<bool>) | `store(true)` in signal handler | `memory_order_relaxed` | ✅ Correct — signal handlers cannot use acquire/release; relaxed is the only valid ordering in a signal handler. The main thread's `exchange(false, acq_rel)` provides the acquire fence |
+| `g_reload_config` | `exchange(false)` in event loop | `memory_order_acq_rel` | ✅ Correct — ensures the main thread sees the store before acting; the release ensures config reload writes are visible after the exchange |
+
+**Design note**: The signal handler uses `relaxed` ordering — this is intentional and correct. POSIX signal handlers are not permitted to use synchronization barriers. The acquire fence is on the consumer (main event loop), which is sufficient: once the main thread loads `true` with acquire, it sees all signal handler writes, then reloads config and stores `false` with release.
+
 ## ReplicationProtocol.h
 
 | Variable | Operations | Ordering | Status |

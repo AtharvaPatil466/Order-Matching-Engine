@@ -25,7 +25,6 @@
 //     is trivial if needed; left out to keep the no-op path cheap.)
 
 #include <cstdio>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -128,6 +127,99 @@ inline LogEvent obEvent(std::string_view name,
     e.severity = sev;
     e.name = name;
     return e;
+}
+
+// ── Stable event name constants ──────────────────────────────────────────────
+// These are the contract with downstream consumers (Splunk, ELK, Prometheus
+// alert rules). Never rename without a deprecation cycle.
+namespace events {
+    constexpr const char* kOrderAccepted      = "order.accepted";
+    constexpr const char* kOrderCancelled     = "order.cancelled";
+    constexpr const char* kOrderRejected      = "order.rejected";
+    constexpr const char* kTradeFill          = "trade.fill";
+    constexpr const char* kTradingStateChange = "trading.state_change";
+    constexpr const char* kCircuitBreaker     = "risk.circuit_breaker";
+    constexpr const char* kKillSwitch         = "risk.kill_switch";
+    constexpr const char* kRateLimitExceeded  = "risk.rate_limit";
+    constexpr const char* kReplicationLag     = "replication.lag_high";
+    constexpr const char* kSnapshotStart      = "replication.snapshot_start";
+    constexpr const char* kSnapshotEnd        = "replication.snapshot_end";
+    constexpr const char* kConfigReloaded     = "config.reloaded";
+    constexpr const char* kJournalCheckpoint  = "journal.checkpoint";
+    constexpr const char* kJournalCorruption  = "journal.corruption";
+} // namespace events
+
+// ── Typed log helpers — enforce required fields ───────────────────────────────
+// Each helper constructs a fully-populated LogEvent. Required fields are
+// positional; optional context can be added with .kv() on the returned event.
+//
+// Usage: obSink().log(logOrderAccepted(orderId, symbolId, participantId, price, qty));
+
+inline LogEvent logOrderAccepted(uint64_t orderId, uint32_t symbolId,
+                                  uint64_t participantId, int64_t price,
+                                  uint64_t qty) {
+    return obEvent(events::kOrderAccepted)
+        .kv("order_id",       static_cast<long long>(orderId))
+        .kv("symbol_id",      static_cast<long long>(symbolId))
+        .kv("participant_id", static_cast<long long>(participantId))
+        .kv("price",          static_cast<long long>(price))
+        .kv("qty",            static_cast<long long>(qty));
+}
+
+inline LogEvent logOrderCancelled(uint64_t orderId, uint32_t symbolId,
+                                   uint64_t participantId) {
+    return obEvent(events::kOrderCancelled)
+        .kv("order_id",       static_cast<long long>(orderId))
+        .kv("symbol_id",      static_cast<long long>(symbolId))
+        .kv("participant_id", static_cast<long long>(participantId));
+}
+
+inline LogEvent logOrderRejected(uint64_t orderId, uint64_t participantId,
+                                  const char* reason) {
+    return obEvent(events::kOrderRejected, LogSeverity::Warn)
+        .kv("order_id",       static_cast<long long>(orderId))
+        .kv("participant_id", static_cast<long long>(participantId))
+        .kv("reason",         reason);
+}
+
+inline LogEvent logTradeFill(uint64_t buyOrderId, uint64_t sellOrderId,
+                              uint32_t symbolId, int64_t price, uint64_t qty) {
+    return obEvent(events::kTradeFill)
+        .kv("buy_order_id",  static_cast<long long>(buyOrderId))
+        .kv("sell_order_id", static_cast<long long>(sellOrderId))
+        .kv("symbol_id",     static_cast<long long>(symbolId))
+        .kv("price",         static_cast<long long>(price))
+        .kv("qty",           static_cast<long long>(qty));
+}
+
+inline LogEvent logTradingStateChange(uint32_t symbolId,
+                                       const char* fromState,
+                                       const char* toState) {
+    return obEvent(events::kTradingStateChange)
+        .kv("symbol_id",  static_cast<long long>(symbolId))
+        .kv("from_state", fromState)
+        .kv("to_state",   toState);
+}
+
+inline LogEvent logCircuitBreaker(uint32_t symbolId, double triggerPct,
+                                   int64_t refPrice, int64_t triggerPrice) {
+    return obEvent(events::kCircuitBreaker, LogSeverity::Warn)
+        .kv("symbol_id",     static_cast<long long>(symbolId))
+        .kv("trigger_pct",   triggerPct)
+        .kv("ref_price",     static_cast<long long>(refPrice))
+        .kv("trigger_price", static_cast<long long>(triggerPrice));
+}
+
+inline LogEvent logConfigReloaded(const char* path) {
+    return obEvent(events::kConfigReloaded)
+        .kv("path", path);
+}
+
+inline LogEvent logJournalCorruption(uint64_t atSequence,
+                                      const char* detail) {
+    return obEvent(events::kJournalCorruption, LogSeverity::Error)
+        .kv("at_sequence", static_cast<long long>(atSequence))
+        .kv("detail",      detail);
 }
 
 }  // namespace OrderMatcher

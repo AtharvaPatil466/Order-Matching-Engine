@@ -1,0 +1,23 @@
+# Keep host build artifacts out of the Docker build context. Without
+# this, COPY . . in the Dockerfile pulls in build*/CMakeCache.txt
+# files whose absolute paths point at the host filesystem, and the
+# in-container cmake then refuses to reuse them.
+build/
+build-*/
+bin/
+*.dSYM/
+
+# Local dev artifacts
+.venv/
+deploy/chaos/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# IDE / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Git history isn't needed for the runtime image
+.git/

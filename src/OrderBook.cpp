@@ -14,7 +14,7 @@ OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo)
     : bids_(Side::Buy, 200001), asks_(Side::Sell, 200001),
       orderLookup_(INITIAL_CAPACITY), orderPool_(INITIAL_CAPACITY),
       symbolId_(symbolId), matchAlgorithm_(algo),
-      otrStats_(1024), riskLimits_(1024), participantOrders_(64) {
+      participantRisk_(1024), participantOrders_(64) {
 }
 
 // ─── Notifications ───────────────────────────────────────────────────────────
@@ -33,6 +33,7 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
     u.timestamp = nowNs();
     u.sequenceNumber = nextSequenceNumber_++;
     listener_->onOrderUpdate(u);
+    engineListener_->onOrderUpdate(u);
 #else
     (void)orderId; (void)status; (void)filledQty; (void)remainingQty; (void)lastFillPrice; (void)reason;
 #endif
@@ -79,7 +80,13 @@ bool OrderBook::canAddToBook(const Order* order) const {
 
 void OrderBook::ensurePriceRange(Price price) {
     if (!bids_.rangeSet()) {
-        // Center the range around the first price seen
+        // Center the range around the first price seen. The range
+        // is FIXED after this — subsequent orders priced outside
+        // [minP, minP + capacity) are rejected with OutOfPriceRange.
+        // There is no automatic re-centering today; a symbol whose
+        // price moves into a new regime far from its first quote
+        // would need an explicit book rebuild. Documented as a
+        // known scaling limitation.
         Price halfRange = static_cast<Price>(bids_.capacity() / 2);
         Price minP = price - halfRange;
         bids_.setRange(minP);
@@ -108,29 +115,34 @@ void OrderBook::removeFromBook(Order* order) {
 // ─── Risk & Validation ──────────────────────────────────────────────────────
 
 bool OrderBook::checkRiskLimits(ParticipantId participantId, Price price, Quantity qty) {
-    const auto* lim = riskLimits_.find(participantId);
-    if (!lim) return true;
+    const auto* state = participantRisk_.find(OTRKey(participantId, symbolId_));
+    if (!state) return true;
 
-    if (lim->maxOrderSize > 0 && qty > lim->maxOrderSize) return false;
+    if (state->maxOrderSize > 0 && qty > state->maxOrderSize) return false;
 
-    if (lim->maxOrderNotional > 0) {
+    if (state->maxOrderNotional > 0) {
         Price notional = price * static_cast<Price>(qty) / PRICE_PRECISION;
-        if (notional > lim->maxOrderNotional) return false;
+        if (notional > state->maxOrderNotional) return false;
     }
 
-    if (lim->maxPositionSize > 0) {
-        const auto* stats = otrStats_.find(participantId);
-        if (stats) {
-            int64_t projected = stats->netPosition + static_cast<int64_t>(qty);
-            if (static_cast<uint64_t>(std::abs(projected)) > lim->maxPositionSize) return false;
-        }
+    if (state->maxPositionSize > 0) {
+        int64_t projected = state->currentExposure + static_cast<int64_t>(qty);
+        // std::abs(INT64_MIN) is UB. Convert to a saturating
+        // unsigned magnitude that handles the full int64 range.
+        uint64_t magnitude = projected < 0
+            ? static_cast<uint64_t>(-(projected + 1)) + 1u
+            : static_cast<uint64_t>(projected);
+        if (magnitude > state->maxPositionSize) return false;
     }
 
     return true;
 }
 
 void OrderBook::setRiskLimits(ParticipantId participantId, const RiskLimits& limits) {
-    riskLimits_.insert(participantId, limits);
+    auto& state = participantRisk_[OTRKey(participantId, symbolId_)];
+    state.maxOrderSize = limits.maxOrderSize;
+    state.maxOrderNotional = limits.maxOrderNotional;
+    state.maxPositionSize = limits.maxPositionSize;
 }
 
 bool OrderBook::checkCircuitBreaker(Price price) {
@@ -192,7 +204,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                           Quantity qty, OrderType type, Price stopPrice, Quantity displayQty,
                           TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
                           PegType pegType, Price pegOffset, Price trailAmount,
-                          Quantity minQty, bool hidden) {
+                          Quantity minQty, bool hidden, bool riskChecksBypassed) {
     std::unique_lock<std::shared_mutex> lock(bookLock_);
 
     // --- Trading-state admission ---
@@ -200,7 +212,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // through cancelOrder() which has no state gate.
     if (tradingState_ == TradingState::Halted) [[unlikely]] {
 #ifndef OB_LEAN_MODE
-        otrStats_[participantId].rejectedOrders++;
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::MarketHalted);
         return RejectReason::MarketHalted;
@@ -209,7 +221,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // different reject reason for client clarity.
     if (tradingState_ == TradingState::PostClose) [[unlikely]] {
 #ifndef OB_LEAN_MODE
-        otrStats_[participantId].rejectedOrders++;
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::MarketClosed);
         return RejectReason::MarketClosed;
@@ -221,12 +233,13 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // Market orders ARE accepted here: they get parked in
     // auctionMarketOrders_ and participate in the uncross at the
     // discovered price (see below + uncross()).
-    if (tradingState_ == TradingState::PreOpen      ||
-        tradingState_ == TradingState::AuctionOpen  ||
-        tradingState_ == TradingState::AuctionClose) [[unlikely]] {
+    if (tradingState_ == TradingState::PreOpen           ||
+        tradingState_ == TradingState::AuctionOpen       ||
+        tradingState_ == TradingState::AuctionClose      ||
+        tradingState_ == TradingState::VolatilityAuction) [[unlikely]] {
         if (type == OrderType::IOC || type == OrderType::FOK) {
 #ifndef OB_LEAN_MODE
-            otrStats_[participantId].rejectedOrders++;
+            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
             notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
                               RejectReason::OrderTypeNotAllowedInState);
@@ -237,17 +250,17 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // --- Input validation ---
     if (qty == 0) [[unlikely]] {
 #ifndef OB_LEAN_MODE
-        otrStats_[participantId].rejectedOrders++;
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, 0, 0, RejectReason::InvalidQuantity);
         return RejectReason::InvalidQuantity;
     }
 
-    if (type != OrderType::Market && price <= 0
+    if (type != OrderType::Market && type != OrderType::MOC && price <= 0
                  && type != OrderType::Stop && type != OrderType::StopLimit
-                 && type != OrderType::TrailingStop) [[unlikely]] {
+                 && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
 #ifndef OB_LEAN_MODE
-        otrStats_[participantId].rejectedOrders++;
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::InvalidPrice);
         return RejectReason::InvalidPrice;
@@ -260,7 +273,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // and no resources leak.
     if (orderLookup_.find(orderId) != nullptr) [[unlikely]] {
 #ifndef OB_LEAN_MODE
-        otrStats_[participantId].rejectedOrders++;
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
                           RejectReason::DuplicateOrderId);
@@ -269,19 +282,20 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     // --- Pre-trade risk checks ---
 #ifndef OB_LEAN_MODE
-    if (!checkRiskLimits(participantId, price, qty)) [[unlikely]] {
-        otrStats_[participantId].rejectedOrders++;
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty)) [[unlikely]] {
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::RiskLimitBreached);
+        obSink().log(logOrderRejected(orderId, participantId, "risk_limit_breached"));
         return RejectReason::RiskLimitBreached;
     }
 
-    otrStats_[participantId].ordersSubmitted++;
+    participantRisk_[OTRKey(participantId, symbolId_)].recordOrderSubmit();
 #endif
 
     // --- Reference price for circuit breaker ---
     if (referencePrice_ == 0 && type != OrderType::Market
                  && type != OrderType::Stop && type != OrderType::StopLimit
-                 && type != OrderType::TrailingStop) [[unlikely]] {
+                 && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
         referencePrice_ = price;
     }
 
@@ -305,7 +319,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         Price hi = referencePrice_ + half;
         if (price < lo || price > hi) {
 #ifndef OB_LEAN_MODE
-            otrStats_[participantId].rejectedOrders++;
+            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
             notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
                               RejectReason::OutsidePriceBand);
@@ -318,16 +332,24 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     if (type == OrderType::Limit || type == OrderType::IOC || type == OrderType::FOK
         || type == OrderType::PostOnly || type == OrderType::Iceberg || type == OrderType::Hidden) {
         if (!checkCircuitBreaker(price)) {
-            // The order that trips the breaker is reported with
-            // VolatilityCircuitBreaker. Subsequent orders during the
-            // resulting halt are reported with MarketHalted (caught by the
-            // state check at the top of addOrder).
-            tradingState_ = TradingState::Halted;
+            // Volatility breach: enter a short volatility auction rather
+            // than an outright halt. Orders now accumulate and the
+            // indicative/imbalance is published until a reopening cross
+            // (resumeVolatilityAuction) returns the book to continuous
+            // trading. A manual halt remains a hard halt. The order that
+            // tripped the breach is still rejected; later orders are
+            // admitted into the auction (no MarketHalted while auctioning).
+            tradingState_ = TradingState::VolatilityAuction;
+            // Compliance/monitoring contract: a breach must always emit the
+            // `breaker_trip` event (symbol/price/ref/threshold_pct). Kept
+            // alongside the newer structured `risk.circuit_breaker` event so
+            // existing alerting and StructuredLogTest continue to observe it.
             obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
                 .kv("symbol", (long long)symbolId_)
                 .kv("price", (long long)price)
                 .kv("ref", (long long)referencePrice_)
                 .kv("threshold_pct", cbThreshold_));
+            obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, price));
             notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::VolatilityCircuitBreaker);
             return RejectReason::VolatilityCircuitBreaker;
         }
@@ -344,11 +366,77 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
         if (wouldCross) {
 #ifndef OB_LEAN_MODE
-            otrStats_[participantId].rejectedOrders++;
+            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
             notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::PostOnlyWouldCross);
             return RejectReason::PostOnlyWouldCross;
         }
+    }
+
+    // --- MOC/LOC: park or release immediately ---
+    // MOC (Market-on-Close) and LOC (Limit-on-Close) only execute during the
+    // AuctionClose uncross. In every other state they are parked in
+    // onCloseOrders_. When the book transitions to AuctionClose,
+    // releaseOnCloseOrders() moves them to the appropriate structures.
+    // Any LOC remaining unfilled after uncross() is cancelled by cancelLocOrders().
+    if (type == OrderType::MOC || type == OrderType::LOC) {
+        Order* order = FaultInjector::instance().shouldFail("pool.allocate.fail")
+                           ? nullptr : orderPool_.allocate();
+        if (!order) [[unlikely]] {
+#ifndef OB_LEAN_MODE
+            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
+#endif
+            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::CapacityExhausted);
+            return RejectReason::CapacityExhausted;
+        }
+        order->id = orderId;
+        order->participantId = participantId;
+        order->side = side;
+        order->price = price;   // only meaningful for LOC
+        order->initialQty = qty;
+        order->remainingQty = qty;
+        order->type = type;
+        order->status = OrderStatus::Accepted;
+        order->timeInForce = tif;
+        order->expiryTime = expiryTime;
+        order->stopPrice = 0;
+        order->stopLimitPrice = 0;
+        order->displayQty = 0;
+        order->visibleQty = 0;
+        order->pegType = PegType::None;
+        order->pegOffset = 0;
+        order->trailAmount = 0;
+        order->trailRefPrice = 0;
+        order->minQty = 0;
+        order->isHidden = false;
+        order->isStopTriggered = false;
+        order->symbolId = symbolId_;
+        order->timestamp = nowNs();
+        order->next = nullptr;
+        order->prev = nullptr;
+
+        orderLookup_.insert(orderId, order);
+#ifndef OB_LEAN_MODE
+        participantOrders_[participantId].push_back(orderId);
+#endif
+        notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
+        obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
+
+        if (tradingState_ == TradingState::AuctionClose) {
+            if (type == OrderType::MOC) {
+                auctionMarketOrders_.push_back(order);
+            } else {
+                if (!addToBook(order)) {
+                    orderLookup_.erase(orderId);
+                    orderPool_.deallocate(order);
+                    return RejectReason::CapacityExhausted;
+                }
+                locActiveIds_.push_back(orderId);
+            }
+        } else {
+            onCloseOrders_.push_back(order);
+        }
+        return orderId;
     }
 
     // --- Allocate order from pool ---
@@ -359,7 +447,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                        ? nullptr : orderPool_.allocate();
     if (!order) [[unlikely]] {
 #ifndef OB_LEAN_MODE
-        otrStats_[participantId].rejectedOrders++;
+        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::CapacityExhausted);
         return RejectReason::CapacityExhausted;
@@ -398,6 +486,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 #endif
 
     notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
+    obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
 
     // --- Auction Market orders: park for the uncross ---
     // A Market order in an auction state has no limit price; it cannot
@@ -407,15 +496,17 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // the discovered price for execution. Any unfilled remainder is
     // cancelled at the end of uncross.
     if (type == OrderType::Market &&
-        (tradingState_ == TradingState::PreOpen     ||
-         tradingState_ == TradingState::AuctionOpen ||
-         tradingState_ == TradingState::AuctionClose)) {
+        (tradingState_ == TradingState::PreOpen           ||
+         tradingState_ == TradingState::AuctionOpen       ||
+         tradingState_ == TradingState::AuctionClose      ||
+         tradingState_ == TradingState::VolatilityAuction)) {
         auctionMarketOrders_.push_back(order);
         return orderId;
     }
 
     // --- Stop / StopLimit: park until triggered ---
-    if (type == OrderType::Stop || type == OrderType::StopLimit) {
+    if (type == OrderType::Stop || type == OrderType::StopLimit
+        || type == OrderType::MIT) {
         stopOrders_.push_back(order);
         return orderId;
     }
@@ -490,7 +581,8 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     const bool inAuction =
         (tradingState_ == TradingState::AuctionOpen) ||
         (tradingState_ == TradingState::AuctionClose) ||
-        (tradingState_ == TradingState::PreOpen);
+        (tradingState_ == TradingState::PreOpen) ||
+        (tradingState_ == TradingState::VolatilityAuction);
     if (!inAuction) {
         if (matchAlgorithm_ == MatchAlgorithm::ProRata)
             matchProRata(order);
@@ -543,6 +635,23 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 // ─── Match (Price-Time FIFO) ─────────────────────────────────────────────────
 
 void OrderBook::match(Order* incoming) {
+    // Market-order sweep protection: cap how far a market order may walk from
+    // the arrival touch price so one order can't clear the book at runaway
+    // prices. Disabled when marketProtectionPct_ == 0; any unfilled remainder
+    // is cancelled by addOrder's post-match handler (Market orders don't rest).
+    const bool useMktProt =
+        (incoming->type == OrderType::Market && marketProtectionPct_ > 0.0);
+    Price mktProtBound = 0;
+    if (useMktProt) {
+        const auto& opp = (incoming->side == Side::Buy) ? asks_ : bids_;
+        if (!opp.empty()) {
+            const Price touch = opp.bestPrice();
+            const Price band =
+                static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
+            mktProtBound = (incoming->side == Side::Buy) ? touch + band : touch - band;
+        }
+    }
+
     while (incoming->remainingQty > 0) {
         bool isBuy = (incoming->side == Side::Buy);
         auto& opposite = isBuy ? asks_ : bids_;
@@ -550,6 +659,11 @@ void OrderBook::match(Order* incoming) {
         if (opposite.empty()) [[unlikely]] break;
 
         Price bestPrice = opposite.bestPrice();
+
+        if (useMktProt) {
+            if (isBuy  && bestPrice > mktProtBound) break;
+            if (!isBuy && bestPrice < mktProtBound) break;
+        }
 
         if (isBuy) {
             if (incoming->type != OrderType::Market && incoming->price < bestPrice) [[likely]]
@@ -626,6 +740,10 @@ void OrderBook::match(Order* incoming) {
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
+        obSink().log(logTradeFill(
+            isBuy ? incoming->id : bookOrder->id,
+            isBuy ? bookOrder->id : incoming->id,
+            symbolId_, bestPrice, fillQty));
 
         OrderId buyId = isBuy ? incoming->id : bookOrder->id;
         OrderId sellId = isBuy ? bookOrder->id : incoming->id;
@@ -633,8 +751,8 @@ void OrderBook::match(Order* incoming) {
         ParticipantId sellerId = isBuy ? bookOrder->participantId : incoming->participantId;
 
 #ifndef OB_LEAN_MODE
-        otrStats_[buyerId].netPosition += static_cast<int64_t>(fillQty);
-        otrStats_[sellerId].netPosition -= static_cast<int64_t>(fillQty);
+        participantRisk_[OTRKey(buyerId, symbolId_)].currentExposure += static_cast<int64_t>(fillQty);
+        participantRisk_[OTRKey(sellerId, symbolId_)].currentExposure -= static_cast<int64_t>(fillQty);
 #endif
 
         Trade t{};
@@ -648,8 +766,9 @@ void OrderBook::match(Order* incoming) {
         t.timestamp = nowNs();
         t.sequenceNumber = nextSequenceNumber_++;
         t.symbolId = symbolId_;
+        t.aggressorSide = incoming->side;
         tradeHistory_.push(t);
-        if (!replayMode_) listener_->onTrade(t);
+        if (!replayMode_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
@@ -728,9 +847,51 @@ void OrderBook::matchProRata(Order* incoming) {
             allocated += share;
         }
 
-        // Distribute rounding remainder by time priority
+        // ── LMM/DMM floor guarantee (pro-rata only) ──────────────────────────
+        // DMM/LMM orders are guaranteed at least DMM_FLOOR_PCT of their available
+        // qty from this price level. Excess beyond natural pro-rata share is taken
+        // from Regular participants' allocations.
+        static constexpr double DMM_FLOOR_PCT = 0.40;
+        for (size_t i = 0; i < allocCount; ++i) {
+            ParticipantRole role = getParticipantRole(allocs[i].order->participantId);
+            if (role == ParticipantRole::Regular) continue;
+            Quantity avail = (allocs[i].order->type == OrderType::Iceberg)
+                ? allocs[i].order->visibleQty : allocs[i].order->remainingQty;
+            Quantity floor = static_cast<Quantity>(avail * DMM_FLOOR_PCT + 0.5);
+            floor = std::min(floor, toFill);
+            if (allocs[i].qty < floor) {
+                Quantity bump = floor - allocs[i].qty;
+                Quantity remaining_bump = bump;
+                for (size_t j = 0; j < allocCount && remaining_bump > 0; ++j) {
+                    if (j == i) continue;
+                    ParticipantRole rj = getParticipantRole(allocs[j].order->participantId);
+                    if (rj != ParticipantRole::Regular) continue;
+                    Quantity take = std::min(remaining_bump, allocs[j].qty);
+                    allocs[j].qty -= take;
+                    remaining_bump -= take;
+                }
+                allocs[i].qty += (bump - remaining_bump);
+                // Do NOT increment allocated — this is a redistribution from Regular,
+                // not new volume. Incrementing would corrupt the remainder calculation.
+            }
+        }
+
+        // Distribute rounding remainder — DMM/LMM get priority, then FIFO for Regular
         Quantity remainder = toFill - allocated;
+        // First pass: LMM/DMM
         for (size_t i = 0; i < allocCount && remainder > 0; ++i) {
+            ParticipantRole role = getParticipantRole(allocs[i].order->participantId);
+            if (role == ParticipantRole::Regular) continue;
+            Quantity avail = (allocs[i].order->type == OrderType::Iceberg)
+                ? allocs[i].order->visibleQty : allocs[i].order->remainingQty;
+            Quantity extra = std::min(remainder, avail - allocs[i].qty);
+            allocs[i].qty += extra;
+            remainder -= extra;
+        }
+        // Second pass: Regular (FIFO)
+        for (size_t i = 0; i < allocCount && remainder > 0; ++i) {
+            ParticipantRole role = getParticipantRole(allocs[i].order->participantId);
+            if (role != ParticipantRole::Regular) continue;
             Quantity avail = (allocs[i].order->type == OrderType::Iceberg)
                 ? allocs[i].order->visibleQty : allocs[i].order->remainingQty;
             Quantity extra = std::min(remainder, avail - allocs[i].qty);
@@ -761,8 +922,8 @@ void OrderBook::matchProRata(Order* incoming) {
 
             updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
 #ifndef OB_LEAN_MODE
-            otrStats_[buyerId].netPosition += static_cast<int64_t>(fillQty);
-            otrStats_[sellerId].netPosition -= static_cast<int64_t>(fillQty);
+            participantRisk_[OTRKey(buyerId, symbolId_)].currentExposure += static_cast<int64_t>(fillQty);
+            participantRisk_[OTRKey(sellerId, symbolId_)].currentExposure -= static_cast<int64_t>(fillQty);
 #endif
 
             Trade t{};
@@ -776,8 +937,9 @@ void OrderBook::matchProRata(Order* incoming) {
             t.timestamp = nowNs();
             t.sequenceNumber = nextSequenceNumber_++;
             t.symbolId = symbolId_;
+            t.aggressorSide = incoming->side;
             tradeHistory_.push(t);
-            if (!replayMode_) listener_->onTrade(t);
+            if (!replayMode_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
             if (bookOrder->remainingQty == 0) {
                 bookOrder->status = OrderStatus::Filled;
@@ -827,6 +989,7 @@ const char* tradingStateName(TradingState s) {
     case TradingState::AuctionClose:  return "AuctionClose";
     case TradingState::PreOpen:       return "PreOpen";
     case TradingState::PostClose:     return "PostClose";
+    case TradingState::VolatilityAuction: return "VolatilityAuction";
     }
     return "Unknown";
 }
@@ -834,11 +997,18 @@ const char* tradingStateName(TradingState s) {
 
 void OrderBook::setTradingState(TradingState s) {
     if (tradingState_ == s) return;  // no-op transitions don't emit events
+    // Observability/audit contract: emit `trading_state_change` (symbol/from/to)
+    // alongside the newer structured `trading.state_change` event so existing
+    // monitoring and StructuredLogTest continue to observe the transition.
     obSink().log(obEvent("trading_state_change")
                      .kv("symbol", (long long)symbolId_)
                      .kv("from", tradingStateName(tradingState_))
                      .kv("to",   tradingStateName(s)));
+    obSink().log(logTradingStateChange(symbolId_, tradingStateName(tradingState_), tradingStateName(s)));
     tradingState_ = s;
+    if (s == TradingState::AuctionClose) {
+        releaseOnCloseOrders();
+    }
 }
 
 void OrderBook::cancelOrderImpl(OrderId orderId) {
@@ -848,7 +1018,7 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
     Order* order = *orderPtr;
     if (!order) return;
 #ifndef OB_LEAN_MODE
-    otrStats_[order->participantId].ordersSubmitted++;
+    participantRisk_[OTRKey(order->participantId, symbolId_)].ordersSubmitted++;
 #endif
 
     // Remove from special tracking lists (FixedVector::erase_value — O(n) swap-erase)
@@ -858,6 +1028,9 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
         trailingStopOrders_.erase_value(order);
     } else if (order->type == OrderType::Pegged) {
         peggedOrders_.erase_value(order);
+    } else if (order->type == OrderType::MOC || order->type == OrderType::LOC) {
+        onCloseOrders_.erase_value(order);
+        locActiveIds_.erase_value(order->id);
     }
 
     removeFromBook(order);
@@ -867,6 +1040,7 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
 
     Quantity filledQty = order->initialQty - order->remainingQty;
     notifyOrderUpdate(orderId, OrderStatus::Cancelled, filledQty, 0);
+    obSink().log(logOrderCancelled(orderId, symbolId_, order->participantId));
 
     orderLookup_.erase(orderId);
     orderPool_.deallocate(order);
@@ -1049,18 +1223,34 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
         Order* order = stopOrders_[i];
         bool triggered = false;
 
-        if (order->side == Side::Buy) {
-            if (lastTradePrice >= order->stopPrice) triggered = true;
+        if (order->type == OrderType::MIT) {
+            // Market-if-Touched: favorable-direction mirror of a stop. A buy
+            // triggers when price falls to/through the level; a sell when it
+            // rises to/through it.
+            if (order->side == Side::Buy) {
+                if (lastTradePrice <= order->stopPrice) triggered = true;
+            } else {
+                if (lastTradePrice >= order->stopPrice) triggered = true;
+            }
         } else {
-            if (lastTradePrice <= order->stopPrice) triggered = true;
+            // Stop / StopLimit: momentum trigger.
+            if (order->side == Side::Buy) {
+                if (lastTradePrice >= order->stopPrice) triggered = true;
+            } else {
+                if (lastTradePrice <= order->stopPrice) triggered = true;
+            }
         }
 
         if (triggered) {
             order->isStopTriggered = true;
 
+            bool becameMarket = false;
             if (order->type == OrderType::StopLimit) {
                 order->type = OrderType::Limit;
                 order->price = order->stopLimitPrice;
+            } else if (order->type == OrderType::MIT) {
+                order->type = OrderType::Market;   // MIT fires a market order
+                becameMarket = true;
             } else {
                 order->type = OrderType::Limit;
             }
@@ -1069,7 +1259,9 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
             match(order);
 
             if (order->remainingQty > 0) {
-                if (!addToBook(order)) {
+                // A triggered MIT is a market order — its unfilled remainder
+                // must not rest; cancel it (also the addToBook-failure path).
+                if (becameMarket || !addToBook(order)) {
                     Quantity filled = order->initialQty - order->remainingQty;
                     notifyOrderUpdate(order->id, OrderStatus::Cancelled, filled, 0);
                     orderLookup_.erase(order->id);
@@ -1184,8 +1376,8 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
     cumulativePrice_ += price;
     priceUpdates_++;
 
-    if (p1 > 0) otrStats_[p1].tradesExecuted++;
-    if (p2 > 0) otrStats_[p2].tradesExecuted++;
+    if (p1 > 0) participantRisk_[OTRKey(p1, symbolId_)].tradesExecuted++;
+    if (p2 > 0) participantRisk_[OTRKey(p2, symbolId_)].tradesExecuted++;
 }
 
 // ─── Uncross (Auction) ──────────────────────────────────────────────────────
@@ -1194,84 +1386,31 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
 void OrderBook::uncross() {
     std::unique_lock<std::shared_mutex> lock(bookLock_);
 
-    // Sum any market orders parked during the auction; they participate
-    // in volume discovery without contributing candidate prices (they
-    // have no limit price to anchor on).
-    Quantity marketBuyTotal = 0, marketSellTotal = 0;
-    for (Order* m : auctionMarketOrders_) {
-        if (m->side == Side::Buy) marketBuyTotal  += m->remainingQty;
-        else                       marketSellTotal += m->remainingQty;
-    }
-
-    const bool hasLimits  = !bids_.empty() || !asks_.empty();
-    const bool hasMarkets = marketBuyTotal > 0 || marketSellTotal > 0;
-    if (!hasLimits && !hasMarkets) return;
-
-    // No limit orders → no candidate prices. Real venues fall back to the
-    // prior session's reference price; we don't track that, so cancel the
-    // markets rather than execute at an arbitrary price.
-    if (!hasLimits) {
+    // Discover the clearing price via the shared, non-destructive core —
+    // the same logic computeAuctionState() publishes pre-cross, so the
+    // indicative feed and the executed price can never disagree.
+    AuctionResult res = discoverUncrossPrice();
+    if (!res.hasCross) {
+        // Nothing crosses: empty / one-sided / non-overlapping book, or
+        // parked market orders with no limit prices to anchor on. Parked
+        // markets cannot fill — cancel them (no-op if there are none).
         cancelAuctionMarketOrders();
+        cancelLocOrders();
         return;
     }
 
-    // Step 1: Discover the uncross price that maximizes matched volume.
-    // Market orders are willing to trade at any price, so they
-    // contribute uniformly to cumBuy/cumSell at every candidate.
-    Price bestUncrossPrice = 0;
-    Quantity maxVolume = 0;
+    const Price bestUncrossPrice = res.indicativePrice;
+    Quantity remainingVolume = res.pairedVolume;
 
-    FixedVector<Price, 4096> prices;
-    bids_.forEachLevel([&](Price p, OrderList&) { prices.push_back(p); });
-    asks_.forEachLevel([&](Price p, OrderList&) { prices.push_back(p); });
-    std::sort(prices.begin(), prices.end());
-    auto* newEnd = std::unique(prices.begin(), prices.end());
-    size_t uniqueCount = static_cast<size_t>(newEnd - prices.begin());
-
-    for (size_t pi = 0; pi < uniqueCount; ++pi) {
-        Price p = prices[pi];
-        Quantity cumBuy  = marketBuyTotal;
-        Quantity cumSell = marketSellTotal;
-
-        bids_.forEachLevel([&](Price bp, OrderList& list) {
-            if (bp >= p) {
-                for (Order* o = list.front(); o; o = o->next) cumBuy += o->remainingQty;
-            }
-        });
-        asks_.forEachLevel([&](Price ap, OrderList& list) {
-            if (ap <= p) {
-                for (Order* o = list.front(); o; o = o->next) cumSell += o->remainingQty;
-            }
-        });
-
-        Quantity volume = std::min(cumBuy, cumSell);
-        if (volume > maxVolume) {
-            maxVolume = volume;
-            bestUncrossPrice = p;
-        }
-    }
-
-    if (maxVolume == 0) {
-        // No volume achievable at any candidate price (e.g., a single
-        // limit order with no counterparty, market orders only on one
-        // side). Cancel the parked markets — they cannot fill.
-        cancelAuctionMarketOrders();
-        return;
-    }
-
-    // Step 1.5: Insert market orders into the regular book at the
-    // discovered uncross price. The execution loop below treats them
-    // identically to limit orders queued at that price (they fill at
-    // bestUncrossPrice, which is what their "any price" mandate means
-    // for a discrete auction). auctionMarketOrders_ is kept around so
-    // we can identify and cancel any unfilled remainder afterwards.
+    // Insert parked market orders into the book at the discovered price so
+    // the execution loop treats them like limit orders queued there.
+    // auctionMarketOrders_ is retained to cancel any unfilled remainder.
     for (Order* m : auctionMarketOrders_) {
         m->price = bestUncrossPrice;
         addToBook(m);
     }
 
-    // Step 2: Execute trades at the uncross price
-    Quantity remainingVolume = maxVolume;
+    // Execute trades at the uncross price
 
     while (remainingVolume > 0) {
         if (bids_.empty()) break;
@@ -1309,8 +1448,8 @@ void OrderBook::uncross() {
         lastTradePrice_ = bestUncrossPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestUncrossPrice, fillQty, buyer->participantId, seller->participantId);
-        otrStats_[buyer->participantId].netPosition += static_cast<int64_t>(fillQty);
-        otrStats_[seller->participantId].netPosition -= static_cast<int64_t>(fillQty);
+        participantRisk_[OTRKey(buyer->participantId, symbolId_)].currentExposure += static_cast<int64_t>(fillQty);
+        participantRisk_[OTRKey(seller->participantId, symbolId_)].currentExposure -= static_cast<int64_t>(fillQty);
 
         Trade t{};
         t.tradeId = nextTradeId_++;
@@ -1324,7 +1463,7 @@ void OrderBook::uncross() {
         t.sequenceNumber = nextSequenceNumber_++;
         t.symbolId = symbolId_;
         tradeHistory_.push(t);
-        if (!replayMode_) listener_->onTrade(t);
+        if (!replayMode_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
         if (buyer->remainingQty == 0) {
             buyer->status = OrderStatus::Filled;
@@ -1363,6 +1502,9 @@ void OrderBook::uncross() {
         orderPool_.deallocate(m);
     }
     auctionMarketOrders_.clear();
+
+    // Cancel any LOC orders that did not fill at the uncross price.
+    cancelLocOrders();
 }
 
 void OrderBook::cancelAuctionMarketOrders() {
@@ -1374,6 +1516,167 @@ void OrderBook::cancelAuctionMarketOrders() {
         orderPool_.deallocate(m);
     }
     auctionMarketOrders_.clear();
+}
+
+// ─── On-Close Order Release ──────────────────────────────────────────────────
+
+void OrderBook::releaseOnCloseOrders() {
+    for (Order* o : onCloseOrders_) {
+        if (o->type == OrderType::MOC) {
+            auctionMarketOrders_.push_back(o);
+        } else {
+            if (addToBook(o)) {
+                locActiveIds_.push_back(o->id);
+            } else {
+                Quantity filled = o->initialQty - o->remainingQty;
+                notifyOrderUpdate(o->id, OrderStatus::Cancelled, filled, 0);
+                orderLookup_.erase(o->id);
+                orderPool_.deallocate(o);
+            }
+        }
+    }
+    onCloseOrders_.clear();
+}
+
+void OrderBook::cancelLocOrders() {
+    for (OrderId id : locActiveIds_) {
+        cancelOrderImpl(id);
+    }
+    locActiveIds_.clear();
+}
+
+// ─── Auction price discovery (shared core, non-destructive) ──────────────────
+// Single source of truth for the auction clearing price. uncross() drives
+// execution from it; computeAuctionState() publishes it as the indicative.
+// Both routing through here is what guarantees the pre-cross indicative the
+// market sees equals the price the cross actually executes at.
+AuctionResult OrderBook::discoverUncrossPrice() const {
+    // Parked market orders participate at every candidate price — they have
+    // no limit to anchor on, so they add uniformly to both cumulants.
+    Quantity marketBuyTotal = 0, marketSellTotal = 0;
+    for (Order* m : auctionMarketOrders_) {
+        if (m->side == Side::Buy) marketBuyTotal += m->remainingQty;
+        else                      marketSellTotal += m->remainingQty;
+    }
+
+    // Book-wide totals — the imbalance to publish when nothing crosses (a
+    // one-sided book still carries a meaningful NOII imbalance figure).
+    Quantity totalBuy = marketBuyTotal, totalSell = marketSellTotal;
+    bids_.forEachLevel([&](Price, const OrderList& list) {
+        for (Order* o = list.front(); o; o = o->next) totalBuy += o->remainingQty;
+    });
+    asks_.forEachLevel([&](Price, const OrderList& list) {
+        for (Order* o = list.front(); o; o = o->next) totalSell += o->remainingQty;
+    });
+
+    AuctionResult res{};
+    auto fillNoCross = [&]() {
+        res.imbalanceQty  = (totalBuy >= totalSell) ? totalBuy - totalSell
+                                                    : totalSell - totalBuy;
+        res.imbalanceSide = (totalBuy >= totalSell) ? Side::Buy : Side::Sell;
+    };
+
+    // No limit levels on either side → no candidate prices to discover.
+    // (Market orders alone cannot anchor a price.)
+    if (bids_.empty() && asks_.empty()) {
+        fillNoCross();
+        return res;
+    }
+
+    // Candidate prices: every populated limit level on either side.
+    FixedVector<Price, 4096> prices;
+    bids_.forEachLevel([&](Price p, const OrderList&) { prices.push_back(p); });
+    asks_.forEachLevel([&](Price p, const OrderList&) { prices.push_back(p); });
+    std::sort(prices.begin(), prices.end());
+    auto* newEnd = std::unique(prices.begin(), prices.end());
+    size_t uniqueCount = static_cast<size_t>(newEnd - prices.begin());
+
+    bool     haveBest = false;
+    Price    bestPrice = 0;
+    Quantity bestVol = 0, bestImb = 0;
+    bool     bestBuySurplus = true;
+
+    for (size_t pi = 0; pi < uniqueCount; ++pi) {
+        Price p = prices[pi];
+        Quantity cumBuy  = marketBuyTotal;
+        Quantity cumSell = marketSellTotal;
+
+        bids_.forEachLevel([&](Price bp, const OrderList& list) {
+            if (bp >= p) for (Order* o = list.front(); o; o = o->next) cumBuy += o->remainingQty;
+        });
+        asks_.forEachLevel([&](Price ap, const OrderList& list) {
+            if (ap <= p) for (Order* o = list.front(); o; o = o->next) cumSell += o->remainingQty;
+        });
+
+        Quantity vol = std::min(cumBuy, cumSell);
+        Quantity imb = (cumBuy >= cumSell) ? cumBuy - cumSell : cumSell - cumBuy;
+        bool buySurplus = (cumBuy >= cumSell);
+
+        // Deterministic venue tie-break cascade, applied as a strict
+        // ordering over candidate prices:
+        //   1. maximize executable volume
+        //   2. minimize imbalance (unmatched quantity)
+        //   3. minimize distance to the reference price (when one exists)
+        //   4. market pressure: buy surplus clears higher, sell surplus lower
+        bool better;
+        if (!haveBest) {
+            better = true;
+        } else if (vol != bestVol) {
+            better = vol > bestVol;
+        } else if (imb != bestImb) {
+            better = imb < bestImb;
+        } else if (referencePrice_ > 0) {
+            Price dCur  = p - referencePrice_;
+            Price dBest = bestPrice - referencePrice_;
+            if (dCur  < 0) dCur  = -dCur;
+            if (dBest < 0) dBest = -dBest;
+            better = (dCur != dBest) ? (dCur < dBest)
+                                     : (bestBuySurplus ? (p > bestPrice) : (p < bestPrice));
+        } else {
+            better = bestBuySurplus ? (p > bestPrice) : (p < bestPrice);
+        }
+
+        if (better) {
+            haveBest = true;
+            bestPrice = p; bestVol = vol; bestImb = imb; bestBuySurplus = buySurplus;
+        }
+    }
+
+    if (bestVol == 0) {
+        // A two-sided book exists but the spread never closes (best bid <
+        // best ask): no candidate price produces any crossing volume.
+        fillNoCross();
+        return res;
+    }
+
+    res.hasCross        = true;
+    res.indicativePrice = bestPrice;
+    res.pairedVolume    = bestVol;
+    res.imbalanceQty    = bestImb;
+    res.imbalanceSide   = bestBuySurplus ? Side::Buy : Side::Sell;
+    return res;
+}
+
+AuctionResult OrderBook::computeAuctionState() const {
+    std::shared_lock<std::shared_mutex> lock(bookLock_);
+    return discoverUncrossPrice();
+}
+
+bool OrderBook::resumeVolatilityAuction() {
+    // Pre-check without the lock: tradingState_ is a plain field read in
+    // the engine's single-writer-per-book model (same relaxed treatment
+    // as isHalted()). uncross() acquires the unique lock itself, so we
+    // must not be holding one across the call.
+    if (tradingState_ != TradingState::VolatilityAuction) return false;
+
+    uncross();   // reopening cross at the discovered clearing price
+
+    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    // Re-anchor the volatility reference to the reopening print so the
+    // post-auction circuit-breaker bands measure from the fresh price.
+    if (lastTradePrice_ > 0) referencePrice_ = lastTradePrice_;
+    tradingState_ = TradingState::Continuous;
+    return true;
 }
 
 // ─── Market Data Snapshot ────────────────────────────────────────────────────

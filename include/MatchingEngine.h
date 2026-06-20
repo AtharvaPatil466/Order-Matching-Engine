@@ -2,6 +2,10 @@
 
 #include "OrderBook.h"
 #include "Journal.h"
+#include "ContingencyManager.h"
+#include "FeeEngine.h"
+#include "CatReporter.h"
+#include "HierarchicalRiskManager.h"
 #include "MpscQueue.h"
 #include "RingBuffer.h"
 #include "FIXParser.h"
@@ -12,6 +16,7 @@
 #include "IncidentLogger.h"
 #include "CapacityMonitor.h"
 #include "Utils.h"
+#include "BatchRiskValidator.h"
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -117,7 +122,19 @@ public:
     OrderBook* getOrderBook(SymbolId symbolId);
     const OrderBook* getOrderBook(SymbolId symbolId) const;
 
-    // Multi-symbol gateway (sync mode: direct call; async mode: enqueue)
+    // Multi-symbol gateway.
+    //
+    // Two flavors with the same effect on the engine. New code should
+    // prefer `submitOrder` — it returns a `SubmitResult` with the
+    // reject reason on failure. `processOrder` is the legacy
+    // fire-and-forget form; it discards the SubmitResult and is kept
+    // only for backwards compatibility with tests and tools that don't
+    // care about the rejection path.
+    //
+    // Sync mode (start()): the order is dispatched directly on the
+    // caller's thread.
+    // Async mode (startAsync()): the order is enqueued onto the
+    // worker's MpscQueue and processed off-thread.
     void processOrder(SymbolId symbolId, OrderId orderId, ParticipantId participantId,
                       Side side, Price price, Quantity qty, OrderType type,
                       Price stopPrice = 0, Quantity displayQty = 0,
@@ -146,6 +163,34 @@ public:
     // Risk management
     void setRiskLimits(SymbolId symbolId, ParticipantId participantId, const RiskLimits& limits);
 
+    // Set the market-maker role for a participant across all symbols.
+    // Role determines guaranteed fill allocation in pro-rata matching.
+    void setParticipantRole(ParticipantId p, ParticipantRole role);
+
+    // ─── Contingent orders (OCO) ─────────────────────────────────────
+    // Link two same-symbol orders One-Cancels-Other: the first to execute
+    // (any fill) cancels the other. The cancel runs synchronously right
+    // after the triggering order is processed — thread-per-symbol makes
+    // that race-free — and is journaled so replay reproduces it.
+    void registerOco(SymbolId symbolId, OrderId a, OrderId b);
+
+    // ─── Risk, fees & compliance (opt-in) ────────────────────────────
+    // Multi-tier pre-trade risk: map a trader into its strategy/account/firm
+    // hierarchy and set per-tier limits. Once any mapping/limit is set the
+    // pre-trade check runs in the order path and fills accrue to every tier.
+    void mapParticipant(ParticipantId trader, uint64_t strategyId,
+                        uint64_t accountId, uint64_t firmId);
+    void setRiskTierLimits(RiskTier tier, uint64_t entityId, const TierLimits& limits);
+    int64_t riskNetPosition(RiskTier tier, uint64_t entityId) const;
+    // Maker-taker fees: configure schedules; query accrued net fees.
+    void setDefaultFeeSchedule(const FeeSchedule& s);
+    void setParticipantFeeSchedule(ParticipantId p, const FeeSchedule& s);
+    int64_t accruedFee(ParticipantId p) const;
+    // CAT-style audit trail: enable capture; inspect / export records.
+    void enableAuditTrail(bool on = true);
+    size_t auditRecordCount() const;
+    std::string auditTrailJsonl() const;
+
     // Market data
     MarketDataSnapshot getSnapshot(SymbolId symbolId, size_t depth = 10);
 
@@ -171,11 +216,51 @@ public:
     // partial uncrosses.
     size_t uncrossBatch(const std::vector<SymbolId>& symbols);
 
+    // Reopen every book currently in a volatility auction: run its
+    // reopening cross and return it to continuous trading. Returns the
+    // count of books reopened. The timing policy (how long the volatility
+    // pause lasts) lives with the caller — a scheduler/timer decides when
+    // to invoke this; the engine just performs the reopening crosses.
+    size_t resumeVolatilityAuctions();
+
     // Time management
     void expireOrders(uint64_t currentTime);
 
     // Journal/Persistence
     void enableJournal(const std::string& path);
+
+    // Access the underlying Journal (null if enableJournal not called).
+    // Used by the replication coordinator wiring to attach an onCommit
+    // hook that ships each committed batch to backups.
+    Journal* getJournal() { return journal_.get(); }
+
+    // Toggle replay mode across every registered book. Backups run
+    // permanently in replay mode so that applying primary-shipped
+    // journal entries does not re-emit market data or order updates
+    // to local clients (the primary is the canonical source).
+    void setReplayModeAllBooks(bool replay);
+
+    // Apply a single deserialized JournalEntry to the engine. Used by
+    // the replication backup path: the coordinator receives an entry
+    // over the wire and dispatches it through this method so the
+    // backup's books stay byte-identical to the primary's. Returns
+    // false if the entry references a symbol unknown to this engine
+    // (caller can decide whether to log/halt).
+    bool applyReplicatedEntry(const struct JournalEntry& entry);
+
+    // Stream a snapshot of all currently-resting orders. For each
+    // order, builds a JournalEntry of type Snapshot and invokes the
+    // callback. Used by the replication primary path to bring a
+    // newly-connected backup up to date before resuming live
+    // replication — closes the "joined-after-orders-existed" gap
+    // surfaced by the rolling-restart chaos scenario.
+    //
+    // Concurrency: takes each book's bookLock_ in shared mode while
+    // iterating. New orders accepted during iteration may or may not
+    // appear in the stream; the Snapshot handler on the receiver
+    // side is idempotent (skips already-known orderIds), so the
+    // overlap is safe — duplicates collapse, no entries are lost.
+    void streamSnapshot(const std::function<void(const struct JournalEntry&)>& fn) const;
 
     // Replay journal to rebuild order book state (crash recovery)
     size_t replayJournal();
@@ -187,7 +272,11 @@ public:
     uint64_t getSubmittedCount() const;
     uint64_t getProcessedCount() const;
 
-    // Backpressure handling (Gap 7)
+    // Backpressure handling. The callback fires when the engine's
+    // ingress queue is full and a request is being dropped. Note:
+    // `std::function` may heap-allocate when the captured lambda
+    // exceeds the small-buffer threshold — call this once at startup
+    // (not per-connection) to keep the allocation off the hot path.
     using BackpressureCallback = std::function<void(const OrderRequest&)>;
     void setBackpressureCallback(BackpressureCallback cb) { backpressureCb_ = std::move(cb); }
     void setMaxPushRetries(uint32_t retries) { maxPushRetries_ = retries; }
@@ -215,6 +304,12 @@ public:
     double getBackpressureThreshold() const { return bpThresholdFraction_; }
     uint64_t getBackpressureRejectCount() const { return bpRejectCount_.load(std::memory_order_relaxed); }
 
+    // Pre-trade risk batching configuration (Phase 1, Week 2)
+    void setRiskBatchSize(size_t size) {
+        riskBatchSize_ = size > 16 ? 16 : (size == 0 ? 1 : size);
+    }
+    size_t getRiskBatchSize() const { return riskBatchSize_; }
+
     // ─── FIX protocol gateway ─────────────────────────────────────────
     // Process a raw FIX message string and route to appropriate handler
     void processFIXMessage(const std::string& rawFix);
@@ -238,6 +333,13 @@ public:
     void uncross() { uncross(0); }
     double getVWAP() const;
 
+enum class RiskValidationResult : uint8_t {
+    NotValidated,
+    Passed,
+    Failed
+};
+
+// Private helper methods inside class MatchingEngine:
 private:
     void ensureDefaultSymbol();
     void workerLoop(size_t threadIndex);
@@ -297,6 +399,7 @@ private:
     std::atomic<bool> checkpointPending_{false};
     size_t checkpointThresholdEntries_{250000};
     size_t checkpointThresholdBytes_{64 * 1024 * 1024};
+    size_t riskBatchSize_{8};
 
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     GraduatedKillSwitch killSwitch_;
@@ -306,6 +409,52 @@ private:
     // Internal helper: push to specific thread's queue with backpressure
     bool enqueueSafe(size_t threadIndex, const OrderRequest& req);
     size_t getThreadIndex(SymbolId symbolId) const;
+
+    // ─── OCO contingent-order plumbing ───────────────────────────────
+    // Per-book observer buffering ids of orders that executed, so the
+    // engine can drive OCO cancellation after the triggering request
+    // completes (off the book lock). Buffers only while OCO is active, so
+    // the no-OCO hot path stays free.
+    // Per-book engine-side observer. Buffers (a) ids of orders that executed
+    // — drained to drive OCO sibling-cancellation — and (b) executed trades —
+    // drained to drive fees, hierarchical-risk position accrual, and the CAT
+    // audit trail. Each buffer is gated by its own atomic so the hot path
+    // stays free when its feature is unused. A book is driven by exactly one
+    // worker thread, so the buffers are single-threaded.
+    struct OcoBookListener : EventListener {
+        const std::atomic<bool>* ocoActive = nullptr;     // gates the executed buffer
+        const std::atomic<bool>* tradesActive = nullptr;  // gates the trades buffer
+        std::vector<OrderId> executed;
+        std::vector<Trade>   trades;
+        void onOrderUpdate(const OrderUpdate& u) override;
+        void onTrade(const Trade& t) override;
+    };
+    // Drain a book's observer after a request: OCO sibling cancels, then the
+    // trade-driven consumers (fees / risk accrual / audit).
+    void driveOco(SymbolId symbolId, OrderBook* book);
+    // Pre-trade hierarchical risk gate; true = admit. No-op (true) when risk
+    // is not configured. Runs on the worker thread, where book reads are safe.
+    bool preTradeRiskCheck(ParticipantId trader, Side side, Price price,
+                           Quantity qty, Price referencePrice);
+
+    ContingencyManager contingency_;
+    std::mutex contingencyMutex_;
+    std::atomic<bool> ocoActive_{false};
+    FlatHashMap<SymbolId, std::unique_ptr<OcoBookListener>> ocoListeners_{64};
+
+    // Risk / fees / compliance components (opt-in; gated to keep the hot path
+    // free until configured). Each has its own mutex — they are touched from
+    // worker threads (drain) and reader threads (admin getters).
+    FeeEngine feeEngine_;
+    CatReporter catReporter_;
+    HierarchicalRiskManager riskManager_;
+    mutable std::mutex feeMutex_;
+    mutable std::mutex catMutex_;
+    mutable std::mutex riskMutex_;
+    std::atomic<bool> feesActive_{false};
+    std::atomic<bool> riskActive_{false};
+    std::atomic<bool> catActive_{false};
+    std::atomic<bool> observersActive_{false};  // any trade-driven consumer enabled
 };
 
 } // namespace OrderMatcher

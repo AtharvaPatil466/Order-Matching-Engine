@@ -61,10 +61,15 @@ void testConcurrentProducers() {
     uint64_t totalOrders = NUM_THREADS * ORDERS_PER_THREAD;
     std::cout << "  Submitted: " << totalOrders << " orders, Trades: " << tradeCount.load() << std::endl;
 
-    // Verify bid/ask invariant: best bid < best ask (or one side is empty)
+    // Verify bid/ask invariant: best bid < best ask (or one side is empty).
+    // The invariant only holds in continuous trading: if the random flow
+    // tripped the circuit breaker, the book sits in a VolatilityAuction where
+    // orders accumulate without matching and a crossed book is expected until
+    // the uncross.
     Price bestBid = book->getBestBid();
     Price bestAsk = book->getBestAsk();
-    if (bestBid > 0 && bestAsk < std::numeric_limits<Price>::max()) {
+    if (book->getTradingState() == TradingState::Continuous &&
+        bestBid > 0 && bestAsk < std::numeric_limits<Price>::max()) {
         assert(bestBid < bestAsk);
     }
 
@@ -134,9 +139,13 @@ void testMixedWorkloadContention() {
     engine.waitForDrain();
     engine.stopAsync();
 
+    // See note in testConcurrentProducers: the bid<ask invariant only holds in
+    // continuous trading. A circuit-breaker trip parks the book in a
+    // VolatilityAuction where a crossed book is expected until the uncross.
     Price bestBid = book->getBestBid();
     Price bestAsk = book->getBestAsk();
-    if (bestBid > 0 && bestAsk < std::numeric_limits<Price>::max()) {
+    if (book->getTradingState() == TradingState::Continuous &&
+        bestBid > 0 && bestAsk < std::numeric_limits<Price>::max()) {
         assert(bestBid < bestAsk);
     }
 

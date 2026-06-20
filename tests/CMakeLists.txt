@@ -22,6 +22,14 @@ gtest_discover_tests(UnitTests
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project;unit")
 
+# enable_assertions(target) — applied per-test-binary to force
+# assertion-rich, debug-friendly builds of TEST bodies. Note: this
+# only affects the test executable's own .cpp files; the linked
+# OrderMatcher library uses whatever the top-level CMake build_type
+# selected (which itself enables -UNDEBUG when ENABLE_ASSERTIONS=ON,
+# the default). So in a Release build the test body runs at -O0/-g
+# while library calls stay at -O3 — inlining boundaries are at the
+# call site, which matters when reading sanitized stacks.
 function(enable_assertions target)
     target_compile_options(${target} PRIVATE -UNDEBUG -O0 -g)
     set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
@@ -316,9 +324,258 @@ add_test(NAME ReplicationProtocolTest COMMAND ReplicationProtocolTest)
 set_tests_properties(ReplicationProtocolTest PROPERTIES TIMEOUT 60
                      LABELS "project;ha;replication")
 
+# Session scheduler: deterministic daily-lifecycle sequencing via virtual clock
+add_executable(SessionSchedulerTest TestSessionScheduler.cpp)
+target_link_libraries(SessionSchedulerTest PRIVATE OrderMatcher)
+enable_assertions(SessionSchedulerTest)
+add_test(NAME SessionSchedulerTest COMMAND SessionSchedulerTest)
+set_tests_properties(SessionSchedulerTest PROPERTIES TIMEOUT 30
+                     LABELS "project;session;lifecycle")
+
+# Auction price discovery, NOII indicative/imbalance, volatility-auction lifecycle
+add_executable(AuctionSessionTest TestAuctionSession.cpp)
+target_link_libraries(AuctionSessionTest PRIVATE OrderMatcher)
+enable_assertions(AuctionSessionTest)
+add_test(NAME AuctionSessionTest COMMAND AuctionSessionTest)
+set_tests_properties(AuctionSessionTest PROPERTIES TIMEOUT 30
+                     LABELS "project;session;auction")
+
+# Advanced order types: MIT, market sweep protection, OCO via the engine
+add_executable(AdvancedOrdersTest TestAdvancedOrders.cpp)
+target_link_libraries(AdvancedOrdersTest PRIVATE OrderMatcher)
+enable_assertions(AdvancedOrdersTest)
+add_test(NAME AdvancedOrdersTest COMMAND AdvancedOrdersTest)
+set_tests_properties(AdvancedOrdersTest PROPERTIES TIMEOUT 30
+                     LABELS "project;orders;advanced")
+
+# Maker-taker fee/rebate engine
+add_executable(FeeEngineTest TestFeeEngine.cpp)
+target_link_libraries(FeeEngineTest PRIVATE OrderMatcher)
+enable_assertions(FeeEngineTest)
+add_test(NAME FeeEngineTest COMMAND FeeEngineTest)
+set_tests_properties(FeeEngineTest PROPERTIES TIMEOUT 30
+                     LABELS "project;compliance;fees")
+
+# CAT-format audit-trail reporter
+add_executable(CatReporterTest TestCatReporter.cpp)
+target_link_libraries(CatReporterTest PRIVATE OrderMatcher)
+enable_assertions(CatReporterTest)
+add_test(NAME CatReporterTest COMMAND CatReporterTest)
+set_tests_properties(CatReporterTest PROPERTIES TIMEOUT 30
+                     LABELS "project;compliance;audit")
+
+# Multi-tier hierarchical risk limits + fat-finger
+add_executable(HierarchicalRiskTest TestHierarchicalRisk.cpp)
+target_link_libraries(HierarchicalRiskTest PRIVATE OrderMatcher)
+enable_assertions(HierarchicalRiskTest)
+add_test(NAME HierarchicalRiskTest COMMAND HierarchicalRiskTest)
+set_tests_properties(HierarchicalRiskTest PROPERTIES TIMEOUT 30
+                     LABELS "project;compliance;risk")
+
+# Risk / fees / audit wired end-to-end through the engine
+add_executable(ComplianceTest TestCompliance.cpp)
+target_link_libraries(ComplianceTest PRIVATE OrderMatcher)
+enable_assertions(ComplianceTest)
+add_test(NAME ComplianceTest COMMAND ComplianceTest)
+set_tests_properties(ComplianceTest PROPERTIES TIMEOUT 30
+                     LABELS "project;compliance;integration")
+
+# Durable lease-epoch persistence
+add_executable(EpochStoreTest TestEpochStore.cpp)
+target_link_libraries(EpochStoreTest PRIVATE OrderMatcher)
+enable_assertions(EpochStoreTest)
+add_test(NAME EpochStoreTest COMMAND EpochStoreTest)
+set_tests_properties(EpochStoreTest PROPERTIES TIMEOUT 30
+                     LABELS "project;ha;durability")
+
+# FIX session-layer sequence / recovery / heartbeat state machine
+add_executable(FixSessionStateTest TestFixSessionState.cpp)
+target_link_libraries(FixSessionStateTest PRIVATE OrderMatcher)
+enable_assertions(FixSessionStateTest)
+add_test(NAME FixSessionStateTest COMMAND FixSessionStateTest)
+set_tests_properties(FixSessionStateTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;fix")
+
+# Durable lease epoch survives restart (split-brain hardening)
+add_executable(LeaseEpochTest TestLeaseEpoch.cpp)
+target_link_libraries(LeaseEpochTest PRIVATE OrderMatcher)
+enable_assertions(LeaseEpochTest)
+add_test(NAME LeaseEpochTest COMMAND LeaseEpochTest)
+set_tests_properties(LeaseEpochTest PROPERTIES TIMEOUT 30
+                     LABELS "project;ha;replication")
+
+# Coordinated-omission-free (HdrHistogram-style) latency histogram
+add_executable(LatencyHistogramTest TestLatencyHistogram.cpp)
+target_link_libraries(LatencyHistogramTest PRIVATE OrderMatcher)
+enable_assertions(LatencyHistogramTest)
+add_test(NAME LatencyHistogramTest COMMAND LatencyHistogramTest)
+set_tests_properties(LatencyHistogramTest PROPERTIES TIMEOUT 30
+                     LABELS "project;perf;latency")
+
+# Dependency-free OpenTelemetry-shaped tracing abstraction
+add_executable(TracingTest TestTracing.cpp)
+target_link_libraries(TracingTest PRIVATE OrderMatcher)
+enable_assertions(TracingTest)
+add_test(NAME TracingTest COMMAND TracingTest)
+set_tests_properties(TracingTest PROPERTIES TIMEOUT 30
+                     LABELS "project;observability;tracing")
+
+# Wire-protocol versioning contract (FIX/SBE/ITCH/OUCH)
+add_executable(ProtocolVersioningTest ProtocolVersioningTest.cpp)
+target_link_libraries(ProtocolVersioningTest PRIVATE OrderMatcher)
+enable_assertions(ProtocolVersioningTest)
+add_test(NAME ProtocolVersioningTest COMMAND ProtocolVersioningTest)
+set_tests_properties(ProtocolVersioningTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;versioning")
+
 # Shadow mode divergence detection test
 add_executable(ShadowModeTest ShadowModeTest.cpp)
 target_link_libraries(ShadowModeTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ShadowModeTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project;shadow;integration")
+
+# ContingencyManager OCO linkage tests (assert-based, engine-agnostic)
+add_executable(ContingencyManagerTest TestContingencyManager.cpp)
+target_link_libraries(ContingencyManagerTest PRIVATE OrderMatcher)
+enable_assertions(ContingencyManagerTest)
+add_test(NAME ContingencyManagerTest COMMAND ContingencyManagerTest)
+set_tests_properties(ContingencyManagerTest PROPERTIES TIMEOUT 30
+                     LABELS "project;orders;oco")
+
+# Market impact models: Almgren-Chriss and square-root law (header-only)
+add_executable(ImpactModelTest TestImpactModel.cpp)
+target_link_libraries(ImpactModelTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(ImpactModelTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;impact")
+
+# Agent-based market simulation: NoiseTrader, MarketMaker, InformedTrader, SimulationDriver
+add_executable(SimulationTest TestSimulation.cpp)
+target_link_libraries(SimulationTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(SimulationTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;simulation")
+
+# Research replay harness: journal-driven replay with trade/book-update callbacks
+add_executable(TestResearchHarness TestResearchHarness.cpp)
+target_link_libraries(TestResearchHarness PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(TestResearchHarness
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;research;unit")
+
+# Microstructure metrics: effective spread, realized spread, Kyle's lambda, Amihud, VPIN
+add_executable(TestMicrostructureMetrics TestMicrostructureMetrics.cpp)
+target_link_libraries(TestMicrostructureMetrics PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(TestMicrostructureMetrics
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;research;unit")
+
+# Almgren-Chriss optimal execution trajectory planner (header-only)
+add_executable(OptimalExecutionTest TestOptimalExecution.cpp)
+target_link_libraries(OptimalExecutionTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(OptimalExecutionTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;execution")
+
+# Execution quality analytics: IS decomposition, VWAP/TWAP benchmarks, spread capture
+add_executable(ExecutionAnalyticsTest TestExecutionAnalytics.cpp)
+target_link_libraries(ExecutionAnalyticsTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(ExecutionAnalyticsTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;execution")
+
+add_executable(OrderFlowAnalyticsTest TestOrderFlowAnalytics.cpp)
+target_link_libraries(OrderFlowAnalyticsTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(OrderFlowAnalyticsTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;microstructure")
+
+add_executable(ResearchSerializerTest TestResearchSerializer.cpp)
+target_link_libraries(ResearchSerializerTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(ResearchSerializerTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;serializer")
+
+# VPIN (Volume-Synchronized Probability of Informed Trading) calculator
+add_executable(VPINTest TestVPINCalculator.cpp)
+target_link_libraries(VPINTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(VPINTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;microstructure")
+
+add_executable(SpreadDecompositionTest TestSpreadDecomposition.cpp)
+target_link_libraries(SpreadDecompositionTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(SpreadDecompositionTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;microstructure")
+
+add_executable(CalibrationPipelineTest TestCalibrationPipeline.cpp)
+target_link_libraries(CalibrationPipelineTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(CalibrationPipelineTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;backtest")
+
+add_executable(BacktestEngineTest TestBacktestEngine.cpp)
+target_link_libraries(BacktestEngineTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(BacktestEngineTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;backtest")
+
+add_executable(SignalGeneratorTest TestSignalGenerator.cpp)
+target_link_libraries(SignalGeneratorTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(SignalGeneratorTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;signals")
+
+add_executable(ResearchDashboardTest TestResearchDashboard.cpp)
+target_link_libraries(ResearchDashboardTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(ResearchDashboardTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;dashboard")
+
+# Signal-driven paper trading loop (header-only PaperTrader)
+add_executable(PaperTraderTest TestPaperTrader.cpp)
+target_link_libraries(PaperTraderTest PRIVATE OrderMatcher gtest_main)
+target_include_directories(PaperTraderTest PRIVATE include)
+gtest_discover_tests(PaperTraderTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;quant;paper-trading")
+
+# MOC/LOC on-close order types
+add_executable(MocLocTest TestMocLocOrders.cpp)
+target_link_libraries(MocLocTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(MocLocTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;auction;moc;loc")
+
+# LMM/DMM market-maker role allocation
+add_executable(LmmDmmTest TestLmmDmmAllocation.cpp)
+target_link_libraries(LmmDmmTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(LmmDmmTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;allocation;dmm")
+
+# Admin bearer token + /readyz endpoint tests
+add_executable(AdminAuthTest AdminAuthTest.cpp)
+target_link_libraries(AdminAuthTest PRIVATE OrderMatcher)
+enable_assertions(AdminAuthTest)
+add_test(NAME AdminAuthTest COMMAND AdminAuthTest)
+set_tests_properties(AdminAuthTest PROPERTIES TIMEOUT 30
+                     LABELS "project;ops;security")
+
+# RateLimiter live reconfiguration test
+add_executable(RateLimiterReconfigureTest RateLimiterReconfigureTest.cpp)
+target_link_libraries(RateLimiterReconfigureTest PRIVATE OrderMatcher)
+enable_assertions(RateLimiterReconfigureTest)
+add_test(NAME RateLimiterReconfigureTest COMMAND RateLimiterReconfigureTest)
+set_tests_properties(RateLimiterReconfigureTest PROPERTIES TIMEOUT 15
+                     LABELS "project;ops;rate-limit")
+
+# Reconnect backoff smoke test
+add_executable(ReconnectBackoffTest ReconnectBackoffTest.cpp)
+target_link_libraries(ReconnectBackoffTest PRIVATE OrderMatcher)
+enable_assertions(ReconnectBackoffTest)
+add_test(NAME ReconnectBackoffTest COMMAND ReconnectBackoffTest)
+set_tests_properties(ReconnectBackoffTest PROPERTIES TIMEOUT 30
+                     LABELS "project;ha;replication")

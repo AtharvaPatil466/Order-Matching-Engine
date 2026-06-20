@@ -67,7 +67,6 @@ class RateLimiter {
 public:
     RateLimiter() = default;
 
-    // Configure the default rate applied to all participants
     void setDefaultRate(uint64_t ratePerSec, uint64_t burstSize) {
         std::lock_guard<std::mutex> lock(mutex_);
         defaultRate_ = ratePerSec;
@@ -79,6 +78,19 @@ public:
     void setParticipantRate(ParticipantId id, uint64_t ratePerSec, uint64_t burstSize) {
         std::lock_guard<std::mutex> lock(mutex_);
         buckets_.insert(id, TokenBucket(ratePerSec, burstSize));
+    }
+
+    // Live reconfiguration — called on SIGHUP config reload.
+    // Updates the default rate and resets ALL existing participant buckets
+    // to the new defaults so no connection is grandfathered at the old rate.
+    // Per-participant overrides are cleared; call setParticipantRate() after
+    // if you need to restore them.
+    void reconfigure(uint64_t ratePerSec, uint64_t burstSize) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        defaultRate_ = ratePerSec;
+        defaultBurst_ = burstSize;
+        enabled_ = (ratePerSec > 0);
+        buckets_.clear();
     }
 
     // Check if a message from this participant is allowed.

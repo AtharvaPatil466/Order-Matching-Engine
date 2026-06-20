@@ -4,19 +4,20 @@
 [![Latency](https://img.shields.io/badge/Matching_P50-125ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-6.6M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
-[![Tests](https://img.shields.io/badge/Tests-181_CTest_targets-brightgreen.svg)](#verification)
+[![Tests](https://img.shields.io/badge/Tests-395_CTest_targets-brightgreen.svg)](#verification)
+[![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
 [![TLA+](https://img.shields.io/badge/TLA%2B-454M_states_verified-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocols-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states, 0 violations on `MatchingEngine.tla` + separate proofs for replication / queues / snapshots), cross-host log replication, and a complete operational stack (config management, webhook alerting, Prometheus metrics, Docker deployment). **34K LOC, 51 test executables, 181 CTest targets, 7 TLA+ specifications.**
+A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states on `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 75 test executables, 395 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
 
 ## 🚀 Key Features
 
 ### Core Engine
-- **Professional Order Types**: Limit, Market, IOC, FOK, Stop, StopLimit, TrailingStop, Pegged, Iceberg, Hidden, PostOnly
+- **Professional Order Types**: Limit, Market, IOC, FOK, Stop, StopLimit, TrailingStop, Pegged, Iceberg, Hidden, PostOnly, MIT, MOC, LOC
 - **O(1) Price Lookup**: `FlatPriceMap` — flat array indexed by price tick, replacing `std::map` red-black trees
 - **Intrusive Data Structures**: Zero-heap matching via `ObjectPool` + intrusive doubly-linked order lists
-- **Dual Match Algorithms**: Price-Time FIFO and Pro-Rata allocation
+- **Dual Match Algorithms**: Price-Time FIFO and Pro-Rata allocation with LMM/DMM floor guarantee (40% of available qty) and rounding-remainder priority
 
 ### Concurrency & Networking
 - **Thread-Per-Symbol Partitioning**: N worker threads with independent lock-free `MpscQueue` ring buffers, routed by `hash(symbolId) % numThreads`
@@ -45,27 +46,42 @@ All four protocols dispatch into the same `MatchingEngine`. Drop a different ses
 - **Volatility Circuit Breakers**: Configurable % price band halts
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant
 - **Kill Switch**: Instant cancellation of all orders for a participant across all symbols
+- **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first
 - **Pre-Trade Risk Limits**: Max order size, notional, and position limits per participant
 - **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst) to bound queue depth and tail latency
 - **Queue-Depth Backpressure**: Rejects orders when queue exceeds configurable threshold, hard ceiling on queuing delay
-- **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080
+- **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (HTTP 503 until warmup completes, then 200)
+
+### Microstructure Research Infrastructure
+- **Simulation Engine**: Multi-agent market simulator with `NoiseTrader`, `MarketMaker`, and `InformedTrader` agents; fully event-driven against the live `OrderBook`
+- **Market Impact Models**: Almgren-Chriss optimal execution model + square-root market impact law for pre-trade analytics
+- **Order Flow Analytics**: VPIN (Volume-Synchronized Probability of Informed Trading), Roll spread decomposition, queue imbalance signal, logistic fill-probability model
+- **Spread Decomposition**: Huang-Stoll and Glosten-Harris decomposition — separates order processing, inventory holding, and adverse selection components
+- **Execution Analytics & Optimal Scheduling**: Almgren-Chriss execution schedule with arrival-price and VWAP slippage tracking
+- **Signal Generator & PaperTrader**: Multi-factor signal composition (momentum, spread, VPIN, imbalance); `PaperTrader` submits IOC orders on composite signal, tracks position and realized/unrealized P&L analytically
+- **Calibration & Backtesting**: `CalibrationPipeline` (Nelder-Mead minimization of spread decomposition residuals), `BacktestEngine` (replay historical tape against research models), `ResearchDashboard` and `ResearchSerializer` for result persistence
 
 ### Reliability & Observability
-- **CRC-32 Journaling**: Write-ahead log with crash recovery, atomic checkpoint, and deterministic replay via virtual clock
-- **Cross-Host Log Replication**: `ReplicationCoordinator` — TCP log-shipping from primary to backup, `HeartbeatMonitor` failure detection, and `LeaderLease` epoch-based fencing
+- **CRC-32 Journaling**: Write-ahead log with crash recovery, atomic checkpoint, and deterministic replay via virtual clock; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
+- **End-to-End Wired Primary-Backup Replication**: `ReplicationCoordinator` instantiated in `src/main.cpp` driven by `OB_NODE_ROLE` / `OB_NODE_ID` / `OB_PRIMARY_HOST` env vars; primary's `Journal::onCommit` hook ships each fsync-durable batch to backup, backup's `applyReplicatedEntry` writes to its own journal — empirically verified end-to-end via the chaos suite
+- **Lease Propagation + Fencing**: Primary broadcasts `LeaseGrant` (durationMs) every heartbeat tick; backup's local lease state is refreshed via same-epoch-from-same-holder path; `BackupPromote` requires both heartbeat miss AND local lease expiry — prevents split brain under packet loss, asymmetric partition, and clock skew
+- **TCP Auto-Reconnect**: `ReplicationTransport::receiveLoop` retries `connectTo()` against saved host/port after socket loss — backup re-establishes within milliseconds of primary recovery without external orchestration
+- **Snapshot Catchup on Join**: When a backup connects, primary streams all currently-resting orders via `streamSnapshot` → `JournalEntry::Snapshot` messages; idempotent on receiver — closes the rolling-restart gap
 - **Crash Recovery & Warm Standby**: `JournalFollower` — single-host automated recovery with `promote()` API and documented invariants
 - **Deterministic Sequencing**: Monotonic `sequenceNumber` on all `Trade`, `OrderUpdate`, and `MarketDataUpdate` events for gap detection
 - **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically
 - **Structured Logging**: Pluggable `StructuredSink` API with `NullSink` (zero-cost default), `JsonStderrSink` (dev), and `CapturingSink` (tests)
-- **Prometheus Metrics**: `MetricsRegistry` with atomic Counters, Gauges, Histograms; `/prometheus` text-exposition endpoint
+- **Prometheus Metrics**: `MetricsRegistry` with atomic Counters, Gauges, Histograms; `/prometheus` text-exposition endpoint exposes `journal_entries_committed_total`, `replication_entries_shipped_total`, `replication_bytes_sent_total`, `replication_snapshot_streams_total`, `replication_snapshot_entries_total`
 - **Webhook Alerting**: `AlertDispatcher` — background thread delivery to Slack, PagerDuty, or generic HTTP webhooks with configurable severity filtering
-- **Config Management**: `Config` key-value loader with env var override (`OB_` prefix), type-safe getters, and hot-reload support
+- **Config Management**: `Config` key-value loader with env var override (`OB_` prefix), type-safe getters, registered-listener callbacks on set/loadFile/loadMap. Hot-reload via SIGHUP wired — `--config PATH` flag, async-signal-safe `g_reload_config` atomic flag, config reloaded on signal receipt
 - **End-to-End Latency Tracking**: Ingress timestamps on every order; per-thread `LatencyTracker` histograms for real P50/P99/P99.9 including queue delay
 - **Hardware Timing**: `mach_absolute_time` (Apple Silicon) / `rdtsc` (x86) for sub-clock-quantum benchmarking
-- **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes
+- **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes; `.dockerignore` excludes host build artifacts; entrypoint shim conditionally LD_PRELOADs `libfaketime` for chaos clock-skew scenarios
 
 ### Formal Verification & Chaos Engineering
-- **TLA+ Specifications**: 6 specs including `Replication.tla` (log shipping & leader election), MatchingEngine safety invariants (454M states, 181M distinct, 0 violations), MPSC queue linearizability, consumer protocol shutdown, and snapshot mechanism
+- **TLA+ Specifications**: 7 specs total. `MatchingEngine.tla` — 454M states, 181M distinct, 0 violations. `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) verified at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Refinement`.
+- **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Empirically verifies `NoCommittedLoss` (every primary-committed entry survives `SIGKILL`), no-split-brain under partition / packet loss / asymmetric partition / clock skew, snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-fenced promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md).
+- **TSan**: `ReplicationProtocolTest` is TSan-clean (was previously excluded due to teardown races on non-atomic fds + non-atomic sendSeq_; closed by atomic fds + `shutdown(2)` wakeup + atomic sequence)
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; zero-cost in production (`OB_ENABLE_FAULT_INJECTION` off)
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow
@@ -225,14 +241,31 @@ The GitHub Actions workflow runs release tests and sanitizer tests on every push
 
 ### Admin Server
 ```bash
-curl localhost:8080/metrics              # throughput & queue depth
-curl "localhost:8080/book?symbolId=0"    # L2 order book snapshot
+# Liveness / build / replication state
+curl localhost:8080/health                # k8s liveness probe
+curl localhost:8080/version               # gitSha + buildTime + engineVersion
+curl localhost:8080/role                  # primary | backup | standalone, epoch, isLeader
+curl localhost:8080/replication           # peerAlive, running, epoch
+curl localhost:8080/journal/head          # last committed journal sequence
+
+# Operational state
+curl localhost:8080/metrics               # throughput & queue depth (JSON)
+curl localhost:8080/prometheus            # Prometheus text exposition (incl. replication counters)
+curl "localhost:8080/book?symbolId=0"     # L2 order book snapshot
+curl "localhost:8080/audit?symbolId=0"    # spread / depth / level counts
 curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
+
+# Chaos-only (gated by OB_CHAOS_INJECT=1; X-Chaos-Token required when OB_CHAOS_TOKEN is set)
+curl -H "X-Chaos-Token: $TOK" \
+     "localhost:8080/chaos/order?orderId=1&participantId=1&price=100000&qty=1&side=0"
 ```
+
+### Replication (live binary)
+The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE` is set. Primary listens on `OB_REPLICATION_PORT` (default 9002); backup connects to `OB_PRIMARY_HOST`:`OB_PRIMARY_REPLICATION_PORT` and runs in replay mode until promotion. Set `OB_JOURNAL_PATH` to enable journal commit → backup shipping. The chaos suite (`docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build`) provides a fully-wired 1+1 topology.
 
 ## 🧪 Verification
 
-**51 test executables** (40 in `tests/`, 8 benchmarks, 3 tools) covering **181 CTest targets**[^1] across 11 categories:
+**75 test executables** covering **395 CTest targets**[^1] across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -248,20 +281,45 @@ curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
 | **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
 
-[^1]: *CTest targets map to individual executables and GTest cases. The 181 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
+[^1]: *CTest targets map to individual executables and GTest cases. The 395 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
 
 ### Formal Verification (TLA+)
 
-**7 TLA+ specifications**, model-checked with TLC:
+**12 TLA+ specifications**, model-checked with TLC:
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
 | `MatchingEngine.tla` | **454M generated, 181M distinct** | NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness *(Model Scope: 2 participants, 2 price levels, 4 orders, qty 1-3)* |
-| `Replication.tla` | written + tested | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain (primary-backup with epoch fencing) |
+| `Replication.tla` (lease-propagation model) | **1373 → 4192 states at MaxEntries=6 / 10**, 0 violations | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain. Realistic promotion rule: backup must observe heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Bug-injected variant (lease check stripped) reproduces split brain in 188 states — confirms the verification is genuine. |
 | `Refinement.tla` | written | Refinement mapping from spec to implementation behavior |
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
 | `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
 | `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Read/write mutex prevents torn snapshots (lock spec verifies the fix found via the unlocked spec) |
+| `Auction.tla` | verified | Opening/closing auction uncross correctness, price collar admission |
+| `EpochDurability.tla` | verified | Epoch-store durability invariant under crash |
+| `FixSession.tla` | verified | FIX session state machine safety (logon/heartbeat/gap-fill) |
+| `Oco.tla` | verified | OCO one-cancels-other atomicity |
+| `Risk.tla` | verified | Hierarchical risk limit enforcement |
+
+### <a name="chaos-suite"></a>Live Chaos Suite
+
+**19 scenarios** in `deploy/chaos/` run against the actual `OrderEngine` binary inside Docker Compose. They empirically verify properties the spec proves, plus operational properties the spec doesn't model. See [deploy/chaos/README.md](./deploy/chaos/README.md) for the full table and how to run them.
+
+| # | Scenario | Measured behavior |
+|---|---|---|
+| 1 | Primary kill → backup detects | ~400 ms RTO (heartbeat-timeout bounded) |
+| 2 | Bidirectional partition + heal | detect ~500 ms / ~3 ms, recover ~110 ms |
+| 3 | Asymmetric partition (primary→backup only) | backup sees peer death, primary doesn't, no split brain |
+| 4 | **Backup clock skew (+30s via libfaketime)** | no split brain across 4s of sampling |
+| 5 | 30% packet loss on replication link | heartbeats survive, no split brain |
+| 6 | Slow link (200 ms one-way latency) | bilateral peerAlive stable for 3s |
+| 7 | Rolling backup restart | bilateral recover ~3 ms via auto-reconnect |
+| 8 | **NoCommittedLoss under SIGKILL** | 200 orders → 192 primary-committed → 192 on backup, **0 lost** |
+| 9 | **Snapshot catchup on late join** | 576 pre-existing entries replicated to joining backup |
+| 10 | Pause / unpause primary | detect ~415 ms, recover ~2 ms |
+| 11 | `/chaos/order` auth | rejects missing & wrong token; accepts correct |
+| 12 | Prometheus replication counters | `_shipped_total`, `_bytes_sent_total`, `_snapshot_streams_total` all advance |
+| 13–19 | Steady-state guards, no-split-brain checks, replication metrics | always-on regression pins |
 
 ### Shadow Mode Validation
 - Dual `OrderBook` instances fed identical order streams
@@ -275,13 +333,15 @@ curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
 | [Architecture.md](./Architecture.md) | Full technical deep-dive |
 | [BENCHMARKS.md](./BENCHMARKS.md) | Three-path latency methodology + binary codec results |
 | [PerformanceWhitepaper.md](./PerformanceWhitepaper.md) | Benchmark methodology & analysis |
-| [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results |
+| [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results (MatchingEngine + Replication) |
+| [deploy/chaos/README.md](./deploy/chaos/README.md) | Live chaos suite — 19 scenarios, how to run, scenario catalog |
 | [docs/Compliance.md](./docs/Compliance.md) | Regulatory mapping (MiFID II / SEC Rule 15c3-5 / Reg NMS) |
 | [docs/MemoryOrderingAudit.md](./docs/MemoryOrderingAudit.md) | Per-site memory-order analysis |
 | [docs/Runbook.md](./docs/Runbook.md) | Operational procedures, incident response |
 | [docs/CapacityPlanning.md](./docs/CapacityPlanning.md) | Memory, CPU, disk, network sizing |
 | [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) | Remaining production checklist |
 | [config/engine.conf.example](./config/engine.conf.example) | All configuration keys with defaults |
+| [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) | Tier-1 production upgrade checklist — completed and planned work |
 
 ## 🔮 Remaining Work
 
@@ -290,18 +350,20 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 | Item | Status | Blocker |
 |------|--------|---------|
 | x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
-| `Replication.tla` TLC run | Spec written + tested | Compute time for full model checker run |
+| ~~`Replication.tla` TLC run~~ | ✅ **Realistic lease-propagation model verified at MaxEntries=10, 0 violations.** Bug-injected variant reproduces split brain — confirms verification is genuine | — |
 | io_uring zero-copy data path | Portable seams in place (`FixSession`, `OuchSession`, `OuchTcpGateway`) | Linux + io_uring kernel |
 | DPDK kernel bypass | Architecture ready | Linux + supported NIC |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
-| Auction uncross price discovery | Auction state machine exists | Volume-maximization algorithm not implemented |
+| Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified | Volume-maximization algorithm: max-qty uncross implemented |
 | Schema-driven SBE codegen | Hand-coded v1/v2 + forward-compat proven | XML schema → codec generator (tooling) |
-| Cross-host failure-drill validation | Replication protocol verified | Multi-host environment |
-| 24h+ TSan soak | Harness exists (`scripts/tsan_soak.sh`) | Clock time |
+| ~~Cross-host failure-drill validation~~ | ✅ **19-scenario live chaos suite in `deploy/chaos/` — multi-container failover, partition, packet loss, clock skew, snapshot catchup, NoCommittedLoss all verified empirically** | True cross-physical-host still needs hardware |
+| TSan coverage | `ReplicationProtocolTest` now TSan-clean (closed atomic-fd + sendSeq_ races); CI runs it under TSan. 24h+ soak still pending | Clock time |
+| Real FIX path through chaos topology | `GatewayServer` runs its own engine — would need to merge with replicated `OrderEngine`. Same safety properties verified via `/chaos/order` + `FixTcpGatewayTest` | Architectural refactor of gateway/engine binary split |
+| TLS + full auth on admin port | Token auth on `/chaos/order` only | Design decision: token-everywhere vs reverse-proxy vs mTLS |
 | Regulatory submission (CAT / MiFID RTS 22) | Event pipeline + journal in place | Broker-dealer / venue registration |
 | Clearing integration (DTCC / OCC / CME) | Trade event surface in place | Clearing membership |
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 34K LOC · 51 test executables · 181 CTest targets · 7 TLA+ specifications · 454M states verified on MatchingEngine.tla*
+*C++20 · 46.5K LOC · 75 test executables · 395 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*

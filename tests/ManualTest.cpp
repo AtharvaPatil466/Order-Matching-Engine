@@ -178,10 +178,16 @@ void testCircuitBreaker() {
     book.setEventListener(&listener);
 
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
+    // A buy 6% above the 5% default band trips the breaker → volatility
+    // auction (not a hard halt); the triggering order itself is rejected.
     book.addOrder(2, 2, Side::Buy, 1060000, 100, OrderType::Limit);
+    assert(book.getTradingState() == TradingState::VolatilityAuction);
+    assert(book.getOrder(2) == nullptr);
 
+    // In-band orders now accumulate into the auction instead of being
+    // rejected; they rest until a reopening cross.
     book.addOrder(3, 3, Side::Sell, 1000000, 100, OrderType::Limit);
-    assert(book.getOrder(3) == nullptr);
+    assert(book.getOrder(3) != nullptr);
     std::cout << "testCircuitBreaker PASSED" << std::endl;
 }
 

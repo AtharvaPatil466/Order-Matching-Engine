@@ -1,11 +1,18 @@
 #pragma once
 
 #include "MatchingEngine.h"
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <thread>
-#include <atomic>
 
 namespace OrderMatcher {
+
+// Forward declaration — full definition (with POSIX networking deps)
+// lives in ReplicationProtocol.h. AdminServer only needs an opaque
+// pointer plus the methods it calls; including the full header here
+// would pull <arpa/inet.h> and friends into every AdminServer client.
+class ReplicationCoordinator;
 
 class AdminServer {
 public:
@@ -15,10 +22,29 @@ public:
     void start();
     void stop();
 
+    // Optional: attach a replication coordinator so /role and
+    // /replication endpoints return live state. Pass nullptr (the
+    // default) on engines that run without replication.
+    void setReplicationCoordinator(ReplicationCoordinator* coord) {
+        coord_ = coord;
+    }
+
+    // When set, all endpoints except /health require an
+    // "Authorization: Bearer <token>" header. Default empty = no auth
+    // (backward compatible). Call before start().
+    void setAdminToken(const std::string& token) { adminToken_ = token; }
+
+    // Readiness gate — false until the caller signals the engine is
+    // ready to serve traffic. Flipped via setReady(true) after warm-up
+    // (journal replay, risk-limit load, peer handshake, etc.).
+    // /readyz returns 200 when ready, 503 otherwise.
+    void setReady(bool r) { ready_.store(r, std::memory_order_release); }
+    bool isReady() const { return ready_.load(std::memory_order_acquire); }
+
 private:
     void listenLoop();
     void handleConnection(int clientSocket);
-    
+
     std::string buildHttpResponse(const std::string& body,
                                   const char* contentType = "application/json") const;
     std::string generateMetricsResponse() const;
@@ -26,13 +52,50 @@ private:
     std::string generateHealthResponse() const;
     std::string generateOtrResponse(ParticipantId pid) const;
     std::string generateBookResponse(SymbolId sym) const;
+    std::string generateAuctionResponse(SymbolId sym) const;
+    std::string generateFeesResponse(ParticipantId pid) const;
+    std::string generateRiskResponse(uint32_t tier, uint64_t entityId) const;
+    std::string generateCatResponse() const;
     std::string generateAuditResponse(SymbolId sym) const;
+    std::string generateRoleResponse() const;
+    std::string generateReplicationResponse() const;
+    std::string generateJournalHeadResponse() const;
+    std::string generateVersionResponse() const;
+    std::string generateReadyzResponse() const;
+    // Chaos-only order injection (guarded by OB_CHAOS_INJECT=1 env
+    // AND, if OB_CHAOS_TOKEN is set, a matching X-Chaos-Token header).
+    // Not exposed unless the env var is set at process start — the
+    // gate is checked once in the constructor and cached.
+    std::string generateChaosOrderResponse(const std::string& query,
+                                           const std::string& token);
 
     MatchingEngine& engine_;
     uint16_t port_;
     int serverSocket_{-1};
     std::atomic<bool> running_{false};
     std::thread listenThread_;
+    ReplicationCoordinator* coord_{nullptr};
+
+    // Captured at construction from OB_CHAOS_INJECT — guards the
+    // /chaos/order endpoint at parse time. Compiled in unconditionally
+    // so the binary is identical across environments; activation is
+    // environment-only.
+    bool chaosInjectEnabled_{false};
+
+    // Shared-secret token for /chaos/order. Captured from
+    // OB_CHAOS_TOKEN at startup. When set AND chaosInjectEnabled_,
+    // requests must carry a matching `X-Chaos-Token` header.
+    // Empty token = inject open to anyone with network reach
+    // (logged as a security warning at startup).
+    std::string chaosToken_;
+
+    // Bearer token for all non-/health admin endpoints.
+    // Empty = no auth required (default, backward compatible).
+    std::string adminToken_;
+
+    // Readiness flag — starts false. Set via setReady(true) once the
+    // engine has completed start-up (journal replay, warm-up, etc.).
+    std::atomic<bool> ready_{false};
 };
 
 } // namespace OrderMatcher

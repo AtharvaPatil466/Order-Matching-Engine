@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Run TLC on a TLA+ spec in this directory.
-#   ./check.sh                 -> MpscQueue
-#   ./check.sh <ModuleName>    -> any module in spec/
+#   ./check.sh                       -> MpscQueue (uses MpscQueue.cfg)
+#   ./check.sh <ModuleName>          -> any module (uses <ModuleName>.cfg)
+#   ./check.sh <ModuleName> <Cfg>    -> run <ModuleName> with an explicit cfg,
+#                                       e.g. the bug-injected non-vacuity
+#                                       variant:  ./check.sh Auction AuctionBroken.cfg
 #
 # Requires java (17+ tested) and tla2tools.jar in this directory.
 
@@ -17,7 +20,17 @@ if [ ! -f tla2tools.jar ]; then
 fi
 
 MODULE="${1:-MpscQueue}"
-java -XX:+UseParallelGC \
-     -cp tla2tools.jar tlc2.TLC \
-     -workers auto -deadlock \
-     "$MODULE"
+CONFIG="${2:-}"
+
+if [ -n "$CONFIG" ]; then
+    java -XX:+UseParallelGC \
+         -cp tla2tools.jar tlc2.TLC \
+         -workers auto -deadlock \
+         -config "$CONFIG" \
+         "$MODULE"
+else
+    java -XX:+UseParallelGC \
+         -cp tla2tools.jar tlc2.TLC \
+         -workers auto -deadlock \
+         "$MODULE"
+fi

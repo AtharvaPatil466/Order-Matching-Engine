@@ -306,6 +306,7 @@ inline char tradingStateToItch(TradingState s) {
     case TradingState::Halted:        return ITCH_TRADING_STATE_HALTED;
     case TradingState::AuctionOpen:
     case TradingState::AuctionClose:
+    case TradingState::VolatilityAuction:
     case TradingState::PreOpen:       return ITCH_TRADING_STATE_QUOTATION_ONLY;
     case TradingState::PostClose:     return ITCH_TRADING_STATE_HALTED;
     }

@@ -1,8 +1,8 @@
 # Benchmark Methodology & Results
 
 > **Platform**: Apple M3 Pro (ARM64) · **Compiler**: Clang C++20 -O2
-> **Date**: 2026-05-14 · **Seed**: 42
-> **Tests**: 181/181 passing
+> **Date**: 2026-05-29 · **Seed**: 42
+> **Tests**: 395/395 passing
 
 ## TL;DR
 

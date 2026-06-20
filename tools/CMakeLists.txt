@@ -9,3 +9,8 @@ target_link_libraries(LatencyCorrelator PRIVATE OrderMatcher)
 # Mutation Fuzzer (Phase 3, Week 11)
 add_executable(JournalMutationFuzzer JournalMutationFuzzer.cpp)
 target_link_libraries(JournalMutationFuzzer PRIVATE OrderMatcher)
+
+# Time Machine — regulatory audit / postmortem replay tool
+add_executable(TimeMachine time_machine.cpp)
+target_link_libraries(TimeMachine PRIVATE OrderMatcher)
+set_target_properties(TimeMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

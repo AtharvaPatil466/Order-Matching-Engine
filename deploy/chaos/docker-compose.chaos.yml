@@ -1,0 +1,84 @@
+# Chaos topology — 1 primary + 1 backup on a dedicated bridge network.
+#
+# Differs from the root docker-compose.yml by:
+#   * Adding NET_ADMIN to engines so future scenarios can use tc/iptables
+#     inside the container netns (slow-link, packet-loss, partition).
+#   * Mapping admin ports on both engines (root file only mapped one).
+#   * Using shorter heartbeats via env (when supported) so failover RTO
+#     measurements aren't dominated by the conservative 500ms default.
+#
+# Usage (from repo root):
+#   docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build
+#   pytest deploy/chaos/ -v
+#   docker compose -f deploy/chaos/docker-compose.chaos.yml down -v
+
+services:
+  engine-primary:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: chaos-engine-primary
+    command: ["--threads", "2", "--port", "8080", "--symbols", "2"]
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "18080:8080"   # admin HTTP
+      - "19002:9002"   # replication (mostly for debugging; backup connects via network alias)
+    environment:
+      - OB_NODE_ROLE=primary
+      - OB_NODE_ID=1
+      - OB_REPLICATION_PORT=9002
+      - OB_JOURNAL_PATH=/app/journal/primary.wal
+      - OB_CHAOS_INJECT=1                          # enables /chaos/order endpoint
+      - OB_CHAOS_TOKEN=chaos-suite-shared-secret   # auth gate; harness sends matching X-Chaos-Token
+    volumes:
+      - journal-primary:/app/journal
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+      start_period: 5s
+    networks:
+      chaos-net:
+        aliases:
+          - primary
+
+  engine-backup:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: chaos-engine-backup
+    command: ["--threads", "2", "--port", "8080", "--symbols", "2"]
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "18081:8080"
+    environment:
+      - OB_NODE_ROLE=backup
+      - OB_NODE_ID=2
+      - OB_PRIMARY_HOST=primary
+      - OB_PRIMARY_REPLICATION_PORT=9002
+      - OB_JOURNAL_PATH=/app/journal/backup.wal
+      - OB_ENABLE_FAKETIME=1   # opt-in libfaketime preload for clock-skew scenarios
+    volumes:
+      - journal-backup:/app/journal
+    depends_on:
+      engine-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+      start_period: 5s
+    networks:
+      - chaos-net
+
+volumes:
+  journal-primary:
+  journal-backup:
+
+networks:
+  chaos-net:
+    driver: bridge

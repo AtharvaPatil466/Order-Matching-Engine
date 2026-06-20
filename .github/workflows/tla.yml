@@ -1,0 +1,146 @@
+name: TLA+ Model Checking
+
+# Model-checks the project's TLA+ specifications with TLC on every push / PR.
+#
+# Only the FAST specs that exhaust their (bounded) state space in a few
+# seconds are gated here:
+#   - Auction         : exchange auction / session state machine
+#   - Oco              : One-Cancels-Other contingent-order safety
+#   - Risk             : multi-tier risk-limit aggregation safety
+#   - EpochDurability  : lease epoch stays monotonic across a restart
+#   - FixSession       : FIX inbound sequence recovery (no out-of-order delivery)
+#   - MpscQueue        : lock-free ring-buffer linearizability
+#   - EngineConsumer   : worker-loop wake-up protocol
+#   - Snapshot         : lockless snapshot (properties that hold)
+#   - SnapshotLocked   : locked snapshot (strong-consistency properties)
+#
+# MatchingEngine.tla (~12 min, 454M states) and Replication.tla are checked
+# out-of-band rather than on every push, to keep CI fast.
+#
+# A dedicated step also runs the Auction NON-VACUITY variant
+# (AuctionBroken.cfg, BROKEN_NO_REOPEN = TRUE) and asserts that TLC reports a
+# counterexample to VolatilityEventuallyReopens — proving the liveness
+# property has teeth.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tlc:
+    name: TLC model checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache tla2tools.jar
+        uses: actions/cache@v4
+        with:
+          path: spec/tla2tools.jar
+          key: tla2tools-jar-v1.8.0
+
+      - name: Check fast specs
+        working-directory: spec
+        run: |
+          set -e
+          for module in Auction Oco Risk EpochDurability FixSession MpscQueue EngineConsumer Snapshot SnapshotLocked; do
+            echo "::group::TLC $module"
+            ./check.sh "$module"
+            echo "::endgroup::"
+          done
+
+      - name: Non-vacuity check (Auction liveness must be violable)
+        working-directory: spec
+        run: |
+          set +e
+          ./check.sh Auction AuctionBroken.cfg > broken.log 2>&1
+          status=$?
+          set -e
+          cat broken.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::AuctionBroken.cfg unexpectedly PASSED — VolatilityEventuallyReopens is vacuous"
+            exit 1
+          fi
+          if ! grep -q "Temporal property VolatilityEventuallyReopens was violated" broken.log; then
+            echo "::error::AuctionBroken.cfg failed for the wrong reason (expected a VolatilityEventuallyReopens counterexample)"
+            exit 1
+          fi
+          echo "Non-vacuity confirmed: TLC produced the expected counterexample."
+
+      - name: Non-vacuity check (OCO safety must be violable)
+        working-directory: spec
+        run: |
+          set +e
+          ./check.sh Oco OcoBroken.cfg > oco_broken.log 2>&1
+          status=$?
+          set -e
+          cat oco_broken.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::OcoBroken.cfg unexpectedly PASSED — AtMostOneWinnerPerGroup is vacuous"
+            exit 1
+          fi
+          if ! grep -q "Invariant AtMostOneWinnerPerGroup is violated" oco_broken.log; then
+            echo "::error::OcoBroken.cfg failed for the wrong reason (expected an AtMostOneWinnerPerGroup counterexample)"
+            exit 1
+          fi
+          echo "Non-vacuity confirmed: TLC produced the expected OCO counterexample."
+
+      - name: Non-vacuity check (risk aggregation must be violable)
+        working-directory: spec
+        run: |
+          set +e
+          ./check.sh Risk RiskBroken.cfg > risk_broken.log 2>&1
+          status=$?
+          set -e
+          cat risk_broken.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::RiskBroken.cfg unexpectedly PASSED — FirmWithinCap is vacuous"
+            exit 1
+          fi
+          if ! grep -q "Invariant FirmWithinCap is violated" risk_broken.log; then
+            echo "::error::RiskBroken.cfg failed for the wrong reason (expected a FirmWithinCap counterexample)"
+            exit 1
+          fi
+          echo "Non-vacuity confirmed: TLC produced the expected risk counterexample."
+
+      - name: Non-vacuity check (epoch durability must be violable)
+        working-directory: spec
+        run: |
+          set +e
+          ./check.sh EpochDurability EpochDurabilityBroken.cfg > epoch_broken.log 2>&1
+          status=$?
+          set -e
+          cat epoch_broken.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::EpochDurabilityBroken.cfg unexpectedly PASSED — NoRegression is vacuous"
+            exit 1
+          fi
+          if ! grep -q "Invariant NoRegression is violated" epoch_broken.log; then
+            echo "::error::EpochDurabilityBroken.cfg failed for the wrong reason (expected a NoRegression counterexample)"
+            exit 1
+          fi
+          echo "Non-vacuity confirmed: TLC produced the expected epoch counterexample."
+
+      - name: Non-vacuity check (FIX sequence recovery must be violable)
+        working-directory: spec
+        run: |
+          set +e
+          ./check.sh FixSession FixSessionBroken.cfg > fix_broken.log 2>&1
+          status=$?
+          set -e
+          cat fix_broken.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::FixSessionBroken.cfg unexpectedly PASSED — DeliveredInOrder is vacuous"
+            exit 1
+          fi
+          if ! grep -q "Invariant DeliveredInOrder is violated" fix_broken.log; then
+            echo "::error::FixSessionBroken.cfg failed for the wrong reason (expected a DeliveredInOrder counterexample)"
+            exit 1
+          fi
+          echo "Non-vacuity confirmed: TLC produced the expected FIX counterexample."

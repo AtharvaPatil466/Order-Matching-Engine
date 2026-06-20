@@ -14,7 +14,7 @@
 //
 // Cache-line layout (64 bytes):
 //   ┌─────────────────────────────────────────────────────────────────┐
-//   │ Bytes  0–7:  positionLimit      (Quantity, 8B)                 │
+//   │ Bytes  0–7:  rejectedOrders     (uint64_t, 8B)                │
 //   │ Bytes  8–15: currentExposure    (int64_t,  8B) — signed net   │
 //   │ Bytes 16–23: ordersInFlight     (uint64_t, 8B)                │
 //   │ Bytes 24–31: maxOrderSize       (Quantity, 8B)                │
@@ -36,7 +36,7 @@ namespace OrderMatcher {
 
 struct alignas(64) ParticipantRiskState {
     // ─── Hot path fields (accessed on every order) ───────────────────
-    Quantity positionLimit{0};       // Max absolute position (0 = no limit)
+    uint64_t rejectedOrders{0};      // Number of rejected orders
     int64_t  currentExposure{0};    // Signed net position (buy - sell)
     uint64_t ordersInFlight{0};     // Currently active orders
 

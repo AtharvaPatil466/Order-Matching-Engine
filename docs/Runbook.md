@@ -11,6 +11,12 @@
 # Load config and start with 4 worker threads
 ./bin/OrderEngine --threads 4 --port 8080 --symbols 4
 
+# With config file (supports SIGHUP hot-reload)
+./bin/OrderEngine --threads 4 --port 8080 --symbols 4 --config /etc/orderengine/engine.conf
+
+# Hot-reload config without restart
+kill -SIGHUP $(pidof OrderEngine)
+
 # Lean mode (disables risk checks — HFT deployments only)
 ./bin/OrderEngine --lean --threads 4 --port 8080 --symbols 4
 ```
@@ -51,6 +57,7 @@ WantedBy=multi-user.target
 | Endpoint | Purpose | Expected Response |
 |----------|---------|-------------------|
 | `GET /health` | K8s liveness probe | `200 OK {"status":"healthy"}` |
+| `GET /readyz` | K8s readiness probe | Returns 503 until engine warmup completes, then 200. Use as k8s `readinessProbe`. Auth-exempt. |
 | `GET /metrics` | Internal counters | JSON with throughput, queue depth, latency |
 | `GET /prometheus` | Prometheus scrape | Text exposition format |
 | `GET /book?symbolId=0` | L2 book snapshot | JSON with bids/asks/trades |
@@ -148,9 +155,17 @@ If the primary fails and a backup is running:
 ## 5. Configuration Changes
 
 ### Hot-Reloadable Settings
-The following can be changed via environment variables without restart:
-- Rate limit parameters (`OB_RATE_LIMIT_*`)
-- Alert webhook URL (`OB_ALERT_WEBHOOK_URL`)
+The following can be changed without restart:
+
+**Via SIGHUP** (send `kill -SIGHUP <pid>` — reloads the config file):
+- Any setting in the config file pointed to by `--config PATH`
+- Rate limit parameters, alert webhooks, symbol config
+- `RateLimiter::reconfigure()` is now called on every SIGHUP: reads `rate_limit.default_rate` and `rate_limit.default_burst` from the reloaded config, updates the default rate/burst, and clears all existing participant token buckets so they inherit the new limits on their next request.
+
+**Via environment variables** (take effect on next config reload or restart):
+- `OB_RATE_LIMIT_*` — per-participant rate limit parameters
+- `OB_ALERT_WEBHOOK_URL` — webhook target
+- `OB_JOURNAL_MAX_SIZE_MB` — maximum journal file size in megabytes before auto-checkpoint. Default: disabled (0). Set to e.g. `256` to rotate at 256 MB. When the threshold is reached, `Journal::needsCheckpoint()` fires and the main loop calls `engine.checkpoint()` automatically.
 
 ### Cold Settings (Require Restart)
 - Thread count, symbol count

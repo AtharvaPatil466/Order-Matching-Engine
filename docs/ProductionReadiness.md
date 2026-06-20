@@ -9,7 +9,7 @@ This project is a low-latency matching-engine implementation for research and po
   rejects that occur on the worker are delivered through order-update/event channels.
 - Self-match prevention policy variants: cancel taker, cancel maker, decrement-and-cancel, and participant hierarchy rules.
 - Cancel/replace priority rules for every amendment type, including hidden and iceberg orders.
-- Market order protection, price collars, auction states, halt/resume transitions, and reject-code contracts.
+- ~~Market order protection, price collars, auction states, halt/resume transitions~~: Implemented (LULD, VolatilityAuction, TradingState enum, RejectReason contract).
 - Iceberg refresh priority and hidden-order allocation rules for the exact venue model.
 - End-to-end sequence guarantees for trades, order updates, market data, replay, and gap recovery.
 - Risk-limit policy for open orders, filled positions, rejected orders, cancels, and cross-symbol exposure.
@@ -30,6 +30,30 @@ This project is a low-latency matching-engine implementation for research and po
 - Ingress submit APIs return explicit reject reasons for stopped engines, unknown symbols, bad orders, rate limits, and queue backpressure.
 - Gateway requests surface ingress rejects as error responses instead of unconditional ACKs.
 - CI runs project tests under Release, ASan/UBSan, and ThreadSanitizer configurations; Ubuntu sanitizer builds also run an E2E benchmark smoke check.
+- `ReplicationProtocolTest` is now TSan-clean and runs under the TSan job. Previously excluded due to atomic-fd and `sendSeq_` races during teardown — closed by atomic fds + `shutdown(2)` before `close()` + atomic `sendSeq_`.
+- `Journal::now()` uses `steady_clock`, so journal timestamps survive NTP step adjustments.
+- `Journal` constructor unlinks any stale `<path>.tmp` from a crashed `rewriteAtomically()`.
+- MOC/LOC on-close orders: `cancelLocOrders()` correctly triggered on both the `!hasCross` early-return path and normal uncross completion. Price validation exclusion for MOC (price=0 is valid). Verified by `TestMocLocOrders` (11 cases).
+- LMM/DMM ProRata floor guarantee: 40% floor allocation with correct redistribution (does not inflate `allocated` counter, preventing unsigned underflow). Verified by `TestLmmDmmAllocation` (7 cases).
+- Config SIGHUP hot-reload: Async-signal-safe pattern verified by `TestPaperTrader` integration path and manual test.
+
+## Live Multi-Container Chaos Suite (`deploy/chaos/`)
+
+19 scenarios run against the actual `OrderEngine` binary inside Docker Compose. The replication path that was previously library-only (verified by unit test but not exercised in the running binary) is now wired into `src/main.cpp` via `OB_NODE_ROLE` / `OB_PRIMARY_HOST` / `OB_JOURNAL_PATH` env vars and validated end-to-end.
+
+Empirically verified:
+
+- **NoCommittedLoss under SIGKILL**: 200 orders → 192 primary-committed → 192 on backup. Same property the TLA+ spec proves, now measured live.
+- **No split brain** under: bidirectional partition, asymmetric partition, 30% packet loss, +30s clock skew on backup (via `libfaketime`).
+- **Snapshot catchup on backup join**: primary streams all currently-resting orders via `MatchingEngine::streamSnapshot` when a backup connects. Closes the rolling-restart gap where pre-restart entries would otherwise never reach a late-joining backup.
+- **Transport auto-reconnect**: backup re-runs `connectTo()` from its receive loop after socket loss — bilateral recovery in ~3 ms after primary recovery, no external orchestration needed. Reconnect now uses exponential backoff (500ms → 30s cap), resetting to base delay on each successful connect. `ReconnectBackoffTest` covers progression and reset.
+- **Lease propagation under partial failure**: backup's local lease is refreshed by every primary heartbeat-tick `LeaseGrant`; `BackupPromote` is gated on local lease expiry, not just heartbeat miss.
+- **Auth gating on `/chaos/order`**: rejects missing / wrong token, accepts matching `X-Chaos-Token` header when `OB_CHAOS_TOKEN` is set.
+- **Observability**: Prometheus counters (`replication_entries_shipped_total`, `_bytes_sent_total`, `_snapshot_streams_total`, `_snapshot_entries_total`) advance under load and on backup rejoin.
+- **`/readyz` k8s readiness probe**: HTTP 503 until `admin.setReady(true)` is called after engine warmup, then 200. Auth-exempt (same as `/health`). `AdminAuthTest` covers 7 scenarios including readyz pre/post-warmup transitions.
+- **Build-metadata endpoint**: `/version` returns `gitSha` + `buildTime` for ops.
+
+See [deploy/chaos/README.md](../deploy/chaos/README.md) for the full scenario catalog, RTO/RPO measurements, and instructions to run the suite locally.
 
 ## Benchmark Artifact Workflow
 
@@ -43,8 +67,16 @@ README latency tables should be updated only from saved artifacts, preferably us
 
 ## Operational Work Required
 
-- Structured logging with stable event schemas.
-- Metrics contracts for order flow, rejects, queue depth, latency histograms, journal health, and gateway sessions.
+- ~~Structured logging with stable event schemas~~ — done. 7 call sites wired in `OrderBook.cpp` via typed helpers in `StructuredLog.h` (order accepted ×2 paths, cancelled, rejected/risk, trade fill, circuit breaker, trading state change). `StructuredSink` backends remain hot-swappable.
+- Metrics contracts for order flow, rejects, queue depth, latency histograms, journal health, and gateway sessions. Replication metrics are in (see chaos suite section above).
 - Configuration files for symbols, risk limits, gateway ports, admin endpoints, rate limits, and persistence.
-- Deployment and recovery runbooks.
+- Deployment and recovery runbooks (started — see `docs/Runbook.md`).
+- Hot-reload via SIGHUP is now wired: `--config PATH` CLI flag in `src/main.cpp`; async-signal-safe `g_reload_config` atomic; SIGHUP sets flag; main event loop calls `cfg.loadFile(configPath)`. SIGHUP now also calls `RateLimiter::reconfigure()` — updates default rate/burst from config keys `rate_limit.default_rate` / `rate_limit.default_burst` and clears all participant token buckets (`RateLimiterReconfigureTest` covers this path). Journal auto-rotation is wired in the main loop: `OB_JOURNAL_MAX_SIZE_MB` env var sets the threshold; main loop calls `engine.checkpoint()` when `Journal::needsCheckpoint()` fires. Remaining cold-restart-only settings: thread count, journal path, and ports.
 - Backward-compatible protocol versioning for gateway and market-data consumers.
+- **TLS + auth on the admin port**. Today only `/chaos/order` is auth-gated (shared-secret token via `X-Chaos-Token` when `OB_CHAOS_TOKEN` is set). The other admin endpoints (`/metrics`, `/book`, `/audit`, `/role`, `/replication`, `/version`) are unauthenticated and serve over plain HTTP. Needs a design decision on auth model: token-everywhere vs reverse-proxy-with-mTLS vs ingress-layer auth.
+
+## Architectural Gaps Worth Documenting
+
+- **`GatewayServer` runs its own embedded `MatchingEngine`**, not the replicated `OrderEngine`. Wiring FIX through the replication topology would require merging the two binaries or building an order-forwarding RPC between them. The same safety properties are verified via `/chaos/order` (calls `engine.submitOrder` directly, the same path FIX converges on after parsing) plus the existing in-tree `FixTcpGatewayTest`.
+- **Snapshot stream concurrency**: `MatchingEngine::streamSnapshot` iterates resting orders while live replication continues. The Snapshot receiver is idempotent (skips duplicates) so race-induced overlap is safe, but a Cancel shipped live just before a Snapshot for the same orderId can land in the wrong order at the backup, leaving a phantom resting order. Documented as a known limitation; a real fix needs SnapshotStart/SnapshotEnd protocol markers and receiver-side buffering.
+- **TOCTOU on `peerFd_` during stop()**: after the atomic-fd / `shutdown(2)` fix, all TSan races are gone. A theoretical residual: between a thread loading `peerFd_` and using it in a syscall, `stop()` could close the fd and the kernel could reuse the number. Not observable in practice (stop is teardown-only), would need fd refcounting for a complete fix.

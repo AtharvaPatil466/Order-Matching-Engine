@@ -10,6 +10,8 @@
 #include "SelfTradeProtection.h"
 #include "LULDManager.h"
 #include "WashTradeDetector.h"
+#include "BatchRiskValidator.h"
+#include <atomic>
 #include <functional>
 #include <shared_mutex>
 #include <variant>
@@ -29,6 +31,10 @@ struct Trade {
     uint64_t timestamp;
     uint64_t sequenceNumber;
     SymbolId symbolId = 0;
+    // Side of the aggressing (taker) order; the resting order is the maker.
+    // Set for continuous-match trades; auction-cross trades keep the default
+    // (a call auction has no single aggressor — fees treat the buyer as taker).
+    Side aggressorSide = Side::Buy;
 };
 
 // Market Data: single price level
@@ -60,6 +66,18 @@ struct MarketDataUpdate {
     PriceLevel level;
     uint64_t timestamp;
     uint64_t sequenceNumber;
+};
+
+// Auction indicative / imbalance snapshot (NASDAQ NOII analogue).
+// Computed non-destructively over the resting book plus any parked
+// auction market orders, so it can be published continuously during
+// PreOpen / AuctionClose / VolatilityAuction without executing trades.
+struct AuctionResult {
+    bool     hasCross = false;           // a positive volume would cross
+    Price    indicativePrice = 0;        // clearing price (0 if !hasCross)
+    Quantity pairedVolume = 0;           // matched qty at the clearing price
+    Quantity imbalanceQty = 0;           // unmatched qty (at the cross, else book-wide)
+    Side     imbalanceSide = Side::Buy;  // surplus side (meaningful iff imbalanceQty > 0)
 };
 
 // Order status notification
@@ -151,7 +169,8 @@ public:
                   TimeInForce tif = TimeInForce::GTC, uint64_t expiryTime = 0,
                   Price stopLimitPrice = 0,
                   PegType pegType = PegType::None, Price pegOffset = 0,
-                  Price trailAmount = 0, Quantity minQty = 0, bool hidden = false);
+                  Price trailAmount = 0, Quantity minQty = 0, bool hidden = false,
+                  bool riskChecksBypassed = false);
     void cancelOrder(OrderId orderId);
     bool modifyOrder(OrderId orderId, Quantity newQty);
 
@@ -163,6 +182,19 @@ public:
 
     // Auction
     void uncross();
+
+    // Non-destructive auction indicative + imbalance over the current
+    // book (NASDAQ NOII analogue). Shares the price-discovery core with
+    // uncross() so the published indicative cannot diverge from the price
+    // the cross will actually use. Takes the book's shared lock.
+    AuctionResult computeAuctionState() const;
+
+    // Reopen a volatility auction: run the reopening cross at the
+    // discovered clearing price and return the book to continuous
+    // trading, re-anchoring the volatility reference to the reopening
+    // print. No-op returning false unless the book is currently in
+    // TradingState::VolatilityAuction. A manual Halt is unaffected.
+    bool resumeVolatilityAuction();
 
     // Time-based expiry: call periodically to expire GTD/DAY orders
     // Cancel any DAY/GTD orders whose expiryTime has elapsed. The
@@ -179,6 +211,15 @@ public:
 
     // Risk Management
     void setRiskLimits(ParticipantId participantId, const RiskLimits& limits);
+
+    // ─── LMM/DMM Market-Maker Role ───────────────────────────────────
+    void setParticipantRole(ParticipantId p, ParticipantRole role) {
+        participantRoles_.insert(p, role);
+    }
+    ParticipantRole getParticipantRole(ParticipantId p) const {
+        const auto* r = participantRoles_.find(p);
+        return r ? *r : ParticipantRole::Regular;
+    }
 
     // ─── Self-Trade Prevention (Phase 4, Week 13) ────────────────────
     void setSTPMode(ParticipantId participant, STPMode mode) {
@@ -238,9 +279,29 @@ public:
     // establish a reference).
     void setPriceBandPct(double pct) { priceBandPct_ = pct < 0 ? 0 : pct; }
     double getPriceBandPct() const   { return priceBandPct_; }
+
+    // Market-order sweep protection: cap how far a market order may walk
+    // from the arrival touch price (fractional half-width, e.g. 0.10 = 10%).
+    // 0 disables. The portion of a market order that would fill beyond the
+    // collar is left unfilled (and cancelled), so a single sweep cannot
+    // clear the book at runaway prices.
+    void setMarketProtectionPct(double pct) { marketProtectionPct_ = pct < 0 ? 0 : pct; }
+    double getMarketProtectionPct() const   { return marketProtectionPct_; }
     ParticipantStats getParticipantStats(ParticipantId id) const {
-        auto* stats = otrStats_.find(id);
-        return stats ? *stats : ParticipantStats{};
+        auto* state = participantRisk_.find(OTRKey(id, symbolId_));
+        if (state) {
+            ParticipantStats stats;
+            stats.ordersSubmitted = state->ordersSubmitted;
+            stats.tradesExecuted = state->tradesExecuted;
+            stats.rejectedOrders = state->rejectedOrders;
+            stats.netPosition = state->currentExposure;
+            return stats;
+        }
+        return ParticipantStats{};
+    }
+
+    const ParticipantRiskState* getParticipantRiskState(ParticipantId id) const {
+        return participantRisk_.find(OTRKey(id, symbolId_));
     }
 
     // Depth limit: max price levels per side (0 = unlimited)
@@ -271,6 +332,22 @@ public:
         listener_ = listener ? listener : &nullListener();
     }
 
+    // Secondary, engine-owned listener for internal observation (e.g. OCO
+    // contingent-order tracking). Kept separate from the user listener slot
+    // above so installing one does not clobber a gateway/OUCH market-data
+    // listener. Receives the same order-update events.
+    void setEngineListener(EventListener* listener) {
+        engineListener_ = listener ? listener : &nullListener();
+    }
+
+    // Emit a rejection notification for an order the engine declined before
+    // it ever reached the book (e.g. a hierarchical pre-trade risk breach).
+    // Touches no book state; just notifies listeners so the reject is
+    // observable on the same path as in-book rejects.
+    void emitReject(OrderId orderId, Quantity qty, RejectReason reason) {
+        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, reason);
+    }
+
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }
     bool isReplayMode() const { return replayMode_; }
@@ -280,8 +357,8 @@ public:
     Price getMidPrice() const;
 
     double getOTR(ParticipantId p) const {
-        auto* stats = otrStats_.find(p);
-        return stats ? stats->getOTR() : 0.0;
+        auto* state = participantRisk_.find(OTRKey(p, symbolId_));
+        return state ? state->getOTR() : 0.0;
     }
 
     void setMatchAlgorithm(MatchAlgorithm algo) { matchAlgorithm_ = algo; }
@@ -292,6 +369,11 @@ private:
     // (expireOrders, cancelAllForParticipant) call this directly to
     // avoid self-deadlock on a non-recursive shared_mutex.
     void cancelOrderImpl(OrderId orderId);
+
+    // Release parked MOC/LOC orders into the book when AuctionClose begins.
+    void releaseOnCloseOrders();
+    // Cancel any LOC orders remaining in the book after uncross completes.
+    void cancelLocOrders();
 
     void match(Order* order);
     void matchProRata(Order* order);
@@ -305,6 +387,13 @@ private:
     // Cancel any market orders parked during an auction without
     // executing them (no candidate price, no counterparties, etc.).
     void cancelAuctionMarketOrders();
+
+    // Shared auction price-discovery core. Assumes the caller already
+    // holds bookLock_ (uncross() holds it unique; computeAuctionState()
+    // holds it shared). Pure read — never mutates the book. Applies the
+    // full venue tie-break cascade: max executable volume → min imbalance
+    // → min distance to reference price → market-pressure side.
+    AuctionResult discoverUncrossPrice() const;
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
     bool checkCircuitBreaker(Price price);
     bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
@@ -337,7 +426,11 @@ private:
     // Asks: Ascending Price (flat array, O(1) best-ask)
     FlatPriceMap asks_;
 
-    // Pending orders by type — pre-allocated fixed vectors (no heap allocation)
+    // Pending orders by type — pre-allocated fixed vectors (no heap allocation).
+    // Memory note: each `FixedVector<Order*, 16384>` is 128 KiB; the four
+    // members below total ~512 KiB per OrderBook regardless of utilization.
+    // Acceptable for a few dozen symbols; if scaling to a large universe,
+    // consider chunked / lazy-allocated alternatives.
     FixedVector<Order*, 16384> stopOrders_;
     FixedVector<Order*, 16384> trailingStopOrders_;
     FixedVector<Order*, 16384> peggedOrders_;
@@ -347,6 +440,12 @@ private:
     // price and execute against limit liquidity; any remainder is
     // cancelled at the end of the uncross.
     FixedVector<Order*, 16384> auctionMarketOrders_;
+    // MOC/LOC orders parked before AuctionClose. Released when the book
+    // transitions to AuctionClose: MOC→auctionMarketOrders_, LOC→limit book.
+    FixedVector<Order*, 16384> onCloseOrders_;
+    // OrderIds of LOC orders released into the limit book during AuctionClose;
+    // cancelled after uncross() completes.
+    FixedVector<OrderId, 16384> locActiveIds_;
 
     // O(1) Lookup — open-addressing hash map (replaces std::unordered_map)
     FlatHashMap<OrderId, Order*> orderLookup_;
@@ -354,6 +453,8 @@ private:
 
     // Event listener (replaces std::function callbacks — zero-cost vtable dispatch)
     EventListener* listener_ = &nullListener();
+    // Secondary engine-internal listener (OCO tracking); see setEngineListener.
+    EventListener* engineListener_ = &nullListener();
 
     // Replay mode flag — suppresses callbacks during journal recovery
     bool replayMode_{false};
@@ -365,7 +466,11 @@ private:
     uint64_t nextTradeId_{1};
     Price lastTradePrice_{0};
     Quantity lastTradeQty_{0};
-    uint64_t nextSequenceNumber_{1};
+    // Atomic so a future reader path holding only the shared_lock
+    // cannot race with the writer's increment. Today every caller
+    // already serializes under unique_lock(bookLock_), so this is
+    // defensive; cost is zero on the writer-only fast path.
+    std::atomic<uint64_t> nextSequenceNumber_{1};
 
     // Analytics
     double vwap_ = 0.0;
@@ -379,10 +484,10 @@ private:
     size_t maxDepthPerSide_{0};  // 0 = unlimited
     double cbThreshold_{0.05};   // Circuit breaker threshold (default 5%)
     double priceBandPct_{0.0};   // LULD price-band half-width (0 = disabled)
+    double marketProtectionPct_{0.0};  // market-order sweep collar (0 = disabled)
 
     // Per-participant tracking — open-addressing hash maps
-    FlatHashMap<ParticipantId, ParticipantStats> otrStats_;
-    FlatHashMap<ParticipantId, RiskLimits> riskLimits_;
+    FlatHashMap<OTRKey, ParticipantRiskState, OTRKeyHash> participantRisk_;
     FlatHashMap<ParticipantId, FixedVector<OrderId, 4096>> participantOrders_;
 
     // Trade history — bounded ring buffer (streams out, never reallocates)
@@ -390,6 +495,7 @@ private:
 
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     FlatHashMap<ParticipantId, STPMode> stpModes_{1024};
+    FlatHashMap<ParticipantId, ParticipantRole> participantRoles_{1024};
     LULDManager luld_;
     WashTradeDetector washTradeDetector_;
 };

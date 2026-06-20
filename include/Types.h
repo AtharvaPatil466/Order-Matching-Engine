@@ -27,7 +27,12 @@ enum class OrderType : uint8_t {
     PostOnly,     // Maker-only: reject if would cross spread
     Pegged,       // Pegged to reference price (mid, primary)
     TrailingStop,
-    Hidden        // Fully dark order
+    Hidden,       // Fully dark order
+    MIT,          // Market-if-Touched: triggers a market order when the
+                  // price touches the trigger (favorable-direction mirror
+                  // of Stop). Trigger level is carried in stopPrice.
+    MOC,          // Market-on-Close: fills only at the closing cross
+    LOC           // Limit-on-Close: resting limit, cancelled after close cross if unfilled
 };
 
 enum class TimeInForce : uint8_t {
@@ -87,14 +92,27 @@ enum class TradingState : uint8_t {
     PreOpen,       // Pre-session: same admission as AuctionOpen, prior to
                    // the opening uncross. Orders accumulate to seed the
                    // opening auction.
-    PostClose      // Post-session: reject all new orders (MarketClosed);
+    PostClose,     // Post-session: reject all new orders (MarketClosed);
                    // cancels still allowed for participants cleaning up
                    // remaining day orders.
+    VolatilityAuction  // LULD / circuit-breaker breach: enter a short
+                       // auction (orders accumulate, indicative is
+                       // published) and reopen via a cross, instead of a
+                       // hard halt. Same admission as the auction states.
 };
 
 enum class MatchAlgorithm : uint8_t {
     PriceTime,  // FIFO at each price level (default)
     ProRata     // Proportional allocation at each price level
+};
+
+// Participant role for market-maker privilege tracking.
+// DMM/LMM orders receive guaranteed floor allocation in pro-rata matching
+// and priority in rounding-remainder distribution in price-time matching.
+enum class ParticipantRole : uint8_t {
+    Regular = 0,
+    LMM,    // Lead Market Maker
+    DMM     // Designated Market Maker
 };
 
 // Fixed-point price constants (4 decimal places)

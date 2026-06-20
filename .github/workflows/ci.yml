@@ -48,8 +48,18 @@ jobs:
         run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest'
 
       - name: Test under ThreadSanitizer
+        # Exclusions documented:
+        #   BenchmarkRegressionTest — perf-only, no thread-safety surface
+        #   PropertyTest             — heavy fuzzer; TSan x ASan x property
+        #                              fuzzing is impractically slow in CI
+        #   AdminServerEndpointsTest — accept/recv races acceptable for an
+        #                              admin port; not on the data path
+        # ReplicationProtocolTest is INCLUDED now — was previously excluded
+        # for teardown races on peerFd_/listenFd_ (close-during-recv) and a
+        # non-atomic sendSeq_; both fixed (atomic fds + shutdown(2) wakeup +
+        # atomic sequence). Keep TSan green going forward.
         if: matrix.thread_sanitizer == 'ON'
-        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest|PropertyTest|AdminServerEndpointsTest|ReplicationProtocolTest'
+        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest|PropertyTest|AdminServerEndpointsTest'
 
       - name: Benchmark smoke
         if: matrix.os == 'ubuntu-latest' && matrix.thread_sanitizer != 'ON'

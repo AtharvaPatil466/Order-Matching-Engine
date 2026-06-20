@@ -33,7 +33,7 @@ endif()
 # Aggressive Optimizations for HFT
 if(CMAKE_BUILD_TYPE MATCHES "Release")
     message(STATUS "Enabling HFT Optimizations: -O3 -march=native -mtune=native")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -Wall -Wextra -Werror")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -Wall -Wextra -Werror -Wno-error=character-conversion")
     
     if(ENABLE_LTO)
         # Link Time Optimization (LTO)
@@ -55,6 +55,34 @@ if(USE_LEAN_MODE)
     add_compile_definitions(OB_LEAN_MODE)
 endif()
 
+# Capture build metadata for the /version admin endpoint.
+# Best-effort — in Docker builds the .git directory is excluded by
+# .dockerignore so we fall back to "unknown". A baked-in version
+# string still beats no version info at all when someone is trying
+# to figure out which binary is running in production.
+find_program(GIT_EXECUTABLE git)
+if(GIT_EXECUTABLE)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE OB_GIT_SHA_VAR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE GIT_RESULT
+    )
+    if(NOT GIT_RESULT EQUAL 0 OR "${OB_GIT_SHA_VAR}" STREQUAL "")
+        set(OB_GIT_SHA_VAR "unknown")
+    endif()
+else()
+    set(OB_GIT_SHA_VAR "unknown")
+endif()
+string(TIMESTAMP OB_BUILD_TIME_VAR "%Y-%m-%dT%H:%M:%SZ" UTC)
+add_compile_definitions(
+    OB_GIT_SHA="${OB_GIT_SHA_VAR}"
+    OB_BUILD_TIME="${OB_BUILD_TIME_VAR}"
+)
+message(STATUS "Build metadata: git=${OB_GIT_SHA_VAR}, time=${OB_BUILD_TIME_VAR}")
+
 # Threading support
 find_package(Threads REQUIRED)
 
@@ -66,8 +94,13 @@ add_library(OrderMatcher
     src/AdminServer.cpp
     src/OrderBook.cpp
     src/MatchingEngine.cpp
+    src/SessionScheduler.cpp
+    src/ContingencyManager.cpp
+    src/HierarchicalRiskManager.cpp
+    src/EpochStore.cpp
     src/TcpGateway.cpp
     src/FaultInjector.cpp
+    src/SimulationDriver.cpp
 )
 target_link_libraries(OrderMatcher PUBLIC Threads::Threads)
 if(ENABLE_ASSERTIONS)

@@ -15,7 +15,7 @@
 | Self-trade prevention | Art. 5(1) | `SelfTradeProtection` with 4 modes: CancelResting, CancelIncoming, CancelBoth, DecreaseAndCancel. Per-participant configurable. | [SelfTradeProtection.h](../include/SelfTradeProtection.h) | ✅ Implemented |
 | Throttling mechanisms | Art. 4(2) | Per-participant token bucket rate limiting via `RateLimiter`. Graduated throttle via kill switch Level 1. | [RateLimiter.h](../include/RateLimiter.h), [GraduatedKillSwitch.h](../include/GraduatedKillSwitch.h) | ✅ Implemented |
 | Order-to-trade ratio monitoring | Art. 7 | OTR tracked per participant via `ParticipantStats`. Accessible via `/otr?participantId=X` admin endpoint. | [OrderBook.h](../include/OrderBook.h), [AdminServer.cpp](../src/AdminServer.cpp) | ✅ Implemented |
-| Market making obligations | Art. 8 | `MatchAlgorithm::ProRata` matching for designated contracts. | [OrderBook.h](../include/OrderBook.h) | ✅ Implemented |
+| Market making obligations | Art. 8 | `MatchAlgorithm::ProRata` matching for designated contracts. `ParticipantRole` enum (`Regular`/`LMM`/`DMM`) with 40% floor allocation guarantee and rounding-remainder priority for market makers. | [OrderBook.h](../include/OrderBook.h) | ✅ Implemented |
 
 ### MiFID II — RTS 7 (Direct Electronic Access)
 
@@ -49,6 +49,13 @@
 | Circuit breakers | Exchange rules | Per-symbol circuit breaker with configurable threshold (default 5%). Triggers `TradingState::Halted`. | [OrderBook.h](../include/OrderBook.h) | ✅ Implemented |
 | Price bands | Exchange rules | `priceBandPct_` admission filter rejects individual orders outside [ref±X%]. | [OrderBook.h](../include/OrderBook.h) | ✅ Implemented |
 
+### On-Close Order Types
+
+| Feature | Standard | Implementation | File | Status |
+|---------|----------|---------------|------|--------|
+| Market-on-Close (MOC) | Exchange rules | MOC orders park in `onCloseOrders_` during Continuous/PreOpen/AuctionOpen; released to auction market orders at `AuctionClose`; fill at uncross clearing price | [OrderBook.h](../include/OrderBook.h) | ✅ Implemented |
+| Limit-on-Close (LOC) | Exchange rules | LOC orders park until `AuctionClose`; admitted to limit book; unfilled remainder cancelled via `cancelLocOrders()` after uncross completes | [OrderBook.h](../include/OrderBook.h) | ✅ Implemented |
+
 ### Market Integrity
 
 | Feature | Regulation | Implementation | File | Status |
@@ -56,6 +63,7 @@
 | Wash trade detection | Dodd-Frank § 747 | `WashTradeDetector` with 256-bit beneficial owner bitsets. O(1) intersection check. Configurable action (flag/reject). | [WashTradeDetector.h](../include/WashTradeDetector.h) | ✅ Implemented |
 | Audit trail | SEC 17a-25 | Full journal with ns timestamps, crash recovery replay, checkpoint/snapshot. | [Journal.h](../include/Journal.h) | ✅ Implemented |
 | Market data integrity | Reg NMS | Shared-memory market data feed with sequence numbers, gap detection, versioned schema. | [MarketDataPublisher.h](../include/MarketDataPublisher.h) | ✅ Implemented |
+| Maker-Taker Fee Calculation | Dodd-Frank / exchange rules | `FeeEngine` calculates maker-taker rebates on every fill event | [FeeEngine.h](../include/FeeEngine.h) | ✅ Implemented |
 
 ## Observability Infrastructure
 
@@ -70,6 +78,8 @@
 
 ## Formal Verification
 
+12 TLA+ specifications cover the core safety and liveness properties of the engine.
+
 | Component | Spec File | Invariants Verified |
 |-----------|-----------|-------------------|
 | MPSC Queue | `spec/MpscQueue.tla` | Linearizability, No data loss |
@@ -77,8 +87,13 @@
 | Snapshot Consistency | `spec/Snapshot.tla` | No torn reads |
 | Matching Engine | `spec/MatchingEngine.tla` | FIFO preservation, Quantity conservation, No negative qty, GTD expiry |
 | Replication Protocol | `spec/Replication.tla` | No committed loss, No duplicate execution, No split-brain |
+| Auction Protocol | `spec/Auction.tla` | Uncross price validity, admission rules |
+| OCO Atomicity | `spec/Oco.tla` | No double-fill on OCO pairs |
+| Risk Hierarchy | `spec/Risk.tla` | Hierarchical limit enforcement |
+| FIX Session | `spec/FixSession.tla` | Session sequence safety |
+| Epoch Durability | `spec/EpochDurability.tla` | Epoch entry durability |
 
 ## Audit Contact
 
 For questions about this compliance matrix, contact the engineering team.
-Document last updated: 2026-05-12.
+Document last updated: 2026-05-28.

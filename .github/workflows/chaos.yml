@@ -1,0 +1,81 @@
+name: Chaos
+
+# Chaos suite — multi-container replication failure-injection.
+# Initially WARN-ONLY (continue-on-error) so a flaky first scenario
+# doesn't block PRs while we stabilize. Flip continue-on-error to
+# false once the suite has been green for ~2 weeks of nightlies.
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/chaos/**'
+      - 'src/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - 'Dockerfile'
+      - '.github/workflows/chaos.yml'
+  schedule:
+    # Nightly so we catch regressions without gating every PR.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  chaos:
+    name: Chaos suite (warn-only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install harness deps
+        run: pip install -r deploy/chaos/requirements.txt
+
+      - name: Build cluster
+        run: docker compose -f deploy/chaos/docker-compose.chaos.yml build
+
+      - name: Bring cluster up
+        run: docker compose -f deploy/chaos/docker-compose.chaos.yml up -d
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            primary=$(curl -sf http://localhost:18080/health || true)
+            backup=$(curl -sf http://localhost:18081/health || true)
+            if [ -n "$primary" ] && [ -n "$backup" ]; then
+              echo "both nodes healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "cluster failed to become healthy"
+          docker compose -f deploy/chaos/docker-compose.chaos.yml logs
+          exit 1
+
+      - name: Run chaos scenarios
+        run: pytest deploy/chaos/ -v -s --junitxml=chaos-results.xml
+
+      - name: Upload container logs on failure
+        if: failure()
+        run: |
+          mkdir -p chaos-logs
+          docker compose -f deploy/chaos/docker-compose.chaos.yml logs --no-color > chaos-logs/compose.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-results
+          path: |
+            chaos-results.xml
+            chaos-logs/
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/chaos/docker-compose.chaos.yml down -v

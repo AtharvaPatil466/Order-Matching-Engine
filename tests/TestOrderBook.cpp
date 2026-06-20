@@ -133,9 +133,9 @@ TEST_F(OrderBookTest, CircuitBreaker_ConfigurableThreshold) {
     book.addOrder(2, 2, Side::Sell, 1015000, 100, OrderType::Limit);
     EXPECT_FALSE(book.isHalted());
 
-    // 3% move should trigger halt
+    // 3% move trips the breaker → volatility auction (not a hard halt)
     book.addOrder(3, 3, Side::Sell, 1030000, 100, OrderType::Limit);
-    EXPECT_TRUE(book.isHalted());
+    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
 }
 
 TEST_F(OrderBookTest, CircuitBreaker_DefaultThreshold) {
@@ -224,11 +224,12 @@ TEST_F(OrderBookTest, TradingState_AuctionRejectsIOCAndFOK) {
               RejectReason::OrderTypeNotAllowedInState);
 }
 
-TEST_F(OrderBookTest, TradingState_CircuitBreakerSetsHaltedState) {
-    // The order that trips the breaker reports VolatilityCircuitBreaker;
-    // subsequent orders see the resulting Halted state and report
-    // MarketHalted. This distinguishes "you tripped the breaker" from
-    // "the market is currently halted because someone earlier tripped it".
+TEST_F(OrderBookTest, TradingState_CircuitBreakerEntersVolatilityAuction) {
+    // The order that trips the breaker reports VolatilityCircuitBreaker and
+    // the book enters a volatility auction rather than a hard halt. Unlike a
+    // halt, the auction ACCUMULATES subsequent orders (no continuous match)
+    // until a reopening cross — so a post-trip limit order is admitted, not
+    // rejected with MarketHalted.
     book.setCircuitBreakerThreshold(0.02);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
@@ -236,12 +237,12 @@ TEST_F(OrderBookTest, TradingState_CircuitBreakerSetsHaltedState) {
     ASSERT_TRUE(std::holds_alternative<RejectReason>(trip));
     EXPECT_EQ(std::get<RejectReason>(trip),
               RejectReason::VolatilityCircuitBreaker);
-    EXPECT_EQ(book.getTradingState(), TradingState::Halted);
+    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
 
     auto post = book.addOrder(3, 3, Side::Buy, 1000000, 50, OrderType::Limit);
-    ASSERT_TRUE(std::holds_alternative<RejectReason>(post));
-    EXPECT_EQ(std::get<RejectReason>(post), RejectReason::MarketHalted)
-        << "post-halt orders should see MarketHalted, not the trip reason";
+    ASSERT_TRUE(std::holds_alternative<OrderId>(post))
+        << "post-trip orders accumulate into the volatility auction, not rejected";
+    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
 }
 
 // ─── Market orders in auction states ────────────────────────────────────────
@@ -963,8 +964,8 @@ TEST_F(OrderBookTest, Iceberg_RefreshExhaustsHiddenQty) {
 TEST_F(OrderBookTest, CircuitBreaker_RecoveryAfterReset) {
     book.setCircuitBreakerThreshold(0.02);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
-    book.addOrder(2, 2, Side::Sell, 1030000, 100, OrderType::Limit); // triggers halt
-    EXPECT_TRUE(book.isHalted());
+    book.addOrder(2, 2, Side::Sell, 1030000, 100, OrderType::Limit); // trips breaker
+    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
 
     // Reset and resume
     book.resetStatus();

@@ -111,11 +111,21 @@ inline StructuredSink*& obSinkPtr() {
 
 inline StructuredSink& obSink() { return *obSinkPtr(); }
 
+// True only when a real sink is installed (not the default NullSink). Hot
+// paths guard event construction on this: a LogEvent owns a
+// std::vector<pair<string,string>> and each .kv() heap-allocates, so building
+// one per accepted order / per fill only to drop it in the NullSink would
+// dominate matching latency (measured ~5-8x). With no sink attached the event
+// is never built.
+inline bool& obSinkActiveFlag() { static bool active = false; return active; }
+inline bool obSinkActive() { return obSinkActiveFlag(); }
+
 // Install a sink. Caller retains ownership; pass nullptr to revert to
 // the default NullSink.
 inline void setObSink(StructuredSink* s) {
     static NullSink fallback;
     obSinkPtr() = s ? s : &fallback;
+    obSinkActiveFlag() = (s != nullptr);
 }
 
 // Convenience constructor — `obEvent("name").kv("key","val") ...`. The

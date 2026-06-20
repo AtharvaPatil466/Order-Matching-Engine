@@ -420,7 +420,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         participantOrders_[participantId].push_back(orderId);
 #endif
         notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
-        obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
+        if (obSinkActive()) obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
 
         if (tradingState_ == TradingState::AuctionClose) {
             if (type == OrderType::MOC) {
@@ -486,7 +486,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 #endif
 
     notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
-    obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
+    if (obSinkActive()) obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
 
     // --- Auction Market orders: park for the uncross ---
     // A Market order in an auction state has no limit price; it cannot
@@ -740,7 +740,7 @@ void OrderBook::match(Order* incoming) {
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
-        obSink().log(logTradeFill(
+        if (obSinkActive()) obSink().log(logTradeFill(
             isBuy ? incoming->id : bookOrder->id,
             isBuy ? bookOrder->id : incoming->id,
             symbolId_, bestPrice, fillQty));

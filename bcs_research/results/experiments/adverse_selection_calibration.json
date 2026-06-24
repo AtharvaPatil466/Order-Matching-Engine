@@ -1,0 +1,142 @@
+{
+  "config": {
+    "base_half_spread": 50,
+    "dt_us": 1000,
+    "duration_us": 2000000,
+    "hft_latency_us": 0,
+    "hft_qty": 50,
+    "hft_race_noise_us": 100,
+    "lambda_per_tick": 0.15,
+    "mm_inventory_skew": 0.2,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "n_noise": 8,
+    "noise_qty": 10,
+    "quote_qty": 50,
+    "sigma": 20.0,
+    "spread_cap_mult": 10.0
+  },
+  "grid": [
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.005944212908529423,
+      "hft_pnl": -2.1239999999999783,
+      "spread_decay": 0.02,
+      "spread_mult_HFT": 9.119237807107444,
+      "spread_mult_noHFT": 9.113293594198915
+    },
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.060801204068347214,
+      "hft_pnl": 2.148199999999906,
+      "spread_decay": 0.05,
+      "spread_mult_HFT": 2.48635467154411,
+      "spread_mult_noHFT": 2.425553467475763
+    },
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.049100258106620664,
+      "hft_pnl": 14.255200000003788,
+      "spread_decay": 0.1,
+      "spread_mult_HFT": 1.4327468803445869,
+      "spread_mult_noHFT": 1.3836466222379662
+    },
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.02370599796895556,
+      "hft_pnl": 20.648800000010738,
+      "spread_decay": 0.2,
+      "spread_mult_HFT": 1.164959962081457,
+      "spread_mult_noHFT": 1.1412539641125015
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": -0.00022834251377013004,
+      "hft_pnl": -2.0106000000000677,
+      "spread_decay": 0.02,
+      "spread_mult_HFT": 9.43573801835017,
+      "spread_mult_noHFT": 9.43596636086394
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.009557376734912637,
+      "hft_pnl": -2.2493999999999685,
+      "spread_decay": 0.05,
+      "spread_mult_HFT": 8.485646819516319,
+      "spread_mult_noHFT": 8.476089442781406
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.051070099949679815,
+      "hft_pnl": -3.5777999999984105,
+      "spread_decay": 0.1,
+      "spread_mult_HFT": 2.424837398191632,
+      "spread_mult_noHFT": 2.373767298241952
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.05082745160567881,
+      "hft_pnl": 9.608999999995422,
+      "spread_decay": 0.2,
+      "spread_mult_HFT": 1.3888583406245778,
+      "spread_mult_noHFT": 1.338030889018899
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": -0.0012949424136206034,
+      "hft_pnl": -0.8911999999999353,
+      "spread_decay": 0.02,
+      "spread_mult_HFT": 9.532594378040006,
+      "spread_mult_noHFT": 9.533889320453627
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.0011397095643488342,
+      "hft_pnl": -0.9359999999999673,
+      "spread_decay": 0.05,
+      "spread_mult_HFT": 8.98790446441205,
+      "spread_mult_noHFT": 8.986764754847702
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.007007511266899691,
+      "hft_pnl": 0.5683999999997468,
+      "spread_decay": 0.1,
+      "spread_mult_HFT": 7.563527224203038,
+      "spread_mult_noHFT": 7.556519712936138
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.08802190561543011,
+      "hft_pnl": 1.4503999999999906,
+      "spread_decay": 0.2,
+      "spread_mult_HFT": 2.2875750544769993,
+      "spread_mult_noHFT": 2.199553148861569
+    }
+  ],
+  "n_seeds": 5
+}

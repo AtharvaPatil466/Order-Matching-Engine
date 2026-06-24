@@ -1,0 +1,63 @@
+{
+  "baseline": {
+    "hft_fills": 0.0,
+    "hft_rent": 0.0,
+    "hft_rent_per_sec": 0.0,
+    "hft_snipes": 0.0,
+    "kyle_lambda": 0.1535433195079137,
+    "liquidity_gaps": 3.2,
+    "mm_max_half_spread": 111.00079923651984,
+    "mm_min_qty": 24.2,
+    "mm_pnl": 121.74648999998536,
+    "n_trades": 1840.1,
+    "nt_pnl": -121.74648999999677,
+    "spread_ticks": 117.79350730691104,
+    "zero_sum_residual": -1.1402789823478087e-11
+  },
+  "config": {
+    "adverse_sensitivity": 0.1,
+    "base_half_spread": 50,
+    "dt_us": 1000,
+    "duration_us": 3000000,
+    "hft_cost_bps": 0.0,
+    "hft_latency_us": 0,
+    "hft_qty": 50,
+    "hft_race_noise_us": 100,
+    "lambda_per_tick": 0.15,
+    "min_quote_qty": 1,
+    "mm_inventory_skew": 0.2,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "n_noise": 8,
+    "noise_qty": 10,
+    "quote_qty": 50,
+    "sigma": 20.0,
+    "spread_cap_mult": 10.0,
+    "spread_decay": 0.1
+  },
+  "n_seeds": 10,
+  "treatment": {
+    "hft_fills": 254.5,
+    "hft_rent": 48.83134000000312,
+    "hft_rent_per_sec": 16.277113333334373,
+    "hft_snipes": 2633.7,
+    "kyle_lambda": 1.3646581288967505,
+    "liquidity_gaps": 10.8,
+    "mm_max_half_spread": 104.45259795257228,
+    "mm_min_qty": 25.3,
+    "mm_pnl": 77.10120000000146,
+    "n_trades": 2106.6,
+    "nt_pnl": -125.93253999999874,
+    "spread_ticks": 117.09851730491032,
+    "zero_sum_residual": 5.820766091346741e-12
+  },
+  "welfare_delta": {
+    "hft_pnl": 48.83134000000312,
+    "hft_rent": 48.83134000000312,
+    "hft_rent_per_sec": 16.277113333334373,
+    "mm_pnl": -44.6452899999839,
+    "mm_pnl_per_sec": 0.0,
+    "noise_trader_loss": 4.18605000000197,
+    "noise_trader_pnl": -4.18605000000197
+  }
+}

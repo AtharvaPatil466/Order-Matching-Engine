@@ -8,6 +8,7 @@
 # Install into the project venv:  bcs_research/.venv/bin/pip install -r bcs_research/requirements.txt
 
 numpy==2.5.0
+scipy==1.18.0
 matplotlib==3.11.0
 pybind11==3.0.4
 

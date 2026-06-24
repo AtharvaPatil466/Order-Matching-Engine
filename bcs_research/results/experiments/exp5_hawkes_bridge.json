@@ -1,0 +1,79 @@
+{
+  "config": {
+    "duration_ticks": 50000,
+    "lead_ticks": 500,
+    "n_sims": 5,
+    "operating_point": {
+      "adverse_sensitivity": 0.1,
+      "mm_latency_us": 3000,
+      "n_hft": 3,
+      "sigma": 20.0,
+      "spread_decay": 0.1
+    },
+    "stride_trades": 100,
+    "window_trades": 500,
+    "with_hft": true
+  },
+  "mann_whitney": {
+    "U": 216647.0,
+    "n_normal": 303,
+    "n_pre": 1371,
+    "normal_mean": 0.0030092704760718305,
+    "p_value": 0.12019069273064698,
+    "pre_mean": 0.003884016862052488,
+    "rank_biserial": 0.04304391051796652
+  },
+  "per_sim": [
+    {
+      "n_gaps": 165,
+      "n_normal": 75,
+      "n_pre": 263,
+      "n_trades": 34902,
+      "n_windows": 338,
+      "normal_mean": 0.0061775888228030994,
+      "pre_mean": 0.004183059813519312,
+      "seed": 1
+    },
+    {
+      "n_gaps": 181,
+      "n_normal": 48,
+      "n_pre": 284,
+      "n_trades": 34869,
+      "n_windows": 332,
+      "normal_mean": 0.0012715889742064186,
+      "pre_mean": 0.0022944672925113976,
+      "seed": 2
+    },
+    {
+      "n_gaps": 178,
+      "n_normal": 67,
+      "n_pre": 271,
+      "n_trades": 35019,
+      "n_windows": 338,
+      "normal_mean": 0.002737816157185664,
+      "pre_mean": 0.0038592826057309623,
+      "seed": 3
+    },
+    {
+      "n_gaps": 169,
+      "n_normal": 63,
+      "n_pre": 270,
+      "n_trades": 35000,
+      "n_windows": 333,
+      "normal_mean": 0.0032023738935630184,
+      "pre_mean": 0.006996090621132209,
+      "seed": 4
+    },
+    {
+      "n_gaps": 172,
+      "n_normal": 50,
+      "n_pre": 283,
+      "n_trades": 35031,
+      "n_windows": 333,
+      "normal_mean": 4.54056790342893e-05,
+      "pre_mean": 0.0022558431872309478,
+      "seed": 5
+    }
+  ],
+  "total_gap_events": 865
+}

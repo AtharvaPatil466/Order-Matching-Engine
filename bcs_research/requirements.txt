@@ -1,0 +1,15 @@
+# BCS research — Python-side dependencies (pinned for reproducibility).
+#
+# The formally-verified C++ matching engine is built separately via
+# build_bridge.py using pybind11; these are the packages the Python agents,
+# experiments, metrics, and figures depend on. Transitive dependencies (e.g.
+# matplotlib's contourpy/pillow/fonttools) are resolved by pip automatically.
+#
+# Install into the project venv:  bcs_research/.venv/bin/pip install -r bcs_research/requirements.txt
+
+numpy==2.5.0
+matplotlib==3.11.0
+pybind11==3.0.4
+
+# Testing
+pytest==9.1.1

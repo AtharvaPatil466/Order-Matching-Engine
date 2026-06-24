@@ -17,7 +17,7 @@ def _two_sided(s):
     return s["best_bid"] > 0 and s["best_ask"] > 0
 
 
-def compute_metrics(result, mm_id, nt_ids):
+def compute_metrics(result, mm_id, nt_ids, kyle_horizon_ticks=5):
     snaps = result.snapshots
     duration_s = result.duration_us / 1_000_000.0
 
@@ -61,18 +61,23 @@ def compute_metrics(result, mm_id, nt_ids):
         if sgn != 0:
             last = sgn
 
-    dmid, sv = [], []
-    prev = None
-    for s in snaps:
-        if s["mid"] > 0:
-            if prev is not None:
-                dmid.append(s["mid"] - prev)
-                sv.append(s["signed_volume"])
-            prev = s["mid"]
+    # Kyle's lambda — LAGGED price impact (Hasbrouck-style): regress the
+    # forward-window mid change mid[t+k] - mid[t] on signed flow at t. The
+    # forward window (not the contemporaneous tick) is what makes this
+    # referee-defensible here: a latency-disadvantaged market maker quotes
+    # stale, so a same-tick regression scores its delayed catch-up requote as
+    # NEGATIVE impact. Measuring the move over the next k ticks instead
+    # captures that catch-up as the POSITIVE permanent impact it actually is.
+    k = max(1, int(kyle_horizon_ticks))
+    ts = [(s["mid"], s["signed_volume"]) for s in snaps if s["mid"] > 0]
+    xs, ys = [], []
+    for i in range(len(ts) - k):
+        xs.append(ts[i][1])
+        ys.append(ts[i + k][0] - ts[i][0])
     lam = r2 = 0.0
-    if len(sv) >= 3 and np.std(sv) > 0:
-        x = np.asarray(sv, float)
-        y = np.asarray(dmid, float)
+    if len(xs) >= 3 and np.std(xs) > 0:
+        x = np.asarray(xs, float)
+        y = np.asarray(ys, float)
         lam = float(np.polyfit(x, y, 1)[0])
         corr = np.corrcoef(x, y)[0, 1]
         r2 = float(corr * corr) if not np.isnan(corr) else 0.0
@@ -98,5 +103,6 @@ def compute_metrics(result, mm_id, nt_ids):
         "reversals_per_sec": reversals / duration_s if duration_s else 0.0,
         "kyle_lambda": lam,
         "kyle_lambda_r2": r2,
+        "kyle_lambda_horizon_ticks": k,
         "endogenous_crashes": 0,
     }

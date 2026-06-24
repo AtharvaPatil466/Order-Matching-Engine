@@ -76,10 +76,23 @@ def test_price_reversals():
     assert m["price_reversals"] == 2
 
 
-def test_kyle_lambda_perfectly_linear():
-    m = compute_metrics(_make_result(), MM_ID, NT_IDS)
+def _make_kyle_result():
+    # Lagged construction: forward 1-tick mid change equals the signed flow at
+    # the START tick, so the k=1 regression slope is exactly 1.
+    # sv=[10,-10,20,0]; mids cumulate sv: each mid[i+1]-mid[i] == sv[i].
+    mids = [1_000_000, 1_000_010, 1_000_000, 1_000_020]
+    signed = [10, -10, 20, 0]
+    snaps = [_snapshot(i * DT_US, mid, sv)
+             for i, (mid, sv) in enumerate(zip(mids, signed))]
+    agents = [StubAgent(MM_ID, 0, 0.0)]
+    return SimResult(snaps, [], agents, DURATION_US, DT_US)
+
+
+def test_kyle_lambda_lagged_perfectly_linear():
+    m = compute_metrics(_make_kyle_result(), MM_ID, NT_IDS, kyle_horizon_ticks=1)
     assert m["kyle_lambda"] == pytest.approx(1.0)
     assert m["kyle_lambda_r2"] == pytest.approx(1.0)
+    assert m["kyle_lambda_horizon_ticks"] == 1
 
 
 def test_pnl_aggregation():

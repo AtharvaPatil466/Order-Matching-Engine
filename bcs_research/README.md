@@ -45,11 +45,13 @@ bcs_research/
     CMakeLists.txt
   agents/          fundamental value, HFT, adverse-selection MM (Phase 2)
   simulation/      latency scheduler + harness (Phase 2)
-  metrics/         market-quality, welfare, flash-crash detection (Phase 3)
-  experiments/     exp1..exp4 parameter sweeps (Phase 4)
-  analysis/        Hawkes bridge, phase transition, plots (Phase 5)
+  metrics/         market-quality, welfare, flash-crash detection, bootstrap (Phase 3)
+  experiments/     exp1..exp4 sweeps + exp1 hardening (Phase 4)
+  hawkes/          vendored univariate-MLE Hawkes calibrator (Phase 5)
+  analysis/        Hawkes bridge, phase transition, figures (Phase 5)
+  paper/           paper draft (markdown + PDF)
   tests/           pytest suite
-  results/         baseline + experiment outputs
+  results/         baseline + experiment outputs (JSON) + figures (PNG)
 ```
 
 ## Build & run
@@ -65,12 +67,43 @@ bcs_research/.venv/bin/python bcs_research/build_bridge.py
 bcs_research/.venv/bin/python -m pytest bcs_research/tests -q
 ```
 
+## Results (summary)
+
+Full writeup with figures, tables, and 95% bootstrap CIs in
+[`paper/bcs_paper_draft.md`](paper/bcs_paper_draft.md) (PDF alongside). Headlines,
+stated with their honest nuance:
+
+- **Exp 1 — welfare transfer.** With HFTs present, HFT rent of $45.59 [25.65,
+  70.04] is a near-exact zero-sum transfer from the market maker (the zero-sum
+  residual closes to machine zero through the verified engine); liquidity gaps
+  rise from 3.45 to 10.40 (non-overlapping CIs). Holds across all nine cells of
+  a 3x3 sensitivity x decay calibration.
+- **Exp 2 — latency scaling.** Rent rises ~linearly at ~$10.80 per tick of MM
+  staleness; a phase transition is *not* supported (dBIC favors the linear fit).
+- **Exp 3 — HFT competition.** Per-HFT rent dissipates as ~1/k while *total*
+  rent stays flat (~$45.5); the marginal social cost surfaces as rising
+  fragility (liquidity gaps ~14x by 21 HFTs), not rising rent.
+- **Exp 4 — batch auctions.** Market-maker welfare recovers monotonically away
+  from the degenerate single-tick interval (~95% recovered by interval 500);
+  the parallel HFT-rent reduction is suggestive but noisy (wide CIs).
+- **Exp 5 — Hawkes bridge (preliminary).** Pilot is directionally consistent
+  but not significant; treated as scaffolding pending the full run.
+
 ## Status
 
 - [x] **Foundation:** pybind11 bridge driving the real engine; Python->C++
       round-trip proven (`tests/test_engine_roundtrip.py`).
-- [ ] Phase 1: baseline metrics on the existing agents.
-- [ ] Phase 2: fundamental value, HFT agent, adverse-selection MM, scheduler.
-- [ ] Phase 3: metrics + flash-crash detector.
-- [ ] Phase 4: experiments 1-4.
-- [ ] Phase 5: Hawkes bridge.
+- [x] Phase 1: baseline metrics on the existing agents.
+- [x] Phase 2: fundamental value, HFT agent, adverse-selection MM, scheduler.
+- [x] Phase 3: metrics (welfare decomposition, lagged Kyle's lambda,
+      liquidity-gap + flash-crash detectors, bootstrap CIs).
+- [x] Phase 4: experiments 1-4 + Exp 1 hardening (n=20 CIs, 3x3 calibration
+      robustness, baseline-gap characterization).
+- [~] Phase 5: Hawkes bridge — vendored univariate-MLE calibrator + 5-sim pilot
+      (preliminary, not significant); full 50-sim run + real-data leg pending
+      AlphaForge Phase 1.
+- [x] Writeup: full paper draft (`paper/bcs_paper_draft.md`, + PDF) — Abstract
+      through Conclusion.
+
+126 pytest tests green across 17 test files (`bcs_research/.venv/bin/python -m
+pytest bcs_research/tests -q`).

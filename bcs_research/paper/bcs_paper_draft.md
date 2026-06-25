@@ -1,5 +1,13 @@
 # Experimental Evidence for the HFT Arms Race: Welfare Decomposition and Market Fragility on a Formally Verified Limit Order Book
 
+<div align="center">
+
+**Atharva Patil**
+
+Xavier Institute of Engineering
+
+</div>
+
 ## Abstract
 
 We provide an experimental test of the Budish–Cramton–Shim (BCS) theory of the high-frequency trading (HFT) arms race, conducted on a continuous limit order book whose matching core has been model-checked in TLA+ with zero invariant violations. Driving latency-differentiated snipers, an adverse-selection market maker, and noise traders through the verified engine via a pybind11 bridge, we decompose realized welfare into market-maker, noise-trader, and HFT components and find that HFT latency-arbitrage rent is a near-exact zero-sum transfer (residual at machine precision, mean $1.6\times10^{-13}$) away from liquidity providers, accompanied by significantly more liquidity gaps. We then trace the mechanism across three further sweeps: rent scales approximately linearly in market-maker staleness with no detectable phase transition; as the number of HFTs grows, per-HFT rent dissipates as roughly $1/k$ while total extracted rent stays flat, so the marginal social cost of additional speed competition surfaces as rising fragility rather than rising rent; and frequent batch auctions recover market-maker welfare monotonically away from the degenerate single-tick interval (about 95% recovery by an interval of 500), with point estimates of rent also falling though more noisily. Because the matching layer is provably correct against its specification, the emergent arms-race dynamics cannot be attributed to engine artifacts, isolating them as consequences of rational latency competition on the continuous-clearing design itself.

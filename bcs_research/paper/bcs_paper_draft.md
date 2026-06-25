@@ -162,9 +162,156 @@ Around this operating point we run four one-dimensional sweeps, each isolating o
 
 Each sweep varies one parameter and holds the rest at the operating point, so that any change in the outcome metrics is attributable to that single axis. We note that the no-HFT baseline liquidity-gap figure is reported per experiment from its own matched run: the matched n=20 baseline used for the Experiment 1 headline comparison is 3.45 gaps (95% CI [2.35, 4.70]), the same value that anchors the Experiment 3 fragility ratio; an n=100 baseline estimate of 2.84 gaps exists in the broader baseline-metrics record and differs only because of sample size, not condition.
 
-## 4. Results (forthcoming)
+## 4. Results
 
-This section will report the four experiments already run: the primary welfare-transfer result with the machine-precision zero-sum residual and the 3×3 calibration robustness check (Exp 1), the latency-scaling sweep and its linear-versus-segmented model comparison (Exp 2), the HFT-count sweep decomposing per-HFT rent, flat total rent, and rising fragility (Exp 3), and the batch-auction frequency sweep with MM-welfare recovery (Exp 4).
+We report four completed experiments and one preliminary pilot, all run through the same formally verified matching engine: continuous-market welfare decomposition (4.1), latency-advantage scaling (4.2), the HFT competition arms race (4.3), and batch auctions as a remedy (4.4), followed by a preliminary Hawkes-bridge pilot (4.5). The cross-cutting validation throughout is the zero-sum conservation residual, which closes to machine precision on every run, so that each welfare decomposition is an audited accounting identity rather than a modelling assumption.
+
+### 4.1 Experiment 1: Welfare decomposition and the zero-sum conservation check
+
+We begin by establishing that the welfare accounting in our setting is an audited identity rather than a modelling assumption. By construction, every unit of profit-and-loss in the formally verified matching engine accrues to one of three agent classes — high-frequency traders (HFT), market makers (MM), or noise traders (NT) — so the sum of realised PnL across classes must equal zero on every run. We measure the empirical conservation residual across 20 seeds at the operating point ($n_{\text{hft}}=3$, adverse sensitivity $0.1$, spread decay $0.1$, MM latency $3000\,\mu s$). In the treatment economy the residual closes to machine zero, 1.6e-13 [-1.43e-11, 1.46e-11], and the matched no-HFT baseline behaves identically, -2.05e-12 [-3.31e-11, 3.07e-11]. Because the residual is indistinguishable from floating-point noise in both arms, the decomposition of welfare into HFT rent, MM loss, and NT loss is a verified accounting identity, and the rent magnitudes reported below are not subject to unmodelled leakage.
+
+Within this conserved frame, HFT entry extracts a positive rent of 45.59 [25.65, 70.04] per run. The transfer is borne almost entirely by market makers: MM PnL changes by -42.02 [-67.41, -22.28] relative to the matched baseline (from 116.98 [99.19, 139.39] to 74.96 [70.43, 79.10]), while the noise-trader class is essentially unaffected, with an NT PnL delta of -3.57 [-7.25, 0.70] whose interval straddles zero. The welfare transfer is therefore inframarginal to liquidity demanders and concentrated on liquidity suppliers, consistent with HFT rent arising from picking off stale market-maker quotes rather than from worsened execution for uninformed flow.
+
+The microstructure correlates of this transfer are pronounced. Liquidity gaps roughly triple under HFT entry, 10.4 [9.15, 11.85] in treatment against 3.45 [2.35, 4.70] in the matched no-HFT baseline, a delta of 6.95 [5.05, 8.85]. Lagged Kyle's $\lambda$, our measure of price impact per unit signed flow, rises by roughly an order of magnitude, from 0.180 [0.149, 0.212] to 1.375 [1.352, 1.396]. Table 1 collects these estimates.
+
+**Table 1.** Experiment 1 welfare and microstructure estimates at the operating point ($n=20$ seeds; point estimate with 95% bootstrap CI).
+
+| Quantity | Treatment | No-HFT baseline | Treatment − baseline |
+|---|---|---|---|
+| HFT rent | 45.59 [25.65, 70.04] | — | — |
+| MM PnL | 74.96 [70.43, 79.10] | 116.98 [99.19, 139.39] | -42.02 [-67.41, -22.28] |
+| NT PnL | -120.55 [-142.60, -101.68] | -116.98 [-139.39, -99.19] | -3.57 [-7.25, 0.70] |
+| Zero-sum residual | 1.6e-13 [-1.43e-11, 1.46e-11] | -2.05e-12 [-3.31e-11, 3.07e-11] | — |
+| Liquidity gaps | 10.4 [9.15, 11.85] | 3.45 [2.35, 4.70] | 6.95 [5.05, 8.85] |
+| Lagged Kyle's $\lambda$ | 1.375 [1.352, 1.396] | 0.180 [0.149, 0.212] | — |
+
+We stress-test the rent result against the two parameters that most directly govern the adverse-selection channel, sweeping adverse sensitivity and spread decay over the grid {0.05, 0.1, 0.2} × {0.05, 0.1, 0.2} with $n=20$ seeds per cell. HFT rent is significantly greater than zero in all nine cells, and the zero-sum identity holds in all nine, with point estimates of the rent ranging from 24.35 to 61.03. The rent is thus a robust feature of the calibration rather than an artefact of a single operating point.
+
+Two points of nuance should be stated plainly rather than relegated to caveats. First, the no-HFT baseline is mildly fragile: liquidity gaps in that arm are not exactly zero (3.45 [2.35, 4.70]), reflecting residual quote churn even absent HFT participation, so the baseline does not represent a frictionless market. We nonetheless interpret the treatment-versus-baseline contrast as informative because the gap CIs are non-overlapping (treatment 10.4 [9.15, 11.85] versus baseline 3.45 [2.35, 4.70]). Second, the NT PnL delta interval includes zero, so we do not claim that HFT entry measurably harms noise traders; the welfare story of Experiment 1 is a market-maker-to-HFT transfer occurring under a conserved, machine-zero accounting identity, accompanied by a sharp deterioration in measured liquidity.
+
+### 4.2 Experiment 2: Latency-advantage scaling
+
+Experiment 2 isolates the dependence of high-frequency-trader (HFT) rent extraction on the magnitude of the market-maker's (MM) quote staleness, holding HFT latency fixed at 0 us. The design question is whether the relationship exhibits a *phase transition*—a critical staleness threshold beyond which rent extraction accelerates discontinuously—or whether rent simply scales smoothly with the latency advantage. The result is an honest negative on the phase-transition hypothesis: HFT rent rises approximately linearly in MM staleness, with no detectable knee. We report this negative as a substantive finding, not a caveat.
+
+We sweep MM staleness over an eight-point grid, tick-aligned at the matching-engine resolution dt_us = 1000, so that latency resolves only at integer multiples of one tick: [0, 1, 2, 3, 5, 8, 13, 20] ticks, equivalently [0, 1000, 2000, 3000, 5000, 8000, 13000, 20000] us. Each grid cell is run over 20 seeds, yielding n = 160 fitted observations. The tick-aligned grid is deliberate: because the engine timestamps events at dt_us granularity, sub-tick latency offsets are not realizable, and a continuous staleness axis would misrepresent the resolution at which the advantage actually materializes.
+
+Figure 2a plots HFT rent against MM staleness with the linear-fit overlay and the significance threshold annotated.
+
+![Figure 2a: HFT rent versus MM staleness with linear-fit overlay and significance threshold](../results/figures/fig2a_hft_rent.png)
+
+The linear fit gives a slope of $10.804 per tick of MM staleness on an intercept of $12.909. Formal model comparison favours the linear specification over a segmented (knee) alternative: ΔBIC (linear minus segmented) = −7.859, a negative value indicating preference for the linear model, with the overall verdict recorded as `linear_scaling`. The segmented fit, although estimable, is not supported by the data and we report its parameters only for completeness: a knee at 11285.7 us (≈11.3 ticks), a pre-knee slope of $12.861 per tick, and a post-knee slope of $7.527 per tick. Crucially, the evidence does not prefer segmentation (`prefers_segmented: false`) and the support for a structural break is not strong (`strong_evidence: false`). There is, in short, smooth scaling and no critical threshold.
+
+Rent is not statistically distinguishable from zero at the smallest staleness levels. The per-cell rent estimates (point [lo, hi], 95% bootstrap CI) are:
+
+| MM staleness (ticks) | staleness (us) | HFT rent ($) | HFT fill rate | Liquidity gaps |
+|---|---|---|---|---|
+| 0 | 0 | 8.44 [−4.36, 24.23] | 0.00624 [0.00473, 0.00775] | 0.65 [0.30, 1.00] |
+| 1 | 1000 | 14.40 [−8.02, 42.14] | 0.04265 [0.04082, 0.04445] | 3.25 [2.70, 3.95] |
+| 2 | 2000 | 30.77 [9.99, 55.30] | 0.07561 [0.07351, 0.07766] | 6.55 [5.60, 7.45] |
+| 3 | 3000 | 45.59 [25.65, 70.04] | 0.09628 [0.09501, 0.09755] | 10.40 [9.15, 11.85] |
+| 5 | 5000 | 78.90 [55.10, 107.63] | 0.11552 [0.11407, 0.11681] | 17.95 [15.65, 20.00] |
+| 8 | 8000 | 105.50 [87.35, 126.56] | 0.13003 [0.12856, 0.13140] | 28.90 [26.70, 31.00] |
+| 13 | 13000 | 164.19 [131.33, 206.15] | 0.14181 [0.14045, 0.14309] | 49.30 [45.45, 53.40] |
+| 20 | 20000 | 217.30 [181.33, 260.20] | 0.14765 [0.14582, 0.14945] | 78.10 [73.00, 83.60] |
+
+The rent CIs at 0 ticks (8.44 [−4.36, 24.23]) and 1 tick (14.40 [−8.02, 42.14]) both straddle zero; the interval first clears zero at 2 ticks (30.77 [9.99, 55.30]), so we take 2.0 ticks = 2000 us as the significance threshold at which the latency advantage becomes economically detectable. This is a detectability floor, not a phase boundary: once positive, rent continues to grow at a near-constant marginal rate consistent with the $10.804-per-tick slope, rather than jumping at any subsequent level.
+
+Figure 2b shows the zero-sum welfare decomposition against staleness.
+
+![Figure 2b: Zero-sum welfare decomposition versus MM staleness](../results/figures/fig2b_welfare_decomp.png)
+
+HFT rent is financed by the other participants. Treatment-arm MM PnL declines monotonically from 98.36 [91.02, 106.08] at 0 ticks to −56.31 [−79.55, −35.46] at 20 ticks, crossing into losses by 13 ticks (−9.92 [−20.88, 0.07]); noise-trader PnL deteriorates from −106.80 [−128.42, −89.88] to −160.98 [−185.54, −140.67] over the same range. The decomposition is clean: the zero-sum residual is ~0 across all cells (max |mean| ≈ 2.6 × 10⁻¹¹), confirming that the gains and losses net out to a pure welfare transfer with no leakage. The price-impact channel is consistent with this story—treatment Kyle's λ rises from 0.1695 [0.1422, 0.1984] at 0 ticks, peaks at 1.3750 [1.3516, 1.3962] at 3 ticks, and relaxes to 0.3762 [0.3509, 0.4000] by 20 ticks—indicating that the marginal informativeness of order flow is concentrated at intermediate staleness rather than at the extremes.
+
+Figure 2c reports liquidity gaps alongside the HFT fill rate.
+
+![Figure 2c: Liquidity gaps and HFT fill rate versus MM staleness](../results/figures/fig2c_liquidity_gaps.png)
+
+Both microstructure quality measures degrade smoothly and without inflection. Liquidity gaps widen from 0.65 [0.30, 1.00] at 0 ticks to 78.10 [73.00, 83.60] at 20 ticks, while the HFT fill rate climbs from 0.00624 [0.00473, 0.00775] to 0.14765 [0.14582, 0.14945], saturating gently at the upper end of the grid. Neither series exhibits the abrupt acceleration that a phase transition would predict. Taken together, the rent, welfare, and liquidity evidence all point to the same conclusion: the latency advantage scales continuously and approximately linearly in MM staleness, and the phase-transition hypothesis is not supported by these data.
+
+### 4.3 Experiment 3: HFT competition and the socially wasteful arms race
+
+We next ask how the number of competing high-frequency traders, $k$, shapes the rents they extract and the costs they impose. We sweep $k$ over the grid $\{0, 1, 2, 3, 5, 8, 13, 21\}$ with $n=20$ seeds per cell, holding the market-maker (MM) population and order-flow process fixed. The central finding is a sharp separation between the *private* and *social* consequences of entry: individual HFT profitability collapses as competitors enter, yet the aggregate rent transferred away from liquidity providers does not. The marginal social cost of an additional HFT is therefore not a larger wealth transfer but a more fragile book.
+
+Per-HFT rent falls monotonically and steeply, from \$45.39 [25.66, 69.23] at $k=1$ to \$2.13 [1.18, 3.28] at $k=21$ (Figure 3a). The decline is almost exactly hyperbolic: a one-parameter fit of the form $\text{rent}/\text{HFT} = C/k$ yields $C=45.59$ with $R^2=0.99963$. (Both the $C/k$ form and the constant are estimated from the cell means, not stored simulation outputs.) The same $1/k$ structure appears in execution shares: the per-HFT fill rate falls from 0.2883 [0.2840, 0.2927] at $k=1$ to 0.0139 [0.0136, 0.0141] at $k=21$, and the product $\text{fill rate}\times k$ is statistically flat at roughly 0.289 (derived mean 0.2897, std 0.0009 over $k=1\ldots21$; Figure 3c). Competition thus partitions a fixed pool of exploitable flow into ever-thinner per-agent slices without enlarging the pool itself.
+
+The aggregate confirms this directly. Total extracted rent is flat across the entire grid (Figure 3, Figure 3b): \$45.39 [25.66, 69.23] at $k=1$, \$46.70 [27.22, 70.26] at $k=2$, \$45.59 [25.65, 70.04] at $k=3$, \$43.64 [24.32, 66.78] at $k=5$, \$45.63 [25.01, 70.51] at $k=8$, \$47.21 [26.81, 72.26] at $k=13$, and \$44.65 [24.79, 68.81] at $k=21$ — a derived mean of \$45.54 (std 1.11, range 43.64–47.21). The transfer is cleanly zero-sum: MM PnL is approximately constant near \$75 for all $k\geq1$ and the zero-sum residual is numerically zero ($|\text{mean}|\leq1.2\times10^{-11}$) at every count. We therefore decline to characterize HFT entry as raising total welfare loss; the welfare delta tracks total rent and is flat, not rising.
+
+| $k$ | Per-HFT rent (\$) | Total rent (\$) | Fill rate | Liquidity gaps |
+|---|---|---|---|---|
+| 0 | — | — | — | 3.45 [2.35, 4.70] |
+| 1 | 45.39 [25.66, 69.23] | 45.39 [25.66, 69.23] | 0.2883 [0.2840, 0.2927] | 5.60 [4.75, 6.50] |
+| 2 | 23.35 [13.61, 35.13] | 46.70 [27.22, 70.26] | 0.1448 [0.1430, 0.1466] | 8.05 [6.80, 9.25] |
+| 3 | 15.20 [8.55, 23.35] | 45.59 [25.65, 70.04] | 0.0963 [0.0950, 0.0975] | 10.40 [9.15, 11.85] |
+| 5 | 8.73 [4.86, 13.36] | 43.64 [24.32, 66.78] | 0.0581 [0.0572, 0.0590] | 16.55 [14.85, 18.10] |
+| 8 | 5.70 [3.13, 8.81] | 45.63 [25.01, 70.51] | 0.0363 [0.0358, 0.0368] | 22.55 [20.70, 24.45] |
+| 13 | 3.63 [2.06, 5.56] | 47.21 [26.81, 72.26] | 0.0223 [0.0220, 0.0226] | 33.90 [31.15, 36.65] |
+| 21 | 2.13 [1.18, 3.28] | 44.65 [24.79, 68.81] | 0.0139 [0.0136, 0.0141] | 49.35 [46.25, 52.40] |
+
+Where the marginal cost of entry does appear is in market fragility. The incidence of liquidity gaps rises steadily with $k$, from a baseline of 3.45 [2.35, 4.70] at $k=0$ to 49.35 [46.25, 52.40] at $k=21$ — roughly a 14.3-fold increase (Figure 3b). The growth is well described as linear in $k$ (derived fit: slope $=2.21$, intercept $=4.08$, $R^2=0.99646$). This is the substantive welfare result of the experiment: each additional HFT competes away its predecessors' per-agent rent without enlarging the total transfer, but contributes an approximately constant increment to the rate at which the book is left empty. The arms race is socially wasteful not because it grows the rent pie but because the competition to capture a fixed pie progressively thins the liquidity available to ordinary participants.
+
+![Per-HFT rent decline versus flat total welfare loss](../results/figures/fig3_dual_axis.png)
+
+![Per-HFT rent with C/k fit](../results/figures/fig3a_rent_per_hft.png)
+
+![Flat total rent alongside rising liquidity gaps](../results/figures/fig3b_welfare_and_fragility.png)
+
+![Per-HFT fill rate declining as 1/k](../results/figures/fig3c_fill_rate.png)
+
+### 4.4 Experiment 4: Batch auctions as a remedy
+
+Having documented in Experiments 1–3 that continuous-time matching concentrates losses on the slow market maker (MM loss of 42.0) while conferring latency rents on the fast trader (HFT rent of 45.6) and leaving liquidity gaps (10.4), we now ask whether frequent batch auctions—uniform-price call auctions run at a fixed clearing interval—repair the damage. We sweep the clearing interval across {1, 5, 10, 25, 50, 100, 500} ticks, with n = 20 seeds per arm, and decompose the outcome into MM welfare, HFT rent, and liquidity gaps. A methodological seam should be stated up front: the continuous arm is produced by the verified C++ matching engine, whereas the batch arms re-express the same verified `discoverUncrossPrice` uniform-clearing rule in Python. The two implementations share the clearing logic but not the runtime, so cross-arm comparisons inherit that boundary.
+
+The robust result is the recovery of market-maker welfare, shown in Figure 4b. Away from the degenerate single-tick auction, MM loss falls monotonically as the clearing interval lengthens: from 42.0 in the continuous market to 30.4 at interval 5, 24.2 at interval 10, 15.3 at interval 25, 8.4 at interval 50, 6.8 at interval 100, and 2.1 at interval 500—roughly 95% of the continuous-market loss eliminated. In recovery terms this is 27.6% at interval 5, 42.5% at interval 10, 63.7% at interval 25, 80.0% at interval 50, 83.8% at interval 100, and 95.0% at interval 500. The threshold for at-least-half recovery is interval 25; the threshold for at-least-90% recovery is interval 500. The monotonicity and the size of the effect make this the headline finding.
+
+![Welfare decomposition versus clearing interval](../results/figures/fig4b_welfare_decomp.png)
+
+The effect on HFT rent points in the same direction but is far noisier, and we report it as suggestive rather than established. Figure 4a plots batch-arm rent against interval; every batch point estimate carries a 95% bootstrap confidence interval that brackets zero. The estimates are 22.0 [-1.0, 49.6] at interval 5, 21.0 [-14.9, 66.1] at interval 10, 30.4 [-21.7, 100.8] at interval 25, 21.3 [-38.8, 102.9] at interval 50, 18.5 [-79.9, 146.6] at interval 100, and 13.5 [-51.2, 88.8] at interval 500, against a continuous-market rent of 45.6 (the single-tick arm registers 46.5 [25.5, 74.0], indistinguishable from continuous). The corresponding rent-elimination fractions—51.7% at interval 5, 53.9% at interval 10, 33.4% at interval 25, 53.3% at interval 50, 59.4% at interval 100, and 70.5% at interval 500—are economically meaningful but not monotone, and the minimum interval achieving at-least-50% rent elimination is 5 while no interval reaches the 90% bar. Uniform clearing makes per-batch HFT P&L lumpy, which inflates the bootstrap dispersion; we therefore decline to claim that batching reliably eliminates latency rent on the basis of these point estimates.
+
+![HFT rent versus clearing interval](../results/figures/fig4a_hft_rent.png)
+
+![Liquidity gaps versus clearing interval](../results/figures/fig4c_liquidity_gaps.png)
+
+A per-tick call auction (interval 1) does not merely fail to help—it backfires. MM loss rises to 57.1, worse than the continuous market's 42.0, and liquidity gaps spike to 134.75 against the continuous baseline of 10.4 (Figure 4c). The mechanism is intuitive: a slow market maker that cannot refresh quotes within a single-tick clearing cadence is churned by the auction, repriced against before it can react, so the remedy at its most aggressive setting reproduces and amplifies the disease. Once the interval lengthens enough for the MM to participate meaningfully, liquidity gaps fall sharply—66.0 at interval 5, 28.6 at interval 10, 13.85 at interval 25—and then stabilize at a low level (17.05, 15.75, and 4.9 at intervals 50, 100, and 500). The policy reading is correspondingly conditional: batch auctions restore market-maker welfare substantially and improve depth, but only above a minimum cadence; set the interval too short and the intervention is counterproductive.
+
+The following table collects the arm-level estimates.
+
+| Clearing interval (ticks) | MM loss | MM welfare recovery | HFT rent (point [lo, hi]) | Rent elimination | Liquidity gaps |
+|---|---|---|---|---|---|
+| Continuous | 42.0 | — | 45.6 | — | 10.4 |
+| 1 (degenerate) | 57.1 | -35.8% (backfires) | 46.5 [25.5, 74.0] | — | 134.75 |
+| 5 | 30.4 | 27.6% | 22.0 [-1.0, 49.6] | 51.7% | 66.0 |
+| 10 | 24.2 | 42.5% | 21.0 [-14.9, 66.1] | 53.9% | 28.6 |
+| 25 | 15.3 | 63.7% | 30.4 [-21.7, 100.8] | 33.4% | 13.85 |
+| 50 | 8.4 | 80.0% | 21.3 [-38.8, 102.9] | 53.3% | 17.05 |
+| 100 | 6.8 | 83.8% | 18.5 [-79.9, 146.6] | 59.4% | 15.75 |
+| 500 | 2.1 | 95.0% | 13.5 [-51.2, 88.8] | 70.5% | 4.9 |
+
+Notes: n = 20 seeds per arm. The continuous arm is generated by the verified C++ engine; batch arms re-express the verified `discoverUncrossPrice` uniform-clearing rule in Python. Brackets give 95% bootstrap confidence intervals (asymmetric); all batch-arm HFT-rent intervals contain zero. The minimum interval for at-least-50% MM recovery is 25 and for at-least-90% is 500; the minimum interval for at-least-50% rent elimination is 5, with no interval reaching at-least-90%.
+
+### 4.5 Experiment 5: Hawkes bridge (preliminary)
+
+Experiment 5 is a preliminary pilot and should not be read as a headline result. Its purpose is to test whether trade-arrival self-excitation, summarized by the Hawkes branching ratio n(t), rises ahead of liquidity gaps relative to normal trading. The intuition is that elevated endogeneity — orders begetting orders — could precede the quote thinning documented in earlier experiments. We report it here in the interest of completeness; the design tensions surfaced below are part of the finding, not incidental caveats.
+
+We fit the branching ratio over rolling windows of 500 trades (approximately 716 ticks) at a stride of 100 trades, across a 5-simulation pilot (each simulation 50,000 ticks, roughly 35,000 trades, yielding on the order of 333–338 windows per simulation). Windows whose 500-tick lead interval terminates immediately before a liquidity gap are labelled pre-gap; all others are labelled normal. Gaps are frequent in these runs — roughly one per 300 ticks, or about 172 gaps per 50,000-tick simulation, with 865 gap events in total. This labelling yields an imbalanced split of 1,371 pre-gap windows against 303 normal windows. Because the two groups are independent rather than matched, we use the Mann-Whitney U test, correcting the paired Wilcoxon test specified in the pre-registered plan; pairing is not well defined once windows are pooled across overlapping gap neighbourhoods.
+
+The pre-gap branching ratio is directionally consistent with the hypothesis but the difference is not statistically significant.
+
+| Quantity | Estimate |
+|---|---|
+| Pre-gap branching ratio n(t), mean | 0.0039 |
+| Normal-period branching ratio n(t), mean | 0.0030 |
+| Mann-Whitney U statistic | 216647.0 |
+| Mann-Whitney one-sided p-value | 0.12 |
+| Rank-biserial correlation (effect size) | 0.043 (negligible) |
+| Pre-gap windows (n_pre) | 1,371 |
+| Normal windows (n_normal) | 303 |
+| Pilot simulations (n_sims) | 5 |
+
+Mean n(t) is higher before gaps (0.0039) than in normal periods (0.0030), the expected sign, but the one-sided Mann-Whitney test does not reject the null (p=0.12) and the rank-biserial effect size of 0.043 is negligible. Bootstrap confidence intervals are deferred to the full run; with only five pilot simulations, interval estimates would be uninformative, so we report point estimates here and adopt the "point [lo, hi]" convention from the full study onward.
+
+Two design tensions temper any reading of these numbers. First, the calibration window (500 trades, about 716 ticks) is coarser than the gap spacing (about one gap per 300 ticks). A window that should characterize a single pre-gap regime therefore straddles multiple gaps, blurring the contrast and producing the lopsided 1,371-versus-303 labelling. Second, the overall branching ratio is small (n(t) about 0.003), implying trade arrivals here are close to Poisson. A near-zero branching ratio leaves little self-excitation for the test to detect and suggests that trade-arrival Hawkes intensity may be the wrong endogeneity proxy for what is, mechanically, a quote-thinning phenomenon; a process defined on quote updates or cancellations is the more natural candidate.
+
+Accordingly, we treat Experiment 5 as scaffolding for forthcoming work rather than evidence for or against the endogeneity hypothesis. The planned extension (AlphaForge Phase 1) adds a real-data leg on BTC, a full 50-simulation run with time-based rather than trade-based windows to align window width with gap spacing, and an exogenous-shock control to separate endogenous excitation from externally driven arrivals. No figure accompanies this preliminary result.
 
 ## 5. Discussion (forthcoming)
 

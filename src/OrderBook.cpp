@@ -654,7 +654,12 @@ void OrderBook::match(Order* incoming) {
 
     while (incoming->remainingQty > 0) {
         bool isBuy = (incoming->side == Side::Buy);
-        auto& opposite = isBuy ? asks_ : bids_;
+        // Branchless opposite-book select: incoming side is ~50/50 and so
+        // unpredictable by any HW branch predictor. Index a pointer array
+        // instead of branching. books[isBuy] is the same-side book
+        // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
+        FlatPriceMap* books[2] = {&asks_, &bids_};
+        FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
 
         if (opposite.empty()) [[unlikely]] break;
 
@@ -805,7 +810,12 @@ void OrderBook::matchProRata(Order* incoming) {
     while (incoming->remainingQty > 0) {
         bool isBuy = (incoming->side == Side::Buy);
 
-        auto& opposite = isBuy ? asks_ : bids_;
+        // Branchless opposite-book select: incoming side is ~50/50 and so
+        // unpredictable by any HW branch predictor. Index a pointer array
+        // instead of branching. books[isBuy] is the same-side book
+        // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
+        FlatPriceMap* books[2] = {&asks_, &bids_};
+        FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
         if (opposite.empty()) break;
 
         Price bestPrice = opposite.bestPrice();

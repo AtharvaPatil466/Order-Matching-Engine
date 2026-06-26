@@ -407,11 +407,20 @@ protected:
             sequence_ -= (toWrite - actuallyWritten);
         }
 
-        // Fault: skip the durability barrier when armed. (Data still sits
-        // in buffer cache; falsification requires a real power-loss harness
-        // we don't have in user space — counter only.)
+        // Durability barrier. The replication ack (onCommit_, fired below)
+        // must happen STRICTLY AFTER a successful durable sync — never before,
+        // and never when the sync was skipped or failed. Otherwise the backup
+        // would ack entries the primary has not durably written; a crash
+        // between flush and fsync then loses them on the primary while the
+        // backup keeps them (ack-before-fsync hazard / backup divergence).
+        //
+        // Fault: skip the durability barrier when armed, modelling an fsync
+        // that did not make the data durable. (Data still sits in the buffer
+        // cache; on a clean exit it is readable, but it is NOT durable, so we
+        // must withhold the ack.)
+        bool durable = false;
         if (!fi.shouldFail("journal.commit.fsync_fail")) {
-            syncFile();
+            durable = syncFile();
         }
 
         persistedEntries_ += actuallyWritten;
@@ -422,12 +431,18 @@ protected:
             "Total journal entries successfully written to disk");
         kEntriesCommitted.increment(actuallyWritten);
 
-        // Fire the commit callback BEFORE erasing the prefix so the
-        // pointer remains valid for the duration of the callback. The
-        // callback runs synchronously on the writer thread — implementers
-        // should keep it short (the replication coordinator queues bytes
-        // for an async send, which is the intended use).
-        if (onCommit_ && actuallyWritten > 0) {
+        // Fire the commit callback ONLY after a successful durable sync (see
+        // the durability barrier above), and BEFORE erasing the prefix so the
+        // pointer remains valid for the duration of the callback. The callback
+        // runs synchronously on the writer thread — implementers should keep it
+        // short (the replication coordinator queues bytes for an async send,
+        // which is the intended use).
+        //
+        // `durable` is false only when the sync was skipped or failed. In that
+        // case the bytes are not on stable storage, so they must not be acked
+        // to the backup — withholding the ack is what closes the
+        // ack-before-fsync hazard.
+        if (durable && onCommit_ && actuallyWritten > 0) {
             onCommit_(batch_.data(), actuallyWritten);
         }
 
@@ -474,14 +489,17 @@ private:
         }
     }
 
-    void syncFile() const {
+    // Returns true iff the durable barrier actually made the bytes durable.
+    // Callers gate the replication ack (onCommit_) on this: an ack may only
+    // be sent once the data is provably on stable storage.
+    bool syncFile() const {
         if (!file_) {
-            return;
+            return false;
         }
 #ifdef __APPLE__
-        ::fcntl(fileno(file_), F_FULLFSYNC);
+        return ::fcntl(fileno(file_), F_FULLFSYNC) == 0;
 #else
-        ::fdatasync(fileno(file_));
+        return ::fdatasync(fileno(file_)) == 0;
 #endif
     }
 

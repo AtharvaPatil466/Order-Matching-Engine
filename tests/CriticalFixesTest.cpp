@@ -10,6 +10,8 @@
 #include "OrderBook.h"
 #include "Types.h"
 
+#include <atomic>
+#include <thread>
 #include <variant>
 
 using namespace OrderMatcher;
@@ -154,4 +156,42 @@ TEST(PerfFixes, CrossWithNoListenerStillFills) {
     // Both sides fully filled -> neither rests; the skipped dispatch dropped no work.
     EXPECT_EQ(book.getOrder(1), nullptr);
     EXPECT_EQ(book.getOrder(2), nullptr);
+}
+
+// ─── Perf #2: bookLock_ swapped shared_mutex -> mutex ───────────────────────
+//
+// getSnapshot()/computeAuctionState() were shared (concurrent) readers; under
+// a plain mutex they become exclusive. This guard confirms the reader/writer
+// path stays safe and DEADLOCK-FREE after the swap (the real risk: a reader
+// that re-locks would self-deadlock on a non-recursive plain mutex). A writer
+// thread hammers addOrder/cancel with bids strictly below asks while the main
+// thread reads snapshots; a consistent (non-torn) snapshot is never crossed.
+TEST(PerfFixes, ConcurrentSnapshotStaysConsistentUnderWriter) {
+    OrderBook book(0);
+    std::atomic<bool> writerDone{false};
+
+    // Bounded writer: add a bid<100 and an ask>100, then cancel both next
+    // iteration (lag 1) so the book holds only a couple of resting orders --
+    // keeps depth small (fast, pool never exhausts) while still hammering
+    // bookLock_ concurrently with the reader.
+    std::thread writer([&] {
+        uint64_t prevBid = 0, prevAsk = 0;
+        for (uint64_t id = 1; id <= 6000; id += 2) {
+            book.addOrder(id,     1, Side::Buy,  90 + (id % 9),  5, OrderType::Limit);
+            book.addOrder(id + 1, 1, Side::Sell, 110 + (id % 9), 5, OrderType::Limit);
+            if (prevBid) { book.cancelOrder(prevBid); book.cancelOrder(prevAsk); }
+            prevBid = id; prevAsk = id + 1;
+        }
+        writerDone.store(true, std::memory_order_release);
+    });
+
+    while (!writerDone.load(std::memory_order_acquire)) {
+        auto s = book.getSnapshot(10);
+        if (s.bidCount > 0 && s.askCount > 0) {
+            // A non-torn snapshot is never crossed (best bid < best ask).
+            EXPECT_LT(s.bids[0].price, s.asks[0].price);
+        }
+    }
+
+    writer.join();  // returns => no deadlock under the plain-mutex readers
 }

@@ -209,7 +209,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                           TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
                           PegType pegType, Price pegOffset, Price trailAmount,
                           Quantity minQty, bool hidden, bool riskChecksBypassed) {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     // --- Trading-state admission ---
     // Halted: regulator/auto halt; reject new orders, cancels still flow
@@ -996,7 +996,7 @@ void OrderBook::matchProRata(Order* incoming) {
 // ─── Cancel ──────────────────────────────────────────────────────────────────
 
 void OrderBook::cancelOrder(OrderId orderId) {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
     cancelOrderImpl(orderId);
 }
 
@@ -1070,7 +1070,7 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
 // ─── Modify (quantity reduction only, preserves time priority) ───────────────
 
 bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty) {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     auto* orderPtr = orderLookup_.find(orderId);
     if (!orderPtr) [[unlikely]] return false;
@@ -1091,7 +1091,7 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty) {
 // ─── Cancel/Replace (full amendment, price change loses priority) ────────────
 
 bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     auto* orderPtr = orderLookup_.find(orderId);
     if (!orderPtr) [[unlikely]] return false;
@@ -1177,7 +1177,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
 // ─── Kill Switch ─────────────────────────────────────────────────────────────
 
 uint64_t OrderBook::cancelAllForParticipant(ParticipantId participantId) {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     uint64_t count = 0;
     OrderId ids[4096];
@@ -1213,7 +1213,7 @@ uint64_t OrderBook::cancelAllForParticipant(ParticipantId participantId) {
 
 void OrderBook::expireOrders(uint64_t currentTime,
                              const std::function<void(OrderId)>& onExpire) {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     // Collect expired order IDs into stack buffer (avoids heap allocation)
     OrderId toExpire[4096];
@@ -1407,7 +1407,7 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
 // Uses stack-allocated FixedVector to avoid heap allocation during auction.
 
 void OrderBook::uncross() {
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     // Discover the clearing price via the shared, non-destructive core —
     // the same logic computeAuctionState() publishes pre-cross, so the
@@ -1681,7 +1681,7 @@ AuctionResult OrderBook::discoverUncrossPrice() const {
 }
 
 AuctionResult OrderBook::computeAuctionState() const {
-    std::shared_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
     return discoverUncrossPrice();
 }
 
@@ -1694,7 +1694,7 @@ bool OrderBook::resumeVolatilityAuction() {
 
     uncross();   // reopening cross at the discovered clearing price
 
-    std::unique_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
     // Re-anchor the volatility reference to the reopening print so the
     // post-auction circuit-breaker bands measure from the fresh price.
     if (lastTradePrice_ > 0) referencePrice_ = lastTradePrice_;
@@ -1709,7 +1709,7 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
     // Closes the torn-read window documented in spec/Snapshot.tla — a
     // side-flipping cancelReplace can no longer interleave between the
     // bid traversal and the ask traversal.
-    std::shared_lock<std::shared_mutex> lock(bookLock_);
+    std::unique_lock<std::mutex> lock(bookLock_);
 
     MarketDataSnapshot snap{};
     snap.symbolId = symbolId_;

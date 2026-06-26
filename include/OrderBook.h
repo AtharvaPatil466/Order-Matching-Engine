@@ -13,7 +13,7 @@
 #include "BatchRiskValidator.h"
 #include <atomic>
 #include <functional>
-#include <shared_mutex>
+#include <mutex>
 #include <variant>
 #include <cstdint>
 #include <limits>
@@ -374,7 +374,7 @@ private:
     // Internal cancel that does NOT take bookLock_. Public cancelOrder
     // wraps this with a unique_lock; callers that already hold the lock
     // (expireOrders, cancelAllForParticipant) call this directly to
-    // avoid self-deadlock on a non-recursive shared_mutex.
+    // avoid self-deadlock on the non-recursive mutex.
     void cancelOrderImpl(OrderId orderId);
 
     // Release parked MOC/LOC orders into the book when AuctionClose begins.
@@ -414,19 +414,22 @@ private:
     bool canAddToBook(const Order* order) const;
     void ensurePriceRange(Price price);
 
-    // Reader/writer mutex protecting the book's mutable state. Writers
-    // (addOrder, cancelOrder, modifyOrder, cancelReplace, expireOrders,
-    // cancelAllForParticipant, uncross) take a unique_lock; the snapshot
-    // reader takes a shared_lock. Without this, a snapshot read could
-    // observe a side-flipping cancelReplace mid-flight and return a
-    // torn view (an order on both sides) — exactly the scenario the
-    // Snapshot.tla spec produced as a counterexample.
+    // Mutex protecting the book's mutable state. Writers (addOrder,
+    // cancelOrder, modifyOrder, cancelReplace, expireOrders,
+    // cancelAllForParticipant, uncross) and the snapshot/auction readers
+    // (getSnapshot, computeAuctionState) all take an exclusive lock. Without
+    // this, a snapshot read could observe a side-flipping cancelReplace
+    // mid-flight and return a torn view (an order on both sides) — exactly
+    // the scenario the Snapshot.tla spec produced as a counterexample.
     //
-    // Cost: one uncontended mutex acquire per write on the engine's
-    // hot path. With single-writer-per-book (the engine's worker-
-    // thread model), there's no writer-vs-writer contention; the
-    // overhead only materializes when a snapshot is in flight.
-    mutable std::shared_mutex bookLock_;
+    // A plain std::mutex (not shared_mutex) because the engine's
+    // single-writer-per-book worker-thread model has no writer-vs-writer
+    // contention, and snapshot reads are rare and off the hot path — so
+    // concurrent-reader throughput is not worth the 3-5x more expensive
+    // uncontended write-lock of a shared_mutex. The exclusive read-lock only
+    // serializes the (infrequent) reader against the writer, which the
+    // shared_mutex already did anyway.
+    mutable std::mutex bookLock_;
 
     // Bids: Descending Price (flat array, O(1) best-bid)
     FlatPriceMap bids_;
@@ -482,8 +485,8 @@ private:
     uint64_t nextTradeId_{1};
     Price lastTradePrice_{0};
     Quantity lastTradeQty_{0};
-    // Atomic so a future reader path holding only the shared_lock
-    // cannot race with the writer's increment. Today every caller
+    // Atomic so a future lock-free reader path cannot race with the
+    // writer's increment. Today every caller
     // already serializes under unique_lock(bookLock_), so this is
     // defensive; cost is zero on the writer-only fast path.
     std::atomic<uint64_t> nextSequenceNumber_{1};

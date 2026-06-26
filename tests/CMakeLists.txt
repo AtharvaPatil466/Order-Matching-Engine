@@ -341,6 +341,13 @@ set_tests_properties(AuctionSessionTest PROPERTIES TIMEOUT 30
                      LABELS "project;session;auction")
 
 # Advanced order types: MIT, market sweep protection, OCO via the engine
+# Critical correctness regression tests (from AUDIT_REPORT.md section 1)
+add_executable(CriticalFixesTest CriticalFixesTest.cpp)
+target_link_libraries(CriticalFixesTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(CriticalFixesTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;correctness")
+
 add_executable(AdvancedOrdersTest TestAdvancedOrders.cpp)
 target_link_libraries(AdvancedOrdersTest PRIVATE OrderMatcher)
 enable_assertions(AdvancedOrdersTest)

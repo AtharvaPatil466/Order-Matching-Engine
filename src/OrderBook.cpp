@@ -121,8 +121,12 @@ bool OrderBook::checkRiskLimits(ParticipantId participantId, Price price, Quanti
     if (state->maxOrderSize > 0 && qty > state->maxOrderSize) return false;
 
     if (state->maxOrderNotional > 0) {
-        Price notional = price * static_cast<Price>(qty) / PRICE_PRECISION;
-        if (notional > state->maxOrderNotional) return false;
+        // price * qty can exceed int64 for large orders; computing it in int64
+        // is signed-overflow UB that wraps negative and silently bypasses the
+        // cap. Widen to __int128 so the notional comparison is always exact.
+        __int128 notional = (static_cast<__int128>(price) * static_cast<__int128>(qty))
+                            / PRICE_PRECISION;
+        if (notional > static_cast<__int128>(state->maxOrderNotional)) return false;
     }
 
     if (state->maxPositionSize > 0) {

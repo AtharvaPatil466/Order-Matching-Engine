@@ -92,3 +92,24 @@ TEST(CriticalFixes, CancellingMitOrderDoesNotDanglingFire) {
     book.addOrder(4, 4, Side::Sell, 105, 10, OrderType::Limit);
     EXPECT_EQ(lis.cancelledFor(2), 1) << "cancelled MIT must not re-fire from stopOrders_";
 }
+
+// ─── Fix #3: sell TrailingStop price must not go negative ────────────────────
+//
+// stopPrice = trailRefPrice - trailAmount with trailAmount > trailRefPrice
+// produced a negative (nonsensical) trigger price; pathological inputs are
+// signed-overflow UB. Floor the stop at 0 at both the init (addOrder) and
+// ratchet (updateTrailingStops) sites. stopPrice is observable via getOrder().
+TEST(CriticalFixes, SellTrailingStopPriceDoesNotUnderflow) {
+    OrderBook book(0);
+    // sell trailing stop, no prior trade -> trailRefPrice = price = 100,
+    // trailAmount = 150 > 100. Buggy: stopPrice = 100-150 = -50. Fixed: 0.
+    // addOrder positional args: id,pid,side,price,qty,type,stopPrice,displayQty,
+    //   tif,expiryTime,stopLimitPrice,pegType,pegOffset,trailAmount,...
+    book.addOrder(1, 1, Side::Sell, 100, 10, OrderType::TrailingStop,
+                  /*stopPrice=*/0, /*displayQty=*/0, TimeInForce::GTC,
+                  /*expiryTime=*/0, /*stopLimitPrice=*/0, PegType::None,
+                  /*pegOffset=*/0, /*trailAmount=*/150);
+    const Order* o = book.getOrder(1);
+    ASSERT_NE(o, nullptr);
+    EXPECT_GE(o->stopPrice, 0) << "trailing-stop price must not go negative";
+}

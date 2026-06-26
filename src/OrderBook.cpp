@@ -522,7 +522,10 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             order->stopPrice = order->trailRefPrice + trailAmount;
         } else {
             order->trailRefPrice = lastTradePrice_ > 0 ? lastTradePrice_ : price;
-            order->stopPrice = order->trailRefPrice - trailAmount;
+            // Floor at 0: a trail wider than the reference would otherwise make
+            // the stop price negative (nonsensical; UB for pathological inputs).
+            order->stopPrice = (trailAmount <= order->trailRefPrice)
+                               ? order->trailRefPrice - trailAmount : 0;
         }
         trailingStopOrders_.push_back(order);
         return orderId;
@@ -1313,7 +1316,9 @@ void OrderBook::updateTrailingStops(Price lastTradePrice) {
         } else {
             if (lastTradePrice > order->trailRefPrice) {
                 order->trailRefPrice = lastTradePrice;
-                order->stopPrice = order->trailRefPrice - order->trailAmount;
+                // Floor at 0 (see addOrder TrailingStop init).
+                order->stopPrice = (order->trailAmount <= order->trailRefPrice)
+                                   ? order->trailRefPrice - order->trailAmount : 0;
             }
             if (lastTradePrice <= order->stopPrice) triggered = true;
         }

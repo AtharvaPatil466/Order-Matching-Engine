@@ -46,6 +46,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -268,17 +269,22 @@ public:
         // FIRST message in this packet.
         uint64_t firstSeq = hdr.sequenceNumber;
         uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
-        if (firstSeq > expected) {
+        if (firstSeq > expected && expected >= gapReportedTo_) {
+            // A genuine new hole opens below this packet — report it
+            // EXACTLY ONCE. While the gap is still outstanding (the
+            // contiguous front hasn't caught up to gapReportedTo_),
+            // later live packets — and the gap packet itself if re-seen
+            // — must NOT keep re-firing onGapDetected. The hole is
+            // closed by recovered / retransmitted messages flowing back
+            // through feedPacket below, which advance nextExpectedSeq_.
             if (onGap_) onGap_(expected, firstSeq);
             gapsObserved_.fetch_add(1, std::memory_order_relaxed);
-            nextExpectedSeq_.store(firstSeq, std::memory_order_relaxed);  // resume from the new data
-        } else if (firstSeq < expected) {
-            // Already-seen messages — duplicate / retransmission.
-            // Skip the prefix that we've already processed; deliver
-            // only the suffix (if any) that's still new. For an
-            // entirely-old packet, message_count steps through and
-            // delivers nothing.
+            gapReportedTo_ = firstSeq;
         }
+        // NOTE: nextExpectedSeq_ is deliberately NOT bumped to firstSeq
+        // here. Messages ahead of the hole are still delivered, but the
+        // contiguous "next expected" front only advances once the
+        // missing range is actually recovered (see deliverSequenced).
 
         const uint8_t* p = data + MOLD_HEADER_BYTES;
         const uint8_t* end = data + len;
@@ -290,12 +296,7 @@ public:
                 ++framingErrors_;
                 return false;
             }
-            uint64_t thisSeq = firstSeq + i;
-            if (thisSeq >= nextExpectedSeq_.load(std::memory_order_relaxed)) {
-                if (onMessage_) onMessage_(thisSeq, p, mlen);
-                nextExpectedSeq_.store(thisSeq + 1, std::memory_order_relaxed);
-                messagesDelivered_.fetch_add(1, std::memory_order_relaxed);
-            }
+            deliverSequenced(firstSeq + i, p, mlen);
             p += mlen;
         }
         return true;
@@ -309,11 +310,39 @@ public:
     uint64_t sessionMismatches()    const { return sessionMismatches_.load(std::memory_order_relaxed); }
 
 private:
+    // Deliver one sequenced message, maintaining the contiguous
+    // "next expected" front. Both live and recovered / retransmitted
+    // messages flow through here: a message that fills the current hole
+    // advances nextExpectedSeq_ (merging any higher sequences buffered
+    // early while the gap was outstanding), so once a gap is recovered
+    // it is never re-detected. Messages already delivered (below the
+    // front, or already buffered ahead) are dropped as duplicates.
+    void deliverSequenced(uint64_t seq, const uint8_t* msg, size_t mlen) {
+        uint64_t front = nextExpectedSeq_.load(std::memory_order_relaxed);
+        if (seq < front || receivedAhead_.count(seq)) return;  // duplicate
+        if (onMessage_) onMessage_(seq, msg, mlen);
+        messagesDelivered_.fetch_add(1, std::memory_order_relaxed);
+        if (seq == front) {
+            uint64_t next = seq + 1;
+            // Merge the contiguous run buffered ahead of the hole.
+            while (!receivedAhead_.empty() &&
+                   *receivedAhead_.begin() == next) {
+                receivedAhead_.erase(receivedAhead_.begin());
+                ++next;
+            }
+            nextExpectedSeq_.store(next, std::memory_order_relaxed);
+        } else {
+            receivedAhead_.insert(seq);  // ahead of the hole — buffer
+        }
+    }
+
     std::string     expectedSession_;
     OnMessage       onMessage_;
     OnGapDetected   onGap_;
     OnEndOfSession  onEos_;
     std::atomic<uint64_t> nextExpectedSeq_{1};
+    std::set<uint64_t>    receivedAhead_;     // delivered seqs above the front
+    uint64_t              gapReportedTo_{0};  // high end of last reported gap
     std::atomic<uint64_t> messagesDelivered_{0};
     std::atomic<uint64_t> gapsObserved_{0};
     std::atomic<uint64_t> heartbeatsReceived_{0};

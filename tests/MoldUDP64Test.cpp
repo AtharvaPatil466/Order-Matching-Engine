@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -376,6 +377,117 @@ void test_SubscriberHeartbeatDetectsSilentGap() {
     } END
 }
 
+// ─── Gap recovery: gap fires once, recovery resumes cleanly ─────────────────
+
+void test_SubscriberSinglePacketGapRecovers() {
+    TEST(SubscriberSinglePacketGapRecovers) {
+        // One packet per message → wireBuf[i] carries seq (i+1).
+        std::vector<std::vector<uint8_t>> wireBuf;
+        MoldUDP64Publisher pub("FEED", [&](std::string_view b) {
+            wireBuf.emplace_back(b.begin(), b.end());
+        });
+        for (int i = 1; i <= 4; ++i) {
+            std::string m = "x" + std::to_string(i);
+            pub.addMessage(m.data(), static_cast<uint16_t>(m.size()));
+            pub.flush();
+        }
+
+        MoldUDP64Subscriber sub;
+        DeliveryLog log;
+        int gapCalls = 0;
+        sub.setOnMessage([&](uint64_t s, const uint8_t* d, size_t n) {
+            log.onMessage(s, d, n);
+        });
+        sub.setOnGapDetected([&](uint64_t a, uint64_t b) {
+            ++gapCalls; log.onGap(a, b);
+        });
+
+        wire(sub, wireBuf[0]);              // seq=1 (in order)
+        // Drop seq=2 (single-packet gap).
+        wire(sub, wireBuf[2]);              // seq=3 → gap [2,3)
+        CHECK(gapCalls == 1);
+        CHECK(log.gaps.size() == 1);
+        CHECK(log.gaps[0].first == 2);
+        CHECK(log.gaps[0].second == 3);
+
+        // Retransmission replays the missing seq=2; it MUST advance the
+        // contiguous front across the hole (and merge buffered seq=3).
+        wire(sub, wireBuf[1]);              // recovered seq=2
+        CHECK(sub.nextExpectedSequence() == 4);
+
+        // Live feed resumes; the recovered gap is NOT re-detected.
+        wire(sub, wireBuf[3]);              // seq=4
+        CHECK(gapCalls == 1 && "single-packet gap fires exactly once");
+
+        std::set<uint64_t> seen;
+        for (const auto& e : log.messages) seen.insert(e.seq);
+        CHECK(seen.size() == 4);
+        for (uint64_t s = 1; s <= 4; ++s) CHECK(seen.count(s) == 1);
+        CHECK(log.messages.size() == 4 && "no duplicate deliveries");
+        CHECK(sub.nextExpectedSequence() == 5);
+    } END
+}
+
+void test_SubscriberMultiPacketGapRecovers() {
+    TEST(SubscriberMultiPacketGapRecovers) {
+        // One packet per message → wireBuf[i] carries seq (i+1).
+        std::vector<std::vector<uint8_t>> wireBuf;
+        MoldUDP64Publisher pub("FEED", [&](std::string_view b) {
+            wireBuf.emplace_back(b.begin(), b.end());
+        });
+        for (int i = 1; i <= 13; ++i) {
+            std::string m = "m" + std::to_string(i);
+            pub.addMessage(m.data(), static_cast<uint16_t>(m.size()));
+            pub.flush();
+        }
+
+        MoldUDP64Subscriber sub;
+        sub.setExpectedSession("FEED");
+        DeliveryLog log;
+        int gapCalls = 0;
+        sub.setOnMessage([&](uint64_t s, const uint8_t* d, size_t n) {
+            log.onMessage(s, d, n);
+        });
+        sub.setOnGapDetected([&](uint64_t a, uint64_t b) {
+            ++gapCalls; log.onGap(a, b);
+        });
+
+        // 1) In-order live: seq 1..5.
+        for (int i = 0; i < 5; ++i) wire(sub, wireBuf[i]);
+        CHECK(log.messages.size() == 5);
+        CHECK(sub.nextExpectedSequence() == 6);
+
+        // 2) UDP loss of seq 6..9 (multi-packet gap). Live resumes at
+        //    seq=10 → gap [6,10).
+        wire(sub, wireBuf[9]);              // seq=10
+        // 3) Live keeps flowing while the gap is still open: 11, 12.
+        //    These must NOT each re-fire onGapDetected.
+        wire(sub, wireBuf[10]);             // seq=11
+        wire(sub, wireBuf[11]);             // seq=12
+        CHECK(gapCalls == 1 && "multi-packet gap fires exactly once");
+        CHECK(log.gaps.size() == 1);
+        CHECK(log.gaps[0].first == 6);
+        CHECK(log.gaps[0].second == 10);
+
+        // 4) Retransmission service replays missing 6,7,8,9; they flow
+        //    back and MUST advance nextExpectedSeq_ across the hole,
+        //    merging the buffered 10,11,12.
+        for (int i = 5; i <= 8; ++i) wire(sub, wireBuf[i]);   // seq 6..9
+        CHECK(sub.nextExpectedSequence() == 13);
+
+        // 5) Live feed resumes at seq=13 — no second gap callback.
+        wire(sub, wireBuf[12]);             // seq=13
+        CHECK(gapCalls == 1 && "gap must fire exactly once, ever");
+
+        std::set<uint64_t> seen;
+        for (const auto& e : log.messages) seen.insert(e.seq);
+        CHECK(seen.size() == 13);
+        for (uint64_t s = 1; s <= 13; ++s) CHECK(seen.count(s) == 1);
+        CHECK(log.messages.size() == 13 && "no duplicate deliveries");
+        CHECK(sub.nextExpectedSequence() == 14);
+    } END
+}
+
 // ─── Integration: ITCH AddOrder via MoldUDP64 ───────────────────────────────
 
 void test_ItchAddOrderRoundtripsThroughMold() {
@@ -431,6 +543,8 @@ int main() {
     test_SubscriberSessionMismatch();
     test_SubscriberEndOfSession();
     test_SubscriberHeartbeatDetectsSilentGap();
+    test_SubscriberSinglePacketGapRecovers();
+    test_SubscriberMultiPacketGapRecovers();
 
     test_ItchAddOrderRoundtripsThroughMold();
 

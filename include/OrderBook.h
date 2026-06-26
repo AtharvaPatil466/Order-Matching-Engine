@@ -330,7 +330,13 @@ public:
     // Event listener (replaces std::function callbacks)
     void setEventListener(EventListener* listener) {
         listener_ = listener ? listener : &nullListener();
+        refreshTradeListenerFlag();
     }
+
+    // True iff a real (non-null) trade listener is registered. The fill hot
+    // path consults this to skip the per-fill onTrade vtable dispatch entirely
+    // when no listener is wired (see match()/matchProRata()).
+    bool hasTradeListener() const { return hasTradeListener_; }
 
     // Secondary, engine-owned listener for internal observation (e.g. OCO
     // contingent-order tracking). Kept separate from the user listener slot
@@ -338,6 +344,7 @@ public:
     // listener. Receives the same order-update events.
     void setEngineListener(EventListener* listener) {
         engineListener_ = listener ? listener : &nullListener();
+        refreshTradeListenerFlag();
     }
 
     // Emit a rejection notification for an order the engine declined before
@@ -455,6 +462,15 @@ private:
     EventListener* listener_ = &nullListener();
     // Secondary engine-internal listener (OCO tracking); see setEngineListener.
     EventListener* engineListener_ = &nullListener();
+
+    // Cached: true iff either listener slot holds a real (non-null) listener.
+    // Lets the fill hot path skip the onTrade vtable dispatch when nothing is
+    // wired. Refreshed by setEventListener/setEngineListener.
+    bool hasTradeListener_ = false;
+    void refreshTradeListenerFlag() {
+        hasTradeListener_ = (listener_ != &nullListener()) ||
+                            (engineListener_ != &nullListener());
+    }
 
     // Replay mode flag — suppresses callbacks during journal recovery
     bool replayMode_{false};

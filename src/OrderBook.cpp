@@ -780,7 +780,10 @@ void OrderBook::match(Order* incoming) {
         t.symbolId = symbolId_;
         t.aggressorSide = incoming->side;
         tradeHistory_.push(t);
-        if (!replayMode_) [[likely]] { listener_->onTrade(t); engineListener_->onTrade(t); }
+        // Skip the per-fill onTrade vtable dispatch entirely when no listener
+        // is wired (the common lean hot path). When one is registered the
+        // virtual call is unavoidable without templating the listener type.
+        if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
@@ -956,7 +959,7 @@ void OrderBook::matchProRata(Order* incoming) {
             t.symbolId = symbolId_;
             t.aggressorSide = incoming->side;
             tradeHistory_.push(t);
-            if (!replayMode_) { listener_->onTrade(t); engineListener_->onTrade(t); }
+            if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
             if (bookOrder->remainingQty == 0) {
                 bookOrder->status = OrderStatus::Filled;
@@ -1483,7 +1486,7 @@ void OrderBook::uncross() {
         t.sequenceNumber = nextSequenceNumber_++;
         t.symbolId = symbolId_;
         tradeHistory_.push(t);
-        if (!replayMode_) { listener_->onTrade(t); engineListener_->onTrade(t); }
+        if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
         if (buyer->remainingQty == 0) {
             buyer->status = OrderStatus::Filled;

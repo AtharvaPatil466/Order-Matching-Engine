@@ -113,3 +113,45 @@ TEST(CriticalFixes, SellTrailingStopPriceDoesNotUnderflow) {
     ASSERT_NE(o, nullptr);
     EXPECT_GE(o->stopPrice, 0) << "trailing-stop price must not go negative";
 }
+
+// ─── Perf #1: per-fill onTrade dispatch skipped when no listener ─────────────
+//
+// The fill hot path now skips listener_->onTrade / engineListener_->onTrade
+// entirely when no real listener is registered (hasTradeListener() == false),
+// eliminating two no-op vtable dispatches per fill. These guards confirm the
+// optimization is behaviour-preserving: trades are still delivered when a
+// listener IS registered, and a cross with NO listener still fills correctly.
+
+namespace {
+class TradeCountingListener : public EventListener {
+public:
+    std::vector<Trade> trades;
+    void onTrade(const Trade& t) override { trades.push_back(t); }
+};
+} // namespace
+
+TEST(PerfFixes, TradesStillDeliveredToRegisteredListener) {
+    OrderBook book(0);
+    TradeCountingListener lis;
+    EXPECT_FALSE(book.hasTradeListener());   // no listener yet -> dispatch skipped
+    book.setEventListener(&lis);
+    EXPECT_TRUE(book.hasTradeListener());    // listener registered -> dispatch active
+
+    book.addOrder(1, 1, Side::Sell, 100, 10, OrderType::Limit);
+    book.addOrder(2, 2, Side::Buy, 100, 10, OrderType::Limit);   // crosses -> 1 trade
+
+    ASSERT_EQ(lis.trades.size(), 1u) << "trade must still be delivered to the listener";
+    EXPECT_EQ(lis.trades[0].price, 100);
+    EXPECT_EQ(lis.trades[0].quantity, 10u);
+}
+
+TEST(PerfFixes, CrossWithNoListenerStillFills) {
+    OrderBook book(0);
+    EXPECT_FALSE(book.hasTradeListener());    // skip path active
+    book.addOrder(1, 1, Side::Sell, 100, 10, OrderType::Limit);
+    auto r = book.addOrder(2, 2, Side::Buy, 100, 10, OrderType::Limit);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(r));
+    // Both sides fully filled -> neither rests; the skipped dispatch dropped no work.
+    EXPECT_EQ(book.getOrder(1), nullptr);
+    EXPECT_EQ(book.getOrder(2), nullptr);
+}

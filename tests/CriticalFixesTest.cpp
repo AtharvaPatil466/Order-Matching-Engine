@@ -60,3 +60,35 @@ TEST(CriticalFixes, NotionalOverflowDoesNotBypassRiskLimit) {
         << "order with notional 1e15 must be rejected, not accepted";
     EXPECT_EQ(std::get<RejectReason>(result), RejectReason::RiskLimitBreached);
 }
+
+// ─── Fix #2: cancelling a parked MIT must remove it from stopOrders_ ─────────
+//
+// MIT orders park in stopOrders_, but cancelOrderImpl only removed Stop/
+// StopLimit — leaving a dangling pointer that checkStopOrders() re-fires
+// (phantom Cancelled + double-deallocate; aborts under the pool's -UNDEBUG
+// double-free assert). The decoy is cancelled second so its slot sits on top
+// of the LIFO free list, preserving the MIT's slot so the dangling fire is
+// deterministic.
+TEST(CriticalFixes, CancellingMitOrderDoesNotDanglingFire) {
+    OrderBook book(0);
+    UpdateCountingListener lis;
+    book.setEventListener(&lis);
+    // resting buy that the aggressor will cross to produce a trade
+    // (also establishes the circuit-breaker reference price at 105)
+    book.addOrder(1, 1, Side::Buy, 105, 10, OrderType::Limit);
+    // MIT sell, triggers on upward touch of 105
+    book.addOrder(2, 2, Side::Sell, 0, 30, OrderType::MIT, /*stopPrice=*/105);
+    // decoy resting sell, harmless, near the market so it is admitted (won't cross)
+    book.addOrder(99, 3, Side::Sell, 107, 1, OrderType::Limit);
+    // cancel the MIT (real Cancelled #1 for id 2), then cancel the decoy so the
+    // decoy's slot sits on TOP of the LIFO free list, preserving the MIT's slot
+    book.cancelOrder(2);
+    book.cancelOrder(99);
+    ASSERT_EQ(book.getOrder(2), nullptr);
+    // aggressor sell crosses resting buy @105 -> trade@105 -> checkStopOrders(105).
+    // Fixed: MIT was removed from stopOrders_ at cancel -> no phantom.
+    // Buggy: dangling MIT re-fires -> double free (abort under -UNDEBUG), or a
+    // SECOND Cancelled for id 2 if assertions are off.
+    book.addOrder(4, 4, Side::Sell, 105, 10, OrderType::Limit);
+    EXPECT_EQ(lis.cancelledFor(2), 1) << "cancelled MIT must not re-fire from stopOrders_";
+}

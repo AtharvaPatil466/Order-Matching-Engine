@@ -1036,7 +1036,8 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
 #endif
 
     // Remove from special tracking lists (FixedVector::erase_value — O(n) swap-erase)
-    if (order->type == OrderType::Stop || order->type == OrderType::StopLimit) {
+    if (order->type == OrderType::Stop || order->type == OrderType::StopLimit
+        || order->type == OrderType::MIT) {
         stopOrders_.erase_value(order);
     } else if (order->type == OrderType::TrailingStop) {
         trailingStopOrders_.erase_value(order);

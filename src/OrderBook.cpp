@@ -499,20 +499,20 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         (tradingState_ == TradingState::PreOpen           ||
          tradingState_ == TradingState::AuctionOpen       ||
          tradingState_ == TradingState::AuctionClose      ||
-         tradingState_ == TradingState::VolatilityAuction)) {
+         tradingState_ == TradingState::VolatilityAuction)) [[unlikely]] {
         auctionMarketOrders_.push_back(order);
         return orderId;
     }
 
     // --- Stop / StopLimit: park until triggered ---
     if (type == OrderType::Stop || type == OrderType::StopLimit
-        || type == OrderType::MIT) {
+        || type == OrderType::MIT) [[unlikely]] {
         stopOrders_.push_back(order);
         return orderId;
     }
 
     // --- Trailing Stop: park and initialize reference ---
-    if (type == OrderType::TrailingStop) {
+    if (type == OrderType::TrailingStop) [[unlikely]] {
         if (side == Side::Buy) {
             order->trailRefPrice = lastTradePrice_ > 0 ? lastTradePrice_ : price;
             order->stopPrice = order->trailRefPrice + trailAmount;
@@ -525,7 +525,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     }
 
     // --- Pegged: compute price from reference and rest ---
-    if (type == OrderType::Pegged) {
+    if (type == OrderType::Pegged) [[unlikely]] {
         Price pegPrice = price; // fallback
         if (pegType == PegType::MidPeg) {
             Price mid = getMidPrice();
@@ -548,7 +548,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     }
 
     // --- FOK: require full liquidity ---
-    if (type == OrderType::FOK) {
+    if (type == OrderType::FOK) [[unlikely]] {
         if (!checkLiquidity(side, price, qty, type)) {
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
@@ -600,7 +600,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     // --- Post-match: handle remaining quantity ---
     if (order->remainingQty > 0) [[likely]] {
-        if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) {
+        if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
             Quantity filled = order->initialQty - order->remainingQty;
             OrderStatus st = (filled > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Cancelled;
             notifyOrderUpdate(orderId, st, filled, 0);
@@ -608,7 +608,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             orderPool_.deallocate(order);
         } else {
             // Rest in book (Limit, PostOnly, Hidden, Iceberg)
-            if (type == OrderType::Iceberg)
+            if (type == OrderType::Iceberg) [[unlikely]]
                 order->visibleQty = std::min(order->remainingQty, order->displayQty);
             if (!addToBook(order)) {
                 // Depth limit or price range exceeded — cancel the order
@@ -660,7 +660,7 @@ void OrderBook::match(Order* incoming) {
 
         Price bestPrice = opposite.bestPrice();
 
-        if (useMktProt) {
+        if (useMktProt) [[unlikely]] {
             if (isBuy  && bestPrice > mktProtBound) break;
             if (!isBuy && bestPrice < mktProtBound) break;
         }
@@ -735,12 +735,12 @@ void OrderBook::match(Order* incoming) {
 
         incoming->remainingQty -= fillQty;
         bookOrder->remainingQty -= fillQty;
-        if (bookOrder->type == OrderType::Iceberg) bookOrder->visibleQty -= fillQty;
+        if (bookOrder->type == OrderType::Iceberg) [[unlikely]] bookOrder->visibleQty -= fillQty;
 
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
-        if (obSinkActive()) obSink().log(logTradeFill(
+        if (obSinkActive()) [[unlikely]] obSink().log(logTradeFill(
             isBuy ? incoming->id : bookOrder->id,
             isBuy ? bookOrder->id : incoming->id,
             symbolId_, bestPrice, fillQty));
@@ -768,7 +768,7 @@ void OrderBook::match(Order* incoming) {
         t.symbolId = symbolId_;
         t.aggressorSide = incoming->side;
         tradeHistory_.push(t);
-        if (!replayMode_) { listener_->onTrade(t); engineListener_->onTrade(t); }
+        if (!replayMode_) [[likely]] { listener_->onTrade(t); engineListener_->onTrade(t); }
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;

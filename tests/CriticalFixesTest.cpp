@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include "OrderBook.h"
+#include "FlatHashMap.h"
 #include "Types.h"
 
 #include <atomic>
@@ -194,4 +195,29 @@ TEST(PerfFixes, ConcurrentSnapshotStaysConsistentUnderWriter) {
     }
 
     writer.join();  // returns => no deadlock under the plain-mutex readers
+}
+
+// ─── Perf #3: orderLookup_ never rehashes (allocates) during matching ───────
+//
+// orderLookup_ is sized to the order pool capacity. With the 50% load factor
+// that gives a rehash threshold well above the pool's max live orders, so it
+// can never rehash mid-addOrder. disallowRehash() makes that invariant a hard,
+// asserted contract; rehashCount() lets us prove no allocation occurred.
+TEST(PerfFixes, FlatHashMapDoesNotRehashWhenPreSizedAndFrozen) {
+    // Sized like orderLookup_(INITIAL_CAPACITY = 200000).
+    FlatHashMap<uint64_t, uint64_t> map(200000);
+    const size_t cap = map.capacity();
+    map.disallowRehash();
+    for (uint64_t i = 1; i <= 200000; ++i) map.insert(i, i * 2);
+    EXPECT_EQ(map.rehashCount(), 0u) << "pre-sized map must not rehash up to pool capacity";
+    EXPECT_EQ(map.capacity(), cap) << "capacity (allocation) must be unchanged";
+    EXPECT_EQ(map.size(), 200000u);
+}
+
+TEST(PerfFixes, FlatHashMapStillRehashesWhenNotPreSized) {
+    // Control: a small, non-frozen map DOES rehash as it grows -- proves the
+    // counter is real and the guard above is not vacuous.
+    FlatHashMap<uint64_t, uint64_t> map(8);
+    for (uint64_t i = 1; i <= 1000; ++i) map.insert(i, i);
+    EXPECT_GT(map.rehashCount(), 0u);
 }

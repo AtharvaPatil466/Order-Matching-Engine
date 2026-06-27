@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -34,11 +35,14 @@ public:
 
     FlatHashMap(FlatHashMap&& other) noexcept
         : entries_(other.entries_), capacity_(other.capacity_), mask_(other.mask_),
-          size_(other.size_) {
+          size_(other.size_), rehashFrozen_(other.rehashFrozen_),
+          rehashCount_(other.rehashCount_) {
         other.entries_ = nullptr;
         other.capacity_ = 0;
         other.mask_ = 0;
         other.size_ = 0;
+        other.rehashFrozen_ = false;
+        other.rehashCount_ = 0;
     }
 
     FlatHashMap& operator=(FlatHashMap&& other) noexcept {
@@ -48,10 +52,14 @@ public:
             capacity_ = other.capacity_;
             mask_ = other.mask_;
             size_ = other.size_;
+            rehashFrozen_ = other.rehashFrozen_;
+            rehashCount_ = other.rehashCount_;
             other.entries_ = nullptr;
             other.capacity_ = 0;
             other.mask_ = 0;
             other.size_ = 0;
+            other.rehashFrozen_ = false;
+            other.rehashCount_ = 0;
         }
         return *this;
     }
@@ -199,6 +207,17 @@ public:
         }
     }
 
+    // Freeze the bucket array: assert (debug) if an insert would ever trigger
+    // an implicit rehash. Use after pre-sizing a map whose live entry count is
+    // hard-bounded (e.g. orderLookup_, bounded by the order pool capacity) so a
+    // mid-matching reallocation is caught as a sizing regression rather than
+    // silently paid on the hot path. Explicit reserve() is still permitted.
+    void disallowRehash() { rehashFrozen_ = true; }
+
+    // Number of (re)allocations triggered by growth. 0 for a correctly
+    // pre-sized, never-grown map — used by tests to prove no hot-path alloc.
+    size_t rehashCount() const { return rehashCount_; }
+
     template <typename Fn>
     void forEach(Fn&& fn) {
         for (size_t i = 0; i < capacity_; ++i) {
@@ -251,11 +270,20 @@ private:
 
     void ensureCapacityForInsert() {
         if ((size_ + 1) > static_cast<size_t>(capacity_ * kMaxLoadFactor)) {
+            // Frozen (disallowRehash) maps must have been sized so this never
+            // fires; an implicit rehash here means the container was
+            // under-sized for its hard-bounded workload. The defensive
+            // pre-sizing is the real guarantee — this assert just catches a
+            // sizing regression in debug builds.
+            assert(!rehashFrozen_ &&
+                   "FlatHashMap implicit rehash after disallowRehash() — "
+                   "container under-sized for its workload");
             rehash(capacity_ == 0 ? 8 : capacity_ * 2);
         }
     }
 
     void rehash(size_t newCapacity) {
+        ++rehashCount_;
         Entry* oldEntries = entries_;
         size_t oldCapacity = capacity_;
 
@@ -278,6 +306,8 @@ private:
     size_t capacity_{0};
     size_t mask_{0};
     size_t size_{0};
+    bool rehashFrozen_{false};   // disallowRehash() sets this; asserts on implicit grow
+    size_t rehashCount_{0};      // count of (re)allocations from growth
     [[no_unique_address]] Hash hash_{};
 };
 

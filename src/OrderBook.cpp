@@ -15,6 +15,12 @@ OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo)
       orderLookup_(INITIAL_CAPACITY), orderPool_(INITIAL_CAPACITY),
       symbolId_(symbolId), matchAlgorithm_(algo),
       participantRisk_(1024), participantOrders_(64) {
+    // orderLookup_ is sized to the order pool capacity, so with the 50% load
+    // factor its rehash threshold sits well above the max live orders the pool
+    // can hand out — it can never rehash during matching. Freeze it so any
+    // future sizing regression that breaks that invariant is caught (debug
+    // assert) instead of silently paying a stop-the-world rehash on the hot path.
+    orderLookup_.disallowRehash();
 }
 
 // ─── Notifications ───────────────────────────────────────────────────────────

@@ -554,7 +554,15 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         }
         order->price = pegPrice;
         peggedOrders_.push_back(order);
-        addToBook(order);
+        if (!addToBook(order)) {
+            // Out of price range / depth: don't leave the order marked Accepted
+            // but dangling in orderLookup_ and peggedOrders_ without resting.
+            notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
+            peggedOrders_.erase_value(order);
+            orderLookup_.erase(orderId);
+            orderPool_.deallocate(order);
+            return orderId;
+        }
         if (!order->isHidden)
             notifyMarketData(MarketDataUpdate::Action::Add, side, order->price);
         return orderId;
@@ -738,6 +746,11 @@ void OrderBook::match(Order* incoming) {
                     if (level->empty()) opposite.eraseBest();
                 } else {
                     bookOrder->remainingQty -= stp.decreaseAmount;
+                    // Preserve the iceberg invariant visibleQty <= remainingQty
+                    // (no-op for non-iceberg, where visibleQty == 0). Without it
+                    // a later fill underflows remainingQty to UINT64_MAX.
+                    bookOrder->visibleQty =
+                        std::min(bookOrder->visibleQty, bookOrder->remainingQty);
                 }
                 continue;  // try next resting order
             default:
@@ -1228,7 +1241,7 @@ void OrderBook::expireOrders(uint64_t currentTime,
     orderLookup_.forEach([&](OrderId id, Order* order) {
         if (!order || expireCount >= 4096) return;
         if ((order->timeInForce == TimeInForce::GTD || order->timeInForce == TimeInForce::DAY)
-            && currentTime >= order->expiryTime) {
+            && order->expiryTime != 0 && currentTime >= order->expiryTime) {
             toExpire[expireCount++] = id;
         }
     });
@@ -1399,8 +1412,14 @@ void OrderBook::updatePeggedOrders() {
 
 void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, ParticipantId p2) {
     double tradeValue = static_cast<double>(price) * qty;
-    vwap_ = (vwap_ * totalQty_ + tradeValue) / (totalQty_ + qty);
-    totalQty_ += qty;
+    // Saturate rather than silently wrap the uint64 VWAP denominator at extreme
+    // session volume (which would diverge the next computed VWAP).
+    if (qty > std::numeric_limits<Quantity>::max() - totalQty_) [[unlikely]] {
+        totalQty_ = std::numeric_limits<Quantity>::max();
+    } else {
+        vwap_ = (vwap_ * totalQty_ + tradeValue) / static_cast<double>(totalQty_ + qty);
+        totalQty_ += qty;
+    }
 
     cumulativePrice_ += price;
     priceUpdates_++;

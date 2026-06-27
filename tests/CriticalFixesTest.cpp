@@ -252,3 +252,90 @@ TEST(PerfFixes, OcoSiblingCancelWorksAcrossManyCycles) {
     }
     engine.stopAsync();
 }
+
+// ─── Audit §1: OrderBook correctness (STP iceberg, GTD=0, Pegged, FOK) ───────
+
+namespace {
+// Put the volatility circuit-breaker out of the way so deliberately-crossing
+// test orders are admitted rather than rejected.
+void relaxBook(OrderBook& book) { book.setCircuitBreakerThreshold(0.99); }
+constexpr Price PX = 1'000'000;
+}  // namespace
+
+// §1(a) GTD/DAY with expiryTime==0 means "no expiry" — must not expire.
+TEST(AuditFixes, GTD_ExpiryZero_DoesNotExpireImmediately) {
+    OrderBook book(1); relaxBook(book);
+    auto r = book.addOrder(1, 1, Side::Buy, PX, 100, OrderType::Limit, 0, 0,
+                           TimeInForce::GTD, /*expiryTime=*/0);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(r));
+    ASSERT_NE(book.getOrder(1), nullptr);
+    book.expireOrders(std::numeric_limits<uint64_t>::max());
+    EXPECT_NE(book.getOrder(1), nullptr)
+        << "GTD order with expiryTime==0 (no expiry) must not be expired";
+}
+
+TEST(AuditFixes, GTD_RealExpiry_StillExpiresWhenClockPasses) {
+    OrderBook book(1); relaxBook(book);
+    const uint64_t expiry = 5'000;
+    book.addOrder(2, 1, Side::Buy, PX, 100, OrderType::Limit, 0, 0, TimeInForce::GTD, expiry);
+    ASSERT_NE(book.getOrder(2), nullptr);
+    book.expireOrders(expiry - 1);
+    EXPECT_NE(book.getOrder(2), nullptr) << "must survive before its expiry";
+    book.expireOrders(expiry);
+    EXPECT_EQ(book.getOrder(2), nullptr) << "must expire once the clock reaches expiry";
+}
+
+// §1(d) Pegged addToBook() failure must not leave the order dangling in lookup.
+TEST(AuditFixes, Pegged_AddToBookFailure_NotLeftSilentlyInBook) {
+    OrderBook book(1); relaxBook(book);
+    book.setMaxDepth(1);
+    book.addOrder(10, 1, Side::Sell, PX + 10'000, 100, OrderType::Limit);
+    ASSERT_NE(book.getOrder(10), nullptr);
+    // Pegged sell at a second ask price; maxDepth==1 already used -> addToBook fails.
+    book.addOrder(11, 2, Side::Sell, PX + 20'000, 50, OrderType::Pegged);
+    EXPECT_EQ(book.getOrder(11), nullptr)
+        << "Pegged order rejected by addToBook must not remain in the book";
+}
+
+// §1(a) STP DecreaseResting must keep iceberg visibleQty <= remainingQty
+// (guard: the bad transient state must never escape to underflow a later fill).
+TEST(AuditFixes, STP_DecreaseResting_Iceberg_NoUnderflow) {
+    OrderBook book(1); relaxBook(book);
+    const ParticipantId P1 = 1, P2 = 2;
+    book.setSTPMode(P1, STPMode::DecreaseAndCancel);
+    book.addOrder(100, P1, Side::Sell, PX, 100, OrderType::Iceberg, 0, /*displayQty=*/60);
+    const Order* ice = book.getOrder(100);
+    ASSERT_NE(ice, nullptr);
+    ASSERT_EQ(ice->remainingQty, 100u);
+    ASSERT_EQ(ice->visibleQty, 60u);
+    book.addOrder(101, P1, Side::Buy, PX, 60, OrderType::Limit);   // self-cross -> STP
+    const Order* after = book.getOrder(100);
+    if (after) {
+        EXPECT_LE(after->visibleQty, after->remainingQty);
+        EXPECT_LE(after->remainingQty, after->initialQty);
+    }
+    book.addOrder(102, P2, Side::Buy, PX, 100, OrderType::Limit);  // consume the rest
+    const Order* fin = book.getOrder(100);
+    if (fin) {
+        EXPECT_LE(fin->visibleQty, fin->remainingQty);
+        EXPECT_LE(fin->remainingQty, fin->initialQty) << "remainingQty underflowed (UINT64 wrap)";
+    }
+}
+
+// §1(a) FOK pre-check vs matcher consistency. Audit item refuted: match()
+// refreshes iceberg slices within one call, so checkLiquidity counting
+// remainingQty is correct; switching to visibleQty would reject a fillable FOK.
+// This pins that the pre-check and matcher agree (FOK is never a partial fill).
+TEST(AuditFixes, FOK_IcebergVisibleVsHidden_PrecheckMatchesFill) {
+    OrderBook book(1); relaxBook(book);
+    book.addOrder(200, 1, Side::Sell, PX, 100, OrderType::Iceberg, 0, /*displayQty=*/10);
+    ASSERT_NE(book.getOrder(200), nullptr);
+    auto r = book.addOrder(201, 2, Side::Buy, PX, 50, OrderType::FOK);
+    const Order* ice = book.getOrder(200);
+    ASSERT_NE(ice, nullptr);
+    if (std::holds_alternative<RejectReason>(r)) {
+        EXPECT_EQ(ice->remainingQty, 100u) << "rejected FOK must not touch the book";
+    } else {
+        EXPECT_EQ(ice->remainingQty, 50u) << "admitted FOK must fully fill 50";
+    }
+}

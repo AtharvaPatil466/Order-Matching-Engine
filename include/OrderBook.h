@@ -242,7 +242,17 @@ public:
     double getVWAP() const { return vwap_; }
     uint64_t getTradeCount() const { return priceUpdates_; }
 
-    // Trade history ring buffer access
+    // Trade history ring buffer access.
+    //
+    // CONCURRENCY (SPSC contract): tradeHistory_ is written (push) only by the
+    // single worker thread that owns this book, under bookLock_. This accessor
+    // returns a CONST reference precisely so a reader on another thread cannot
+    // call push()/pop() (both non-const) and break the single-producer/single-
+    // consumer invariant. The const observers that remain reachable — size(),
+    // empty(), capacity() — touch only the release/acquire atomics head_/tail_,
+    // never the buffer storage, so calling them concurrently with the producer's
+    // push() is data-race-free. Do NOT add a non-const overload or a path to
+    // pop() from a second consumer.
     const RingBuffer<Trade>& getTradeRingBuffer() const { return tradeHistory_; }
     void clearTradeHistory() { /* ring buffer wraps automatically */ }
 
@@ -312,9 +322,26 @@ public:
     // Note: returns up to maxOrders pointers into a caller-provided buffer
     size_t getAllOrders(const Order** out, size_t maxOrders) const;
 
-    // Iterate all active orders (for checkpoint — avoids allocation)
+    // Iterate all active orders (for checkpoint — avoids allocation).
+    // CALLER MUST hold bookLock_ (or otherwise guarantee no concurrent writer)
+    // — this overload does NOT lock. Safe from the owning worker thread; use
+    // forEachOrderLocked() from any other thread.
     template<typename Fn>
     void forEachOrder(Fn&& fn) const {
+        orderLookup_.forEach([&](OrderId, Order* order) {
+            if (order) fn(*order);
+        });
+    }
+
+    // Same as forEachOrder, but acquires bookLock_ for the whole iteration so
+    // it is safe to call from a thread that does NOT own the book — snapshot
+    // streaming, checkpoint, replication. Writers take the lock exclusively, so
+    // orderLookup_ cannot be mutated/rehashed mid-walk. The callback must not
+    // re-enter a method that takes bookLock_ (no re-entrancy on the non-
+    // recursive mutex).
+    template<typename Fn>
+    void forEachOrderLocked(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
         orderLookup_.forEach([&](OrderId, Order* order) {
             if (order) fn(*order);
         });

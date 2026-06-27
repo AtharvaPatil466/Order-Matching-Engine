@@ -41,6 +41,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <vector>
 
@@ -166,8 +167,13 @@ public:
         boundaries_[numShards - 1].upperBound = maxPrice + 1; // inclusive last
     }
 
-    // Determine which shard owns a given price
+    // Determine which shard owns a given price.
+    // Reads boundaries_ under a shared lock so it can never observe a torn
+    // boundary table while rebalance() (exclusive) is mid-rewrite. Many router
+    // threads read in parallel; rebalance is rare, so the shared_mutex keeps
+    // reader parallelism while making the read consistent.
     size_t getShardIndex(Price price) const {
+        std::shared_lock<std::shared_mutex> lock(migrationMutex_);
         for (size_t i = 0; i < numShards_; ++i) {
             if (price >= boundaries_[i].lowerBound &&
                 price < boundaries_[i].upperBound) {
@@ -199,7 +205,7 @@ public:
         Price totalRange = maxPrice_ - minPrice_;
         Price cursor = minPrice_;
 
-        std::lock_guard<std::mutex> lock(migrationMutex_);
+        std::unique_lock<std::shared_mutex> lock(migrationMutex_);
         for (size_t i = 0; i < numShards_; ++i) {
             boundaries_[i].lowerBound = cursor;
             double share = static_cast<double>(orderCounts[i]) / static_cast<double>(total);
@@ -214,7 +220,11 @@ public:
         return true;
     }
 
-    const ShardConfig& getBoundary(size_t shardIndex) const {
+    // Returns a COPY taken under the shared lock, so the caller can never read
+    // a boundary that rebalance() is concurrently rewriting. Returning a
+    // reference would re-expose the torn-read race.
+    ShardConfig getBoundary(size_t shardIndex) const {
+        std::shared_lock<std::shared_mutex> lock(migrationMutex_);
         return boundaries_[shardIndex];
     }
 
@@ -230,7 +240,8 @@ private:
     Price maxPrice_;
     std::array<ShardConfig, MAX_SHARDS> boundaries_{};
     std::atomic<uint64_t> migrationEpoch_{0};
-    std::mutex migrationMutex_;
+    // mutable: const readers (getShardIndex/getBoundary) take it in shared mode.
+    mutable std::shared_mutex migrationMutex_;
 };
 
 // ─── ShardedOrderBook ───────────────────────────────────────────────────────

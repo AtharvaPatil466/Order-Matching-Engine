@@ -342,6 +342,11 @@ enum class RiskValidationResult : uint8_t {
 // Private helper methods inside class MatchingEngine:
 private:
     void ensureDefaultSymbol();
+    // Raw symbol registration. ASSUMES bookMutex_ is already held by the
+    // caller. addSymbol() is the public, self-locking wrapper; internal callers
+    // that already hold bookMutex_ (e.g. applyReplicatedEntry's ensureBook) use
+    // this form to avoid re-locking the non-recursive mutex.
+    void addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo = MatchAlgorithm::PriceTime);
     void workerLoop(size_t threadIndex);
     void processRequest(size_t threadIndex, const OrderRequest& req);
     void maybeTriggerAutoCheckpoint();

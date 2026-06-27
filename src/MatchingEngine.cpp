@@ -147,6 +147,10 @@ uint64_t MatchingEngine::getProcessedCount() const {
 }
 
 void MatchingEngine::ensureDefaultSymbol() {
+    // Mutates books_/symbolIds_; guard with bookMutex_ for the same discipline
+    // as addSymbol. Called from the constructor (no contention), but uniform
+    // locking keeps every books_/symbolIds_ mutation guarded.
+    std::lock_guard<std::mutex> lock(bookMutex_);
     if (books_.contains(0)) {
         return;
     }
@@ -256,7 +260,9 @@ void MatchingEngine::expireOrdersFromClock() {
             enqueueSafe(i, req);
         }
     } else {
-        std::lock_guard<std::mutex> lock(bookMutex_);
+        // expireOrders() self-guards with bookMutex_ now (it iterates
+        // symbolIds_); do NOT pre-lock — bookMutex_ is a non-recursive
+        // std::mutex and re-locking would self-deadlock.
         expireOrders(now);
     }
 }
@@ -521,6 +527,17 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
 }
 
 void MatchingEngine::addSymbol(SymbolId symbolId, MatchAlgorithm algo) {
+    // Public entry point: take bookMutex_, then delegate the mutation. Every
+    // books_/symbolIds_/ocoListeners_ mutation runs under bookMutex_ so it
+    // cannot rehash the FlatHashMap (freeing the bucket array) underneath a
+    // concurrent off-hot-path reader (snapshot/checkpoint/replication apply)
+    // iterating symbolIds_ or calling getOrderBook().
+    std::lock_guard<std::mutex> lock(bookMutex_);
+    addSymbolLocked(symbolId, algo);
+}
+
+void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
+    // Caller MUST hold bookMutex_.
     if (booksFrozen_.load(std::memory_order_acquire) || books_.contains(symbolId)) {
         return;
     }
@@ -937,7 +954,11 @@ uint64_t MatchingEngine::killSwitch(ParticipantId participantId) {
         return 0;
     }
 
+    // Sync path: iterate symbolIds_ under bookMutex_ so a concurrent addSymbol
+    // (e.g. a sync-mode replication apply) cannot reallocate the vector / books_
+    // map mid-iteration. Lock order bookMutex_ -> bookLock_.
     uint64_t total = 0;
+    std::lock_guard<std::mutex> lock(bookMutex_);
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId)) {
             total += book->cancelAllForParticipant(participantId);
@@ -1016,6 +1037,13 @@ size_t MatchingEngine::resumeVolatilityAuctions() {
 }
 
 void MatchingEngine::expireOrders(uint64_t currentTime) {
+    // Sync-mode expiry path. Iterates symbolIds_, so hold bookMutex_ to stay
+    // consistent against a concurrent addSymbol (expiry timer thread vs. a
+    // symbol-management mutation). Lock order bookMutex_ -> book->bookLock_ ->
+    // journalMutex_ (the onExpire callback logs under journalMutex_); sync-mode
+    // only, where no async worker runs, so it cannot deadlock the worker path.
+    std::lock_guard<std::mutex> lock(bookMutex_);
+
     // If the journal is enabled, log each expiration as a CancelOrder
     // BEFORE the cancel actually runs. Replay then reproduces these
     // expirations deterministically without needing a virtual clock —
@@ -1148,6 +1176,9 @@ size_t MatchingEngine::replayJournal() {
 }
 
 void MatchingEngine::setReplayModeAllBooks(bool replay) {
+    // Can run on the promotion path concurrently with the replication apply
+    // thread (which adds symbols), so iterate symbolIds_ under bookMutex_.
+    std::lock_guard<std::mutex> lock(bookMutex_);
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId)) {
             book->setReplayMode(replay);
@@ -1158,10 +1189,15 @@ void MatchingEngine::setReplayModeAllBooks(bool replay) {
 void MatchingEngine::streamSnapshot(
         const std::function<void(const JournalEntry&)>& fn) const {
     if (!fn) return;
+    // Runs on the replication coordinator thread while workers mutate books.
+    // Hold bookMutex_ for a consistent symbolIds_/books_ view, and iterate each
+    // book under its own lock via forEachOrderLocked. Lock order: bookMutex_ ->
+    // book->bookLock_.
+    std::lock_guard<std::mutex> lock(bookMutex_);
     for (SymbolId symbolId : symbolIds_) {
         const auto* book = getOrderBook(symbolId);
         if (!book) continue;
-        book->forEachOrder([&](const Order& o) {
+        book->forEachOrderLocked([&](const Order& o) {
             JournalEntry e{};
             e.entryType    = JournalEntry::Type::Snapshot;
             e.orderId      = o.id;
@@ -1201,10 +1237,20 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
     // durability of received entries across its own restarts — and
     // so the chaos suite can observe replication progress via
     // /journal/head on the backup.
+    // The replication receive thread mutates books_/symbolIds_ via ensureBook
+    // (addSymbol) and iterates symbolIds_ in the Cancel/Modify branches. Hold
+    // bookMutex_ across the whole apply so neither the structural mutation nor
+    // the iterations race a concurrent symbol add / off-hot-path reader. Lock
+    // order bookMutex_ -> book->bookLock_ (taken inside addOrder/cancelOrder),
+    // matching streamSnapshot/checkpoint; no path takes a book lock before
+    // bookMutex_, so there is no inversion. ensureBook uses addSymbolLocked
+    // because we already hold bookMutex_.
+    std::lock_guard<std::mutex> booksLock(bookMutex_);
+
     auto ensureBook = [this](SymbolId sym) -> OrderBook* {
         auto* book = getOrderBook(sym);
         if (!book) {
-            addSymbol(sym);
+            addSymbolLocked(sym);
             book = getOrderBook(sym);
             if (book) book->setReplayMode(true);
         }
@@ -1325,23 +1371,43 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained) {
         waitForDrain();
     }
 
-    std::lock_guard<std::mutex> lock(journalMutex_);
-    journal_->rewriteAtomically([&](Journal& snapshotJournal) {
+    // Two phases, deliberately NOT nested, to keep the lock order acyclic.
+    // The expiry path takes book->bookLock_ then journalMutex_ (onExpire logs
+    // under journalMutex_ while the book lock is held). Holding journalMutex_
+    // here and then reaching for a book lock (which forEachOrderLocked does)
+    // would invert that order and could deadlock a concurrent worker
+    // ExpireCheck. So: phase 1 copies a point-in-time snapshot of every resting
+    // order under each book's own lock (under bookMutex_ for a consistent
+    // symbol set, never holding journalMutex_); phase 2 writes the gathered
+    // copy under journalMutex_ alone (no book lock held). Order copies are
+    // read-only value snapshots — the intrusive next/prev are never deref'd.
+    std::vector<std::pair<SymbolId, Order>> resting;
+    {
+        std::lock_guard<std::mutex> booksLock(bookMutex_);
         for (SymbolId symbolId : symbolIds_) {
             const OrderBook* book = getOrderBook(symbolId);
             if (!book) {
                 continue;
             }
-
-            book->forEachOrder([&](const Order& order) {
-                snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
-                                            order.side, order.price, order.remainingQty,
-                                            order.type, order.timeInForce, order.expiryTime,
-                                            order.stopPrice, order.stopLimitPrice,
-                                            order.displayQty, order.pegType,
-                                            order.pegOffset, order.trailAmount,
-                                            order.minQty, order.isHidden);
+            book->forEachOrderLocked([&](const Order& order) {
+                resting.emplace_back(symbolId, order);
             });
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (!journal_) {
+        return;
+    }
+    journal_->rewriteAtomically([&](Journal& snapshotJournal) {
+        for (const auto& [symbolId, order] : resting) {
+            snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
+                                        order.side, order.price, order.remainingQty,
+                                        order.type, order.timeInForce, order.expiryTime,
+                                        order.stopPrice, order.stopLimitPrice,
+                                        order.displayQty, order.pegType,
+                                        order.pegOffset, order.trailAmount,
+                                        order.minQty, order.isHidden);
         }
     });
 }

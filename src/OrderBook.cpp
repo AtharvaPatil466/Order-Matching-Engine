@@ -38,8 +38,12 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
     u.rejectReason = reason;
     u.timestamp = nowNs();
     u.sequenceNumber = nextSequenceNumber_++;
-    listener_->onOrderUpdate(u);
-    engineListener_->onOrderUpdate(u);
+    // Skip the vtable dispatch when no real listener is wired (the flag is set
+    // by setEventListener/setEngineListener). Same guard as the onTrade path.
+    if (hasTradeListener_) {
+        listener_->onOrderUpdate(u);
+        engineListener_->onOrderUpdate(u);
+    }
 #else
     (void)orderId; (void)status; (void)filledQty; (void)remainingQty; (void)lastFillPrice; (void)reason;
 #endif
@@ -70,7 +74,7 @@ void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Pri
     }
 
     update.level = lvl;
-    listener_->onMarketData(update);
+    if (hasTradeListener_) listener_->onMarketData(update);
 #else
     (void)action; (void)side; (void)price;
 #endif

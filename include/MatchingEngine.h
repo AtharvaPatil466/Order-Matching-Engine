@@ -426,6 +426,14 @@ private:
         const std::atomic<bool>* tradesActive = nullptr;  // gates the trades buffer
         std::vector<OrderId> executed;
         std::vector<Trade>   trades;
+        // Persistent drain buffers reused across driveOco cycles. The drain
+        // swaps these with executed/trades and clear()s them (keeping
+        // capacity), so a buffer with reserved storage is always swapped back
+        // into executed/trades — eliminating the per-cycle reallocation the
+        // old swap-with-a-local pattern incurred. Touched only by the symbol's
+        // owning worker thread (matching + drain run on the same thread).
+        std::vector<OrderId> firedScratch;
+        std::vector<Trade>   tradesScratch;
         void onOrderUpdate(const OrderUpdate& u) override;
         void onTrade(const Trade& t) override;
     };

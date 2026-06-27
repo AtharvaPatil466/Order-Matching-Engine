@@ -534,6 +534,14 @@ void MatchingEngine::addSymbol(SymbolId symbolId, MatchAlgorithm algo) {
     auto oco = std::make_unique<OcoBookListener>();
     oco->ocoActive = &ocoActive_;
     oco->tradesActive = &observersActive_;
+    // Pre-reserve the observer + drain buffers so a burst of fills in one
+    // request does not heap-allocate on the worker hot path. driveOco then
+    // reuses the buffers (swap + clear), keeping steady-state allocation-free.
+    constexpr size_t kOcoBufferReserve = 256;
+    oco->executed.reserve(kOcoBufferReserve);
+    oco->trades.reserve(kOcoBufferReserve);
+    oco->firedScratch.reserve(kOcoBufferReserve);
+    oco->tradesScratch.reserve(kOcoBufferReserve);
     if (auto* bk = getOrderBook(symbolId)) bk->setEngineListener(oco.get());
     ocoListeners_.insert(symbolId, std::move(oco));
 
@@ -573,9 +581,11 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
     // the cancels below (which re-enter the observer with Cancelled updates,
     // ignored) cannot grow the buffer mid-iteration.
     if (!obs->executed.empty()) {
-        std::vector<OrderId> fired;
-        fired.swap(obs->executed);
-        for (OrderId id : fired) {
+        // Swap into the persistent scratch (so a re-entrant push during the
+        // cancels below cannot grow the buffer mid-iteration), then clear it
+        // afterwards to retain its capacity for the next cycle.
+        obs->firedScratch.swap(obs->executed);
+        for (OrderId id : obs->firedScratch) {
             std::vector<OrderId> siblings;
             {
                 std::lock_guard<std::mutex> lock(contingencyMutex_);
@@ -590,14 +600,14 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
                 }
             }
         }
+        obs->firedScratch.clear();   // retain capacity for the next drain cycle
     }
 
     // (2) Trade-driven consumers: maker-taker fees, hierarchical-risk position
     // accrual, and the CAT audit trail. Each fill moves both participants.
     if (!obs->trades.empty()) {
-        std::vector<Trade> ts;
-        ts.swap(obs->trades);
-        for (const Trade& t : ts) {
+        obs->tradesScratch.swap(obs->trades);
+        for (const Trade& t : obs->tradesScratch) {
             if (feesActive_.load(std::memory_order_relaxed)) {
                 const ParticipantId maker = (t.aggressorSide == Side::Buy) ? t.sellerId : t.buyerId;
                 const ParticipantId taker = (t.aggressorSide == Side::Buy) ? t.buyerId : t.sellerId;
@@ -615,6 +625,7 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
                                          t.sellOrderId, t.symbolId, t.price, t.quantity);
             }
         }
+        obs->tradesScratch.clear();  // retain capacity for the next drain cycle
     }
 }
 

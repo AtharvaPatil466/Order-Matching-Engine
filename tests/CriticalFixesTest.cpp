@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include "OrderBook.h"
+#include "MatchingEngine.h"
 #include "FlatHashMap.h"
 #include "Types.h"
 
@@ -220,4 +221,34 @@ TEST(PerfFixes, FlatHashMapStillRehashesWhenNotPreSized) {
     FlatHashMap<uint64_t, uint64_t> map(8);
     for (uint64_t i = 1; i <= 1000; ++i) map.insert(i, i);
     EXPECT_GT(map.rehashCount(), 0u);
+}
+
+// ─── Perf #1: OCO drain reuses scratch buffers (no per-cycle realloc) ───────
+//
+// driveOco drains executed/trades via persistent reserved scratch buffers
+// (swap + clear, retaining capacity) instead of swapping into a local that
+// frees the buffer every cycle. Behaviour-preserving guard: OCO sibling-cancel
+// must keep working across many cycles, which repeatedly exercise the reused
+// buffers. (A pure allocation optimisation has no functional RED; the existing
+// OCO suite plus this multi-cycle guard protect correctness.)
+TEST(PerfFixes, OcoSiblingCancelWorksAcrossManyCycles) {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+    engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
+    engine.startAsync(1, 1024);
+
+    OrderId id = 1;
+    for (int cycle = 0; cycle < 8; ++cycle) {
+        OrderId hi = id++, lo = id++, agg = id++;
+        engine.processOrder(1, hi, 1, Side::Sell, 105, 10, OrderType::Limit);
+        engine.processOrder(1, lo, 1, Side::Sell, 95,  10, OrderType::Limit);
+        engine.waitForDrain();
+        engine.registerOco(1, hi, lo);
+        engine.processOrder(1, agg, 2, Side::Buy, 95, 10, OrderType::Limit);  // fills lo
+        engine.waitForDrain();
+        const OrderBook* book = engine.getOrderBook(1);
+        ASSERT_EQ(book->getOrder(lo), nullptr) << "filled leg gone (cycle " << cycle << ")";
+        ASSERT_EQ(book->getOrder(hi), nullptr) << "OCO sibling cancelled (cycle " << cycle << ")";
+    }
+    engine.stopAsync();
 }

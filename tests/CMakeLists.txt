@@ -228,6 +228,14 @@ add_test(NAME ItchPublisherTest COMMAND ItchPublisherTest)
 set_tests_properties(ItchPublisherTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
+# ITCH 5.0 exact wire byte-layout / field-offset tests (C / X / P)
+add_executable(ItchByteLayoutTest ItchByteLayoutTest.cpp)
+target_link_libraries(ItchByteLayoutTest PRIVATE OrderMatcher)
+enable_assertions(ItchByteLayoutTest)
+add_test(NAME ItchByteLayoutTest COMMAND ItchByteLayoutTest)
+set_tests_properties(ItchByteLayoutTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol")
+
 # SoupBinTCP transport: envelope codec, framer, session state machine
 add_executable(SoupBinTcpTest SoupBinTcpTest.cpp)
 target_link_libraries(SoupBinTcpTest PRIVATE OrderMatcher)

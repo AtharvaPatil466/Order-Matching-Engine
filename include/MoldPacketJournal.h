@@ -27,6 +27,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -66,18 +67,28 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         if (entries_.empty()) return 0;
 
-        // Bound the request to what we can actually answer.
-        uint64_t endSeq;
+        // Bound the request to what we can actually answer, expressed as
+        // an INCLUSIVE upper sequence so the window never wraps near the
+        // top of the 64-bit space. A naive half-open end (back().seq + 1
+        // or startSeq + count) wraps to a small value when the operand is
+        // at/near UINT64_MAX, which silently replays nothing.
+        constexpr uint64_t kMaxSeq = std::numeric_limits<uint64_t>::max();
+        uint64_t lastWanted;
         if (count == 0) {
-            endSeq = entries_.back().seq + 1;
+            // "To end of journal" — inclusive of the newest entry, even
+            // when that newest sequence is UINT64_MAX itself.
+            lastWanted = entries_.back().seq;
         } else {
-            endSeq = startSeq + count;
+            // startSeq + (count - 1), clamped so an oversized window at
+            // the top of the space saturates instead of wrapping.
+            uint64_t span = static_cast<uint64_t>(count) - 1;
+            lastWanted = (startSeq > kMaxSeq - span) ? kMaxSeq : startSeq + span;
         }
 
         size_t delivered = 0;
         for (const auto& e : entries_) {
             if (e.seq < startSeq) continue;
-            if (e.seq >= endSeq) break;
+            if (e.seq > lastWanted) break;
             cb(e.seq, e.bytes.data(), e.bytes.size());
             ++delivered;
         }

@@ -58,6 +58,16 @@ namespace OrderMatcher {
 constexpr char ITCH_RETRANSMIT_REQUEST_TAG = 'R';
 constexpr size_t ITCH_RETRANSMIT_REQUEST_BYTES = 11;
 
+// Per-request replay cap. The re-request count field is a uint16 (max
+// 65535) and count==0 means "from startSeq to the end of the journal";
+// either lets a single subscriber ask the server to stream an unbounded
+// run of messages, pinning the per-connection thread and starving other
+// requests. The service clamps the work served per re-request to this
+// many messages — a subscriber needing more simply issues a follow-up
+// request from the next uncovered sequence. Sized to comfortably cover
+// realistic multicast gaps while keeping any one request bounded.
+constexpr uint16_t ITCH_RETRANSMIT_MAX_REPLAY = 1024;
+
 // Synchronous helper: validate and parse a re-request payload from
 // the wire. Returns true on a well-formed request.
 struct ItchRetransmitRequest {
@@ -172,13 +182,21 @@ private:
                 ::send(fd, bytes.data(), bytes.size(), 0);
             },
             serverSession_);
-        if (loginValidator_) {
-            soup->setOnLoginRequest(loginValidator_);
-        } else {
-            soup->setOnLoginRequest([](const SoupLoginRequest&) {
+        // Always enforce that a re-request names THIS service's session
+        // (or leaves it blank = "current"). A login that asks for a
+        // different session is a cross-session replay attempt and is
+        // refused before any journal access. The caller's custom
+        // validator (if any) runs only after the session check passes.
+        const std::string expectedSession = serverSession_;
+        LoginValidator userValidator = loginValidator_;
+        soup->setOnLoginRequest(
+            [expectedSession, userValidator](const SoupLoginRequest& req) -> char {
+                if (!req.session.empty() && req.session != expectedSession) {
+                    return SOUP_LOGIN_REJECT_SESSION_NOT_AVAILABLE;
+                }
+                if (userValidator) return userValidator(req);
                 return char{0};
             });
-        }
 
         auto* journalPtr = &journal_;
         auto requestsCtr = &requestsServed_;
@@ -194,7 +212,17 @@ private:
 
                 auto s = soupWeak.lock();
                 if (!s) return;
-                journalPtr->replayRange(req.startSeq, req.count,
+                // Bound the per-request work: clamp count==0 ("to end of
+                // journal") and any count above the cap down to
+                // ITCH_RETRANSMIT_MAX_REPLAY, so one slow subscriber can't
+                // monopolize the connection thread streaming an unbounded
+                // run. A client needing more re-requests from the next
+                // uncovered sequence.
+                uint16_t replayCount = req.count;
+                if (replayCount == 0 || replayCount > ITCH_RETRANSMIT_MAX_REPLAY) {
+                    replayCount = ITCH_RETRANSMIT_MAX_REPLAY;
+                }
+                journalPtr->replayRange(req.startSeq, replayCount,
                     [&s, messagesCtr](uint64_t /*seq*/, const uint8_t* data, size_t len) {
                         s->sendSequenced(data, len);
                         ++*messagesCtr;

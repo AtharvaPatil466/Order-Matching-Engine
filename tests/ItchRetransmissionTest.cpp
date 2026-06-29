@@ -141,6 +141,53 @@ void test_JournalContainsReflectsWindow() {
     } END
 }
 
+void test_JournalReplayCountZeroNearUint64Max() {
+    TEST(JournalReplayCountZeroNearUint64Max) {
+        // A journal whose newest sequence sits at the very top of the
+        // 64-bit space. A "to end" (count==0) replay must still emit the
+        // journaled entries: computing endSeq = back().seq + 1 wraps to
+        // 0 when back().seq == UINT64_MAX, which would make the half-open
+        // window [startSeq, 0) empty and silently replay nothing.
+        MoldPacketJournal j(16);
+        j.record(UINT64_MAX - 2, "A", 1);
+        j.record(UINT64_MAX - 1, "B", 1);
+        j.record(UINT64_MAX,     "C", 1);
+
+        std::vector<std::string> got;
+        size_t n = j.replayRange(UINT64_MAX - 2, /*count=*/0,
+            [&](uint64_t, const uint8_t* p, size_t len) {
+                got.emplace_back(reinterpret_cast<const char*>(p), len);
+            });
+        CHECK(n == 3 && "count==0 replay near UINT64_MAX must not wrap to empty");
+        CHECK(got.size() == 3);
+        CHECK(got[0] == "A");
+        CHECK(got[1] == "B");
+        CHECK(got[2] == "C");
+    } END
+}
+
+void test_JournalReplayCountWrapGuard() {
+    TEST(JournalReplayCountWrapGuard) {
+        // startSeq + count must not wrap: a request near the top of the
+        // sequence space with a large count must clamp to UINT64_MAX
+        // rather than fold back into a tiny [startSeq, small) window that
+        // delivers nothing.
+        MoldPacketJournal j(16);
+        j.record(UINT64_MAX - 1, "A", 1);
+        j.record(UINT64_MAX,     "B", 1);
+
+        std::vector<std::string> got;
+        size_t n = j.replayRange(UINT64_MAX - 1, /*count=*/50000,
+            [&](uint64_t, const uint8_t* p, size_t len) {
+                got.emplace_back(reinterpret_cast<const char*>(p), len);
+            });
+        CHECK(n == 2 && "count window must not wrap past UINT64_MAX");
+        CHECK(got.size() == 2);
+        CHECK(got[0] == "A");
+        CHECK(got[1] == "B");
+    } END
+}
+
 // ─── Re-request packet tests ────────────────────────────────────────────────
 
 void test_RetransmitRequestRoundtrip() {
@@ -233,6 +280,13 @@ std::vector<uint8_t> recvSoupPacket(int fd) {
 std::vector<uint8_t> buildLogin(const std::string& u, const std::string& p) {
     std::vector<uint8_t> wire(3 + SOUP_SIZE_LOGIN_REQUEST_PAYLOAD);
     soupWriteLoginRequest(wire.data(), u, p, "", 0);
+    return wire;
+}
+
+std::vector<uint8_t> buildLoginSession(const std::string& u, const std::string& p,
+                                       const std::string& session) {
+    std::vector<uint8_t> wire(3 + SOUP_SIZE_LOGIN_REQUEST_PAYLOAD);
+    soupWriteLoginRequest(wire.data(), u, p, session, 0);
     return wire;
 }
 
@@ -372,6 +426,101 @@ void test_ServiceMissingRangeReturnsNoReplays() {
     } END
 }
 
+void test_ServiceRejectsMismatchedSession() {
+    TEST(ServiceRejectsMismatchedSession) {
+        // The service journals for session "REPLAY". A subscriber that
+        // logs in naming a DIFFERENT session is attempting a cross-
+        // session replay and must be refused at login — before it can
+        // ever issue a re-request against this journal.
+        MoldPacketJournal j;
+        j.record(1, "MSG_A", 5);
+        ItchRetransmissionService svc(j, "REPLAY");
+        CHECK(svc.start(0));
+
+        int fd = tcpConnect(svc.boundPort());
+        CHECK(fd >= 0);
+
+        auto login = buildLoginSession("SUB", "PASS", "OTHERSESS");
+        CHECK(sendAll(fd, login.data(), login.size()));
+
+        auto resp = recvSoupPacket(fd);
+        CHECK(!resp.empty());
+        CHECK(resp[2] == SOUP_PT_LOGIN_REJECTED
+              && "cross-session login must be rejected, not accepted");
+        CHECK(resp[3] == SOUP_LOGIN_REJECT_SESSION_NOT_AVAILABLE);
+
+        ::close(fd);
+        svc.stop();
+        // The rejected client never got far enough to issue a request.
+        CHECK(svc.requestsServed() == 0);
+    } END
+}
+
+void test_ServiceAcceptsMatchingSession() {
+    TEST(ServiceAcceptsMatchingSession) {
+        // Control for the mismatch test: a login that names the service's
+        // OWN session is accepted and replays normally (a blank session —
+        // "current" — is already exercised by the other service tests).
+        MoldPacketJournal j;
+        j.record(1, "MSG_A", 5);
+        ItchRetransmissionService svc(j, "REPLAY");
+        CHECK(svc.start(0));
+
+        int fd = tcpConnect(svc.boundPort());
+        CHECK(fd >= 0);
+
+        auto login = buildLoginSession("SUB", "PASS", "REPLAY");
+        CHECK(sendAll(fd, login.data(), login.size()));
+
+        auto ack = recvSoupPacket(fd);
+        CHECK(ack.size() == 3 + SOUP_SIZE_LOGIN_ACCEPTED_PAYLOAD);
+        CHECK(ack[2] == SOUP_PT_LOGIN_ACCEPTED
+              && "matching-session login must be accepted");
+
+        ::close(fd);
+        svc.stop();
+    } END
+}
+
+void test_ServiceCapsOverSizedReplay() {
+    TEST(ServiceCapsOverSizedReplay) {
+        // A journal holding far more than the per-request cap. A single
+        // count==0 ("from startSeq to end of journal") re-request is the
+        // unbounded path: without a server-side cap it would stream every
+        // journaled message, pinning the connection thread. The service
+        // must clamp the work to ITCH_RETRANSMIT_MAX_REPLAY.
+        const uint64_t total =
+            static_cast<uint64_t>(ITCH_RETRANSMIT_MAX_REPLAY) + 500;
+        MoldPacketJournal j(static_cast<size_t>(total) + 16);
+        for (uint64_t s = 1; s <= total; ++s) {
+            j.record(s, "x", 1);
+        }
+
+        ItchRetransmissionService svc(j, "REPLAY");
+        CHECK(svc.start(0));
+
+        int fd = tcpConnect(svc.boundPort());
+        CHECK(fd >= 0);
+        auto login = buildLogin("U", "P");
+        sendAll(fd, login.data(), login.size());
+        recvSoupPacket(fd);   // discard LoginAccepted
+
+        // count == 0 ⇒ "to end of journal" — the path the cap reins in.
+        uint8_t inner[ITCH_RETRANSMIT_REQUEST_BYTES];
+        buildRetransmitRequest(inner, /*startSeq=*/1, /*count=*/0);
+        uint8_t req[3 + ITCH_RETRANSMIT_REQUEST_BYTES];
+        soupWriteEnvelope(req, SOUP_PT_UNSEQUENCED_DATA, inner, sizeof(inner));
+        sendAll(fd, req, sizeof(req));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        ::close(fd);
+        svc.stop();
+        CHECK(svc.messagesReplayedTotal() == ITCH_RETRANSMIT_MAX_REPLAY
+              && "over-cap request must be clamped to the replay cap");
+    } END
+}
+
 int main() {
     std::cout << "Running ItchRetransmissionTest\n";
 
@@ -380,6 +529,8 @@ int main() {
     test_JournalReplayEmptyRange();
     test_JournalReplayEvictedRange();
     test_JournalContainsReflectsWindow();
+    test_JournalReplayCountZeroNearUint64Max();
+    test_JournalReplayCountWrapGuard();
 
     test_RetransmitRequestRoundtrip();
     test_RetransmitRequestRejectsBadTag();
@@ -389,6 +540,9 @@ int main() {
     test_ServiceReplaysJournaledMessages();
     test_ServiceEmptyJournalReturnsNoReplays();
     test_ServiceMissingRangeReturnsNoReplays();
+    test_ServiceRejectsMismatchedSession();
+    test_ServiceAcceptsMatchingSession();
+    test_ServiceCapsOverSizedReplay();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

@@ -4,12 +4,12 @@
 [![Latency](https://img.shields.io/badge/Matching_P50-125ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-6.6M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
-[![Tests](https://img.shields.io/badge/Tests-396_CTest_targets-brightgreen.svg)](#verification)
+[![Tests](https://img.shields.io/badge/Tests-426_CTest_targets-brightgreen.svg)](#verification)
 [![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
 [![TLA+](https://img.shields.io/badge/TLA%2B-454M_states_verified-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocols-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states on `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 75 test executables, 396 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
+A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states on `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 79 test executables, 426 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
 
 ## 🚀 Key Features
 
@@ -265,7 +265,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 
 ## 🧪 Verification
 
-**75 test executables** covering **396 CTest targets**[^1] across 11 categories:
+**79 test executables** covering **426 CTest targets**[^1] across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -281,7 +281,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
 | **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
 
-[^1]: *CTest targets map to individual executables and GTest cases. The 396 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
+[^1]: *CTest targets map to individual executables and GTest cases. The 426 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
 
 ### Formal Verification (TLA+)
 
@@ -366,4 +366,4 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 46.5K LOC · 75 test executables · 396 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*
+*C++20 · 46.5K LOC · 79 test executables · 426 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*

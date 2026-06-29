@@ -2,8 +2,8 @@
 
 > **Platform**: Apple M3 Pro (ARM64) · **Compiler**: Clang C++20 -O3 -march=native
 > **Baseline**: commit `5228158` · **Date**: 2026-06-21 · **Seed**: 42
-> **Tests**: 396/396 passing
-> **Verified**: fresh `git clone` → clean build → `ctest` (396/396) → `HonestBenchmark` ×4.
+> **Tests**: 426/426 passing
+> **Verified**: fresh `git clone` → clean build → `ctest` (426/426) → `HonestBenchmark` ×4.
 > Throughput figures are wall-clock and sensitive to machine load; P50 is the
 > stable per-operation number. All figures are ARM64 (Apple Silicon) local
 > measurements — throughput in particular should be re-measured on bare-metal

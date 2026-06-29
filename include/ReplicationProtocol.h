@@ -388,15 +388,18 @@ public:
         hdr.epoch = epoch;
         hdr.senderId = senderId;
         hdr.payloadSize = static_cast<uint32_t>(payloadLen);
-        // Atomic increment — multiple threads can reach send()
-        // concurrently (heartbeat thread + replicateEntry caller).
-        // sendMu_ protects the wire ordering, but the sequence
-        // number is read before the lock, so it needs its own
-        // synchronization.
-        hdr.sequenceNum = sendSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
 
-        // Send header + payload atomically
+        // Assign the sequence number and frame the message under the SAME
+        // lock that serializes the socket writes, so the on-wire byte order
+        // is strictly monotonic in sequenceNum (usable for receiver-side gap
+        // detection). Multiple threads (the heartbeat thread + every
+        // replicateEntry caller) race into send(); if the number were taken
+        // before acquiring sendMu_, two messages could grab sequence numbers
+        // in one order and then serialize onto the socket in the opposite
+        // order, producing a non-monotonic wire sequence. Holding the lock
+        // across both the fetch_add and the sendAll() closes that window.
         std::lock_guard<std::mutex> lock(sendMu_);
+        hdr.sequenceNum = sendSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
 
         if (sendAll(fd, reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)) < 0)
             return false;
@@ -470,6 +473,13 @@ private:
         }
         peerFd_.store(fd, std::memory_order_release);
         freeaddrinfo(res);
+        // Fire the connect hook symmetrically with acceptOne() so the
+        // backup side is notified of every (re)connection. The coordinator
+        // uses this to engage snapshot buffering BEFORE any live
+        // JournalEntry can be processed on the fresh connection — the
+        // primary always (re)streams a snapshot on peer join, so a backup
+        // must treat a snapshot as "pending" from the instant it connects.
+        if (onPeerConnected_) onPeerConnected_();
         return true;
     }
 
@@ -614,10 +624,13 @@ public:
     explicit ReplicationCoordinator(uint32_t nodeId,
                                     uint32_t heartbeatMs = 100,
                                     uint32_t heartbeatTimeoutMs = 500,
-                                    uint64_t leaseDurationMs = 5000)
+                                    uint64_t leaseDurationMs = 5000,
+                                    uint32_t promotionMissThreshold = 3)
         : nodeId_(nodeId),
           lease_(nodeId, leaseDurationMs),
-          heartbeat_(heartbeatMs, heartbeatTimeoutMs) {}
+          heartbeat_(heartbeatMs, heartbeatTimeoutMs),
+          promotionMissThreshold_(promotionMissThreshold == 0
+                                      ? 1u : promotionMissThreshold) {}
 
     ~ReplicationCoordinator() { stop(); }
 
@@ -662,8 +675,19 @@ public:
             // In a real system, this would trigger an alert.
         });
 
-        // Try to acquire the lease
-        if (!lease_.tryAcquire()) return false;
+        // Acquire the lease BEFORE any background thread is started.
+        // startReceiving()/heartbeat_.start() are below this point, so on a
+        // failed acquisition they never run — no thread is leaked. We still
+        // tear down anything already opened above (the transport's listen
+        // socket) and, defensively, stop the heartbeat in case a future
+        // re-ordering of this function starts threads earlier: both stop()s
+        // join their worker thread if (and only if) it was started, so they
+        // are safe no-ops on this path.
+        if (!lease_.tryAcquire()) {
+            heartbeat_.stop();   // joins heartbeat worker_ if started
+            transport_.stop();   // closes the listen socket; joins recvThread_ if started
+            return false;
+        }
 
         // Set up replication message handler
         transport_.setMessageHandler(
@@ -687,14 +711,44 @@ public:
     bool startAsBackup(const std::string& primaryHost, int primaryPort) {
         role_ = NodeRole::Backup;
 
+        // Engage snapshot buffering on EVERY (re)connection, BEFORE the
+        // first byte is processed on the link. The primary streams a full
+        // snapshot (SnapshotStart … SnapshotEnd) on every peer join, so a
+        // snapshot is "pending" from the instant we connect. Any live
+        // JournalEntry that races ahead of SnapshotStart (the primary
+        // exposes the new peer fd a few instructions before it sends
+        // SnapshotStart, so a concurrent replicateEntry can slip in front)
+        // is then buffered instead of being applied immediately — closing
+        // the Cancel-before-Insert window. Registered before connectTo()
+        // because the initial connect fires this hook synchronously.
+        transport_.setOnPeerConnected([this]() {
+            inSnapshot_ = true;       // snapshot pending until SnapshotEnd
+            snapshotBuffer_.clear();
+        });
+
         if (!transport_.connectTo(primaryHost, primaryPort)) return false;
 
         heartbeat_.setSendFunction([this]() -> bool {
             return transport_.sendHeartbeat(lease_.epoch(), nodeId_);
         });
 
-        // On primary failure detection: attempt promotion
+        // On primary failure detection: attempt promotion.
+        //
+        // Skew-robust promotion gate (see FLAG). We promote only after the
+        // heartbeat monitor has observed >= N consecutive missed renewals,
+        // where "missed" is measured purely against the LOCAL monotonic
+        // clock (HeartbeatMonitor uses steady_clock) and missedCount() is
+        // reset to 0 on every received heartbeat. A backup whose clock runs
+        // fast can therefore never promote while renewals keep arriving:
+        // each arrival zeroes the counter before it can reach the
+        // threshold. tryAcquire() then adds the lease fence — it only
+        // succeeds when the locally-tracked remote lease has expired under
+        // the local monotonic clock — so a still-renewing primary blocks
+        // promotion on both counts.
         heartbeat_.setFailureCallback([this]() {
+            if (heartbeat_.missedCount() < promotionMissThreshold_) {
+                return;  // not enough consecutive misses yet — hold
+            }
             if (promotionCallback_) {
                 // Try to acquire the lease (fencing: new epoch)
                 if (lease_.tryAcquire()) {
@@ -722,15 +776,26 @@ public:
                     LeaderLease::Lease remoteLease{};
                     remoteLease.epoch = hdr.epoch;
                     remoteLease.holderId = hdr.senderId;
+                    // Stamp the grant with the LOCAL monotonic receipt time
+                    // (steady_clock via nowMs()), NOT any timestamp from the
+                    // primary. Lease validity is therefore measured as local
+                    // elapsed-since-last-renewal, which is immune to wall-clock
+                    // skew between the two nodes — a one-sided fast clock cannot
+                    // expire the lease early while grants keep arriving.
                     remoteLease.grantedAtMs = nowMs();
                     remoteLease.durationMs = durationMs;
                     lease_.acceptRemoteLease(remoteLease);
                 }
                 if (hdr.type == ReplicationHeader::Type::SnapshotStart) {
-                    // Primary is about to stream a full state snapshot.
-                    // Buffer any live JournalEntry messages that arrive
-                    // concurrently so we do not apply a Cancel before
-                    // the corresponding snapshot entry has been applied.
+                    // Snapshot boundary. inSnapshot_ is already true (engaged
+                    // on connect), so re-assert it and DROP anything buffered
+                    // before this marker: those are live entries that raced
+                    // ahead of SnapshotStart on the wire. Their effect was
+                    // applied to the primary engine BEFORE the snapshot cut was
+                    // taken (an entry is shipped only after it is applied, and
+                    // the cut happens after SnapshotStart is sent), so the
+                    // snapshot we are about to receive already reflects them —
+                    // discarding them here is correct, not lossy.
                     inSnapshot_ = true;
                     snapshotBuffer_.clear();
                 }
@@ -842,14 +907,30 @@ private:
     HeartbeatMonitor heartbeat_;
     ReplicationTransport transport_;
     bool running_{false};
+    // Minimum number of consecutive missed heartbeat renewals (local
+    // monotonic) before the backup is allowed to promote. Defends against
+    // clock-skew-induced split brain: as long as renewals keep arriving the
+    // miss counter is reset to 0 and can never reach this threshold.
+    uint32_t promotionMissThreshold_{3};
     PromotionCallback promotionCallback_;
     JournalApplyCallback journalApplyCallback_;
 
-    // Snapshot-race guard (backup side).
-    // Set true when a SnapshotStart is received; cleared on SnapshotEnd.
-    // JournalEntry messages that arrive while inSnapshot_ is true are
-    // held in snapshotBuffer_ and replayed after all snapshot entries
-    // have been applied, preventing Cancel-before-Insert phantoms.
+    // Snapshot-race guard (backup side). Touched only by the receive-loop
+    // thread (and, for the very first connect, by the thread calling
+    // startAsBackup before the receive loop is spawned — a happens-before
+    // edge), so no additional synchronization is required.
+    //
+    // Engaged (true) the moment the backup connects — a snapshot is "pending"
+    // from connect, because the primary streams one on every peer join.
+    // Cleared on SnapshotEnd. JournalEntry messages that arrive while
+    // inSnapshot_ is true are held in snapshotBuffer_:
+    //   * entries buffered BEFORE SnapshotStart are dropped at SnapshotStart
+    //     (already captured by the snapshot — see handler comment);
+    //   * entries buffered between SnapshotStart and SnapshotEnd (the snapshot
+    //     content plus any live tail) are replayed in arrival order at
+    //     SnapshotEnd.
+    // Net guarantee: every snapshot entry is applied before any post-snapshot
+    // live entry on that connection, eliminating Cancel-before-Insert phantoms.
     bool inSnapshot_{false};
     std::vector<std::vector<uint8_t>> snapshotBuffer_;
 };

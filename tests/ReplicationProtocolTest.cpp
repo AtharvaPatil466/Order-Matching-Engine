@@ -1,10 +1,14 @@
 // ReplicationProtocolTest — tests for the primary-backup HA system.
 
 #include "ReplicationProtocol.h"
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <iostream>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 using namespace OrderMatcher;
 
@@ -311,6 +315,11 @@ void test_coordinator_replicate_entry() {
 
     ReplicationCoordinator primary(1, 100, 500, 5000);
     assert(primary.startAsPrimary(19880));
+    // Follow the real snapshot-on-join protocol: the primary emits
+    // SnapshotStart … SnapshotEnd when a backup connects. Here the snapshot
+    // body is empty, but the markers are what flush the backup's
+    // connect-time snapshot buffer so subsequent live entries are applied.
+    primary.setOnPeerJoined([]() { /* empty snapshot */ });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -323,7 +332,7 @@ void test_coordinator_replicate_entry() {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    // Replicate a journal entry
+    // Replicate a journal entry (post-snapshot, so applied immediately).
     std::string entry = "ADD|1|100|BUY|100000|10";
     primary.replicateEntry(
         reinterpret_cast<const uint8_t*>(entry.data()), entry.size());
@@ -333,11 +342,157 @@ void test_coordinator_replicate_entry() {
     primary.stop();
     backup.stop();
 
-    // Backup should have received the journal entry
-    if (!receivedJournal.empty()) {
-        std::string received(receivedJournal.begin(), receivedJournal.end());
-        assert(received == entry);
+    // With the snapshot markers flushing the buffer, delivery is now
+    // guaranteed — assert it rather than tolerating an empty result.
+    assert(!receivedJournal.empty() &&
+           "backup did not receive the post-snapshot journal entry");
+    std::string received(receivedJournal.begin(), receivedJournal.end());
+    assert(received == entry);
+
+    PASS();
+}
+
+// ─── Snapshot-before-live ordering (Cancel-before-Insert race) ───────────────
+
+// Drives a precisely ordered message stream into a real backup coordinator
+// using a raw transport as the "primary", reproducing the wire order in which
+// a live JournalEntry races AHEAD of SnapshotStart. The fix must buffer that
+// pre-snapshot entry (and drop it at SnapshotStart, since the snapshot already
+// reflects it), so the backup never applies a Cancel before the snapshot Add.
+void test_snapshot_ordering() {
+    TEST(SnapshotOrdering);
+
+    // Raw transport we drive by hand to inject an exact message order.
+    ReplicationTransport primary;
+    assert(primary.listenOn(19881));
+    primary.startReceiving();  // runs acceptOne() so the backup can connect
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::vector<std::string> applied;
+    std::mutex appliedMu;
+    ReplicationCoordinator backup(2, 100, 500, 5000);
+    backup.setJournalApplyCallback([&](const uint8_t* d, size_t n) {
+        std::lock_guard<std::mutex> lk(appliedMu);
+        applied.emplace_back(reinterpret_cast<const char*>(d), n);
+    });
+    assert(backup.startAsBackup("127.0.0.1", 19881));
+
+    // Wait for the primary side to observe the backup connection.
+    for (int i = 0; i < 200 && !primary.isConnected(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    assert(primary.isConnected());
+
+    auto sendEntry = [&](const std::string& s) {
+        return primary.send(ReplicationHeader::Type::JournalEntry, 1, 1,
+                            reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    };
+
+    // (1) Live Cancel that races ahead of SnapshotStart. Under the bug this
+    //     is applied immediately (Cancel-before-Insert); with the fix it is
+    //     buffered as "snapshot pending" and dropped at SnapshotStart.
+    sendEntry("CANCEL X (pre-snapshot)");
+    // (2) Snapshot boundary, snapshot content, then a live tail.
+    primary.send(ReplicationHeader::Type::SnapshotStart, 1, 1, nullptr, 0);
+    sendEntry("ADD X (snapshot)");
+    primary.send(ReplicationHeader::Type::SnapshotEnd, 1, 1, nullptr, 0);
+    sendEntry("CANCEL X (post-snapshot)");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    backup.stop();
+    primary.stop();
+
+    std::lock_guard<std::mutex> lk(appliedMu);
+    // Exactly two applies, in snapshot-before-live order. The pre-snapshot
+    // Cancel must NOT appear, and ADD must precede the post-snapshot CANCEL.
+    assert(applied.size() == 2 &&
+           "pre-snapshot live entry leaked into the apply stream");
+    assert(applied[0] == "ADD X (snapshot)");
+    assert(applied[1] == "CANCEL X (post-snapshot)");
+
+    PASS();
+}
+
+// ─── Heartbeat miss-counter reset (skew-defense mechanism) ───────────────────
+
+// The promotion gate requires N consecutive missed renewals, and missedCount()
+// is reset to 0 on every received heartbeat. This reset is precisely what stops
+// a fast-clock backup from ever reaching the threshold while the primary keeps
+// renewing. Verified deterministically here against the local monotonic clock.
+void test_heartbeat_miss_reset() {
+    TEST(HeartbeatMissReset);
+
+    HeartbeatMonitor hb(20, 80);  // interval 20ms, timeout 80ms
+    hb.start();
+
+    // Healthy: renewals within the timeout keep missedCount pinned at 0.
+    for (int i = 0; i < 10; ++i) {
+        hb.receivedHeartbeat();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    assert(hb.missedCount() == 0);
+    assert(hb.isAlive());
+
+    // Outage: with no renewals the counter climbs past a 3-miss threshold.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    assert(hb.missedCount() >= 3);
+    assert(!hb.isAlive());
+
+    // A single renewal resets the counter to 0 — the mechanism that prevents
+    // a fast-clock backup from ever reaching the promotion threshold while the
+    // primary keeps renewing.
+    hb.receivedHeartbeat();
+    assert(hb.missedCount() == 0);
+    assert(hb.isAlive());
+
+    hb.stop();
+    PASS();
+}
+
+// ─── Lease clock-skew: no promotion while renewals arrive ────────────────────
+
+// Real failover requires a sustained renewal outage. A backup whose local
+// clock runs fast (indistinguishable from real time as long as renewals keep
+// arriving and reset the local miss counter / refresh the local-monotonic
+// lease) must NOT promote. We run a live primary+backup for many multiples of
+// the lease duration with renewals flowing, assert no promotion, then kill the
+// primary and assert real failover still happens.
+void test_lease_skew_no_promotion() {
+    TEST(LeaseSkewNoPromotion);
+
+    // Short, fast timings so the test is quick: lease 200ms, heartbeat 30ms,
+    // timeout 120ms, promote after 3 consecutive misses.
+    ReplicationCoordinator primary(1, 30, 120, 200, 3);
+    assert(primary.startAsPrimary(19882));
+    primary.setOnPeerJoined([]() {});
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::atomic<bool> promoted{false};
+    ReplicationCoordinator backup(2, 30, 120, 200, 3);
+    backup.setPromotionCallback([&]() { promoted.store(true); });
+    assert(backup.startAsBackup("127.0.0.1", 19882));
+
+    // Phase A: renewals keep arriving for 600ms == 3x the lease duration.
+    // A naive fixed-grant expiry would fire at 200ms; the refresh-on-renewal
+    // (local monotonic) + miss-counter reset keep the backup a backup.
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    assert(!promoted.load() &&
+           "backup promoted while primary kept renewing (clock-skew split brain)");
+    assert(backup.role() == NodeRole::Backup);
+
+    // Phase B: true primary death — real failover must still occur.
+    primary.stop();
+    bool failedOver = false;
+    for (int i = 0; i < 100; ++i) {  // up to ~1s
+        if (promoted.load()) { failedOver = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    backup.stop();
+
+    assert(failedOver &&
+           "backup failed to promote after genuine primary death");
+    assert(backup.role() == NodeRole::Primary);
 
     PASS();
 }
@@ -371,6 +526,11 @@ int main() {
     test_coordinator_primary_startup();
     test_coordinator_backup_promotion();
     test_coordinator_replicate_entry();
+
+    // HA correctness regressions
+    test_snapshot_ordering();
+    test_heartbeat_miss_reset();
+    test_lease_skew_no_promotion();
 
     std::cout << "\n─── Results: " << passed << " passed ───\n";
     std::cout << "\nAll replication protocol tests passed.\n\n";

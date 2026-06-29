@@ -254,12 +254,106 @@ void testPromotion() {
     fs::remove(path);
 }
 
+// Verifies that JournalFollower (which re-reads via Journal(path).readAll with
+// no advisory lock) cleanly DROPS a torn trailing record rather than counting
+// or applying it. Two corruption shapes are covered:
+//   1. A short final record (a partial append, e.g. a crash mid-write) — fread
+//      sees fewer than sizeof(JournalEntry) bytes and stops without counting.
+//   2. A full-length but CRC-corrupt final record — the per-entry CRC32 check
+//      rejects it.
+// In both cases appliedCount() must stay at the number of intact entries.
+void testTornTrailingRecord() {
+    // ---- Case 1: short (partial) trailing record -------------------------
+    {
+        auto path = tmpJournalPath("torn_short");
+        OrderBook leader(0);
+        OrderBook follower(0);
+
+        {
+            Journal j(path, Journal::SyncPolicy::Immediate, 1);
+            for (OrderId id = 1; id <= 3; ++id) {
+                leader.addOrder(id, 1, Side::Buy, Price(1000 + int(id)), 10,
+                                OrderType::Limit);
+                j.logAddOrder(id, 1, 0, Side::Buy, Price(1000 + int(id)), 10,
+                              OrderType::Limit);
+            }
+        }  // 3 intact records flushed + closed
+
+        // Simulate a crash mid-append: write half a record's worth of bytes.
+        {
+            FILE* f = std::fopen(path.c_str(), "ab");
+            assert(f);
+            std::vector<uint8_t> partial(sizeof(JournalEntry) / 2, 0xAB);
+            assert(std::fwrite(partial.data(), 1, partial.size(), f) ==
+                   partial.size());
+            std::fclose(f);
+        }
+
+        JournalFollower f(path, follower);
+        f.poll();
+        assert(f.appliedCount() == 3 &&
+               "short torn trailing record must not be counted/applied");
+        assert(snapshotBook(leader) == snapshotBook(follower) &&
+               "follower diverged after a short torn trailing record");
+        fs::remove(path);
+    }
+
+    // ---- Case 2: full-length but CRC-corrupt trailing record -------------
+    {
+        auto path = tmpJournalPath("torn_crc");
+        OrderBook leader(0);
+        OrderBook follower(0);
+
+        {
+            Journal j(path, Journal::SyncPolicy::Immediate, 1);
+            for (OrderId id = 1; id <= 3; ++id) {
+                leader.addOrder(id, 1, Side::Buy, Price(1000 + int(id)), 10,
+                                OrderType::Limit);
+                j.logAddOrder(id, 1, 0, Side::Buy, Price(1000 + int(id)), 10,
+                              OrderType::Limit);
+            }
+        }
+
+        // Append an aligned full record with a deliberately wrong checksum.
+        {
+            JournalEntry bad{};
+            bad.entryType = JournalEntry::Type::AddOrder;
+            bad.sequenceNumber = 4;       // would-be next contiguous sequence
+            bad.orderId = 99;
+            bad.participantId = 1;
+            bad.side = Side::Buy;
+            bad.price = 1234;
+            bad.quantity = 10;
+            bad.orderType = OrderType::Limit;
+            bad.checksum = 0xDEADBEEF;     // does NOT match the body's CRC32
+            FILE* f = std::fopen(path.c_str(), "ab");
+            assert(f);
+            assert(std::fwrite(&bad, sizeof(bad), 1, f) == 1);
+            std::fclose(f);
+        }
+
+        JournalFollower f(path, follower);
+        f.poll();
+        assert(f.appliedCount() == 3 &&
+               "CRC-corrupt trailing record must not be counted/applied");
+        assert(follower.getOrder(99) == nullptr &&
+               "corrupt record's order must not appear in the follower book");
+        assert(snapshotBook(leader) == snapshotBook(follower) &&
+               "follower diverged after a CRC-corrupt trailing record");
+        fs::remove(path);
+    }
+
+    std::printf("torn-record: short + CRC-corrupt trailing records both "
+                "dropped; only intact entries applied\n");
+}
+
 int main() {
     for (uint64_t seed : {uint64_t{1}, uint64_t{0xC0FFEE}, uint64_t{0xDEADBEEF}}) {
         testSequential(seed);
         testConcurrent(seed);
     }
     testPromotion();
+    testTornTrailingRecord();
     std::puts("JournalFollowerTest passed");
     return 0;
 }

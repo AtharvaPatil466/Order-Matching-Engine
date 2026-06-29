@@ -131,6 +131,23 @@ private:
         // For larger logs we'd remember the file offset and read only
         // the new bytes; left as a future optimisation since the
         // current readAll is fast enough for unit tests.
+        //
+        // Torn trailing record: there is NO advisory lock (no flock/lockf)
+        // between the leader's writer and this reader — we tolerate, rather
+        // than exclude, a concurrent in-flight append. That is safe because
+        // readAll()/readEntriesFromPath() reads whole fixed-size records via
+        // fread(sizeof(JournalEntry)) and rejects any record that is not
+        // intact:
+        //   * A short final record (fewer than sizeof(JournalEntry) bytes on
+        //     disk yet) makes fread return 0, so the loop stops WITHOUT
+        //     counting it — the partial tail is dropped.
+        //   * A full-length but torn/garbled final record fails the per-entry
+        //     CRC32 (or the contiguous-sequence check) and is likewise dropped
+        //     rather than applied.
+        // So entries.size() never includes a partial trailing record; on a
+        // later poll, once the writer has committed it in full, it appears and
+        // is applied then. appliedCount_ only ever advances over fully-intact,
+        // CRC-valid, contiguously-sequenced entries.
         auto entries = Journal(path_).readAll(/*validateCRC=*/true,
                                                /*validateSequence=*/true);
         uint64_t alreadyApplied = appliedCount_.load(std::memory_order_relaxed);

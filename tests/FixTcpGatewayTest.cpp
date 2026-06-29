@@ -90,17 +90,9 @@ std::string recvFixFrame(int fd, std::chrono::milliseconds deadline) {
     return buf;
 }
 
-std::string makeNewOrder(OrderId clOrdId, SymbolId sym, Quantity qty, Price price) {
-    std::string body;
-    body += "35=D"; body += FIX_SOH;
-    body += "49=100"; body += FIX_SOH;     // SenderCompID = participantId
-    body += "11=" + std::to_string(clOrdId); body += FIX_SOH;
-    body += "55=" + std::to_string(sym);     body += FIX_SOH;
-    body += "54=1"; body += FIX_SOH;         // Buy
-    body += "38=" + std::to_string(qty);     body += FIX_SOH;
-    body += "44=" + std::to_string(price);   body += FIX_SOH;
-    body += "40=2"; body += FIX_SOH;         // Limit
-    body += "59=1"; body += FIX_SOH;         // GTC
+// Wrap an already-built body (35=...<SOH>...) with BeginString, BodyLength
+// and CheckSum.
+std::string frameBody(const std::string& body) {
     std::string head = "8=FIX.4.2";
     head += FIX_SOH;
     head += "9=" + std::to_string(body.size());
@@ -111,6 +103,32 @@ std::string makeNewOrder(OrderId clOrdId, SymbolId sym, Quantity qty, Price pric
     char cs[4];
     std::snprintf(cs, sizeof(cs), "%03d", sum % 256);
     return pre + "10=" + cs + FIX_SOH;
+}
+
+// The session now requires a Logon(35=A) with MsgSeqNum(34) before any
+// application message, and a MsgSeqNum on every message.
+std::string makeLogon(uint64_t seqNum) {
+    std::string body;
+    body += "35=A"; body += FIX_SOH;
+    body += "34=" + std::to_string(seqNum); body += FIX_SOH;
+    body += "108=30"; body += FIX_SOH;       // HeartBtInt
+    return frameBody(body);
+}
+
+std::string makeNewOrder(OrderId clOrdId, SymbolId sym, Quantity qty,
+                         Price price, uint64_t seqNum) {
+    std::string body;
+    body += "35=D"; body += FIX_SOH;
+    body += "34=" + std::to_string(seqNum); body += FIX_SOH;  // MsgSeqNum
+    body += "49=100"; body += FIX_SOH;     // SenderCompID = participantId
+    body += "11=" + std::to_string(clOrdId); body += FIX_SOH;
+    body += "55=" + std::to_string(sym);     body += FIX_SOH;
+    body += "54=1"; body += FIX_SOH;         // Buy
+    body += "38=" + std::to_string(qty);     body += FIX_SOH;
+    body += "44=" + std::to_string(price);   body += FIX_SOH;
+    body += "40=2"; body += FIX_SOH;         // Limit
+    body += "59=1"; body += FIX_SOH;         // GTC
+    return frameBody(body);
 }
 
 void expectAck(const std::string& raw, OrderId expectedOrderId) {
@@ -148,8 +166,18 @@ int main() {
         int fd = connectTo(port);
         assert(fd >= 0);
 
+        // Logon (seq 1) first — app messages are rejected before Logon.
+        auto logon = makeLogon(/*seqNum=*/1);
+        assert(sendAll(fd, logon.data(), logon.size()));
+        auto logonAck = recvFixFrame(fd, std::chrono::milliseconds(500));
+        {
+            FixMessage la;
+            assert(la.parse(logonAck.data(), logonAck.size()) && "logon ack parse");
+            assert(la.getString(FixTag::MsgType) == "A" && "expected Logon ack");
+        }
+
         auto frame = makeNewOrder(/*clOrdId=*/1001, kSym,
-                                  /*qty=*/50, /*price=*/1000);
+                                  /*qty=*/50, /*price=*/1000, /*seqNum=*/2);
         assert(sendAll(fd, frame.data(), frame.size()));
 
         auto resp = recvFixFrame(fd, std::chrono::milliseconds(500));
@@ -166,11 +194,21 @@ int main() {
         int fd = connectTo(port);
         assert(fd >= 0);
 
+        // Logon (seq 1) first — app messages are rejected before Logon.
+        auto logon = makeLogon(/*seqNum=*/1);
+        assert(sendAll(fd, logon.data(), logon.size()));
+        auto logonAck = recvFixFrame(fd, std::chrono::milliseconds(500));
+        {
+            FixMessage la;
+            assert(la.parse(logonAck.data(), logonAck.size()) && "logon ack parse");
+            assert(la.getString(FixTag::MsgType) == "A" && "expected Logon ack");
+        }
+
         // Keep price near the prior order's to avoid the engine's
         // volatility circuit breaker — orthogonal to what this test
         // exercises (gateway framing under fragmentation).
         auto frame = makeNewOrder(/*clOrdId=*/1002, kSym,
-                                  /*qty=*/25, /*price=*/1010);
+                                  /*qty=*/25, /*price=*/1010, /*seqNum=*/2);
         for (size_t i = 0; i < frame.size(); ++i) {
             assert(sendAll(fd, frame.data() + i, 1));
             // Tiny pause so the gateway sees genuinely fragmented arrivals

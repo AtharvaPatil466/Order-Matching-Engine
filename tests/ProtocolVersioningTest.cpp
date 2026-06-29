@@ -71,9 +71,11 @@ static int passed = 0;
 // being malformed). Mirrors makeNewOrder() in FixTcpGatewayTest.
 static std::string makeNewOrder(std::string_view beginString, OrderId clOrdId,
                                 SymbolId sym, Quantity qty, Price price,
-                                bool withTransactTime = false) {
+                                bool withTransactTime = false,
+                                uint64_t seqNum = 0) {
     std::string body;
     body += "35=D"; body += FIX_SOH;
+    if (seqNum > 0) { body += "34=" + std::to_string(seqNum); body += FIX_SOH; }
     body += "49=100"; body += FIX_SOH;                       // SenderCompID
     body += "11=" + std::to_string(clOrdId); body += FIX_SOH;
     body += "55=" + std::to_string(sym);     body += FIX_SOH;
@@ -102,6 +104,36 @@ static FixMessage parseResp(const std::string& raw) {
     FixMessage m;
     assert(m.parse(raw.data(), raw.size()) && "response failed to parse");
     return m;
+}
+
+// Build a Logon(35=A, MsgSeqNum=1) for the given BeginString. The session
+// now requires a successful Logon and a MsgSeqNum on every message before
+// any application message is dispatched, so the enforced-contract tests
+// perform a handshake first.
+static std::string makeLogon(std::string_view beginString) {
+    std::string body;
+    body += "35=A"; body += FIX_SOH;
+    body += "34=1"; body += FIX_SOH;
+    body += "108=30"; body += FIX_SOH;  // HeartBtInt
+    std::string head = "8=" + std::string(beginString);
+    head += FIX_SOH;
+    head += "9=" + std::to_string(body.size());
+    head += FIX_SOH;
+    std::string pre = head + body;
+    uint32_t sum = 0;
+    for (char c : pre) sum += static_cast<uint8_t>(c);
+    char cs[4];
+    std::snprintf(cs, sizeof(cs), "%03d", sum % 256);
+    return pre + "10=" + cs + FIX_SOH;
+}
+
+// Log the session on (Logon seq 1) so subsequent app messages (seq >= 2)
+// pass the logon gate; clears the Logon ack from `sent`.
+static void logonSession(FixSession& session, std::vector<std::string>& sent,
+                         std::string_view beginString = "FIX.4.2") {
+    auto logon = makeLogon(beginString);
+    assert(session.feed(logon.data(), logon.size()));
+    sent.clear();
 }
 
 // ─── FIX: ENFORCED contract via FixSession ───────────────────────────────────
@@ -158,8 +190,10 @@ void test_fix_supported_version_parses() {
     });
 
     // FIX.4.2 is the default-accepted version → order reaches the engine.
+    logonSession(session, sent, "FIX.4.2");
     auto frame = makeNewOrder("FIX.4.2", /*clOrdId=*/42, kSym, /*qty=*/25,
-                              /*price=*/1000);
+                              /*price=*/1000, /*withTransactTime=*/false,
+                              /*seqNum=*/2);
     assert(session.feed(frame.data(), frame.size()));
 
     assert(session.ordersAccepted() == 1);
@@ -208,9 +242,11 @@ void test_fix_4_4_is_opt_in() {
         std::vector<std::string> sent;
         FixSession session(engine, [&](std::string_view b) { sent.emplace_back(b); });
         session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
+        logonSession(session, sent, "FIX.4.4");
 
         auto frame = makeNewOrder("FIX.4.4", /*clOrdId=*/101, kSym, /*qty=*/10,
-                                  /*price=*/1000, /*withTransactTime=*/true);
+                                  /*price=*/1000, /*withTransactTime=*/true,
+                                  /*seqNum=*/2);
         assert(session.feed(frame.data(), frame.size()));
         assert(session.ordersAccepted() == 1 && session.ordersRejected() == 0);
         auto* book = engine.getOrderBook(kSym);
@@ -237,9 +273,11 @@ void test_fix_4_4_missing_transact_time_rejected() {
     std::vector<std::string> sent;
     FixSession session(engine, [&](std::string_view b) { sent.emplace_back(b); });
     session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
+    logonSession(session, sent, "FIX.4.4");
 
     auto frame = makeNewOrder("FIX.4.4", /*clOrdId=*/200, kSym, /*qty=*/10,
-                              /*price=*/1000, /*withTransactTime=*/false);
+                              /*price=*/1000, /*withTransactTime=*/false,
+                              /*seqNum=*/2);
     assert(session.feed(frame.data(), frame.size()));
     assert(session.ordersRejected() == 1 && session.ordersAccepted() == 0);
     auto resp = parseResp(sent.back());

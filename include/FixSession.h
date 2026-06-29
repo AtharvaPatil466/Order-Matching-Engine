@@ -62,6 +62,16 @@ public:
         return acceptedVersions_;
     }
 
+    // Configure the venue's CompID. When non-empty, every inbound message
+    // must carry a matching TargetCompID(56) or it is rejected before any
+    // sequence/application processing (see dispatch()). Empty (the default)
+    // disables the check so existing single-tenant deployments are
+    // unaffected.
+    void setExpectedTargetCompID(std::string compId) {
+        expectedTargetCompID_ = std::move(compId);
+    }
+    const std::string& expectedTargetCompID() const { return expectedTargetCompID_; }
+
     // Feed bytes from the wire. Returns false on unrecoverable framing
     // error — the gateway should drop the connection.
     bool feed(const char* data, size_t len) {
@@ -131,11 +141,33 @@ private:
         currentVersion_ = parseFixVersion(currentBeginString_);
 
         auto msgType = msg.getString(FixTag::MsgType);
+
+        // TargetCompID(56): when the venue has a configured CompID, every
+        // inbound message (including the Logon) must be addressed to it. A
+        // mismatch means the bytes belong to a different counterparty and
+        // must be rejected before any sequence or application processing.
+        if (!expectedTargetCompID_.empty() &&
+            msg.getString(FixTag::TargetCompID) != expectedTargetCompID_) {
+            ++ordersRejected_;
+            sendReject(/*orderId=*/0, "TargetCompID (56) mismatch");
+            return;
+        }
+
         if (!validateInboundSequence(msg, msgType)) {
             return;
         }
         if (isSessionMessage(msgType)) {
             handleSessionMessage(msg, msgType);
+            return;
+        }
+
+        // Logon gate: application messages (NewOrderSingle/Cancel/
+        // CancelReplace) may only be processed after a successful Logon(35=A).
+        // An app message arriving before logon is a protocol violation and
+        // must never reach the engine.
+        if (!loggedOn_) {
+            ++ordersRejected_;
+            sendReject(/*orderId=*/0, "message received before Logon");
             return;
         }
 
@@ -159,7 +191,14 @@ private:
 
         auto params = fixToOrderParams(msg);
         if (!params.valid) {
-            sendReject(/*orderId=*/0, "MsgType not supported");
+            // Surface the parser's field-level reason (missing required
+            // field, unknown OrdType/Side/TimeInForce, unsupported MsgType)
+            // instead of a generic message, echo ClOrdID so the client can
+            // correlate, and count it as a reject.
+            ++ordersRejected_;
+            OrderId rejectId = static_cast<OrderId>(msg.getInt(FixTag::ClOrdID));
+            sendReject(rejectId,
+                       params.error.empty() ? "invalid order" : params.error.c_str());
             return;
         }
 
@@ -209,8 +248,15 @@ private:
     }
 
     bool validateInboundSequence(const FixMessage& msg, std::string_view msgType) {
+        // MsgSeqNum(34) is mandatory on every FIX message. The previous code
+        // treated an absent tag 34 as "skip sequence checking" and returned
+        // true, silently admitting an unsequenced message into dispatch. An
+        // unsequenced message cannot be ordered against the session and must
+        // be rejected at the boundary, never reaching the engine.
         if (!msg.hasTag(FixTag::MsgSeqNum)) {
-            return true;
+            ++ordersRejected_;
+            sendReject(/*orderId=*/0, "missing MsgSeqNum (34)");
+            return false;
         }
 
         uint64_t seq = msg.getUint64(FixTag::MsgSeqNum);
@@ -380,6 +426,7 @@ private:
     SendBytes                        send_;
     FixFramer                        framer_;
     std::unordered_set<std::string>  acceptedVersions_;
+    std::string                      expectedTargetCompID_{};
     FixVersion                       currentVersion_{FixVersion::FIX_4_2};
     std::string                      currentBeginString_{"FIX.4.2"};
     uint64_t                         expectedInboundSeqNum_{1};

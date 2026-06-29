@@ -250,6 +250,46 @@ public:
         return (static_cast<int>(sum % 256) == expected);
     }
 
+    // Cross-check BodyLength(9) against the actual measured body size.
+    // FIX defines BodyLength as the number of bytes from the character
+    // immediately following the BodyLength field's SOH up to and including
+    // the SOH immediately preceding the CheckSum(10) field. The framer
+    // trusts tag 9 to locate the trailer; this lets any caller holding a
+    // complete frame verify the declared length matches reality and reject
+    // a forged/garbled header. Returns false on any structural problem or
+    // on a mismatch — never trust the declared length.
+    bool validateBodyLength() const {
+        if (!hasTag(FixTag::BodyLength)) return false;
+
+        // Frame must start "8=...<SOH>9=NNN<SOH>". Find the SOH that ends
+        // BeginString(8); BodyLength(9) must immediately follow.
+        size_t firstSoh = rawData_.find(FIX_SOH);
+        if (firstSoh == std::string_view::npos) return false;
+        size_t blPos = firstSoh + 1;
+        if (blPos + 2 > rawData_.size()) return false;
+        if (rawData_[blPos] != '9' || rawData_[blPos + 1] != '=') return false;
+        size_t blSoh = rawData_.find(FIX_SOH, blPos + 2);
+        if (blSoh == std::string_view::npos) return false;
+        size_t bodyStart = blSoh + 1;  // first body byte
+
+        // Trailer must be exactly "...<SOH>10=NNN<SOH>" (8 bytes) at the end.
+        size_t end = rawData_.size();
+        if (end < 8) return false;
+        if (rawData_[end - 1] != FIX_SOH) return false;
+        size_t csPos = end - 8;  // SOH immediately preceding "10="
+        if (rawData_[csPos] != FIX_SOH) return false;
+        if (rawData_[csPos + 1] != '1' || rawData_[csPos + 2] != '0' ||
+            rawData_[csPos + 3] != '=') return false;
+        if (bodyStart > csPos + 1) return false;  // header overlaps trailer
+
+        // Measured body spans [bodyStart, csPos] inclusive — FIX counts the
+        // SOH that precedes "10=".
+        size_t measured = csPos - bodyStart + 1;
+        int64_t declared = getInt(FixTag::BodyLength);
+        return declared >= 0 &&
+               static_cast<size_t>(declared) == measured;
+    }
+
     // Structural framing check per FIX 4.2: BeginString(8), BodyLength(9),
     // MsgType(35), CheckSum(10) must all be present. This is intentionally
     // separate from parse() to keep the lenient zero-copy path available; the
@@ -300,39 +340,86 @@ inline FixOrderParams fixToOrderParams(const FixMessage& msg) {
     if (msgType == "D") {
         // NewOrderSingle
         result.action = FixOrderParams::Action::NewOrder;
+
+        // Required fields. The previous code read every tag unconditionally;
+        // an absent tag coerced to 0/'\0' yet still set valid=true, admitting
+        // orders with id=0, qty=0, or an unintended side. Reject at the
+        // boundary with a field-level reason — never build an order from
+        // missing data. result.valid stays false on every early return.
+        if (!msg.hasTag(FixTag::ClOrdID)) {
+            result.error = "Missing required field ClOrdID (11)"; return result;
+        }
+        if (!msg.hasTag(FixTag::Symbol)) {
+            result.error = "Missing required field Symbol (55)"; return result;
+        }
+        if (!msg.hasTag(FixTag::Side)) {
+            result.error = "Missing required field Side (54)"; return result;
+        }
+        if (!msg.hasTag(FixTag::OrderQty)) {
+            result.error = "Missing required field OrderQty (38)"; return result;
+        }
+        if (!msg.hasTag(FixTag::OrdType)) {
+            result.error = "Missing required field OrdType (40)"; return result;
+        }
+
         result.orderId = static_cast<OrderId>(msg.getInt(FixTag::ClOrdID));
         result.symbolId = static_cast<SymbolId>(msg.getInt(FixTag::Symbol));
         result.price = static_cast<Price>(msg.getInt(FixTag::Price));
         result.qty = static_cast<Quantity>(msg.getInt(FixTag::OrderQty));
 
-        // Side: 1=Buy, 2=Sell
-        char side = msg.getChar(FixTag::Side);
-        result.side = (side == '1') ? Side::Buy : Side::Sell;
+        // OrderQty must be strictly positive — an explicit 0 is not a
+        // tradeable quantity and must not be admitted as a live order.
+        if (result.qty == 0) {
+            result.error = "Invalid OrderQty (38): must be > 0"; return result;
+        }
 
-        // OrdType: 1=Market, 2=Limit, 3=Stop, 4=StopLimit
+        // Side: 1=Buy, 2=Sell. Any other value is a malformed enum and must
+        // be rejected, not silently defaulted to Sell.
+        char side = msg.getChar(FixTag::Side);
+        if (side == '1') {
+            result.side = Side::Buy;
+        } else if (side == '2') {
+            result.side = Side::Sell;
+        } else {
+            result.error = "Unknown Side (54): " + std::string(1, side);
+            return result;
+        }
+
+        // OrdType: 1=Market, 2=Limit, 3=Stop, 4=StopLimit. An unknown value
+        // must be rejected, not silently reinterpreted as Limit.
         char ordType = msg.getChar(FixTag::OrdType);
         switch (ordType) {
             case '1': result.orderType = OrderType::Market; break;
             case '2': result.orderType = OrderType::Limit; break;
             case '3': result.orderType = OrderType::Stop; break;
             case '4': result.orderType = OrderType::StopLimit; break;
-            default:  result.orderType = OrderType::Limit; break;
+            default:
+                result.error = "Unknown OrdType (40): " + std::string(1, ordType);
+                return result;
         }
 
-        // TimeInForce: 0=Day, 1=GTC, 3=IOC, 4=FOK
-        char tifChar = msg.getChar(FixTag::TimeInForce);
-        switch (tifChar) {
-            case '0': result.tif = TimeInForce::DAY; break;
-            case '1': result.tif = TimeInForce::GTC; break;
-            case '3':
-                result.orderType = OrderType::IOC;
-                result.tif = TimeInForce::GTC;
-                break;
-            case '4':
-                result.orderType = OrderType::FOK;
-                result.tif = TimeInForce::GTC;
-                break;
-            default:  result.tif = TimeInForce::GTC; break;
+        // TimeInForce: 0=Day, 1=GTC, 3=IOC, 4=FOK. Optional (absent means the
+        // session default, GTC), but a PRESENT value outside the known set is
+        // rejected rather than silently defaulted.
+        if (msg.hasTag(FixTag::TimeInForce)) {
+            char tifChar = msg.getChar(FixTag::TimeInForce);
+            switch (tifChar) {
+                case '0': result.tif = TimeInForce::DAY; break;
+                case '1': result.tif = TimeInForce::GTC; break;
+                case '3':
+                    result.orderType = OrderType::IOC;
+                    result.tif = TimeInForce::GTC;
+                    break;
+                case '4':
+                    result.orderType = OrderType::FOK;
+                    result.tif = TimeInForce::GTC;
+                    break;
+                default:
+                    result.error = "Unknown TimeInForce (59): " + std::string(1, tifChar);
+                    return result;
+            }
+        } else {
+            result.tif = TimeInForce::GTC;
         }
 
         result.participantId = static_cast<ParticipantId>(msg.getInt(FixTag::SenderCompID));

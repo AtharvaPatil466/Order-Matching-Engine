@@ -450,6 +450,14 @@ gtest_discover_tests(ShadowModeTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project;shadow;integration")
 
+# FIX inbound boundary-validation tests (seqnum, logon gate, required
+# fields, BodyLength cross-check, TargetCompID, unknown enums)
+add_executable(FixValidationTest FixValidationTest.cpp)
+target_link_libraries(FixValidationTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(FixValidationTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;fix;validation")
+
 # ContingencyManager OCO linkage tests (assert-based, engine-agnostic)
 add_executable(ContingencyManagerTest TestContingencyManager.cpp)
 target_link_libraries(ContingencyManagerTest PRIVATE OrderMatcher)

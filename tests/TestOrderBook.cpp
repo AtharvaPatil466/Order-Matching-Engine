@@ -1338,6 +1338,21 @@ std::string makeFixMessage(const char* msgType,
     return makeFixMessageVer("FIX.4.2", msgType, tags);
 }
 
+// Drive a Logon(35=A) with MsgSeqNum=1 through the session so subsequent
+// sequenced application messages pass the logon gate, then clear the Logon
+// ack from `sent`. Inbound application messages should then use MsgSeqNum
+// starting at 2. (The session now requires a successful Logon before any
+// app message and a MsgSeqNum on every message — see FixSession.h.)
+void feedLogon(FixSession& session, std::string& sent,
+               const char* beginString = "FIX.4.2") {
+    auto logon = makeFixMessageVer(beginString, "A", {
+        {FixTag::MsgSeqNum,  "1"},
+        {FixTag::HeartBtInt, "30"},
+    });
+    session.feed(logon.data(), logon.size());
+    sent.clear();
+}
+
 }  // namespace
 
 TEST(FixSessionTest, NewOrderDispatchesToEngineAndAcks) {
@@ -1349,8 +1364,10 @@ TEST(FixSessionTest, NewOrderDispatchesToEngineAndAcks) {
     FixSession session(engine, [&](std::string_view bytes) {
         sent.append(bytes);
     });
+    feedLogon(session, sent);  // Logon (seq 1) required before app messages.
 
     auto msg = makeFixMessage("D", {
+        {FixTag::MsgSeqNum,    "2"},
         {FixTag::SenderCompID, "100"},
         {FixTag::ClOrdID,      "1001"},
         {FixTag::Symbol,       "7"},
@@ -1362,7 +1379,7 @@ TEST(FixSessionTest, NewOrderDispatchesToEngineAndAcks) {
     });
     ASSERT_TRUE(session.feed(msg.data(), msg.size()));
 
-    EXPECT_EQ(session.framesEmitted(), 1u);
+    EXPECT_EQ(session.framesEmitted(), 2u);  // Logon + NewOrderSingle
     EXPECT_EQ(session.ordersAccepted(), 1u);
     EXPECT_EQ(session.ordersRejected(), 0u);
 
@@ -1379,7 +1396,7 @@ TEST(FixSessionTest, NewOrderDispatchesToEngineAndAcks) {
     ASSERT_TRUE(resp.parse(sent.data(), sent.size()));
     EXPECT_TRUE(resp.validateChecksum());
     EXPECT_EQ(resp.getString(FixTag::MsgType), "8");
-    EXPECT_EQ(resp.getUint64(FixTag::MsgSeqNum), 1u);
+    EXPECT_EQ(resp.getUint64(FixTag::MsgSeqNum), 2u);  // outbound: Logon ack was 1
     EXPECT_EQ(resp.getUint64(FixTag::OrderID), 1001u);
     EXPECT_EQ(resp.getChar(FixTag::ExecType), '0');
 }
@@ -1391,8 +1408,10 @@ TEST(FixSessionTest, FragmentedFeedReassemblesAndDispatches) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1) required before app messages.
 
     auto msg = makeFixMessage("D", {
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "1"}, {FixTag::ClOrdID, "42"},
         {FixTag::Symbol, "1"}, {FixTag::Side, "1"},
         {FixTag::OrderQty, "10"}, {FixTag::Price, "500"},
@@ -1402,7 +1421,7 @@ TEST(FixSessionTest, FragmentedFeedReassemblesAndDispatches) {
     for (size_t i = 0; i < msg.size(); ++i) {
         ASSERT_TRUE(session.feed(msg.data() + i, 1));
     }
-    EXPECT_EQ(session.framesEmitted(), 1u);
+    EXPECT_EQ(session.framesEmitted(), 2u);  // Logon + NewOrderSingle
     EXPECT_EQ(session.ordersAccepted(), 1u);
 }
 
@@ -1415,7 +1434,9 @@ TEST(FixSessionTest, CancelDispatch) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1) required before app messages.
     auto msg = makeFixMessage("F", {
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::OrigClOrdID, "7"}, {FixTag::Symbol, "2"},
     });
     ASSERT_TRUE(session.feed(msg.data(), msg.size()));
@@ -1431,13 +1452,16 @@ TEST(FixSessionTest, UnsupportedMsgTypeIsRejected) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1) so 35=Z reaches the type check.
 
     // 35=Z is not a supported MsgType; framer parses it (well-formed) and
     // session rejects via fixToOrderParams.
-    auto msg = makeFixMessage("Z", {{FixTag::ClOrdID, "999"}});
+    auto msg = makeFixMessage("Z", {
+        {FixTag::MsgSeqNum, "2"}, {FixTag::ClOrdID, "999"},
+    });
     ASSERT_TRUE(session.feed(msg.data(), msg.size()));
 
-    EXPECT_EQ(session.framesEmitted(), 1u);
+    EXPECT_EQ(session.framesEmitted(), 2u);  // Logon + 35=Z
     EXPECT_EQ(session.ordersAccepted(), 0u);
 
     // A reject ExecutionReport must have been emitted.
@@ -1497,8 +1521,10 @@ TEST(FixSessionTest, AcceptsFix44WhenConfigured) {
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
     session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
+    feedLogon(session, sent, "FIX.4.4");  // 4.4 Logon (seq 1) before app msgs.
 
     auto msg = makeFixMessageVer("FIX.4.4", "D", {
+        {FixTag::MsgSeqNum,    "2"},
         {FixTag::SenderCompID, "100"},
         {FixTag::ClOrdID,      "1001"},
         {FixTag::Symbol,       "7"},
@@ -1552,6 +1578,7 @@ TEST(FixSessionTest, LogonAcknowledgesAndSetsSessionState) {
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
 
     auto msg = makeFixMessage("A", {
+        {FixTag::MsgSeqNum, "1"},
         {FixTag::SenderCompID, "CLIENT1"},
         {FixTag::TargetCompID, "ORDERBOOK"},
         {FixTag::HeartBtInt, "15"},
@@ -1581,6 +1608,7 @@ TEST(FixSessionTest, LogonResponsePreservesAcceptedFix44Version) {
     session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
 
     auto msg = makeFixMessageVer("FIX.4.4", "A", {
+        {FixTag::MsgSeqNum, "1"},
         {FixTag::SenderCompID, "CLIENT1"},
         {FixTag::TargetCompID, "ORDERBOOK"},
         {FixTag::HeartBtInt, "20"},
@@ -1603,9 +1631,10 @@ TEST(FixSessionTest, InOrderMsgSeqNumAdvancesAndDispatches) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1); inbound expected advances to 2.
 
     auto msg = makeFixMessage("D", {
-        {FixTag::MsgSeqNum, "1"},
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "10"},
         {FixTag::ClOrdID, "5001"},
         {FixTag::Symbol, "1"},
@@ -1616,7 +1645,7 @@ TEST(FixSessionTest, InOrderMsgSeqNumAdvancesAndDispatches) {
     });
     ASSERT_TRUE(session.feed(msg.data(), msg.size()));
 
-    EXPECT_EQ(session.expectedInboundSeqNum(), 2u);
+    EXPECT_EQ(session.expectedInboundSeqNum(), 3u);  // Logon advanced 1->2, order 2->3
     EXPECT_EQ(session.ordersAccepted(), 1u);
     auto* book = engine.getOrderBook(1);
     ASSERT_NE(book, nullptr);
@@ -1705,9 +1734,10 @@ TEST(FixSessionTest, DuplicateMsgSeqNumWithoutPossDupIsRejected) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1); inbound expected advances to 2.
 
     auto first = makeFixMessage("D", {
-        {FixTag::MsgSeqNum, "1"},
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "10"},
         {FixTag::ClOrdID, "5003"},
         {FixTag::Symbol, "1"},
@@ -1720,7 +1750,7 @@ TEST(FixSessionTest, DuplicateMsgSeqNumWithoutPossDupIsRejected) {
     sent.clear();
 
     auto dup = makeFixMessage("D", {
-        {FixTag::MsgSeqNum, "1"},
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "10"},
         {FixTag::ClOrdID, "5004"},
         {FixTag::Symbol, "1"},
@@ -1731,7 +1761,7 @@ TEST(FixSessionTest, DuplicateMsgSeqNumWithoutPossDupIsRejected) {
     });
     ASSERT_TRUE(session.feed(dup.data(), dup.size()));
 
-    EXPECT_EQ(session.expectedInboundSeqNum(), 2u);
+    EXPECT_EQ(session.expectedInboundSeqNum(), 3u);  // Logon 1->2, first order 2->3
     EXPECT_EQ(session.ordersAccepted(), 1u);
     EXPECT_EQ(engine.getOrderBook(1)->getOrder(5004), nullptr);
 
@@ -1749,9 +1779,10 @@ TEST(FixSessionTest, DuplicateMsgSeqNumWithPossDupIsIgnored) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1); inbound expected advances to 2.
 
     auto first = makeFixMessage("D", {
-        {FixTag::MsgSeqNum, "1"},
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "10"},
         {FixTag::ClOrdID, "5005"},
         {FixTag::Symbol, "1"},
@@ -1764,7 +1795,7 @@ TEST(FixSessionTest, DuplicateMsgSeqNumWithPossDupIsIgnored) {
     sent.clear();
 
     auto dup = makeFixMessage("D", {
-        {FixTag::MsgSeqNum, "1"},
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::PossDupFlag, "Y"},
         {FixTag::SenderCompID, "10"},
         {FixTag::ClOrdID, "5006"},
@@ -1776,7 +1807,7 @@ TEST(FixSessionTest, DuplicateMsgSeqNumWithPossDupIsIgnored) {
     });
     ASSERT_TRUE(session.feed(dup.data(), dup.size()));
 
-    EXPECT_EQ(session.expectedInboundSeqNum(), 2u);
+    EXPECT_EQ(session.expectedInboundSeqNum(), 3u);  // Logon 1->2, first order 2->3
     EXPECT_EQ(session.ordersAccepted(), 1u);
     EXPECT_EQ(engine.getOrderBook(1)->getOrder(5006), nullptr);
     EXPECT_TRUE(sent.empty());
@@ -1790,6 +1821,7 @@ TEST(FixSessionTest, TestRequestEmitsHeartbeatWithTestReqID) {
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
 
     auto msg = makeFixMessage("1", {
+        {FixTag::MsgSeqNum, "1"},
         {FixTag::TestReqID, "probe-42"},
     });
     ASSERT_TRUE(session.feed(msg.data(), msg.size()));
@@ -1811,6 +1843,7 @@ TEST(FixSessionTest, ResendRequestReturnsSequenceResetGapFill) {
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
 
     auto msg = makeFixMessage("2", {
+        {FixTag::MsgSeqNum, "1"},
         {FixTag::BeginSeqNo, "1"},
         {FixTag::EndSeqNo, "7"},
     });
@@ -1833,11 +1866,11 @@ TEST(FixSessionTest, LogoutAcknowledgesAndRequestsDisconnect) {
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
 
-    auto logon = makeFixMessage("A", {{FixTag::HeartBtInt, "30"}});
-    ASSERT_TRUE(session.feed(logon.data(), logon.size()));
-    sent.clear();
+    feedLogon(session, sent);  // Logon (seq 1); clears the ack from `sent`.
 
-    auto logout = makeFixMessage("5", {{FixTag::Text, "client shutdown"}});
+    auto logout = makeFixMessage("5", {
+        {FixTag::MsgSeqNum, "2"}, {FixTag::Text, "client shutdown"},
+    });
     EXPECT_FALSE(session.feed(logout.data(), logout.size()))
         << "gateway should close after sending Logout ack";
 
@@ -1953,8 +1986,10 @@ TEST(FixSessionTest, Fix44NewOrderSingleRequiresTransactTime) {
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
     session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
+    feedLogon(session, sent, "FIX.4.4");  // 4.4 Logon (seq 1) before app msgs.
 
     auto msg = makeFixMessageVer("FIX.4.4", "D", {
+        {FixTag::MsgSeqNum,    "2"},
         {FixTag::SenderCompID, "100"},
         {FixTag::ClOrdID,      "1234"},
         {FixTag::Symbol,       "7"},
@@ -1994,8 +2029,10 @@ TEST(FixSessionTest, Fix42NewOrderSingleAcceptsWithoutTransactTime) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1) before app messages.
 
     auto msg = makeFixMessageVer("FIX.4.2", "D", {
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "100"}, {FixTag::ClOrdID, "9999"},
         {FixTag::Symbol, "7"}, {FixTag::Side, "1"},
         {FixTag::OrderQty, "10"}, {FixTag::Price, "1000"},
@@ -2015,8 +2052,10 @@ TEST(FixSessionTest, Fix44SessionRejectIncludesOrdRejReason) {
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
     session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
+    feedLogon(session, sent, "FIX.4.4");  // 4.4 Logon (seq 1) before app msgs.
 
     auto msg = makeFixMessageVer("FIX.4.4", "D", {
+        {FixTag::MsgSeqNum,    "2"},
         {FixTag::SenderCompID, "100"},
         {FixTag::ClOrdID,      "5555"},
         {FixTag::Symbol,       "99"},  // unregistered
@@ -2051,8 +2090,10 @@ TEST(FixSessionTest, Fix42RejectStillEmitsOrdRejReason) {
 
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
+    feedLogon(session, sent);  // Logon (seq 1) before app messages.
 
     auto msg = makeFixMessage("D", {
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::SenderCompID, "1"}, {FixTag::ClOrdID, "1"},
         {FixTag::Symbol, "42"},  // unregistered
         {FixTag::Side, "1"}, {FixTag::OrderQty, "1"},
@@ -2078,8 +2119,10 @@ TEST(FixSessionTest, Fix44CancelRequiresTransactTime) {
     std::string sent;
     FixSession session(engine, [&](std::string_view b) { sent.append(b); });
     session.setAcceptedVersions({"FIX.4.2", "FIX.4.4"});
+    feedLogon(session, sent, "FIX.4.4");  // 4.4 Logon (seq 1) before app msgs.
 
     auto msg = makeFixMessageVer("FIX.4.4", "F", {
+        {FixTag::MsgSeqNum, "2"},
         {FixTag::OrigClOrdID, "7"}, {FixTag::Symbol, "2"},
     });
     ASSERT_TRUE(session.feed(msg.data(), msg.size()));

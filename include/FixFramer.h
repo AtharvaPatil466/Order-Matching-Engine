@@ -158,6 +158,7 @@ public:
             FixMessage msg;
             bool ok = msg.parse(start, frameLen);
             ok = ok && msg.isWellFormed();
+            ok = ok && msg.validateBodyLength();
             ok = ok && msg.validateChecksum();
 
             if (ok) {

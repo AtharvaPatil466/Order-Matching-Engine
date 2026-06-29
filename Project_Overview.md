@@ -1,8 +1,8 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **46,500+ lines of C++20** | 85 headers | 13 source files | 75 test files | 396 CTest targets
+> **46,500+ lines of C++20** | 85 headers | 13 source files | 79 test files | 426 CTest targets
 >
-> A C++20 low-latency matching engine drawing on institutional exchange design principles, built for sub-150ns processing latency and horizontal scalability.
+> A C++20 low-latency matching engine drawing on institutional exchange design principles — **271 ns P50 core-matching latency validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
 
 ---
 
@@ -17,8 +17,8 @@ This is a C++20 low-latency order matching engine with institutional-grade archi
 | Total C++ LOC | ~46,500 |
 | Header files (`include/`) | 85 |
 | Source files (`src/`) | 13 |
-| Test files | 75 |
-| Individual test cases | 396 CTest targets |
+| Test files | 79 |
+| Individual test cases | 426 CTest targets |
 | TLA+ specifications | 12 (454M+ states verified) |
 | Documentation files | 6 (plus architecture/benchmark docs) |
 
@@ -188,15 +188,42 @@ A self-contained quantitative research layer that runs against the live matching
 
 ## 8. Performance Benchmarks
 
-Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O3 -march=native. Numbers below are verified from a **fresh clone of commit `5228158`**; P50 is the stable per-operation figure, while throughput is wall-clock and sensitive to machine load. (Per-order/per-fill structured logging is sink-gated, so the hot path stays allocation-free when no log sink is attached.)
+`HonestBenchmark` feeds one deterministic order flow (50K orders, seed=42) through three cumulative paths. The **x86 figures are the authoritative, reproducible numbers**, validated on AWS bare metal; Apple Silicon dev-machine numbers follow as a reference. P50 is the stable per-operation figure; throughput is wall-clock and load-sensitive. (Per-order/per-fill structured logging and event dispatch are sink-/listener-gated, so the hot path stays allocation- and vtable-free when nothing is attached.)
 
-### Three-Path Latency (identical order flow)
+### Validated x86 — AWS c6in.metal (authoritative)
 
-| Path | What's Included | P50 | P99 | Throughput |
-| :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | 333 ns | ~6.6M ops/s |
-| **Engine wrapper** | + sequence alloc, rate limiter | 84 ns | 292 ns | ~7.1M ops/s |
-| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | 1,040 ns | 2.7 ms (fdatasync) | ~22K ops/s |
+Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosmt`), Ubuntu 26.04, Clang C++20 `-O3 -march=native`, `numactl --cpunodebind=0 --membind=0`. 5 stable runs, post-optimization commit `d2e688c`.
+
+| Path | What's Included | P50 | P90 | P99 | Throughput |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Core matching** | OrderBook + STP + WashTrade + LULD | **271 ns** | 662 ns | 1,072 ns | 2.63M ops/s |
+| **Engine wrapper** | + sequence alloc, rate limiter | 282 ns | 646 ns | 1,040 ns | 2.59M ops/s |
+| **Full-stack journal** | + GroupCommit (batch=64, fdatasync on EBS) | 448 ns | 898 ns | 5,312 ns | 1.52M ops/s |
+
+`perf` (Path A, 50K orders): IPC 1.36 · ~6.3 branch-misses/order · ~47 L1-dcache-misses/order · ~0.23 LLC-misses/order.
+
+### Apple Silicon (M-series dev machine, reference)
+
+| Path | P50 | Note |
+| :--- | :--- | :--- |
+| Core matching | ~125 ns | ~42 ns clock granularity quantizes per-path P50s, so Path A/B can read equal or invert run-to-run |
+| Engine wrapper | ~125 ns | |
+| Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — **not structural** (the same path is 448 ns on Linux x86) |
+
+The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider out-of-order window + stronger branch prediction on pointer-chasing code), **confirmed not** caused by build flags, field ordering, branch hints, or branchless selection.
+
+### Where the 271 ns goes (and what doesn't move it)
+
+The four performance fixes shipped this cycle (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change** — Path A 279→271 ns is within run-to-run noise, and branch-misses (~6.3/order) and L1-misses (~47/order) were unchanged. This is the expected result: the P50 is **structurally bound**, not instruction-bound.
+
+| Cost | ns | Driver | Lever (estimated) |
+| :--- | --: | :--- | :--- |
+| Pointer chasing (intrusive list) | 80–100 | ~47 L1-dcache misses/order | arena allocator (40–60 ns) |
+| Branch mispredicts | 60–80 | ~6.3/order, data-dependent | branchless cross check (10–20 ns) |
+| Irreducible work | 50–60 | price/qty math, STP, compliance | — |
+| Spectre mitigation (eIBRS) | 30–40 | kernel-enforced on this instance | not disableable here |
+
+Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reordering, `[[likely]]`/`[[unlikely]]` hints, branchless `isBuy` book selection. Remaining un-implemented software levers: price-level-aware arena allocator, branchless price-cross, next-order prefetch, PGO. The journal P99 (~5.3 µs) is the `fdatasync` flush on EBS; NVMe/RAM-backed storage would be materially lower (io_uring is the planned journal-path optimization).
 
 ### Binary Codec Microbenchmark
 
@@ -211,9 +238,9 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 
 ## 9. Verification & Testing
 
-### Test Suite — 75 Executables, 396 CTest Targets
+### Test Suite — 79 Executables, 426 CTest Targets
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 75 test executables and 396 CTest targets. Key mechanisms:
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 79 test executables and 426 CTest targets. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.
@@ -234,7 +261,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ```
 include/              85 header files — core logic and networking
 src/                  13 source files — thin compilation units
-tests/                75 test files, 396 CTest targets
+tests/                79 test files, 426 CTest targets
 benchmarks/           9 benchmark binaries
 fuzz/                 9 files — coverage-guided fuzzing harnesses
 spec/                 TLA+ formal specifications (12 specs)
@@ -248,7 +275,7 @@ docs/                 Runbooks, CapacityPlanning, ProductionReadiness
 ## 11. Remaining Work
 
 The system is architecturally complete. The main remaining gaps require specialized hardware not typically available in standard environments:
-- **x86 Bare Metal Benchmarks**: Needs multi-socket EC2 c5.metal instance.
+- **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 271 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The four micro-optimizations moved x86 latency 0 ns — the remaining gains require an arena allocator and branchless price-cross, not instruction tweaks.
 - **Kernel Bypass Networking**: DPDK and io_uring seams are prepared, but require specific NICs (e.g., Solarflare/Onload) and tuning.
 - **`Replication.tla` Verification**: ✅ done — see Verification section above. The original "not yet verified" footnote is obsolete.
 - **Wire-to-Wire Latency Validation**: Requires a multi-host test rig with hardware timestamping.
@@ -256,4 +283,4 @@ The system is architecturally complete. The main remaining gaps require speciali
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · ~46,500 LOC · 75 test executables · 396 CTest targets · 19 multi-container chaos scenarios · 454M TLA+ states verified on MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · ~46,500 LOC · 79 test executables · 426 CTest targets · 19 multi-container chaos scenarios · 454M TLA+ states verified on MatchingEngine.tla · 12 TLA+ specifications*

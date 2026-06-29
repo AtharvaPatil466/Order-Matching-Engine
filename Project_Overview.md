@@ -194,9 +194,9 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 
 | Path | What's Included | P50 | P99 | Throughput |
 | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | ~500 ns | ~5.0M ops/s |
-| **Engine wrapper** | + sequence alloc, rate limiter | 125 ns | ~500 ns | ~5.5M ops/s |
-| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | ~958 ns | ~8 ms (fdatasync) | ~7K ops/s |
+| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | 333 ns | ~6.6M ops/s |
+| **Engine wrapper** | + sequence alloc, rate limiter | 84 ns | 292 ns | ~7.1M ops/s |
+| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | 1,040 ns | 2.7 ms (fdatasync) | ~22K ops/s |
 
 ### Binary Codec Microbenchmark
 

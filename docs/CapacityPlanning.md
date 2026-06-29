@@ -9,15 +9,15 @@
 ### Per-Order Memory
 | Component | Size | Notes |
 |-----------|------|-------|
-| `Order` struct | 128 bytes | Packed, intrusive linked list pointers |
+| `Order` struct | 192 bytes | `alignas(64)`, intrusive linked list pointers (`sizeof(Order) == 192`) |
 | ObjectPool overhead | 16 bytes/slot | Pool metadata + free list pointer |
 | FlatPriceMap slot | 8 bytes/price level | Pointer to price level head |
 | Price level metadata | 32 bytes | Total qty, order count, head/tail |
-| **Total per live order** | **~184 bytes** | |
+| **Total per live order** | **~248 bytes** | 192 + 16 + 8 + 32 |
 
 ### Sizing Formula
 ```
-Memory = (max_live_orders × 184 bytes)
+Memory = (max_live_orders × 248 bytes)
        + (price_range × 8 bytes × num_symbols)      # FlatPriceMap
        + (num_symbols × 64KB)                         # per-book overhead
        + (queue_capacity × sizeof(OrderRequest))      # MPSC queues
@@ -166,7 +166,7 @@ For a given target:
 Target: 50K orders/sec, 100 symbols, 500K max live orders, 99th %ile < 10μs
 
 CPU:    8 cores (4 workers + 4 overhead)
-Memory: 512 MB (500K × 184 bytes + overhead)
+Memory: 512 MB (500K × 248 bytes ≈ 124 MB + overhead)
 Disk:   NVMe, 200 GB capacity (50K × 86400s × 80 bytes / 1e9 = 345 GB/day
         → checkpoint every 10K entries reclaims ~90%)
 Network: 10 GbE

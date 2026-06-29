@@ -11,7 +11,8 @@
 //           Adds: sequence allocation, rate limiter check, risk validation
 //
 //   Path C: MatchingEngine::submitOrder() (sync mode, journal with fdatasync)
-//           Adds: persisted journal with SyncPolicy::Immediate
+//           Adds: persisted journal with SyncPolicy::GroupCommit (batch=64,
+//           fdatasync once per batch)
 //
 // ORDER FLOW:
 //   All three paths process the IDENTICAL order stream: same IDs, same
@@ -190,7 +191,7 @@ static PathResult runPathB(const std::vector<TestOrder>& orders, size_t /*warmup
     return result;
 }
 
-// ─── Path C: MatchingEngine + Journal (SyncPolicy::Immediate → fdatasync) ──
+// ─── Path C: MatchingEngine + Journal (SyncPolicy::GroupCommit batch=64 → fdatasync) ──
 
 static PathResult runPathC(const std::vector<TestOrder>& orders, size_t /*warmup*/) {
     PathResult result;

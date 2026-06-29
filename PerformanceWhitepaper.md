@@ -31,7 +31,7 @@ All three paths process the **identical** deterministic order stream (seed=42):
 
 ### 2.3 Timing Source
 
-`clock_gettime_nsec_np(CLOCK_UPTIME_RAW)` on Apple Silicon ARM64. This provides ~1ns resolution via the hardware performance counter, avoiding the ~41.6ns quantization of `mach_absolute_time` at 24MHz.
+`HonestBenchmark` times each order with `nowNs()`, defined in `LatencyTracker.h` as `std::chrono::high_resolution_clock::now().time_since_epoch().count()`. On Apple Silicon ARM64 this clock resolves to nanoseconds. (The separate `ManualBenchmark` is the only benchmark that reads raw platform counters — `mach_absolute_time` / `rdtsc` — and is not the source of the numbers in this document.)
 
 ### 2.4 Reproducibility
 
@@ -42,7 +42,7 @@ cd build/
 
 Record: CPU model, OS version, compiler version, power mode, thermal state, and repeated-run variance with any published result.
 
-## 3. Results (Apple Silicon ARM64, Clang C++20 -O2)
+## 3. Results (Apple Silicon ARM64, Clang C++20 -O3 -march=native)
 
 ### 3.1 Path A — Core Matching
 

@@ -4,12 +4,12 @@
 [![Latency](https://img.shields.io/badge/Matching_P50-125ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-6.6M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
-[![Tests](https://img.shields.io/badge/Tests-395_CTest_targets-brightgreen.svg)](#verification)
+[![Tests](https://img.shields.io/badge/Tests-396_CTest_targets-brightgreen.svg)](#verification)
 [![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
 [![TLA+](https://img.shields.io/badge/TLA%2B-454M_states_verified-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocols-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states on `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 75 test executables, 395 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
+A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states on `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 75 test executables, 396 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
 
 ## 🚀 Key Features
 
@@ -75,11 +75,11 @@ All four protocols dispatch into the same `MatchingEngine`. Drop a different ses
 - **Webhook Alerting**: `AlertDispatcher` — background thread delivery to Slack, PagerDuty, or generic HTTP webhooks with configurable severity filtering
 - **Config Management**: `Config` key-value loader with env var override (`OB_` prefix), type-safe getters, registered-listener callbacks on set/loadFile/loadMap. Hot-reload via SIGHUP wired — `--config PATH` flag, async-signal-safe `g_reload_config` atomic flag, config reloaded on signal receipt
 - **End-to-End Latency Tracking**: Ingress timestamps on every order; per-thread `LatencyTracker` histograms for real P50/P99/P99.9 including queue delay
-- **Hardware Timing**: `mach_absolute_time` (Apple Silicon) / `rdtsc` (x86) for sub-clock-quantum benchmarking
+- **Hardware Timing**: `ManualBenchmark` uses raw platform timers — `mach_absolute_time` (Apple Silicon) / `rdtsc` (x86) — for sub-clock-quantum micro-measurement. The headline `HonestBenchmark` numbers below use `nowNs()`, which is `std::chrono::high_resolution_clock`
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes; `.dockerignore` excludes host build artifacts; entrypoint shim conditionally LD_PRELOADs `libfaketime` for chaos clock-skew scenarios
 
 ### Formal Verification & Chaos Engineering
-- **TLA+ Specifications**: 7 specs total. `MatchingEngine.tla` — 454M states, 181M distinct, 0 violations. `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) verified at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Refinement`.
+- **TLA+ Specifications**: 12 specs total. `MatchingEngine.tla` — 454M states, 181M distinct, 0 violations. `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) verified at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Refinement`, `Auction`, `EpochDurability`, `FixSession`, `Oco`, `Risk`.
 - **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Empirically verifies `NoCommittedLoss` (every primary-committed entry survives `SIGKILL`), no-split-brain under partition / packet loss / asymmetric partition / clock skew, snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-fenced promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md).
 - **TSan**: `ReplicationProtocolTest` is TSan-clean (was previously excluded due to teardown races on non-atomic fds + non-atomic sendSeq_; closed by atomic fds + `shutdown(2)` wakeup + atomic sequence)
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison
@@ -88,7 +88,7 @@ All four protocols dispatch into the same `MatchingEngine`. Drop a different ses
 
 ## 📊 Performance Benchmarks
 
-Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O2. Each order individually timed with `clock_gettime_nsec_np`.
+Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O3 -march=native (Release). Each order individually timed with `nowNs()` (`std::chrono::high_resolution_clock`).
 
 > [!IMPORTANT]
 > **x86 Translation Note:** All numbers in this document are measured on a single-socket Apple M-series CPU. These are **not** multi-socket x86 numbers. Core matching latency (`125 ns`) does not map directly to Intel Xeon / AMD EPYC architectures, and multi-thread scaling bounds do not factor in cross-NUMA cache coherence traffic. Bare-metal x86 benchmarking is pending.
@@ -119,7 +119,7 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 
 ### Binary Codec Performance
 
-`./bin/BinaryCodecBenchmark` — pure encode/decode microbench, no engine, no transport. 2M iterations per row, Apple M3 Pro, Clang `-O2`.
+`./bin/BinaryCodecBenchmark` — pure encode/decode microbench, no engine, no transport. 2M iterations per row, Apple M3 Pro, Clang `-O3 -march=native`.
 
 | Codec | Message | ns/op | M ops/s |
 | :--- | :--- | --: | --: |
@@ -265,7 +265,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 
 ## 🧪 Verification
 
-**75 test executables** covering **395 CTest targets**[^1] across 11 categories:
+**75 test executables** covering **396 CTest targets**[^1] across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -281,7 +281,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
 | **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
 
-[^1]: *CTest targets map to individual executables and GTest cases. The 395 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
+[^1]: *CTest targets map to individual executables and GTest cases. The 396 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
 
 ### Formal Verification (TLA+)
 
@@ -299,7 +299,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 | `EpochDurability.tla` | verified | Epoch-store durability invariant under crash |
 | `FixSession.tla` | verified | FIX session state machine safety (logon/heartbeat/gap-fill) |
 | `Oco.tla` | verified | OCO one-cancels-other atomicity |
-| `Risk.tla` | verified | Hierarchical risk limit enforcement |
+| `Risk.tla` | verified | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. |
 
 ### <a name="chaos-suite"></a>Live Chaos Suite
 
@@ -366,4 +366,4 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 46.5K LOC · 75 test executables · 395 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*
+*C++20 · 46.5K LOC · 75 test executables · 396 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*

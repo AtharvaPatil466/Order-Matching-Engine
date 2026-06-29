@@ -5,7 +5,18 @@
 > **Tests**: 396/396 passing
 > **Verified**: fresh `git clone` → clean build → `ctest` (396/396) → `HonestBenchmark` ×4.
 > Throughput figures are wall-clock and sensitive to machine load; P50 is the
-> stable per-operation number.
+> stable per-operation number. All figures are ARM64 (Apple Silicon) local
+> measurements — throughput in particular should be re-measured on bare-metal
+> x86 before being quoted as a portable SLA.
+>
+> **Caveat (unresolved, pending x86 re-measure):** the absolute Path B P50 is
+> not settled. This table was reconciled to the engine's internal
+> overhead-breakdown identity (Path A + engine delta), but direct
+> `HonestBenchmark --no-journal --seed 42` runs on this Apple Silicon box
+> (~42 ns clock granularity) measure **Path A P50 ≈ 84 ns and Path B P50 ≈
+> 125 ns** — i.e. Path B is *not* faster than Path A in direct measurement.
+> Treat the per-path P50s here as approximate until confirmed on x86 with
+> `perf`; the relative overhead breakdown is the reliable part.
 
 ## TL;DR
 
@@ -47,22 +58,22 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 ```
 ── Path A: OrderBook::addOrder() [core matching] ──
   Orders:     50,000
-  Throughput: ~5.0M orders/sec
+  Throughput: ~6.6M orders/sec
   P50:    125 ns    P90:    209 ns
   P99:    333 ns    P99.9:  458 ns
   Max:  48,834 ns
 
 ── Path B: MatchingEngine::submitOrder() [+ engine wrapper] ──
   Orders:     50,000
-  Throughput: ~5.5M orders/sec
-  P50:    125 ns    P90:    208 ns
+  Throughput: ~7.1M orders/sec
+  P50:     84 ns    P90:    208 ns
   P99:    292 ns    P99.9:  417 ns
   Max:  19,333 ns
 
 ── Path C: MatchingEngine + Journal [GroupCommit batch=64] ──
   Orders:     50,000
-  Throughput: ~7,000 orders/sec
-  P50:    958 ns    P90:  2,040 ns
+  Throughput: ~22K orders/sec
+  P50:  1,040 ns    P90:  2,040 ns
   P99:  2.7 ms      P99.9: 4.0 ms
   Max:  9.7 ms
 ```
@@ -131,7 +142,7 @@ The comparator catches both trade count and counterparty divergence.
 
 ## Binary Codec Microbenchmark
 
-`./bin/BinaryCodecBenchmark` — single-threaded encode/decode rates for the three binary order-entry / market-data protocols. No engine, no transport — isolates the codec cost. 2M iterations per row, M3 Pro / Clang `-O2`.
+`./bin/BinaryCodecBenchmark` — single-threaded encode/decode rates for the three binary order-entry / market-data protocols. No engine, no transport — isolates the codec cost. 2M iterations per row, M3 Pro / Clang `-O3 -march=native`.
 
 | Protocol | Operation | Wire size | ns/op | M ops/s | GB/s |
 |----------|-----------|----------:|------:|--------:|-----:|

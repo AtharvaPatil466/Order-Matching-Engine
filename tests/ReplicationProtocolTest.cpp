@@ -422,25 +422,36 @@ void test_snapshot_ordering() {
 void test_heartbeat_miss_reset() {
     TEST(HeartbeatMissReset);
 
-    HeartbeatMonitor hb(20, 80);  // interval 20ms, timeout 80ms
+    // Generous alive-timeout (500ms) relative to the renewal cadence so
+    // scheduler jitter on a loaded / sanitizer-instrumented CI runner cannot
+    // spuriously trip the miss counter or flip liveness during the healthy
+    // phase. isAlive() is nowMs()-lastHeartbeat < timeout, so the assertions
+    // below are taken IMMEDIATELY after receivedHeartbeat() (≈0 elapsed) — never
+    // after a sleep that a slow runner could overshoot past the timeout.
+    HeartbeatMonitor hb(20, 500);  // monitor tick 20ms, alive-timeout 500ms
     hb.start();
 
-    // Healthy: renewals within the timeout keep missedCount pinned at 0.
-    for (int i = 0; i < 10; ++i) {
+    // Healthy: each renewal pins missedCount at 0 and keeps the link alive.
+    // Checked at zero-elapsed (right after the renewal), so the result is
+    // independent of how long the following sleep actually takes.
+    for (int i = 0; i < 5; ++i) {
         hb.receivedHeartbeat();
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        assert(hb.missedCount() == 0);
+        assert(hb.isAlive());
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // « timeout
     }
-    assert(hb.missedCount() == 0);
-    assert(hb.isAlive());
 
-    // Outage: with no renewals the counter climbs past a 3-miss threshold.
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // Outage: no renewals for well past the timeout (+ many monitor ticks). A
+    // slow runner only makes this wait longer, never shorter, so the counter
+    // climbing past the 3-miss threshold and isAlive() going false are robust.
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
     assert(hb.missedCount() >= 3);
     assert(!hb.isAlive());
 
-    // A single renewal resets the counter to 0 — the mechanism that prevents
-    // a fast-clock backup from ever reaching the promotion threshold while the
-    // primary keeps renewing.
+    // A single renewal resets the counter to 0 and revives liveness — the
+    // mechanism that prevents a fast-clock backup from ever reaching the
+    // promotion threshold while the primary keeps renewing. Asserted at
+    // zero-elapsed for the same timing-robustness reason.
     hb.receivedHeartbeat();
     assert(hb.missedCount() == 0);
     assert(hb.isAlive());

@@ -3,10 +3,12 @@
 // ExecutionAnalytics.h — header-only execution quality calculator.
 // Measures how well a sequence of fills performed against common benchmarks
 // (Implementation Shortfall, VWAP, TWAP, spread capture).
-// No external dependencies: only <algorithm>, <cmath>, <numeric>, <vector>.
+// No external dependencies beyond the standard library.
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>   // uint64_t (FillRecord::seqNum, fillCount); GCC/libstdc++
+                     // does not pull this in transitively like libc++ does.
 #include <numeric>
 #include <vector>
 

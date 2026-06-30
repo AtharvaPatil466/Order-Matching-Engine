@@ -121,13 +121,13 @@ The `AdminServer` exposes a lightweight HTTP interface for ops tooling and conta
 
 ### 3.1 OrderBook & Data Structures
 The core of the engine is purely single-threaded and deterministic.
-- **`Order`**: A 128-byte packed struct containing ID, price, quantity, participant ID, and intrusive pointers.
+- **`Order`**: A 192-byte `alignas(64)` struct containing ID, price, quantity, participant ID, and intrusive pointers (`sizeof(Order) == 192`).
 - **`FlatPriceMap`**: A fixed-size array covering the valid tick range of an instrument. If BTC trades from \$0 to \$100,000 at \$0.01 increments, the map has 10,000,000 slots. Memory is cheap; cache misses are expensive.
 - **`FlatHashMap`**: Used for O(1) order cancellation by `OrderId`. It uses Robin-Hood open-addressing to maintain cache density.
 
 ### 3.2 ShardedOrderBook & Horizontal Scaling
 To scale beyond a single core, the engine utilizes the `ShardedOrderBook`.
-Instead of placing all instruments in one book, instruments are sharded across $N$ instances. Each worker thread runs an independent event loop pinned to a specific CPU core. Affinity is set inline at thread startup in `MatchingEngine.cpp` — `pthread_setaffinity_np` with a `cpu_set_t` on Linux, and `thread_policy_set(..., THREAD_AFFINITY_POLICY, ...)` on macOS — rather than through a dedicated `CPUAffinity` class. Cross-symbol interactions are heavily restricted to maintain this isolation.
+Instead of placing all instruments in one book, instruments are sharded across $N$ instances. Each worker thread runs an independent event loop pinned to a specific CPU core. Affinity is set inline at thread startup in `MatchingEngine.cpp` — `pthread_setaffinity_np` with a `cpu_set_t` on Linux, and `thread_policy_set(..., THREAD_AFFINITY_POLICY, ...)` on macOS. Cross-symbol interactions are heavily restricted to maintain this isolation.
 
 ### 3.3 ShadowEngine (Dark Launching)
 For algorithmic testing and capacity planning, the `ShadowEngine` allows cloning production state. It consumes production traffic (via a fork or replay) but suppresses all outbound executions and market data. By taking a read-only snapshot of the production book and replaying subsequent events from a specific journal offset, the shadow instance accurately mirrors live execution logic without corrupting the production order book or impacting live network egress. This allows safe, realistic load testing of new engine versions against live market flow.

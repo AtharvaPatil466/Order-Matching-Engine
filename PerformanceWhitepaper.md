@@ -4,7 +4,7 @@
 
 This document records **verified, reproducible** performance measurements for the C++20 order matching engine. All numbers come from a single benchmark binary (`HonestBenchmark`) that feeds an identical, deterministic order flow through three progressively heavier execution paths. The numbers are machine-specific and should not be treated as a portable latency SLA.
 
-**Key Result**: Core matching latency is **125 ns P50** including all compliance checks (STP, WashTrade, LULD). Full-stack with GroupCommit journaling adds ~900ns at P50. Journal `fdatasync` dominates tail latency at P99+.
+**Key Result (authoritative, x86 bare metal — AWS c6in.metal)**: Core matching latency is **271 ns P50** including all compliance checks (STP, WashTrade, LULD); full-stack with GroupCommit journaling is **448 ns P50**. Journal `fdatasync` dominates tail latency at P99+. (The Apple Silicon dev machine reads ~125 ns P50 for core matching — a *dev-machine reference only*, ~2.2× faster than x86 for microarchitectural reasons, not a portable SLA.)
 
 ## 2. Methodology
 
@@ -42,7 +42,32 @@ cd build/
 
 Record: CPU model, OS version, compiler version, power mode, thermal state, and repeated-run variance with any published result.
 
-## 3. Results (Apple Silicon ARM64, Clang C++20 -O3 -march=native)
+## 3. Results
+
+### 3.0 Authoritative — x86 bare metal (AWS c6in.metal)
+
+Dual Intel Xeon Platinum 8375C @ 2.90GHz, 64 cores (`nosmt`), Ubuntu 26.04,
+Clang C++20 `-O3 -march=native`, `numactl --cpunodebind=0 --membind=0`,
+50K orders / seed=42, 5 stable runs, commit `d2e688c`.
+
+| Path | P50 | P90 | P99 | Throughput |
+|------|----:|----:|----:|-----------:|
+| **A** Core matching | **271 ns** | 662 ns | 1,072 ns | 2.63M ops/s |
+| **B** Engine wrapper | 282 ns | 646 ns | 1,040 ns | 2.59M ops/s |
+| **C** Full-stack journal | 448 ns | 898 ns | 5,312 ns | 1.52M ops/s |
+
+`perf` (Path A): IPC 1.36 · ~6.3 branch-misses/order · ~47 L1-dcache-misses/order.
+The 271 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
+branch mispredicts + Spectre eIBRS), not instruction-bound. Note that on x86 the
+overhead is cleanly additive (A 271 < B 282 < C 448) — Path B is correctly
+*slower* than Path A here, unlike the ARM artifact below.
+
+### 3.1–3.4 ARM64 dev-machine reference (Apple M3 Pro — NOT a portable SLA)
+
+The blocks below are **dev-machine reference numbers only**. The ~42 ns clock
+granularity quantizes per-path P50s (Path A/B read equal or swap run-to-run;
+Path B can show ~84 ns), and the Path C ~1,040 ns figure is a macOS/APFS
+`fdatasync` artifact — the same path is 448 ns on Linux x86.
 
 ### 3.1 Path A — Core Matching
 
@@ -119,13 +144,13 @@ This is the correct production configuration. The P99 spike is **not** matching 
 
 ### Production Options to Reduce P99
 
-1. **Async journal thread**: Dedicated I/O thread decouples persistence from hot path. Matching latency stays at ~125ns. Journal confirms persistence asynchronously.
+1. **Async journal thread**: Dedicated I/O thread decouples persistence from hot path. Matching latency stays at core-match speed (271 ns x86 / ~125 ns ARM dev ref). Journal confirms persistence asynchronously.
 2. **Larger batch size**: `batch_size=256` reduces fdatasync frequency 4x (one sync per 256 entries instead of 64).
 3. **Page-cache only**: Skip fdatasync entirely. Data persists in the OS page cache. Accept a data loss window on crash/power failure.
 
 ## 5. Architectural Analysis
 
-### Why Core Matching is Fast (~125ns)
+### Why Core Matching is Fast (~271ns x86 / ~125ns ARM dev reference)
 
 - **O(1) price lookup**: `FlatPriceMap` — flat array indexed by tick offset. No tree traversal.
 - **O(1) order lookup**: `FlatHashMap` — Robin Hood open-addressing. No chaining.
@@ -166,8 +191,9 @@ Shadow comparison validated against a deliberate FIFO violation:
 
 | Claim | Evidence | Confidence |
 |-------|----------|------------|
-| Core matching: **125 ns** P50 | HonestBenchmark Path A, 50K orders, seed=42 | Reproducible |
-| Full-stack: **1,040 ns** P50 | HonestBenchmark Path C, GroupCommit/64 | Reproducible |
+| Core matching (x86): **271 ns** P50 | HonestBenchmark Path A, AWS c6in.metal, 50K orders, seed=42 | Reproducible |
+| Full-stack (x86): **448 ns** P50 | HonestBenchmark Path C, AWS c6in.metal, GroupCommit/64 | Reproducible |
+| Core matching (ARM dev ref): ~125 ns P50 | HonestBenchmark Path A, Apple M3 Pro — reference only | Reproducible |
 | Journal dominates P99 | 2.7ms = fdatasync, not matching | Structural |
 | Safety invariants hold | TLC: 454M states, 0 violations | Formally verified |
 | Shadow mode catches bugs | FIFO violation → trade divergence detected | Validated |

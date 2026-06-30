@@ -1,29 +1,20 @@
 # Benchmark Methodology & Results
 
-> **Platform**: Apple M3 Pro (ARM64) · **Compiler**: Clang C++20 -O3 -march=native
-> **Baseline**: commit `5228158` · **Date**: 2026-06-21 · **Seed**: 42
-> **Tests**: 426/426 passing
-> **Verified**: fresh `git clone` → clean build → `ctest` (426/426) → `HonestBenchmark` ×4.
-> Throughput figures are wall-clock and sensitive to machine load; P50 is the
-> stable per-operation number. All figures are ARM64 (Apple Silicon) local
-> measurements — throughput in particular should be re-measured on bare-metal
-> x86 before being quoted as a portable SLA.
->
-> **Caveat (unresolved, pending x86 re-measure):** the absolute Path B P50 is
-> not settled. This table was reconciled to the engine's internal
-> overhead-breakdown identity (Path A + engine delta), but direct
-> `HonestBenchmark --no-journal --seed 42` runs on this Apple Silicon box
-> (~42 ns clock granularity) measure **Path A P50 ≈ 84 ns and Path B P50 ≈
-> 125 ns** — i.e. Path B is *not* faster than Path A in direct measurement.
-> Treat the per-path P50s here as approximate until confirmed on x86 with
-> `perf`; the relative overhead breakdown is the reliable part.
+> **Authoritative platform**: AWS c6in.metal — dual Intel Xeon Platinum 8375C
+> @ 2.90GHz, 64 physical cores (hyperthreading disabled via `nosmt`),
+> Ubuntu 26.04, Clang C++20 `-O3 -march=native`, `numactl --cpunodebind=0
+> --membind=0`. 50,000 orders, seed=42, 5 stable runs, commit `d2e688c`.
+> **Tests**: 426/426 passing.
+> **Reference platform**: Apple M3 Pro (ARM64) dev machine — quoted separately
+> below and clearly labelled as a *dev-machine reference only*, NOT an SLA.
+> Throughput is wall-clock and load-sensitive; P50 is the stable per-op number.
 
 ## TL;DR
 
 | Claim | Evidence | Status |
 |-------|----------|--------|
-| Core matching: **125 ns** P50 | Identical 50K order flow, `nowNs()` per-order | ✅ Verified |
-| Full-stack with journal: **1,040 ns** P50 | GroupCommit batch=64, fdatasync per batch | ✅ Verified |
+| Core matching (x86): **271 ns** P50 | AWS c6in.metal, identical 50K order flow | ✅ Verified |
+| Full-stack with journal (x86): **448 ns** P50 | GroupCommit batch=64, fdatasync per batch on EBS | ✅ Verified |
 | Safety invariants | TLC: 454M states, 181M distinct, 0 violations | ✅ Verified |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
@@ -55,28 +46,30 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 ## Results
 
-```
-── Path A: OrderBook::addOrder() [core matching] ──
-  Orders:     50,000
-  Throughput: ~6.6M orders/sec
-  P50:    125 ns    P90:    209 ns
-  P99:    333 ns    P99.9:  458 ns
-  Max:  48,834 ns
+### Authoritative — x86 bare metal (AWS c6in.metal)
 
-── Path B: MatchingEngine::submitOrder() [+ engine wrapper] ──
-  Orders:     50,000
-  Throughput: ~7.1M orders/sec
-  P50:     84 ns    P90:    208 ns
-  P99:    292 ns    P99.9:  417 ns
-  Max:  19,333 ns
+| Path | What's Included | P50 | P90 | P99 | Throughput |
+|------|------------------|----:|----:|----:|-----------:|
+| **A** Core matching | OrderBook + STP + WashTrade + LULD | **271 ns** | 662 ns | 1,072 ns | 2.63M ops/s |
+| **B** Engine wrapper | + sequence alloc, rate limiter | 282 ns | 646 ns | 1,040 ns | 2.59M ops/s |
+| **C** Full-stack journal | + GroupCommit (batch=64, fdatasync on EBS) | 448 ns | 898 ns | 5,312 ns | 1.52M ops/s |
 
-── Path C: MatchingEngine + Journal [GroupCommit batch=64] ──
-  Orders:     50,000
-  Throughput: ~22K orders/sec
-  P50:  1,040 ns    P90:  2,040 ns
-  P99:  2.7 ms      P99.9: 4.0 ms
-  Max:  9.7 ms
-```
+`perf` (Path A): IPC 1.36 · ~6.3 branch-misses/order · ~47 L1-dcache-misses/order.
+The 271 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
+branch mispredicts + Spectre eIBRS), not instruction-bound — the four
+micro-optimisations moved x86 P50 by 0 ns.
+
+### Reference — Apple Silicon ARM64 (M3 Pro dev machine, NOT an SLA)
+
+| Path | P50 | Note |
+|------|----:|------|
+| A Core matching | ~125 ns | ~42 ns clock granularity quantizes per-path P50; Path A/B read equal or swap run-to-run (Path B can show ~84 ns) — these are *dev-machine reference* figures only |
+| B Engine wrapper | ~125 ns | |
+| C Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — NOT structural (the same path is 448 ns on Linux x86) |
+
+The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider OoO window
++ stronger branch prediction on pointer-chasing code), not a build-flag or
+field-ordering effect.
 
 ## GroupCommit Explained
 
@@ -95,13 +88,17 @@ not matching engine latency. Production options to reduce P99:
 
 ## Overhead Breakdown (P50)
 
+x86 (authoritative — clean additive ordering A < B < C):
 ```
-Core matching + compliance:   125 ns  (Path A)
-Engine wrapper (seq+rate):    -41 ns  (Path B — faster from cache warming)
-Journal (GroupCommit/64):    +956 ns  (Path C — amortized batch I/O)
+Core matching + compliance:   271 ns  (Path A)
+Engine wrapper (seq+rate):    +11 ns  (Path B − A)
+Journal (GroupCommit/64):    +166 ns  (Path C − B — amortized batch I/O)
 ────────────────────────────────────────
-Total full-stack P50:       1,040 ns
+Total full-stack P50:         448 ns  (Path C)
 ```
+(On the ARM dev machine, the ~42 ns clock granularity can make Path B *appear*
+faster than Path A — a measurement artifact, not real; the x86 ordering above
+is the true overhead structure.)
 
 ## Formal Verification
 
@@ -165,9 +162,10 @@ The 1.0 ns/op SBE encode number is approaching the floor of what's measurable on
 ## Sharding (Separate Measurement)
 
 > **⚠ These numbers use a DIFFERENT order flow** (pre-partitioned by price
-> range). They are NOT comparable to the single-thread paths above.
+> range) and are **ARM64 dev-machine (M3 Pro) reference figures**, NOT the x86
+> authoritative numbers. They are NOT comparable to the single-thread paths above.
 
-| Metric | Single-Thread | 4 Shards |
+| Metric (ARM64 dev reference) | Single-Thread | 4 Shards |
 |--------|--------------|----------|
 | Throughput | 7.6M ops/sec | 45.2M ops/sec |
 | P50 | 84 ns | 42 ns |

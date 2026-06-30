@@ -395,7 +395,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // Any LOC remaining unfilled after uncross() is cancelled by cancelLocOrders().
     if (type == OrderType::MOC || type == OrderType::LOC) {
         Order* order = FaultInjector::instance().shouldFail("pool.allocate.fail")
-                           ? nullptr : orderPool_.allocate();
+                           ? nullptr : orderPool_.allocate(price);
         if (!order) [[unlikely]] {
 #ifndef OB_LEAN_MODE
             participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
@@ -458,7 +458,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // (allocate 200k orders) is too slow for a unit test; this point
     // exercises the CapacityExhausted reject path deterministically.
     Order* order = FaultInjector::instance().shouldFail("pool.allocate.fail")
-                       ? nullptr : orderPool_.allocate();
+                       ? nullptr : orderPool_.allocate(price);
     if (!order) [[unlikely]] {
 #ifndef OB_LEAN_MODE
         participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;

@@ -7,6 +7,9 @@ bin/
 *.profraw
 *.profdata
 
+# aws_benchmark.sh run logs
+aws-benchmark-*.log
+
 .DS_Store
 *.o
 *.a

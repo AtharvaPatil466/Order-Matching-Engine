@@ -144,21 +144,18 @@ public:
                 limitPrice = selling ? 1 : toPrice(1000000.0);
             }
 
-            // Submit the aggressive limit order.
-            engine_.submitOrder(
-                cfg.symbolId,
-                orderId,
-                cfg.participantId,
-                orderSide,
-                limitPrice,
-                qty,
-                OrderType::Limit);
-
-            ++orderId;
-
             // ── Collect fills via a scoped EventListener ──────────────
-            // Install a temporary listener BEFORE submit so we capture the
-            // trade callback that fires synchronously inside waitForDrain().
+            // The engine is async (worker threads) and OrderBook's listener
+            // pointer is non-atomic, so setEventListener must not run
+            // concurrently with a worker reading it (data race). Ordering:
+            //   (1) waitForDrain — workers idle, nothing in flight on this book;
+            //   (2) setEventListener — install while idle;
+            //   (3) submitOrder — the queue's release/acquire makes the
+            //       setEventListener write happen-before the worker's read.
+            // This also fixes a latent miss (the old code installed the
+            // listener AFTER submit, so a fast worker could fire onTrade before
+            // the listener existed): the listener is now installed strictly
+            // before the order can be processed.
             struct FillCapture : EventListener {
                 OrderId      watchId;
                 bool         selling;
@@ -181,14 +178,28 @@ public:
                 }
             };
             FillCapture cap;
-            cap.watchId = orderId - 1;
+            cap.watchId = orderId;   // the id we are about to submit
             cap.selling = selling;
             cap.out     = &fills_;
 
             OrderBook* bk = engine_.getOrderBook(cfg.symbolId);
+            engine_.waitForDrain();                 // workers idle before touching listener
             if (bk) bk->setEventListener(&cap);
-            engine_.waitForDrain();
-            if (bk) bk->setEventListener(nullptr);
+
+            // Submit the aggressive limit order (listener already installed).
+            engine_.submitOrder(
+                cfg.symbolId,
+                orderId,
+                cfg.participantId,
+                orderSide,
+                limitPrice,
+                qty,
+                OrderType::Limit);
+
+            ++orderId;
+
+            engine_.waitForDrain();                 // fills captured during drain
+            if (bk) bk->setEventListener(nullptr);  // workers idle again → safe
 
             result.actualFills[j]  = cap.fillQty;
             result.actualPrices[j] = (cap.fillQty > 0.0) ? (cap.wsum / cap.fillQty) : 0.0;

@@ -63,6 +63,7 @@ run_bench_n() {
 # ─── Step 1: full ctest suite ───────────────────────────────────────────────
 banner "STEP 1/4 — full ctest suite (Release)"
 cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang \
       -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON || die "step 1: configure failed"
 cmake --build "$BUILD_DIR" --parallel "$NPROC" || die "step 1: build failed"
 if ctest --test-dir "$BUILD_DIR" --output-on-failure -j"$NPROC"; then

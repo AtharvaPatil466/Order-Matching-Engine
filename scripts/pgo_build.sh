@@ -66,6 +66,7 @@ rm -rf "$INSTR_DIR"
 cmake -S . -B "$INSTR_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_COMPILER="$CXX_COMPILER" \
+    -DCMAKE_C_COMPILER=clang \
     -DENABLE_PGO=ON -DPGO_MODE=generate \
     -DBUILD_TESTS=OFF -DBUILD_BENCHMARKS=ON
 cmake --build "$INSTR_DIR" --parallel "$NPROC" --target HonestBenchmark
@@ -88,6 +89,7 @@ rm -rf "$FINAL_DIR"
 cmake -S . -B "$FINAL_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_COMPILER="$CXX_COMPILER" \
+    -DCMAKE_C_COMPILER=clang \
     -DENABLE_PGO=ON -DPGO_MODE=use -DPGO_PROFILE="$PROFDATA" \
     -DBUILD_TESTS=OFF -DBUILD_BENCHMARKS=ON
 cmake --build "$FINAL_DIR" --parallel "$NPROC" --target HonestBenchmark

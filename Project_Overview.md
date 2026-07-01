@@ -276,7 +276,8 @@ docs/                 Runbooks, CapacityPlanning, ProductionReadiness
 
 The system is architecturally complete. The main remaining gaps require specialized hardware not typically available in standard environments:
 - **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 271 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The four micro-optimizations moved x86 latency 0 ns — the remaining gains require an arena allocator and branchless price-cross, not instruction tweaks.
-- **Kernel Bypass Networking**: DPDK and io_uring seams are prepared, but require specific NICs (e.g., Solarflare/Onload) and tuning.
+- **Journal Async I/O (io_uring)**: A planned journal-path optimization, **not** hardware-blocked. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern Linux kernel. The seam is implemented behind `#ifdef __linux__` (with an `fdatasync`/`F_FULLFSYNC` fallback on other platforms); validation on x86 Linux is pending.
+- **Kernel Bypass Networking (DPDK)**: The genuine hardware-blocked item. DPDK kernel bypass requires a dedicated NIC/ENI (e.g., Solarflare/Onload) and tuning — unlike io_uring, this cannot run on commodity hardware.
 - **`Replication.tla` Verification**: ✅ done — see Verification section above. The original "not yet verified" footnote is obsolete.
 - **Wire-to-Wire Latency Validation**: Requires a multi-host test rig with hardware timestamping.
 

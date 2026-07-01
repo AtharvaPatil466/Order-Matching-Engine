@@ -3,7 +3,6 @@
 #include "Order.h"
 #include "IntrusiveList.h"
 #include "MemoryPool.h"
-#include "OrderArena.h"
 #include "FlatPriceMap.h"
 #include "FlatHashMap.h"
 #include "EventListener.h"
@@ -487,11 +486,7 @@ private:
 
     // O(1) Lookup — open-addressing hash map (replaces std::unordered_map)
     FlatHashMap<OrderId, Order*> orderLookup_;
-    // Price-level-aware arena (replaces ObjectPool<Order>): groups orders by
-    // limit price into contiguous slabs for cache-local matching-loop walks.
-    // Same fixed-address identity model, same O(1) alloc/dealloc, same
-    // pre-allocated-no-heap-on-hot-path guarantee. See OrderArena.h.
-    OrderArena orderPool_;
+    ObjectPool<Order> orderPool_;
 
     // Event listener (replaces std::function callbacks — zero-cost vtable dispatch)
     EventListener* listener_ = &nullListener();

@@ -103,6 +103,27 @@ add_library(OrderMatcher
     src/SimulationDriver.cpp
 )
 target_link_libraries(OrderMatcher PUBLIC Threads::Threads)
+
+# Optional io_uring-backed journal write path (Linux only). When liburing is
+# found we define OB_HAVE_LIBURING (PUBLIC, so the header-only Journal.h sees it
+# in every consumer that includes it) and link liburing. If liburing is absent
+# — or on any non-Linux platform — this block is a no-op and the journal uses
+# the existing fwrite + fdatasync path with identical durability semantics.
+# Force off with -DENABLE_IO_URING=OFF.
+option(ENABLE_IO_URING "Use io_uring for the journal write path when liburing is available" ON)
+if(ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_library(URING_LIB uring)
+    find_path(URING_INCLUDE liburing.h)
+    if(URING_LIB AND URING_INCLUDE)
+        target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_LIBURING=1)
+        target_include_directories(OrderMatcher PUBLIC ${URING_INCLUDE})
+        target_link_libraries(OrderMatcher PUBLIC ${URING_LIB})
+        message(STATUS "io_uring journal path enabled (liburing: ${URING_LIB})")
+    else()
+        message(STATUS "io_uring requested but liburing not found — journal uses fwrite + fdatasync")
+    endif()
+endif()
+
 if(ENABLE_ASSERTIONS)
     target_compile_options(OrderMatcher PUBLIC -UNDEBUG)
 endif()

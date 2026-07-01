@@ -18,6 +18,14 @@
 #include <sys/stat.h>
 #endif
 
+// Optional io_uring-backed journal write path (Linux only). Enabled when the
+// build defines OB_HAVE_LIBURING (set by CMake when liburing is found). When
+// absent — macOS, or Linux without liburing — the journal uses the classic
+// fwrite + fdatasync path below, with identical durability semantics.
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+#include <liburing.h>
+#endif
+
 // Hardware CRC32-C intrinsics
 #if defined(__ARM_FEATURE_CRC32)
 #include <arm_acle.h>
@@ -122,11 +130,29 @@ public:
 
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
+
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        // io_uring_queue_init(entries, ring, flags) returns 0 on success or
+        // -errno on failure (e.g. kernel < 5.1, or blocked by a seccomp /
+        // container policy). On any failure we leave useIoUring_ = false and
+        // the journal transparently uses the classic fwrite + fdatasync path —
+        // behaviour-identical, just without the ring. (io_uring_queue_init(3))
+        useIoUring_ = (io_uring_queue_init(kRingDepth, &ring_, 0) == 0);
+#endif
     }
 
     ~Journal() {
         flush();
         close();
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        // Tear the ring down AFTER the final flush()/close() above, since
+        // flush() may run a last commitBatch() that submits on the ring.
+        // (io_uring_queue_exit(3))
+        if (useIoUring_) {
+            io_uring_queue_exit(&ring_);
+            useIoUring_ = false;
+        }
+#endif
     }
 
     Journal(const Journal&) = delete;
@@ -306,11 +332,23 @@ public:
         if (!file_) {
             return 0;
         }
+#ifdef __linux__
+        // io_uring writes bypass the stdio stream, so ftell(file_) would not
+        // reflect them. Ask the kernel for the true size — this is also correct
+        // for the fwrite fallback path (commitBatch always fflushes), so it is
+        // used unconditionally on Linux.
+        struct stat st;
+        if (::fstat(fileno(file_), &st) == 0) {
+            return static_cast<size_t>(st.st_size);
+        }
+        return 0;
+#else
         long current = std::ftell(file_);
         if (current < 0) {
             return 0;
         }
         return static_cast<size_t>(current);
+#endif
     }
 
 protected:
@@ -396,9 +434,12 @@ protected:
             bytes[byteOff] ^= bit;
         }
 
-        size_t actuallyWritten =
-            std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
-        std::fflush(file_);
+        // Write the toWrite-entry prefix to the page cache. On Linux with
+        // liburing this is an io_uring write; elsewhere it is the classic
+        // fwrite + fflush. Returns the number of WHOLE entries that landed —
+        // identical contract to the old fwrite return — so the short-write
+        // rewind and durability barrier below are mechanism-agnostic.
+        size_t actuallyWritten = writeBatch(toWrite);
 
         // If the OS returned short on the actual fwrite (independent of
         // fault injection), rewind sequence_ for the un-written tail of
@@ -489,6 +530,47 @@ private:
         }
     }
 
+    // Write the first `toWrite` entries of batch_ to the page cache and return
+    // the number of WHOLE entries that landed. This is the write half of the
+    // commit; durability is a separate step (syncFile) so the fsync_fail fault
+    // and the onCommit_ ack-after-durable ordering are unchanged.
+    //
+    // Linux + liburing: a single io_uring write. Offset is passed as (__u64)-1
+    // so the op uses the file's current position — i.e. write(2) semantics that
+    // honour the O_APPEND set by fopen("ab+"), giving an atomic append at EOF,
+    // byte-for-byte equivalent to fwrite in append mode. The CQE res is the
+    // byte count (>=0) or -errno; a partial/sub-entry tail is floored to whole
+    // entries (the trailing partial entry fails CRC on recovery and is dropped,
+    // exactly as a torn fwrite would be). API: io_uring_get_sqe(3),
+    // io_uring_prep_write(3) ("offset ... -1 ... current file position"),
+    // io_uring_submit(3), io_uring_wait_cqe(3), io_uring_cqe_seen(3).
+    size_t writeBatch(size_t toWrite) {
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        if (useIoUring_) {
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe) {  // NULL only if the SQ ring is full — fall back to fwrite
+                io_uring_prep_write(
+                    sqe, fileno(file_), batch_.data(),
+                    static_cast<unsigned>(toWrite * sizeof(JournalEntry)),
+                    static_cast<unsigned long long>(-1));  // -1 → append at EOF
+                io_uring_submit(&ring_);
+                struct io_uring_cqe* cqe = nullptr;
+                size_t written = 0;
+                if (io_uring_wait_cqe(&ring_, &cqe) == 0 && cqe) {
+                    if (cqe->res > 0) {
+                        written = static_cast<size_t>(cqe->res) / sizeof(JournalEntry);
+                    }
+                    io_uring_cqe_seen(&ring_, cqe);
+                }
+                return written;
+            }
+        }
+#endif
+        size_t w = std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
+        std::fflush(file_);
+        return w;
+    }
+
     // Returns true iff the durable barrier actually made the bytes durable.
     // Callers gate the replication ack (onCommit_) on this: an ack may only
     // be sent once the data is provably on stable storage.
@@ -496,6 +578,27 @@ private:
         if (!file_) {
             return false;
         }
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        // io_uring fdatasync: IORING_FSYNC_DATASYNC selects fdatasync(2)
+        // semantics (data + size metadata, not full inode). Submitted AFTER the
+        // write CQE was reaped in writeBatch(), so the data is already in cache
+        // — same ordering as fwrite→fflush→fdatasync. durable == (res == 0).
+        // API: io_uring_prep_fsync(3), io_uring_submit(3), io_uring_wait_cqe(3).
+        if (useIoUring_) {
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+            if (sqe) {  // NULL only if the SQ ring is full — fall back to fdatasync
+                io_uring_prep_fsync(sqe, fileno(file_), IORING_FSYNC_DATASYNC);
+                io_uring_submit(&ring_);
+                struct io_uring_cqe* cqe = nullptr;
+                bool ok = false;
+                if (io_uring_wait_cqe(&ring_, &cqe) == 0 && cqe) {
+                    ok = (cqe->res == 0);
+                    io_uring_cqe_seen(&ring_, cqe);
+                }
+                return ok;
+            }
+        }
+#endif
 #ifdef __APPLE__
         return ::fcntl(fileno(file_), F_FULLFSYNC) == 0;
 #else
@@ -554,6 +657,17 @@ private:
     std::vector<JournalEntry> batch_;
     OnCommitFn onCommit_;
     size_t maxSizeMb_{0};
+
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+    // Per-Journal io_uring ring. `mutable` so the const syncFile() may submit
+    // on it (the ring is an I/O mechanism; submitting does not change the
+    // journal's logical state). Used only from the single writer thread that
+    // owns this Journal (matching is single-writer-per-book), so no ring
+    // locking is needed. Depth 8 is ample — each commit queues one op at a time.
+    static constexpr unsigned kRingDepth = 8;
+    mutable struct io_uring ring_{};
+    bool useIoUring_{false};
+#endif
 };
 
 class GroupCommitJournal : public Journal {

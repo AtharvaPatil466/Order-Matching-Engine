@@ -10,6 +10,10 @@ option(ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
 option(ENABLE_LTO "Enable link-time optimization in Release builds" OFF)
 option(ENABLE_ASSERTIONS "Keep C assert checks enabled in all build types" ON)
 option(ENABLE_FAULT_INJECTION "Compile fault-injection points (zero overhead when off)" OFF)
+# Clang IR-based profile-guided optimization (opt-in; driven by scripts/pgo_build.sh).
+option(ENABLE_PGO "Enable Clang IR-based profile-guided optimization" OFF)
+set(PGO_MODE ""    CACHE STRING "PGO phase when ENABLE_PGO=ON: 'generate' or 'use'")
+set(PGO_PROFILE "" CACHE STRING "Absolute path to merged .profdata for PGO_MODE=use")
 if(ENABLE_SANITIZERS AND ENABLE_THREAD_SANITIZER)
     message(FATAL_ERROR "ENABLE_SANITIZERS and ENABLE_THREAD_SANITIZER cannot be enabled together")
 endif()
@@ -45,6 +49,40 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
         else()
             message(WARNING "LTO not supported: ${output}")
         endif()
+    endif()
+endif()
+
+# ─── Profile-Guided Optimization (Clang IR-based PGO) ───────────────────────
+# Opt-in, driven by scripts/pgo_build.sh. Must be set BEFORE any target is
+# defined so the compile/link flags apply to OrderMatcher and the benchmarks.
+# When ENABLE_PGO=OFF (default) this block is skipped entirely — the normal
+# build is unchanged.
+if(ENABLE_PGO)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "ENABLE_PGO requires Clang (IR-based PGO uses "
+            "-fprofile-instr-*); current compiler is ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+    if(PGO_MODE STREQUAL "generate")
+        message(STATUS "PGO: INSTRUMENT build (-fprofile-instr-generate)")
+        add_compile_options(-fprofile-instr-generate)
+        add_link_options(-fprofile-instr-generate)
+    elseif(PGO_MODE STREQUAL "use")
+        if(NOT EXISTS "${PGO_PROFILE}")
+            message(FATAL_ERROR "PGO_MODE=use requires -DPGO_PROFILE=<absolute "
+                "path to merged .profdata>; got '${PGO_PROFILE}'")
+        endif()
+        message(STATUS "PGO: OPTIMIZED build (-fprofile-instr-use=${PGO_PROFILE})")
+        # The Release build uses -Werror. In use-mode Clang warns on functions
+        # not covered by the profile (HonestBenchmark exercises only the match
+        # path, so gateways/research/etc. are "unprofiled") and on profile
+        # drift. Demote just those two to warnings so PGO doesn't trip -Werror.
+        add_compile_options(-fprofile-instr-use=${PGO_PROFILE}
+            -Wno-error=profile-instr-unprofiled
+            -Wno-error=profile-instr-out-of-date)
+        add_link_options(-fprofile-instr-use=${PGO_PROFILE})
+    else()
+        message(FATAL_ERROR "ENABLE_PGO=ON requires -DPGO_MODE=generate or "
+            "-DPGO_MODE=use")
     endif()
 endif()
 

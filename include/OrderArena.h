@@ -46,9 +46,16 @@ namespace OrderMatcher {
 // free-slab stack is empty but slots remain (high price-diversity), allocate
 // falls back to any PARTIAL slab — a locality miss, never a rejection — so the
 // CapacityExhausted reject path fires only when genuinely out of slots.
+// Slots per slab. Default 64 (64 * 192B = 12KB, ~3 pages). Overridable at build
+// time with -DOB_SLAB_SIZE=<N> (scripts/aws_benchmark.sh sweeps K=32/64/128 to
+// tune the locality/fragmentation trade-off) without editing this file.
+#ifndef OB_SLAB_SIZE
+#define OB_SLAB_SIZE 64
+#endif
+
 class OrderArena {
 public:
-    static constexpr size_t SLAB_SIZE = 64;  // slots per slab (64 * 192B = 12KB)
+    static constexpr size_t SLAB_SIZE = OB_SLAB_SIZE;
 
     explicit OrderArena(size_t capacity)
         : capacity_(capacity),

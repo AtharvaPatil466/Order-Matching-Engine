@@ -706,6 +706,12 @@ void OrderBook::match(Order* incoming) {
         OrderList* level = opposite.bestLevel();
         Order* bookOrder = level->front();
 
+        // Prefetch the node that becomes front once bookOrder fills, so its
+        // cache line is fetched in parallel with the fill compute below instead
+        // of stalling on the next front() re-fetch. Hint only — no control-flow
+        // or correctness effect; null-guarded (last order in the level).
+        if (bookOrder->next) __builtin_prefetch(bookOrder->next, 0, 3);
+
         if (checkSMP(*incoming, *bookOrder)) [[unlikely]] {
             // Phase 4: mode-aware STP — action depends on participant config
             STPMode mode = getSTPMode(incoming->participantId);
@@ -863,6 +869,7 @@ void OrderBook::matchProRata(Order* incoming) {
         // Calculate total quantity at this level
         Quantity totalLevelQty = 0;
         for (Order* o = level.front(); o; o = o->next) {
+            if (o->next) __builtin_prefetch(o->next, 0, 3);  // next node in flight (hint)
             totalLevelQty += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
         }
         if (totalLevelQty == 0) {
@@ -878,6 +885,7 @@ void OrderBook::matchProRata(Order* incoming) {
         Quantity allocated = 0;
 
         for (Order* o = level.front(); o && allocCount < MAX_LEVEL_ORDERS; o = o->next) {
+            if (o->next) __builtin_prefetch(o->next, 0, 3);  // next node in flight (hint)
             if (checkSMP(*incoming, *o)) {
                 incoming->remainingQty = 0;
                 return;

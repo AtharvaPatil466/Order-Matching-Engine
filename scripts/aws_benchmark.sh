@@ -6,8 +6,7 @@
 #   1. Full ctest suite (Release build).
 #   2. perf stat — L1-dcache-load-misses / branch-misses / IPC on HonestBenchmark.
 #   3. Five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, all 3 paths).
-#   4. SLAB_SIZE sweep — rebuild + benchmark at K=32, 64, 128.
-#   5. PGO build (scripts/pgo_build.sh) + three runs of the PGO binary.
+#   4. PGO build (scripts/pgo_build.sh) + three runs of the PGO binary.
 #
 # TARGET: x86_64 Linux bare metal (AWS c6in.metal). Requires perf + numactl —
 # these do not exist on macOS, so run this on the AWS box, not the dev machine.
@@ -62,7 +61,7 @@ run_bench_n() {
 }
 
 # ─── Step 1: full ctest suite ───────────────────────────────────────────────
-banner "STEP 1/5 — full ctest suite (Release)"
+banner "STEP 1/4 — full ctest suite (Release)"
 cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON || die "step 1: configure failed"
 cmake --build "$BUILD_DIR" --parallel "$NPROC" || die "step 1: build failed"
@@ -73,7 +72,7 @@ else
 fi
 
 # ─── Step 2: perf stat (L1 misses / branch misses / IPC) ────────────────────
-banner "STEP 2/5 — perf stat on HonestBenchmark"
+banner "STEP 2/4 — perf stat on HonestBenchmark"
 echo "(counters are whole-run totals over ${BENCH_ARGS[*]}; divide by 50000 for per-order)"
 "${NUMA[@]}" perf stat \
     -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles \
@@ -81,25 +80,11 @@ echo "(counters are whole-run totals over ${BENCH_ARGS[*]}; divide by 50000 for 
     || warn "perf stat failed (check /proc/sys/kernel/perf_event_paranoid; needs <=2 or CAP_PERFMON)"
 
 # ─── Step 3: five NUMA-pinned runs, all three paths ─────────────────────────
-banner "STEP 3/5 — five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, paths A/B/C)"
+banner "STEP 3/4 — five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, paths A/B/C)"
 run_bench_n "$BUILD_DIR" 5 "step3"
 
-# ─── Step 4: SLAB_SIZE sweep (rebuild each) ──────────────────────────────────
-banner "STEP 4/5 — SLAB_SIZE sweep (K = 32, 64, 128)"
-for K in 32 64 128; do
-    banner "SLAB_SIZE = $K"
-    slab_dir="build-slab-$K"
-    cmake -S . -B "$slab_dir" -DCMAKE_BUILD_TYPE=Release \
-          -DBUILD_TESTS=OFF -DBUILD_BENCHMARKS=ON \
-          -DCMAKE_CXX_FLAGS="-DOB_SLAB_SIZE=$K" \
-        || { warn "SLAB_SIZE=$K: configure failed (skipping)"; continue; }
-    cmake --build "$slab_dir" --parallel "$NPROC" --target HonestBenchmark \
-        || { warn "SLAB_SIZE=$K: build failed (skipping)"; continue; }
-    run_bench_n "$slab_dir" 3 "slab-$K"
-done
-
-# ─── Step 5: PGO build + three runs ─────────────────────────────────────────
-banner "STEP 5/5 — PGO build + three runs of the PGO binary"
+# ─── Step 4: PGO build + three runs ─────────────────────────────────────────
+banner "STEP 4/4 — PGO build + three runs of the PGO binary"
 if command -v clang++ >/dev/null 2>&1; then
     if bash "$SCRIPT_DIR/pgo_build.sh"; then
         run_bench_n "build-pgo" 3 "pgo"

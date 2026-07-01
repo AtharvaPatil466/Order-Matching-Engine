@@ -22,17 +22,6 @@ Release enables `-O3 -march=native -mtune=native` (see `CMakeLists.txt`).
 | `ENABLE_IO_URING` | ON | io_uring journal write path when liburing is found (Linux); no-op otherwise |
 | `ENABLE_PGO` | OFF | Profile-guided optimization (see below) |
 
-### Tuning `SLAB_SIZE` (arena allocator)
-
-The `OrderArena` slab size (slots per contiguous price-level slab) defaults to
-64. Override it at build time without editing source:
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-DOB_SLAB_SIZE=128"
-```
-
-`scripts/aws_benchmark.sh` sweeps K=32/64/128 this way.
-
 ---
 
 ## Profile-Guided Optimization (PGO)

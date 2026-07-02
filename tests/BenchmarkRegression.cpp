@@ -7,6 +7,24 @@ using namespace OrderMatcher;
 // ─── Benchmark Regression Tests ─────────────────────────────────────────────
 // These tests run fixed workloads and assert that p99 latency stays below
 // conservative thresholds. Thresholds are generous to avoid CI flakiness.
+//
+// Thresholds are calibrated for an optimized Release build on x86 bare metal.
+// Debug runs 3-5x slower and fault injection adds per-op hot-path overhead, so
+// enforcing them there yields meaningless false failures. CMake defines
+// OB_ENFORCE_LATENCY_THRESHOLD only for a Release, no-FI build; elsewhere each
+// test still runs its workload and prints its numbers, then GTEST_SKIPs instead
+// of asserting. (Not keyed off NDEBUG: ENABLE_ASSERTIONS=ON compiles -UNDEBUG,
+// so NDEBUG is undefined even in Release.)
+#ifdef OB_ENFORCE_LATENCY_THRESHOLD
+#define OB_EXPECT_P99_UNDER(p99, bound, label)                                  \
+    EXPECT_LT((p99), (bound)) << label " p99 latency " << (p99)                 \
+                              << "ns exceeds " #bound "ns threshold"
+#else
+#define OB_EXPECT_P99_UNDER(p99, bound, label)                                  \
+    GTEST_SKIP() << "latency threshold enforced only in a Release build "       \
+                    "without fault injection (see file header); this build's "  \
+                    "timings are not comparable to the x86 Release calibration"
+#endif
 
 class BenchmarkRegressionTest : public ::testing::Test {
 protected:
@@ -26,13 +44,14 @@ TEST_F(BenchmarkRegressionTest, AddOrder_P99_Under2000ns) {
     }
 
     uint64_t p99 = tracker.getP99();
-    EXPECT_LT(p99, 2000) << "AddOrder p99 latency " << p99 << "ns exceeds 2000ns threshold";
     EXPECT_GT(tracker.getCount(), 0);
 
     // Print stats for CI visibility
     std::cout << "[  PERF   ] AddOrder: p50=" << tracker.getP50()
               << "ns p99=" << p99 << "ns p999=" << tracker.getP999()
               << "ns max=" << tracker.getMax() << "ns\n";
+
+    OB_EXPECT_P99_UNDER(p99, 2000, "AddOrder");
 }
 
 TEST_F(BenchmarkRegressionTest, MatchOrder_P99_Under5000ns) {
@@ -53,11 +72,12 @@ TEST_F(BenchmarkRegressionTest, MatchOrder_P99_Under5000ns) {
     }
 
     uint64_t p99 = tracker.getP99();
-    EXPECT_LT(p99, 5000) << "MatchOrder p99 latency " << p99 << "ns exceeds 5000ns threshold";
 
     std::cout << "[  PERF   ] MatchOrder: p50=" << tracker.getP50()
               << "ns p99=" << p99 << "ns p999=" << tracker.getP999()
               << "ns max=" << tracker.getMax() << "ns\n";
+
+    OB_EXPECT_P99_UNDER(p99, 5000, "MatchOrder");
 }
 
 TEST_F(BenchmarkRegressionTest, CancelOrder_P99_Under1000ns) {
@@ -77,11 +97,12 @@ TEST_F(BenchmarkRegressionTest, CancelOrder_P99_Under1000ns) {
     }
 
     uint64_t p99 = tracker.getP99();
-    EXPECT_LT(p99, 1000) << "CancelOrder p99 latency " << p99 << "ns exceeds 1000ns threshold";
 
     std::cout << "[  PERF   ] CancelOrder: p50=" << tracker.getP50()
               << "ns p99=" << p99 << "ns p999=" << tracker.getP999()
               << "ns max=" << tracker.getMax() << "ns\n";
+
+    OB_EXPECT_P99_UNDER(p99, 1000, "CancelOrder");
 }
 
 TEST_F(BenchmarkRegressionTest, Snapshot_P99_Under500ns) {
@@ -103,9 +124,10 @@ TEST_F(BenchmarkRegressionTest, Snapshot_P99_Under500ns) {
     }
 
     uint64_t p99 = tracker.getP99();
-    EXPECT_LT(p99, 5000) << "Snapshot p99 latency " << p99 << "ns exceeds 5000ns threshold";
 
     std::cout << "[  PERF   ] Snapshot: p50=" << tracker.getP50()
               << "ns p99=" << p99 << "ns p999=" << tracker.getP999()
               << "ns max=" << tracker.getMax() << "ns\n";
+
+    OB_EXPECT_P99_UNDER(p99, 5000, "Snapshot");
 }

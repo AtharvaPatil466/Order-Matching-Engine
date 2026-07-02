@@ -54,7 +54,21 @@ add_executable(BenchmarkRegression BenchmarkRegression.cpp)
 target_link_libraries(BenchmarkRegression PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(BenchmarkRegression
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;benchmark-regression")
+    # RUN_SERIAL: latency thresholds are calibrated single-threaded/uncontended,
+    # so these must not run concurrently with other ctest tests under -j — CPU
+    # contention inflates p99 past the bar and false-fails (same principle as the
+    # Debug+FI gate above: only measure/enforce in the calibrated configuration).
+    PROPERTIES LABELS "project;benchmark-regression" RUN_SERIAL TRUE)
+
+# The p99 thresholds are calibrated for an optimized Release build on x86 bare
+# metal. Debug is 3-5x slower and fault injection adds hot-path overhead, so the
+# threshold is only ENFORCED in a Release build without fault injection. NDEBUG
+# can't carry this signal: ENABLE_ASSERTIONS=ON compiles -UNDEBUG, leaving NDEBUG
+# undefined even in Release. Elsewhere the workload still runs and prints, but the
+# assertion is replaced by GTEST_SKIP.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
+    target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
+endif()
 
 # Journal Crash Recovery Tests (no GTest dependency)
 add_executable(JournalCrashTest JournalCrashTest.cpp)

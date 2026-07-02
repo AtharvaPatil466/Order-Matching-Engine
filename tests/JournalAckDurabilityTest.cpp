@@ -63,6 +63,10 @@ struct AckSink {
 
         j.logAddOrder(1, 1, 1, Side::Buy, 10000, 100, OrderType::Limit);
         j.flush();
+        // Async path: flush() submits + drains, but make the completion
+        // dependency explicit — block until the reaper has reaped the
+        // write→fdatasync chain and fired onCommit before observing `sink`.
+        j.quiesce();
 
         // The durable sync succeeded, so the ack must have fired exactly once
         // for exactly one entry.
@@ -93,6 +97,9 @@ struct AckSink {
 
         j.logAddOrder(1, 1, 1, Side::Buy, 10000, 100, OrderType::Limit);
         j.flush();
+        // Async path: drain the (write-only, no-ack) chain so the assertion
+        // below observes the reaper's final decision — which must be NO ack.
+        j.quiesce();
 
         // The fault must actually have fired — otherwise the test proves nothing.
         uint64_t fires = fi.activations("journal.commit.fsync_fail");

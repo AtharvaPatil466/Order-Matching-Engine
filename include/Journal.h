@@ -3,6 +3,7 @@
 #include "Types.h"
 #include "FaultInjector.h"
 #include "Metrics.h"
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
@@ -24,6 +25,10 @@
 // fwrite + fdatasync path below, with identical durability semantics.
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
 #include <liburing.h>
+#include <array>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #endif
 
 // Hardware CRC32-C intrinsics
@@ -138,16 +143,28 @@ public:
         // the journal transparently uses the classic fwrite + fdatasync path —
         // behaviour-identical, just without the ring. (io_uring_queue_init(3))
         useIoUring_ = (io_uring_queue_init(kRingDepth, &ring_, 0) == 0);
+        if (useIoUring_) {
+            // Pre-size each inflight slot's copy buffer so the hot commit path
+            // never allocates (Hazard A). Then start the completion reaper that
+            // fires onCommit_ once the write→fdatasync chain is durable.
+            for (auto& slot : inflight_) {
+                slot.buf.reserve(batchSize_);
+            }
+            reaper_ = std::thread([this] { reaperLoop(); });
+        }
 #endif
     }
 
     ~Journal() {
-        flush();
+        flush();  // commits + drains the final batch; reaper fires its onCommit
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        // After flush() the ring is idle (inflightCount_ == 0). Stop and join
+        // the reaper BEFORE closing the fd / tearing the ring down, so it can
+        // never touch a closed fd or a freed ring. (io_uring_queue_exit(3))
+        stopReaper();
+#endif
         close();
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
-        // Tear the ring down AFTER the final flush()/close() above, since
-        // flush() may run a last commitBatch() that submits on the ring.
-        // (io_uring_queue_exit(3))
         if (useIoUring_) {
             io_uring_queue_exit(&ring_);
             useIoUring_ = false;
@@ -259,14 +276,27 @@ public:
         } else {
             std::fflush(file_);
         }
+        // Barrier: on the async io_uring path commitBatch() only *submits* the
+        // durability chain — block here until the reaper has reaped it and
+        // fired onCommit. On the synchronous path (macOS, or Linux without
+        // liburing) this is a no-op: commits are already durable-and-acked
+        // inline. Guarantees read-after-flush consistency for readAll(),
+        // truncate(), rewriteAtomically(), and the destructor.
+        drainCompletions();
     }
+
+    // Block until every in-flight durability chain has been reaped and its
+    // onCommit callback has fired. On the synchronous commit path this is a
+    // no-op. Callers that submitted orders asynchronously use this to
+    // establish a happens-before edge before observing onCommit side effects.
+    void quiesce() { drainCompletions(); }
 
     void truncate() {
         flush();
         close();
         open("wb+");
         sequence_ = 0;
-        persistedEntries_ = 0;
+        persistedEntries_.store(0, std::memory_order_relaxed);
     }
 
     bool rewriteAtomically(const std::function<void(Journal&)>& writer) {
@@ -304,12 +334,14 @@ public:
 
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
-        persistedEntries_ = static_cast<size_t>(sequence_);
+        persistedEntries_.store(static_cast<size_t>(sequence_),
+                                std::memory_order_relaxed);
         return true;
     }
 
     bool needsCheckpoint(size_t maxEntries, size_t maxBytes) const {
-        return persistedEntries_ >= maxEntries || bytesOnDisk() >= maxBytes;
+        return persistedEntries_.load(std::memory_order_relaxed) >= maxEntries ||
+               bytesOnDisk() >= maxBytes;
     }
 
     void setMaxSizeMb(size_t mb) { maxSizeMb_ = mb; }
@@ -390,6 +422,26 @@ protected:
     // CRC-valid prefix instead of stopping at a gap created by a partial
     // batch.
     void commitBatch() {
+        if (!file_) {
+            return;
+        }
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        if (useIoUring_) {
+            commitBatchAsync();  // drains requeue_ internally, then submits
+            return;
+        }
+#endif
+        if (batch_.empty()) {
+            return;
+        }
+        commitBatchSync();
+    }
+
+    // Synchronous commit path: fwrite → fflush → fdatasync, then fire onCommit
+    // inline once the sync is durable. Used on macOS, on Linux without liburing
+    // (or when the ring failed to init), and as the io_uring SQE-exhaustion
+    // fallback. This is the original commitBatch body, behaviour-unchanged.
+    void commitBatchSync() {
         if (!file_ || batch_.empty()) {
             return;
         }
@@ -464,7 +516,7 @@ protected:
             durable = syncFile();
         }
 
-        persistedEntries_ += actuallyWritten;
+        persistedEntries_.fetch_add(actuallyWritten, std::memory_order_relaxed);
         // Counter cached at function-static scope — first call locks the
         // registry to allocate; subsequent calls hit the atomic directly.
         static auto& kEntriesCommitted = MetricsRegistry::instance().counter(
@@ -505,6 +557,242 @@ protected:
         (void)tornWrite;
     }
 
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+    // user_data layout: (slotIndex << 1) | isFsync. kStopUserData (all ones)
+    // cannot collide — kInflightDepth is 8, so real tokens are <= 15.
+    static uint64_t encodeUserData(uint32_t slotIdx, bool isFsync) {
+        return (static_cast<uint64_t>(slotIdx) << 1) | (isFsync ? 1ull : 0ull);
+    }
+
+    // Async durability commit (Hazards A–D). Assigns sequence + CRC, copies the
+    // prefix into a free inflight slot, submits a write→fdatasync linked chain,
+    // and returns WITHOUT waiting. The reaper thread reaps both CQEs and fires
+    // onCommit only once the chain is durable. Called on the writer thread.
+    void commitBatchAsync() {
+        // ── Hazard C: single outstanding durability chain ──
+        // Block until the previous chain is fully reaped. On return the reaper
+        // is idle, so the writer alone owns sequence_/batch_/requeue_. Then
+        // fold back any real-short-write tail (rewind here keeps sequence_
+        // writer-owned — the reaper never writes it).
+        {
+            std::unique_lock<std::mutex> lk(ringMu_);
+            chainDone_.wait(lk, [this] { return inflightCount_ == 0; });
+            if (pendingRewind_ > 0) {
+                sequence_ -= pendingRewind_;
+                pendingRewind_ = 0;
+                batch_.insert(batch_.begin(), requeue_.begin(), requeue_.end());
+                requeue_.clear();
+            }
+        }
+
+        if (batch_.empty()) {
+            return;
+        }
+
+        auto& fi = FaultInjector::instance();
+        size_t toWrite = batch_.size();
+
+        // Fault: fault-injected short write — attempt only a prefix; the tail
+        // stays in batch_ for the next commit (writer-side, exactly as the sync
+        // path). Distinct from a *real* short write (write CQE returns fewer
+        // bytes than asked), which the reaper hands back via requeue_.
+        bool tornWrite = fi.shouldFail("journal.commit.short_write");
+        if (tornWrite) {
+            toWrite = batch_.size() / 2;
+        }
+        if (toWrite == 0) {
+            return;
+        }
+
+        // Assign sequence numbers + CRCs to the prefix we're about to submit.
+        for (size_t i = 0; i < toWrite; ++i) {
+            batch_[i].sequenceNumber = ++sequence_;
+            batch_[i].checksum = computeCRC32(&batch_[i],
+                                              offsetof(JournalEntry, checksum));
+        }
+
+        // Fault: bit-flip one byte after CRC assignment (exercises recovery).
+        if (fi.shouldFail("journal.commit.bit_flip")) {
+            uint64_t r = fi.nextU64();
+            size_t entryIdx = r % toWrite;
+            size_t byteOff  = (r >> 16) % sizeof(JournalEntry);
+            uint8_t bit     = uint8_t(1) << ((r >> 32) & 7);
+            auto* bytes = reinterpret_cast<uint8_t*>(&batch_[entryIdx]);
+            bytes[byteOff] ^= bit;
+        }
+
+        // Fault: fsync_fail — model an fsync that did not make data durable. We
+        // still submit the WRITE (data reaches the page cache, readable on a
+        // clean exit) but omit the fdatasync link and withhold the ack.
+        bool wantAck = !fi.shouldFail("journal.commit.fsync_fail");
+
+        // ── Hazard B: two linked SQEs (write → fdatasync) ──
+        struct io_uring_sqe* wsqe = io_uring_get_sqe(&ring_);
+        struct io_uring_sqe* fsqe = wantAck ? io_uring_get_sqe(&ring_) : nullptr;
+        if (!wsqe || (wantAck && !fsqe)) {
+            // SQ ring exhausted — commit this batch synchronously. Safe: no
+            // chain is inflight (drained above), so the fwrite append is
+            // correctly ordered and does not touch the ring.
+            commitBatchSync();
+            return;
+        }
+
+        uint32_t slotIdx;
+        {
+            // ── Hazard A: copy the prefix into a pre-allocated inflight slot.
+            // Populate the slot under the lock so the reaper (which reads it
+            // under the same lock) has a happens-before edge — TSan-clean.
+            std::lock_guard<std::mutex> lk(ringMu_);
+            slotIdx = nextSlot_;
+            nextSlot_ = (nextSlot_ + 1) % kInflightDepth;
+            Inflight& slot = inflight_[slotIdx];
+            slot.buf.assign(batch_.begin(),
+                            batch_.begin() + static_cast<std::ptrdiff_t>(toWrite));
+            slot.firstSeq = slot.buf.front().sequenceNumber;
+            slot.count = static_cast<uint32_t>(toWrite);
+            slot.writeRes = INT32_MIN;
+            slot.fsyncRes = INT32_MIN;
+            slot.wantAck = wantAck;
+            slot.pendingCqes = wantAck ? 2 : 1;
+            slot.active = true;
+
+            io_uring_prep_write(
+                wsqe, fileno(file_), slot.buf.data(),
+                static_cast<unsigned>(toWrite * sizeof(JournalEntry)),
+                static_cast<unsigned long long>(-1));  // -1 → append at EOF
+            io_uring_sqe_set_data64(wsqe, encodeUserData(slotIdx, /*isFsync=*/false));
+            if (wantAck) {
+                // IOSQE_IO_LINK: the fdatasync runs iff the write succeeds; a
+                // failed write auto-cancels it (fsyncRes == -ECANCELED), so the
+                // chain is durable only when BOTH CQEs report success.
+                wsqe->flags |= IOSQE_IO_LINK;
+                io_uring_prep_fsync(fsqe, fileno(file_), IORING_FSYNC_DATASYNC);
+                io_uring_sqe_set_data64(fsqe, encodeUserData(slotIdx, /*isFsync=*/true));
+            }
+            inflightCount_ = 1;
+        }
+        io_uring_submit(&ring_);  // return ignored, matching the prior code path
+
+        // Pop the submitted prefix; the slot owns the copy now. A fault-injected
+        // short-write tail stays in batch_, renumbered on the next commit.
+        batch_.erase(batch_.begin(),
+                     batch_.begin() + static_cast<std::ptrdiff_t>(toWrite));
+        for (auto& e : batch_) {
+            e.sequenceNumber = 0;
+            e.checksum = 0;
+        }
+    }
+
+    // Reaper thread loop: reap CQEs, finalize chains, fire onCommit. Runs until
+    // stopReaper() sets reaperStop_ and posts the NOP shutdown token.
+    void reaperLoop() {
+        for (;;) {
+            struct io_uring_cqe* cqe = nullptr;
+            int rc = io_uring_wait_cqe(&ring_, &cqe);
+            if (rc < 0 || !cqe) {
+                // EINTR / spurious — exit if we're shutting down, else retry.
+                if (reaperStop_.load(std::memory_order_acquire)) return;
+                continue;
+            }
+            uint64_t ud = io_uring_cqe_get_data64(cqe);
+            int res = cqe->res;
+            io_uring_cqe_seen(&ring_, cqe);
+
+            if (ud == kStopUserData) {
+                if (reaperStop_.load(std::memory_order_acquire)) return;
+                continue;
+            }
+            handleCqe(static_cast<uint32_t>(ud >> 1), (ud & 1ull) != 0, res);
+        }
+    }
+
+    void handleCqe(uint32_t slotIdx, bool isFsync, int res) {
+        {
+            std::lock_guard<std::mutex> lk(ringMu_);
+            Inflight& slot = inflight_[slotIdx];
+            if (isFsync) {
+                slot.fsyncRes = res;
+            } else {
+                slot.writeRes = res;
+            }
+            if (--slot.pendingCqes > 0) {
+                return;  // await the paired CQE
+            }
+        }
+        finalizeChain(slotIdx);
+    }
+
+    // Chain complete: compute durability, update counters, fire onCommit iff
+    // durable, hand any real-short-write tail back to the writer, free the slot.
+    void finalizeChain(uint32_t slotIdx) {
+        const JournalEntry* bufPtr = nullptr;
+        size_t written = 0;
+        bool durable = false;
+        {
+            std::lock_guard<std::mutex> lk(ringMu_);
+            Inflight& slot = inflight_[slotIdx];
+            written = (slot.writeRes > 0)
+                ? static_cast<size_t>(slot.writeRes) / sizeof(JournalEntry)
+                : 0;
+            if (written > slot.count) written = slot.count;  // defensive
+            durable = slot.wantAck && written == slot.count && slot.fsyncRes == 0;
+            bufPtr = slot.buf.data();
+
+            // Real short write: the linked fdatasync still synced what landed,
+            // so the `written` prefix is durable; the unwritten tail must be
+            // renumbered and rewritten. Stage it for the writer to fold back.
+            if (written < slot.count) {
+                requeue_.assign(
+                    slot.buf.begin() + static_cast<std::ptrdiff_t>(written),
+                    slot.buf.end());
+                for (auto& e : requeue_) { e.sequenceNumber = 0; e.checksum = 0; }
+                pendingRewind_ = slot.count - static_cast<uint32_t>(written);
+            }
+        }
+
+        // persistedEntries_ + metric reflect bytes that reached the file,
+        // regardless of the ack decision (matches the synchronous path).
+        persistedEntries_.fetch_add(written, std::memory_order_relaxed);
+        static auto& kEntriesCommitted = MetricsRegistry::instance().counter(
+            "journal_entries_committed_total",
+            "Total journal entries successfully written to disk");
+        kEntriesCommitted.increment(written);
+
+        // Fire the ack STRICTLY after durability, on this reaper thread. The
+        // slot stays active (inflightCount_ still 1) until after the callback,
+        // so the writer cannot reuse the slot's buffer mid-callback. The
+        // ReplicationCoordinator locks internally, so this is safe from here.
+        if (durable && onCommit_ && written > 0) {
+            onCommit_(bufPtr, written);
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(ringMu_);
+            Inflight& slot = inflight_[slotIdx];
+            slot.active = false;
+            slot.buf.clear();
+            inflightCount_ = 0;
+        }
+        chainDone_.notify_all();
+    }
+
+    // Stop and join the reaper. Called from the dtor AFTER flush() has drained
+    // all real chains, so the ring is idle and the NOP is the only completion.
+    void stopReaper() {
+        if (!reaper_.joinable()) {
+            return;
+        }
+        reaperStop_.store(true, std::memory_order_release);
+        struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        if (sqe) {
+            io_uring_prep_nop(sqe);
+            io_uring_sqe_set_data64(sqe, kStopUserData);
+            io_uring_submit(&ring_);
+        }
+        reaper_.join();
+    }
+#endif  // __linux__ && OB_HAVE_LIBURING
+
     static uint64_t now() {
         // steady_clock — monotonic, unaffected by NTP step adjustments.
         // high_resolution_clock aliases system_clock on libstdc++ and
@@ -531,41 +819,14 @@ private:
     }
 
     // Write the first `toWrite` entries of batch_ to the page cache and return
-    // the number of WHOLE entries that landed. This is the write half of the
-    // commit; durability is a separate step (syncFile) so the fsync_fail fault
-    // and the onCommit_ ack-after-durable ordering are unchanged.
+    // the number of WHOLE entries that landed. Synchronous fwrite + fflush.
     //
-    // Linux + liburing: a single io_uring write. Offset is passed as (__u64)-1
-    // so the op uses the file's current position — i.e. write(2) semantics that
-    // honour the O_APPEND set by fopen("ab+"), giving an atomic append at EOF,
-    // byte-for-byte equivalent to fwrite in append mode. The CQE res is the
-    // byte count (>=0) or -errno; a partial/sub-entry tail is floored to whole
-    // entries (the trailing partial entry fails CRC on recovery and is dropped,
-    // exactly as a torn fwrite would be). API: io_uring_get_sqe(3),
-    // io_uring_prep_write(3) ("offset ... -1 ... current file position"),
-    // io_uring_submit(3), io_uring_wait_cqe(3), io_uring_cqe_seen(3).
+    // This is the synchronous commit half, used by commitBatchSync() (macOS,
+    // Linux without liburing / ring-init-failed, and the io_uring
+    // SQE-exhaustion fallback). The io_uring write is issued directly by
+    // commitBatchAsync() as the first link of the durability chain — it does
+    // NOT go through here, so this stays a plain fwrite.
     size_t writeBatch(size_t toWrite) {
-#if defined(__linux__) && defined(OB_HAVE_LIBURING)
-        if (useIoUring_) {
-            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-            if (sqe) {  // NULL only if the SQ ring is full — fall back to fwrite
-                io_uring_prep_write(
-                    sqe, fileno(file_), batch_.data(),
-                    static_cast<unsigned>(toWrite * sizeof(JournalEntry)),
-                    static_cast<unsigned long long>(-1));  // -1 → append at EOF
-                io_uring_submit(&ring_);
-                struct io_uring_cqe* cqe = nullptr;
-                size_t written = 0;
-                if (io_uring_wait_cqe(&ring_, &cqe) == 0 && cqe) {
-                    if (cqe->res > 0) {
-                        written = static_cast<size_t>(cqe->res) / sizeof(JournalEntry);
-                    }
-                    io_uring_cqe_seen(&ring_, cqe);
-                }
-                return written;
-            }
-        }
-#endif
         size_t w = std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
         std::fflush(file_);
         return w;
@@ -578,27 +839,9 @@ private:
         if (!file_) {
             return false;
         }
-#if defined(__linux__) && defined(OB_HAVE_LIBURING)
-        // io_uring fdatasync: IORING_FSYNC_DATASYNC selects fdatasync(2)
-        // semantics (data + size metadata, not full inode). Submitted AFTER the
-        // write CQE was reaped in writeBatch(), so the data is already in cache
-        // — same ordering as fwrite→fflush→fdatasync. durable == (res == 0).
-        // API: io_uring_prep_fsync(3), io_uring_submit(3), io_uring_wait_cqe(3).
-        if (useIoUring_) {
-            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-            if (sqe) {  // NULL only if the SQ ring is full — fall back to fdatasync
-                io_uring_prep_fsync(sqe, fileno(file_), IORING_FSYNC_DATASYNC);
-                io_uring_submit(&ring_);
-                struct io_uring_cqe* cqe = nullptr;
-                bool ok = false;
-                if (io_uring_wait_cqe(&ring_, &cqe) == 0 && cqe) {
-                    ok = (cqe->res == 0);
-                    io_uring_cqe_seen(&ring_, cqe);
-                }
-                return ok;
-            }
-        }
-#endif
+        // Synchronous durability barrier for commitBatchSync(). On the async
+        // io_uring path the fdatasync is the SECOND link of the chain issued by
+        // commitBatchAsync(), so it does not go through here.
 #ifdef __APPLE__
         return ::fcntl(fileno(file_), F_FULLFSYNC) == 0;
 #else
@@ -606,9 +849,19 @@ private:
 #endif
     }
 
+    // ── Drain barrier (all platforms; body only on the async path) ──
+    void drainCompletions() {
+#if defined(__linux__) && defined(OB_HAVE_LIBURING)
+        if (useIoUring_) {
+            std::unique_lock<std::mutex> lk(ringMu_);
+            chainDone_.wait(lk, [this] { return inflightCount_ == 0; });
+        }
+#endif
+    }
+
     uint64_t recoverSequenceFromDisk() {
         auto entries = readEntriesFromPath(filePath_, true, false);
-        persistedEntries_ = entries.size();
+        persistedEntries_.store(entries.size(), std::memory_order_relaxed);
         if (entries.empty()) {
             return 0;
         }
@@ -653,20 +906,49 @@ private:
     SyncPolicy syncPolicy_{SyncPolicy::GroupCommit};
     size_t batchSize_{64};
     uint64_t sequence_{0};
-    size_t persistedEntries_{0};
+    // Written by the reaper thread on the async path (durable-write count) and
+    // by the writer thread on the sync path / setup — hence atomic. Read by the
+    // background checkpoint thread via needsCheckpoint().
+    std::atomic<size_t> persistedEntries_{0};
     std::vector<JournalEntry> batch_;
     OnCommitFn onCommit_;
     size_t maxSizeMb_{0};
 
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
-    // Per-Journal io_uring ring. `mutable` so the const syncFile() may submit
-    // on it (the ring is an I/O mechanism; submitting does not change the
-    // journal's logical state). Used only from the single writer thread that
-    // owns this Journal (matching is single-writer-per-book), so no ring
-    // locking is needed. Depth 8 is ample — each commit queues one op at a time.
+    // Per-Journal io_uring ring. Depth 8 is ample — the async path keeps a
+    // single durability chain outstanding (2 linked SQEs) plus the shutdown
+    // NOP. The writer thread is the sole submitter; the reaper thread is the
+    // sole completion consumer, so the ring itself needs no locking.
     static constexpr unsigned kRingDepth = 8;
     mutable struct io_uring ring_{};
     bool useIoUring_{false};
+
+    // ── Async ack machinery (Hazards A–D) ──
+    // One durability chain (write → fdatasync) in flight at a time. A chain's
+    // entries are copied into a free Inflight slot before submission; the slot
+    // owns those bytes until BOTH CQEs are reaped, so the SQE buffer never
+    // dangles. Only the reaper thread frees a slot.
+    static constexpr unsigned kInflightDepth = 8;
+    static constexpr uint64_t kStopUserData = ~uint64_t{0};  // NOP shutdown token
+    struct Inflight {
+        std::vector<JournalEntry> buf;   // copy submitted in this chain
+        uint64_t firstSeq{0};            // sequenceNumber of buf.front()
+        uint32_t count{0};               // entries submitted
+        int32_t  writeRes{INT32_MIN};    // write CQE res (bytes, or -errno)
+        int32_t  fsyncRes{INT32_MIN};    // fdatasync CQE res (0, or -errno)
+        uint16_t pendingCqes{0};         // CQEs still to reap for this chain
+        bool     wantAck{true};          // false when fsync_fail fault armed
+        bool     active{false};          // slot occupied
+    };
+    std::array<Inflight, kInflightDepth> inflight_{};
+    uint32_t nextSlot_{0};               // round-robin slot cursor (writer)
+    uint32_t inflightCount_{0};          // chains in flight (0 or 1)
+    uint32_t pendingRewind_{0};          // real-short-write shortfall to apply
+    std::vector<JournalEntry> requeue_;  // real-short-write tail, writer re-commits
+    std::mutex ringMu_;                  // guards inflight_/inflightCount_/requeue_
+    std::condition_variable chainDone_;  // signalled when inflightCount_ hits 0
+    std::thread reaper_;
+    std::atomic<bool> reaperStop_{false};
 #endif
 };
 

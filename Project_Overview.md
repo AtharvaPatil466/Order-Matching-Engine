@@ -2,7 +2,7 @@
 
 > **46,500+ lines of C++20** | 85 headers | 13 source files | 79 test files | 426 CTest targets
 >
-> A C++20 low-latency matching engine drawing on institutional exchange design principles — **271 ns P50 core-matching latency validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
+> A C++20 low-latency matching engine drawing on institutional exchange design principles — **261 ns P50 core-matching latency validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
 
 ---
 
@@ -196,11 +196,11 @@ Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosm
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP + WashTrade + LULD | **271 ns** | 662 ns | 1,072 ns | 2.63M ops/s |
-| **Engine wrapper** | + sequence alloc, rate limiter | 282 ns | 646 ns | 1,040 ns | 2.59M ops/s |
-| **Full-stack journal** | + GroupCommit (batch=64, fdatasync on EBS) | 448 ns | 898 ns | 5,312 ns | 1.52M ops/s |
+| **Core matching** | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **Engine wrapper** | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
+| **Full-stack journal** | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 
-`perf` (Path A, 50K orders): IPC 1.36 · ~6.3 branch-misses/order · ~47 L1-dcache-misses/order · ~0.23 LLC-misses/order.
+`perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8 branch-misses/order · 152 L1-dcache-misses/order · 12,638 instructions/order.
 
 ### Apple Silicon (M-series dev machine, reference)
 
@@ -208,22 +208,22 @@ Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosm
 | :--- | :--- | :--- |
 | Core matching | ~125 ns | ~42 ns clock granularity quantizes per-path P50s, so Path A/B can read equal or invert run-to-run |
 | Engine wrapper | ~125 ns | |
-| Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — **not structural** (the same path is 448 ns on Linux x86) |
+| Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — **not structural** (the same path is 615 ns on Linux x86, async io_uring ack) |
 
 The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider out-of-order window + stronger branch prediction on pointer-chasing code), **confirmed not** caused by build flags, field ordering, branch hints, or branchless selection.
 
-### Where the 271 ns goes (and what doesn't move it)
+### Where the 261 ns goes (and what doesn't move it)
 
-The four performance fixes shipped this cycle (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change** — Path A 279→271 ns is within run-to-run noise, and branch-misses (~6.3/order) and L1-misses (~47/order) were unchanged. This is the expected result: the P50 is **structurally bound**, not instruction-bound.
+The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change** — the P50 is **structurally bound**, not instruction-bound (17.8 branch-misses/order, 152 L1-dcache-misses/order). This cycle's branchless price-cross + next-order prefetch *did* move it, shaving 10 ns P50 / 62 ns P99 to reach 261 ns (see Optimization History in BENCHMARKS.md); the price-level arena allocator was implemented and reverted as net-negative on this 100%-fill flow.
 
 | Cost | ns | Driver | Lever (estimated) |
 | :--- | --: | :--- | :--- |
-| Pointer chasing (intrusive list) | 80–100 | ~47 L1-dcache misses/order | arena allocator (40–60 ns) |
-| Branch mispredicts | 60–80 | ~6.3/order, data-dependent | branchless cross check (10–20 ns) |
+| Pointer chasing (intrusive list) | 80–100 | 152 L1-dcache misses/order | arena allocator (reverted — net-negative) |
+| Branch mispredicts | 60–80 | 17.8/order, data-dependent | branchless price-cross (shipped, −10 ns P50) |
 | Irreducible work | 50–60 | price/qty math, STP, compliance | — |
 | Spectre mitigation (eIBRS) | 30–40 | kernel-enforced on this instance | not disableable here |
 
-Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reordering, `[[likely]]`/`[[unlikely]]` hints, branchless `isBuy` book selection. Remaining un-implemented software levers: price-level-aware arena allocator, branchless price-cross, next-order prefetch, PGO. The journal P99 (~5.3 µs) is the `fdatasync` flush on EBS; NVMe/RAM-backed storage would be materially lower (io_uring is the planned journal-path optimization).
+Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reordering, `[[likely]]`/`[[unlikely]]` hints, branchless `isBuy` book selection. Shipped this cycle: branchless price-cross + next-order prefetch (−10 ns P50 / −62 ns P99) and io_uring async journal ack (Path C P99 5,312→3,568 ns); the price-level arena allocator was reverted as net-negative. Remaining lever: PGO. The journal P99 (~3.6 µs) is the `fdatasync`/EBS flush; NVMe/RAM-backed storage would be materially lower.
 
 ### Binary Codec Microbenchmark
 
@@ -275,8 +275,8 @@ docs/                 Runbooks, CapacityPlanning, ProductionReadiness
 ## 11. Remaining Work
 
 The system is architecturally complete. The main remaining gaps require specialized hardware not typically available in standard environments:
-- **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 271 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The four micro-optimizations moved x86 latency 0 ns — the remaining gains require an arena allocator and branchless price-cross, not instruction tweaks.
-- **Journal Async I/O (io_uring)**: A planned journal-path optimization, **not** hardware-blocked. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern Linux kernel. The seam is implemented behind `#ifdef __linux__` (with an `fdatasync`/`F_FULLFSYNC` fallback on other platforms); validation on x86 Linux is pending.
+- **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 261 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The prior four micro-optimizations moved x86 latency 0 ns; this cycle's branchless price-cross + prefetch shaved 10 ns and the arena allocator was reverted as net-negative — confirming the P50 is structurally bound.
+- **Journal Async I/O (io_uring)**: ✅ done — validated on x86 Linux (AWS c6in.metal). The async ack (onCommit fires on the completion-reaper thread, not on submit) cut Path C P99 **32.8%** (5,312 → 3,568 ns) at the cost of +167 ns P50. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern kernel; the seam stays behind `#ifdef __linux__` with an `fdatasync`/`F_FULLFSYNC` fallback elsewhere.
 - **Kernel Bypass Networking (DPDK)**: The genuine hardware-blocked item. DPDK kernel bypass requires a dedicated NIC/ENI (e.g., Solarflare/Onload) and tuning — unlike io_uring, this cannot run on commodity hardware.
 - **`Replication.tla` Verification**: ✅ done — see Verification section above. The original "not yet verified" footnote is obsolete.
 - **Wire-to-Wire Latency Validation**: Requires a multi-host test rig with hardware timestamping.

@@ -1,8 +1,8 @@
 # High-Performance Order Matching Engine
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
-[![Latency](https://img.shields.io/badge/Matching_P50-125ns-green.svg)](#performance)
-[![Throughput](https://img.shields.io/badge/Throughput-6.6M_ops/s-blue.svg)](#performance)
+[![Latency](https://img.shields.io/badge/Matching_P50_x86-261ns-green.svg)](#performance)
+[![Throughput](https://img.shields.io/badge/Throughput-2.80M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
 [![Tests](https://img.shields.io/badge/Tests-426_CTest_targets-brightgreen.svg)](#verification)
 [![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
@@ -95,18 +95,18 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 > 
 > These are **per-order processing latencies** on the matching thread. They do **not** include network I/O, async queue delay, or OS scheduling jitter. See [BENCHMARKS.md](./BENCHMARKS.md) for full methodology and caveats.
 
-### Three-Path Latency (identical order flow)
+### Three-Path Latency (identical order flow, x86 AWS c6in.metal)
 
-| Path | What's Included | P50 | P99 | P99.9 | Throughput |
+| Path | What's Included | P50 | P90 | P99 | Throughput |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP + WashTrade + LULD | **125 ns** | 333 ns | 458 ns | 6.6M ops/s |
-| **Engine wrapper** | + sequence alloc, rate limiter | 84 ns | 292 ns | 417 ns | 7.1M ops/s |
-| **Full-stack journal** | + GroupCommit (batch=64, fdatasync) | 1,040 ns | 2.7 ms | 4.0 ms | 22K ops/s |
+| **Core matching** | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **Engine wrapper** | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
+| **Full-stack journal** | + async io_uring ack (batch=64, EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 
 > [!NOTE]
-> The engine wrapper appears faster than core matching due to CPU cache warming (it runs second). The real core matching cost is Path A: **125 ns P50**.
+> Authoritative x86 figures (AWS c6in.metal, dual Xeon Platinum 8375C, 50K orders seed=42). Apple M3 Pro dev-machine reference: core matching **~125 ns P50** — a microarchitectural ARM advantage on pointer-chasing code, not an SLA. See [BENCHMARKS.md](./BENCHMARKS.md).
 >
-> The journal P99 (2.7ms) is entirely `fdatasync` disk I/O. GroupCommit amortizes this across 64 entries — P50 is only 1μs. Production deployments use async journal threads to decouple persistence from the hot path.
+> The full-stack journal path now uses the **async io_uring ack** (onCommit fires on the completion reaper, not on submit): Path C P99 dropped **32.8%** (5,312 → 3,568 ns) versus the synchronous `fdatasync` path, trading ~167 ns of added P50.
 
 ### Multi-Threaded Stress Test (4 threads)
 | Scenario | Orders | Trades | Result |

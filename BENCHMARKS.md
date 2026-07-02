@@ -13,8 +13,8 @@
 
 | Claim | Evidence | Status |
 |-------|----------|--------|
-| Core matching (x86): **271 ns** P50 | AWS c6in.metal, identical 50K order flow | ✅ Verified |
-| Full-stack with journal (x86): **448 ns** P50 | GroupCommit batch=64, fdatasync per batch on EBS | ✅ Verified |
+| Core matching (x86): **261 ns** P50 | AWS c6in.metal, identical 50K order flow | ✅ Verified |
+| Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack on EBS | ✅ Verified |
 | Safety invariants | TLC: 454M states, 181M distinct, 0 violations | ✅ Verified |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
@@ -50,14 +50,17 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 |------|------------------|----:|----:|----:|-----------:|
-| **A** Core matching | OrderBook + STP + WashTrade + LULD | **271 ns** | 662 ns | 1,072 ns | 2.63M ops/s |
-| **B** Engine wrapper | + sequence alloc, rate limiter | 282 ns | 646 ns | 1,040 ns | 2.59M ops/s |
-| **C** Full-stack journal | + GroupCommit (batch=64, fdatasync on EBS) | 448 ns | 898 ns | 5,312 ns | 1.52M ops/s |
+| **A** Core matching | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **B** Engine wrapper | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
+| **C** Full-stack journal | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 
-`perf` (Path A): IPC 1.36 · ~6.3 branch-misses/order · ~47 L1-dcache-misses/order.
-The 271 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
-branch mispredicts + Spectre eIBRS), not instruction-bound — the four
-micro-optimisations moved x86 P50 by 0 ns.
+`perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8 branch-misses/order ·
+152 L1-dcache-misses/order · 12,638 instructions/order.
+The 261 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
+branch mispredicts + Spectre eIBRS), not instruction-bound. This cycle's
+branchless price-cross + next-order prefetch shaved 10 ns P50 / 62 ns P99 (see
+Optimization History below); the price-level arena allocator was reverted as
+net-negative on this 100%-fill flow.
 
 ### Reference — Apple Silicon ARM64 (M3 Pro dev machine, NOT an SLA)
 
@@ -65,11 +68,22 @@ micro-optimisations moved x86 P50 by 0 ns.
 |------|----:|------|
 | A Core matching | ~125 ns | ~42 ns clock granularity quantizes per-path P50; Path A/B read equal or swap run-to-run (Path B can show ~84 ns) — these are *dev-machine reference* figures only |
 | B Engine wrapper | ~125 ns | |
-| C Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — NOT structural (the same path is 448 ns on Linux x86) |
+| C Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — NOT structural (the same path is 615 ns on Linux x86, async io_uring ack) |
 
 The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider OoO window
 + stronger branch prediction on pointer-chasing code), not a build-flag or
 field-ordering effect.
+
+## Optimization History (latest cycle)
+
+Validated on AWS c6in.metal against the same 50K/seed=42 flow:
+
+| Change | Result |
+|--------|--------|
+| **Branchless price-cross** | Path A −10 ns P50, −62 ns P99 |
+| **Next-order prefetch** | Additive with the branchless change (folded into the −10 ns above) |
+| **io_uring async ack (Option 1)** | Path C P99 **−32.8%** (5,312 → 3,568 ns); Path C P50 **+167 ns** — expected, since `submitOrder()` now returns before durability and the completion-reaper thread's overhead surfaces in P50 |
+| **Price-level arena allocator** | Implemented and **reverted** — net-negative on the 100%-fill benchmark flow; concept remains sound for workloads with persistent resting orders |
 
 ## GroupCommit Explained
 
@@ -82,7 +96,7 @@ Path C uses `SyncPolicy::GroupCommit` with `batch_size=64`:
 This is the correct production configuration. The P99 is disk I/O,
 not matching engine latency. Production options to reduce P99:
 
-1. **Async journal**: Dedicated I/O thread decouples persistence from hot path
+1. **Async journal** (shipped): io_uring async ack — a completion-reaper thread decouples the durability fsync from the hot path; Path C P99 fell 32.8% (see Optimization History)
 2. **Larger batch**: `batch_size=256` reduces fdatasync frequency 4x
 3. **Page-cache only**: Skip fdatasync (accept data loss window on crash)
 
@@ -90,11 +104,11 @@ not matching engine latency. Production options to reduce P99:
 
 x86 (authoritative — clean additive ordering A < B < C):
 ```
-Core matching + compliance:   271 ns  (Path A)
-Engine wrapper (seq+rate):    +11 ns  (Path B − A)
-Journal (GroupCommit/64):    +166 ns  (Path C − B — amortized batch I/O)
+Core matching + compliance:   261 ns  (Path A)
+Engine wrapper (seq+rate):     +8 ns  (Path B − A)
+Journal (async io_uring ack): +346 ns  (Path C − B — completion-reaper overhead)
 ────────────────────────────────────────
-Total full-stack P50:         448 ns  (Path C)
+Total full-stack P50:         615 ns  (Path C)
 ```
 (On the ARM dev machine, the ~42 ns clock granularity can make Path B *appear*
 faster than Path A — a measurement artifact, not real; the x86 ordering above

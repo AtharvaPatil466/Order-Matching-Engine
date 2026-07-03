@@ -216,7 +216,7 @@ The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider out-of-o
 
 ### Where the 261 ns goes (and what doesn't move it)
 
-The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change** — the P50 is **structurally bound**, not instruction-bound (17.8 branch-misses/order, 152 L1-dcache-misses/order). This cycle's branchless price-cross + next-order prefetch *did* move it, shaving 10 ns P50 / 62 ns P99 to reach 261 ns (see Optimization History in BENCHMARKS.md); the price-level arena allocator was implemented and reverted as net-negative on this 100%-fill flow.
+The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change** — the P50 is **structurally bound**, not instruction-bound (17.8 branch-misses/order, 152 L1-dcache-misses/order). This cycle's branchless price-cross *did* move it, shaving 10 ns P50 / 62 ns P99 to reach 261 ns (see Optimization History in BENCHMARKS.md); next-order prefetch and the price-level arena allocator were both implemented and reverted as net-negative on this 100%-fill flow.
 
 | Cost | ns | Driver | Lever (estimated) |
 | :--- | --: | :--- | :--- |
@@ -225,7 +225,7 @@ The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `m
 | Irreducible work | 50–60 | price/qty math, STP, compliance | — |
 | Spectre mitigation (eIBRS) | 30–40 | kernel-enforced on this instance | not disableable here |
 
-Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reordering, `[[likely]]`/`[[unlikely]]` hints, branchless `isBuy` book selection. Shipped this cycle: branchless price-cross + next-order prefetch (−10 ns P50 / −62 ns P99) and io_uring async journal ack (Path C P99 5,312→3,568 ns); the price-level arena allocator was reverted as net-negative. Remaining lever: PGO. The journal P99 (~3.6 µs) is the `fdatasync`/EBS flush; NVMe/RAM-backed storage would be materially lower.
+Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reordering, `[[likely]]`/`[[unlikely]]` hints, branchless `isBuy` book selection. Shipped this cycle: branchless price-cross (−10 ns P50 / −62 ns P99) and io_uring async journal ack (Path C P99 5,312→3,568 ns); next-order prefetch and the price-level arena allocator were both reverted as net-negative. Clang IR-based PGO then took Path A to 237 ns P50 (the headline figure). The journal P99 (~3.6 µs) is the `fdatasync`/EBS flush; NVMe/RAM-backed storage would be materially lower.
 
 ### Binary Codec Microbenchmark
 
@@ -277,7 +277,7 @@ docs/                 Runbooks, CapacityPlanning, ProductionReadiness
 ## 11. Remaining Work
 
 The system is architecturally complete. The main remaining gaps require specialized hardware not typically available in standard environments:
-- **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 261 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The prior four micro-optimizations moved x86 latency 0 ns; this cycle's branchless price-cross + prefetch shaved 10 ns and the arena allocator was reverted as net-negative — confirming the P50 is structurally bound.
+- **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 261 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The prior four micro-optimizations moved x86 latency 0 ns; this cycle's branchless price-cross shaved 10 ns while next-order prefetch and the arena allocator were both reverted as net-negative — confirming the P50 is structurally bound.
 - **Journal Async I/O (io_uring)**: ✅ done — validated on x86 Linux (AWS c6in.metal). The async ack (onCommit fires on the completion-reaper thread, not on submit) cut Path C P99 **32.8%** (5,312 → 3,568 ns) at the cost of +167 ns P50. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern kernel; the seam stays behind `#ifdef __linux__` with an `fdatasync`/`F_FULLFSYNC` fallback elsewhere.
 - **Kernel Bypass Networking (DPDK)**: The genuine hardware-blocked item. DPDK kernel bypass requires a dedicated NIC/ENI (e.g., Solarflare/Onload) and tuning — unlike io_uring, this cannot run on commodity hardware.
 - **`Replication.tla` Verification**: ✅ done — see Verification section above. The original "not yet verified" footnote is obsolete.

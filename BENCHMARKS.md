@@ -63,9 +63,9 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 152 L1-dcache-misses/order · 12,638 instructions/order.
 The 261 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
 branch mispredicts + Spectre eIBRS), not instruction-bound. This cycle's
-branchless price-cross + next-order prefetch shaved 10 ns P50 / 62 ns P99 (see
-Optimization History below); the price-level arena allocator was reverted as
-net-negative on this 100%-fill flow.
+branchless price-cross shaved 10 ns P50 / 62 ns P99 (see Optimization History
+below); next-order prefetch and the price-level arena allocator were both
+implemented and reverted as net-negative on this 100%-fill flow.
 
 ### Reference — Apple Silicon ARM64 (M3 Pro dev machine, NOT an SLA)
 
@@ -86,7 +86,7 @@ Validated on AWS c6in.metal against the same 50K/seed=42 flow:
 | Change | Result |
 |--------|--------|
 | **Branchless price-cross** | Path A −10 ns P50, −62 ns P99 |
-| **Next-order prefetch** | Additive with the branchless change (folded into the −10 ns above) |
+| **Next-order prefetch** | Implemented and **reverted** — net-negative on the 100%-fill flow (L1-dcache-misses 47→152/order): the matching loop terminates right after each fill, so the prefetched next-node cache line is never consumed |
 | **io_uring async ack (Option 1)** | Path C P99 **−32.8%** (5,312 → 3,568 ns); Path C P50 **+167 ns** — expected, since `submitOrder()` now returns before durability and the completion-reaper thread's overhead surfaces in P50 |
 | **Price-level arena allocator** | Implemented and **reverted** — net-negative on the 100%-fill benchmark flow; concept remains sound for workloads with persistent resting orders |
 

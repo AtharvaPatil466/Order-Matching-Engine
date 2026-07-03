@@ -13,7 +13,7 @@
 
 | Claim | Evidence | Status |
 |-------|----------|--------|
-| Core matching (x86): **261 ns** P50 | AWS c6in.metal, identical 50K order flow | ✅ Verified |
+| Core matching (x86, PGO): **237 ns** P50 · 3.10M ops/s | Clang IR-PGO on the seed=42 workload (AWS c6in.metal); 261 ns non-PGO baseline | ✅ Verified |
 | Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack on EBS | ✅ Verified |
 | Safety invariants | TLC: 454M states, 181M distinct, 0 violations | ✅ Verified |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
@@ -46,13 +46,18 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 ## Results
 
-### Authoritative — x86 bare metal (AWS c6in.metal)
+### Authoritative — x86 bare metal (AWS c6in.metal, standard Release build)
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 |------|------------------|----:|----:|----:|-----------:|
 | **A** Core matching | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **B** Engine wrapper | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **C** Full-stack journal | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
+
+> **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42
+> HonestBenchmark workload) takes Path A to **P50 237 ns / P99 910 ns /
+> 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO)
+> Release build.
 
 `perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8 branch-misses/order ·
 152 L1-dcache-misses/order · 12,638 instructions/order.

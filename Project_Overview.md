@@ -2,7 +2,7 @@
 
 > **46,500+ lines of C++20** | 85 headers | 13 source files | 79 test files | 426 CTest targets
 >
-> A C++20 low-latency matching engine drawing on institutional exchange design principles — **261 ns P50 core-matching latency validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
+> A C++20 low-latency matching engine drawing on institutional exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
 
 ---
 
@@ -190,7 +190,7 @@ A self-contained quantitative research layer that runs against the live matching
 
 `HonestBenchmark` feeds one deterministic order flow (50K orders, seed=42) through three cumulative paths. The **x86 figures are the authoritative, reproducible numbers**, validated on AWS bare metal; Apple Silicon dev-machine numbers follow as a reference. P50 is the stable per-operation figure; throughput is wall-clock and load-sensitive. (Per-order/per-fill structured logging and event dispatch are sink-/listener-gated, so the hot path stays allocation- and vtable-free when nothing is attached.)
 
-### Validated x86 — AWS c6in.metal (authoritative)
+### Validated x86 — AWS c6in.metal (authoritative, standard Release build)
 
 Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosmt`), Ubuntu 26.04, Clang C++20 `-O3 -march=native`, `numactl --cpunodebind=0 --membind=0`. 5 stable runs, post-optimization commit `d2e688c`.
 
@@ -199,6 +199,8 @@ Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosm
 | **Core matching** | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **Engine wrapper** | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **Full-stack journal** | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
+
+**PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42 HonestBenchmark workload) takes Path A core matching to **P50 237 ns / P99 910 ns / 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO) Release build.
 
 `perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8 branch-misses/order · 152 L1-dcache-misses/order · 12,638 instructions/order.
 

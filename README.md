@@ -1,8 +1,8 @@
 # High-Performance Order Matching Engine
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
-[![Latency](https://img.shields.io/badge/Matching_P50_x86-261ns-green.svg)](#performance)
-[![Throughput](https://img.shields.io/badge/Throughput-2.80M_ops/s-blue.svg)](#performance)
+[![Latency](https://img.shields.io/badge/Matching_P50_PGO-237ns-green.svg)](#performance)
+[![Throughput](https://img.shields.io/badge/Throughput-3.10M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
 [![Tests](https://img.shields.io/badge/Tests-426_CTest_targets-brightgreen.svg)](#verification)
 [![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
@@ -107,6 +107,8 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 > Authoritative x86 figures (AWS c6in.metal, dual Xeon Platinum 8375C, 50K orders seed=42). Apple M3 Pro dev-machine reference: core matching **~125 ns P50** — a microarchitectural ARM advantage on pointer-chasing code, not an SLA. See [BENCHMARKS.md](./BENCHMARKS.md).
 >
 > The full-stack journal path now uses the **async io_uring ack** (onCommit fires on the completion reaper, not on submit): Path C P99 dropped **32.8%** (5,312 → 3,568 ns) versus the synchronous `fdatasync` path, trading ~167 ns of added P50.
+>
+> **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42 HonestBenchmark workload) takes Path A core matching to **P50 237 ns / P99 910 ns / 3.10M ops/s** — the headline figure above. The three-path table is the standard (non-PGO) Release build.
 
 ### Multi-Threaded Stress Test (4 threads)
 | Scenario | Orders | Trades | Result |

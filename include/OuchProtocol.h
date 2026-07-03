@@ -267,6 +267,28 @@ inline bool decodeEnterOrder(const uint8_t* p, size_t len, OuchEnterOrder& out) 
     return true;
 }
 
+// Client-side EnterOrder encoder — the exact inverse of decodeEnterOrder
+// (same field offsets). Used by order-entry / measurement tools that need to
+// put an EnterOrder on the wire. Buffer must be >= OUCH_SIZE_ENTER_ORDER.
+inline size_t encodeEnterOrder(uint8_t* out, const OuchEnterOrder& o) {
+    std::memset(out, ' ', OUCH_SIZE_ENTER_ORDER);
+    out[0] = OUCH_MT_ENTER_ORDER;
+    writeAsciiDecimal(out + 1, 14, o.orderToken);
+    out[15] = (o.side == Side::Buy) ? 'B' : 'S';
+    writeU32BE(out + 16, static_cast<uint32_t>(o.shares));
+    writeAsciiDecimal(out + 20, 8, static_cast<uint64_t>(o.stock));
+    writeU32BE(out + 28, static_cast<uint32_t>(o.price));
+    writeU32BE(out + 32, o.timeInForce);
+    writeAsciiDecimal(out + 36, 4, static_cast<uint64_t>(o.firm));
+    out[40] = o.display;
+    out[41] = o.capacity;
+    out[42] = o.intermarketSweep;
+    writeU32BE(out + 43, static_cast<uint32_t>(o.minQuantity));
+    out[47] = o.crossType;
+    out[48] = o.customerType;
+    return OUCH_SIZE_ENTER_ORDER;
+}
+
 inline bool decodeCancelOrder(const uint8_t* p, size_t len, OuchCancelOrder& out) {
     if (len != OUCH_SIZE_CANCEL_ORDER || p[0] != OUCH_MT_CANCEL_ORDER) {
         return false;
@@ -351,6 +373,49 @@ inline size_t encodeOrderAccepted(uint8_t* out, uint64_t timestampNs,
     out[64] = 'L';   // order state: live
     out[65] = 'R';   // customer type: retail
     return OUCH_SIZE_ORDER_ACCEPTED;
+}
+
+// ─── Client-side ack decoder ────────────────────────────────────────────────
+// Mirrors encodeOrderAccepted. Used by order-entry / measurement tools that
+// receive the ack and need to correlate it (by orderToken) with the order sent.
+
+struct OuchOrderAccepted {
+    uint64_t      timestampNs{0};
+    uint64_t      orderToken{0};
+    Side          side{Side::Buy};
+    Quantity      shares{0};
+    SymbolId      stock{0};
+    Price         price{0};
+    uint32_t      timeInForce{0};
+    ParticipantId firm{0};
+    char          display{'Y'};
+    uint64_t      orderReferenceNumber{0};  // engine-side order id
+    char          orderState{'L'};
+};
+
+inline bool decodeOrderAccepted(const uint8_t* p, size_t len,
+                                OuchOrderAccepted& out) {
+    if (len != OUCH_SIZE_ORDER_ACCEPTED || p[0] != OUCH_MT_ORDER_ACCEPTED) {
+        return false;
+    }
+    out.timestampNs = readU64BE(p + 1);
+    uint64_t token = 0;
+    if (!parseAsciiDecimal(p + 9, 14, token)) return false;
+    out.orderToken = token;
+    out.side = (static_cast<char>(p[23]) == 'B') ? Side::Buy : Side::Sell;
+    out.shares = readU32BE(p + 24);
+    uint64_t stock = 0;
+    if (!parseAsciiDecimal(p + 28, 8, stock)) return false;
+    out.stock = static_cast<SymbolId>(stock);
+    out.price = static_cast<Price>(readU32BE(p + 36));
+    out.timeInForce = readU32BE(p + 40);
+    uint64_t firm = 0;
+    if (!parseAsciiDecimal(p + 44, 4, firm)) return false;
+    out.firm = static_cast<ParticipantId>(firm);
+    out.display = static_cast<char>(p[48]);
+    out.orderReferenceNumber = readU64BE(p + 49);
+    out.orderState = static_cast<char>(p[64]);
+    return true;
 }
 
 inline size_t encodeOrderRejected(uint8_t* out, uint64_t timestampNs,

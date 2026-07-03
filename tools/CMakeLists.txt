@@ -14,3 +14,17 @@ target_link_libraries(JournalMutationFuzzer PRIVATE OrderMatcher)
 add_executable(TimeMachine time_machine.cpp)
 target_link_libraries(TimeMachine PRIVATE OrderMatcher)
 set_target_properties(TimeMachine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# ─── Wire-to-wire latency harness (OUCH / SO_TIMESTAMPING) ───────────────────
+# Two-host OUCH order-entry wire-latency measurement using NIC hardware
+# timestamps (Linux SO_TIMESTAMPING) with a CLOCK_MONOTONIC software fallback.
+# OFF by default: needs two machines / a NIC to be useful and must not affect
+# normal builds.
+option(BUILD_WIRE_LATENCY_TOOLS "Build the OUCH wire-latency measurement tools" OFF)
+if(BUILD_WIRE_LATENCY_TOOLS)
+    add_executable(WireLatencySender WireLatencySender.cpp)
+    target_link_libraries(WireLatencySender PRIVATE OrderMatcher)
+
+    add_executable(WireLatencyReceiver WireLatencyReceiver.cpp)
+    target_link_libraries(WireLatencyReceiver PRIVATE OrderMatcher)
+endif()

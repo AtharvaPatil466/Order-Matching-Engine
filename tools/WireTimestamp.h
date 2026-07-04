@@ -132,6 +132,26 @@ inline bool recvFrameWithTs(int fd, uint8_t* buf, size_t frameSize,
     return true;
 }
 
+// Plain blocking receive of exactly `frameSize` bytes, stamping CLOCK_MONOTONIC
+// when the first bytes land. Deliberately uses plain recv() — NO recvmsg control
+// buffer, NO SO_TIMESTAMPING, NO errqueue, NO poll — so the --software-timestamps
+// hot path can never block on a timestamp mechanism. This is the software-mode
+// counterpart to recvFrameWithTs.
+inline bool recvFrameSoftware(int fd, uint8_t* buf, size_t frameSize, uint64_t& tsNs) {
+    size_t got = 0;
+    bool haveTs = false;
+    while (got < frameSize) {
+        ssize_t n = ::recv(fd, buf + got, frameSize - got, 0);
+        if (n <= 0) return false;
+        if (!haveTs) {
+            tsNs = softwareNowNs();
+            haveTs = true;
+        }
+        got += static_cast<size_t>(n);
+    }
+    return true;
+}
+
 // After a send(), collect the TX timestamp from the socket error queue. Polls
 // up to `timeoutMs` for the errqueue message. Returns true if a TX timestamp
 // was obtained (sets tsNs/hw). On non-Linux, or if none arrives in time,

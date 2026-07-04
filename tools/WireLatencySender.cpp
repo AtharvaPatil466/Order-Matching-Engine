@@ -157,12 +157,17 @@ int main(int argc, char** argv) {
             break;
         }
 
-        // Block for the ack — this is also the round-trip barrier that
-        // guarantees the TX has completed, so the errqueue TX timestamp is
-        // ready to collect immediately afterward.
+        // Block for the ack — this is also the round-trip barrier. In software
+        // mode use a plain recv (recvFrameSoftware): zero SO_TIMESTAMPING /
+        // errqueue / poll machinery, so the hot path is exactly
+        // softwareNowNs → send → recv → softwareNowNs → record. In HW mode the
+        // errqueue TX timestamp is ready to collect immediately after this.
         uint64_t rxNs = 0;
         bool rxHw = false;
-        if (!wirelat::recvFrameWithTs(fd, ackBuf, OUCH_SIZE_ORDER_ACCEPTED, rxNs, rxHw)) {
+        bool rxOk = c.softwareOnly
+            ? wirelat::recvFrameSoftware(fd, ackBuf, OUCH_SIZE_ORDER_ACCEPTED, rxNs)
+            : wirelat::recvFrameWithTs(fd, ackBuf, OUCH_SIZE_ORDER_ACCEPTED, rxNs, rxHw);
+        if (!rxOk) {
             std::fprintf(stderr, "recv ack failed at seq=%llu\n",
                          static_cast<unsigned long long>(seq));
             break;

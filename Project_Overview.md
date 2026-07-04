@@ -108,6 +108,12 @@ All four protocols dispatch into the same `MatchingEngine`.
 - **Gap Recovery**: Bounded ring of journaled MoldUDP64 messages backing a SoupBinTCP-over-TCP retransmission service.
 - **Shared Memory IPC**: L2 market data distribution to co-located consumers via `shm_open`.
 
+### Kernel-Bypass Ingestion (DPDK / F-Stack)
+Optional kernel-bypass order-entry path behind `#ifdef OB_HAVE_DPDK` (CMake `-DENABLE_DPDK=ON`): `DpdkGateway` runs F-Stack (DPDK userspace TCP over the AWS ENA PMD) on a dedicated **secondary ENI**, leaving the primary interface kernel-managed so SSH is never lost. A **single RX queue / single busy-poll lcore** preserves FIFO submit order (RSS splitting one connection across lcores would reorder and break price-time priority). F-Stack owns the NIC and runs FreeBSD's TCP stack internally; the gateway consumes its BSD-socket API (`ff_recv`), so ordered TCP payload flows straight into `OuchSession::feed()` and the engine submit path **unchanged** — DPDK replaces only how bytes arrive from the NIC, not how they are parsed. When `OB_HAVE_DPDK` is undefined (the default, and every non-Linux build) the kernel `TcpGateway` is the only ingestion path and the binary is byte-for-byte identical. **Implemented and locally verified** (macOS builds cleanly with the DPDK path `#ifdef`'d out; gateway tests green); **AWS validation pending** via `scripts/dpdk_aws.sh`.
+
+### Wire-to-Wire Latency Measurement
+A two-host OUCH-over-TCP harness — `tools/WireLatencySender` (instance A) and `tools/WireLatencyReceiver` (instance B) — measures NIC-to-NIC order-entry latency. On Linux it captures NIC **hardware** timestamps via `SO_TIMESTAMPING` (TX from the socket error queue, RX from the `recvmsg` cmsg), with a `CLOCK_MONOTONIC` **software fallback** on non-Linux / non-HW hosts (each CSV row records which source it used). One-way latency is estimated as **round-trip / 2**, which sidesteps clock synchronisation entirely — both timestamps are on the sender's own clock, so no PTP is needed for a first-pass number. The receiver also supports the F-Stack path (`--conf`) so the DPDK and kernel sessions emit directly comparable CSV, and a `--software-timestamps` flag forces both onto an identical CLOCK_MONOTONIC basis. **Implemented and locally verified** (both tools build on macOS; loopback smoke test passes); **AWS validation pending** via `scripts/wire_latency_aws.sh`.
+
 ---
 
 ## 4. Regulatory & Risk Management
@@ -276,12 +282,12 @@ docs/                 Runbooks, CapacityPlanning, ProductionReadiness
 
 ## 11. Remaining Work
 
-The system is architecturally complete. The main remaining gaps require specialized hardware not typically available in standard environments:
+The system is architecturally complete. The remaining items are AWS validation steps for capabilities already implemented and locally verified (nothing is hardware-blocked — the kernel-bypass path runs on commodity AWS ENA hardware):
 - **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 261 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The prior four micro-optimizations moved x86 latency 0 ns; this cycle's branchless price-cross shaved 10 ns while next-order prefetch and the arena allocator were both reverted as net-negative — confirming the P50 is structurally bound.
 - **Journal Async I/O (io_uring)**: ✅ done — validated on x86 Linux (AWS c6in.metal). The async ack (onCommit fires on the completion-reaper thread, not on submit) cut Path C P99 **32.8%** (5,312 → 3,568 ns) at the cost of +167 ns P50. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern kernel; the seam stays behind `#ifdef __linux__` with an `fdatasync`/`F_FULLFSYNC` fallback elsewhere.
-- **Kernel Bypass Networking (DPDK)**: The genuine hardware-blocked item. DPDK kernel bypass requires a dedicated NIC/ENI (e.g., Solarflare/Onload) and tuning — unlike io_uring, this cannot run on commodity hardware.
+- **Kernel Bypass Networking (DPDK / F-Stack)**: ⏳ implemented locally, pending AWS validation. `DpdkGateway` integrates F-Stack (DPDK userspace TCP over the AWS ENA PMD) on a secondary ENI behind `#ifdef OB_HAVE_DPDK`, feeding `OuchSession::feed()` unchanged (see §3). The integration is complete and builds locally with the path `#ifdef`'d out; `scripts/dpdk_aws.sh` provisions the receiver (hugepages, DPDK + F-Stack install, vfio-pci bind, F-Stack config). It runs on **commodity AWS ENA** hardware — no Solarflare/Onload — needing only a secondary ENI, hugepages, and the DPDK/F-Stack toolchain; the two-instance c6in.metal run is the next step.
 - **`Replication.tla` Verification**: ✅ done — see Verification section above. The original "not yet verified" footnote is obsolete.
-- **Wire-to-Wire Latency Validation**: Requires a multi-host test rig with hardware timestamping.
+- **Wire-to-Wire Latency Validation**: ⏳ harness implemented locally, pending AWS validation. The `WireLatencySender`/`WireLatencyReceiver` harness (`SO_TIMESTAMPING` hardware timestamps with `CLOCK_MONOTONIC` software fallback, round-trip/2 one-way estimate — see §3) and `scripts/wire_latency_aws.sh` are ready; the remaining step is a two-instance AWS c6in.metal run (placement group, secondary ENI).
 
 ---
 

@@ -195,18 +195,13 @@ RECV_LOG="$REPO_ROOT/wire-dpdk-receiver-$RUN_ID.log"
 RECV_BIN="$BUILD_DIR/tools/WireLatencyReceiver"
 [[ -x "$RECV_BIN" ]] || die "receiver binary missing: $RECV_BIN"
 
-# ┌─ IMPORTANT — read before trusting this as a DPDK measurement ─────────────┐
-# │ The DPDK F-Stack receive path (DpdkGateway: ff_init/ff_run/ff_recv) is    │
-# │ currently wired into the OrderEngine binary (main.cpp, OB_DPDK=1), NOT    │
-# │ into the standalone WireLatencyReceiver tool — which still uses kernel    │
-# │ sockets (socket/accept/recvmsg). Since Step 4 vfio-binds $ENI away from   │
-# │ the kernel, the tool as built cannot receive on $ENI over F-Stack.        │
-# │ To exercise the DPDK path today, run the engine instead:                  │
-# │   OB_DPDK=1 OB_DPDK_PORT=$PORT $BUILD_DIR/OrderEngine --conf $FSTACK_CONF  │
-# │ For a like-for-like DPDK vs kernel WireLatencyReceiver comparison, the    │
-# │ tool needs DpdkGateway wiring (a follow-up code change). This step runs   │
-# │ the command as specified; confirm the wiring before trusting the numbers. │
-# └───────────────────────────────────────────────────────────────────────────┘
+# WireLatencyReceiver --conf now takes the F-Stack receive path directly: it
+# runs a self-contained F-Stack echo receiver (ff_init/ff_run/ff_recv/ff_send)
+# and emits the SAME CSV as the kernel path, so this session's log is directly
+# comparable to the baseline. Note: F-Stack's ff_recv exposes no NIC hardware
+# timestamp, so the DPDK path uses CLOCK_MONOTONIC software timestamps (the
+# 'hardware' CSV column reads 0). For a strict apples-to-apples comparison,
+# collect the baseline with software timestamps too.
 echo "  logging to: $RECV_LOG"
 echo "  >>> On the SENDER instance (Instance A) run:"
 echo "        RECEIVER_IP=$ENI_IP ROLE=sender bash scripts/wire_latency_aws.sh"

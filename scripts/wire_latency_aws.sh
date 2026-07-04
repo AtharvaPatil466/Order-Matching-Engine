@@ -162,7 +162,11 @@ run_receiver() {
     echo "        RECEIVER_IP=$ENI_IP ROLE=sender bash scripts/wire_latency_aws.sh"
     echo "  Receiver runs until the sender disconnects. Logs RX-arrival + TX-ack"
     echo "  timestamps per order (CSV: seq,rx_arrival_ns,tx_ack_ns,processing_ns,hardware)."
-    "$bin" --port "$PORT"
+    # Match the sender's timestamp basis (and the DPDK session's F-Stack
+    # receiver, which is software-only) so the whole baseline is CLOCK_MONOTONIC.
+    # Match the sender's timestamp basis (and the DPDK session's F-Stack
+    # receiver, which is software-only) so the whole baseline is CLOCK_MONOTONIC.
+    "$bin" --port "$PORT" --software-timestamps --software-timestamps
     banner "DONE — receiver log: $LOG"
 }
 

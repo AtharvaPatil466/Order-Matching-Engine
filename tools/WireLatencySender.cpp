@@ -49,6 +49,7 @@ struct Config {
     uint32_t    price = 100000;
     uint64_t    stock = 1;
     uint64_t    firm = 1;
+    bool        softwareOnly = false;  // force CLOCK_MONOTONIC (match the DPDK path)
 };
 
 Config parseArgs(int argc, char** argv) {
@@ -64,6 +65,7 @@ Config parseArgs(int argc, char** argv) {
         else if (a == "--price") c.price = static_cast<uint32_t>(std::atoi(next()));
         else if (a == "--stock") c.stock = std::strtoull(next(), nullptr, 10);
         else if (a == "--firm") c.firm = std::strtoull(next(), nullptr, 10);
+        else if (a == "--software-timestamps") c.softwareOnly = true;
         else {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
         }
@@ -115,8 +117,16 @@ int main(int argc, char** argv) {
     int fd = connectTo(c);
     if (fd < 0) return 1;
 
-    bool hwEnabled = wirelat::enableTimestamping(fd);
-    wirelat::printTimestampBanner(hwEnabled);
+    // --software-timestamps: skip SO_TIMESTAMPING so timestamps come from
+    // CLOCK_MONOTONIC (softwareNowNs) and the TX errqueue is not polled — same
+    // basis as the DPDK receiver path, for an apples-to-apples comparison.
+    if (!c.softwareOnly) {
+        bool hwEnabled = wirelat::enableTimestamping(fd);
+        wirelat::printTimestampBanner(hwEnabled);
+    } else {
+        std::printf("[wire-latency] software timestamps forced "
+                    "(--software-timestamps): CLOCK_MONOTONIC; 'hardware' column = 0\n");
+    }
     std::printf("[wire-latency] sender -> %s:%u, %llu orders\n",
                 c.host.c_str(), static_cast<unsigned>(c.port),
                 static_cast<unsigned long long>(c.count));
@@ -170,11 +180,13 @@ int main(int argc, char** argv) {
                          static_cast<unsigned long long>(ack.orderToken));
         }
 
-        uint64_t txNs = 0;
+        uint64_t txNs = softwareTx;
         bool txHw = false;
-        if (!wirelat::collectTxTimestamp(fd, txNs, txHw, kTxTimestampTimeoutMs)) {
-            txNs = softwareTx;   // errqueue unavailable — software send-time
-            txHw = false;
+        if (!c.softwareOnly) {
+            if (!wirelat::collectTxTimestamp(fd, txNs, txHw, kTxTimestampTimeoutMs)) {
+                txNs = softwareTx;   // errqueue unavailable — software send-time
+                txHw = false;
+            }
         }
 
         const bool hardware = txHw && rxHw;

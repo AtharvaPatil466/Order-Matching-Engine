@@ -53,6 +53,7 @@ struct Config {
     uint16_t    port = 12345;
     uint64_t    count = 0;   // 0 = run until the peer disconnects
     std::string conf;        // non-empty selects the F-Stack/DPDK path
+    bool        softwareOnly = false;  // force CLOCK_MONOTONIC on the kernel path
 };
 
 Config parseArgs(int argc, char** argv) {
@@ -121,8 +122,16 @@ int runKernelReceiver(const Config& c) {
     int flag = 1;
     ::setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));  // Nagle off
 
-    bool hwEnabled = wirelat::enableTimestamping(clientFd);
-    wirelat::printTimestampBanner(hwEnabled);
+    // --software-timestamps: skip SO_TIMESTAMPING entirely so recvFrameWithTs
+    // falls back to CLOCK_MONOTONIC and the TX errqueue is not polled — same
+    // basis as the DPDK path, for an apples-to-apples comparison.
+    if (!c.softwareOnly) {
+        bool hwEnabled = wirelat::enableTimestamping(clientFd);
+        wirelat::printTimestampBanner(hwEnabled);
+    } else {
+        std::printf("[wire-latency] software timestamps forced "
+                    "(--software-timestamps): CLOCK_MONOTONIC; 'hardware' column = 0\n");
+    }
     std::printf("[wire-latency] client connected\n");
     std::printf("seq,rx_arrival_ns,tx_ack_ns,processing_ns,hardware\n");
 
@@ -154,11 +163,13 @@ int runKernelReceiver(const Config& c) {
             break;
         }
 
-        uint64_t txAckNs = 0;
+        uint64_t txAckNs = softwareTxAck;
         bool txHw = false;
-        if (!wirelat::collectTxTimestamp(clientFd, txAckNs, txHw, kTxTimestampTimeoutMs)) {
-            txAckNs = softwareTxAck;
-            txHw = false;
+        if (!c.softwareOnly) {
+            if (!wirelat::collectTxTimestamp(clientFd, txAckNs, txHw, kTxTimestampTimeoutMs)) {
+                txAckNs = softwareTxAck;
+                txHw = false;
+            }
         }
 
         const bool hardware = rxHw && txHw;

@@ -152,18 +152,29 @@ inline bool recvFrameSoftware(int fd, uint8_t* buf, size_t frameSize, uint64_t& 
     return true;
 }
 
-// After a send(), collect the TX timestamp from the socket error queue. Polls
-// up to `timeoutMs` for the errqueue message. Returns true if a TX timestamp
-// was obtained (sets tsNs/hw). On non-Linux, or if none arrives in time,
-// returns false — the caller then uses the software send-time it captured.
+// Upper bound on the errqueue poll wait. Hardware that generates TX timestamps
+// makes the errqueue ready in microseconds; hardware/paths that do NOT (loopback,
+// no-HW NIC) never fill it, so a large timeout would stall the whole duration on
+// every order. 2 ms keeps HW mode viable without the 100 ms per-order stall.
+constexpr int kTxTimestampPollMs = 2;
+
+// After a send(), collect the TX timestamp from the socket error queue. Polls up
+// to min(timeoutMs, kTxTimestampPollMs). Returns true (sets tsNs/hw) iff a TX
+// timestamp was obtained. On timeout / non-Linux it sets hw=false and returns
+// false — the caller then uses the software send-time it captured just BEFORE
+// send() (the correct TX instant). NOTE: it does NOT stamp softwareNowNs() here
+// on timeout; this function runs after the round-trip barrier, so softwareNowNs()
+// would be post-round-trip and zero out the rtt. The pre-send caller fallback is
+// both correct and already wired.
 inline bool collectTxTimestamp(int fd, uint64_t& tsNs, bool& hw, int timeoutMs) {
 #if defined(__linux__)
     struct pollfd pfd;
     pfd.fd = fd;
     pfd.events = POLLERR;  // errqueue readiness surfaces as POLLERR in revents
     pfd.revents = 0;
-    int pr = ::poll(&pfd, 1, timeoutMs);
-    if (pr <= 0) return false;
+    int pollMs = (timeoutMs < kTxTimestampPollMs) ? timeoutMs : kTxTimestampPollMs;
+    int pr = ::poll(&pfd, 1, pollMs);
+    if (pr <= 0) { hw = false; return false; }  // no TX ts within 2 ms — caller uses pre-send software time
 
     char cbuf[CMSG_SPACE(sizeof(struct scm_timestamping))];
     struct msghdr msg;
@@ -171,13 +182,13 @@ inline bool collectTxTimestamp(int fd, uint64_t& tsNs, bool& hw, int timeoutMs) 
     msg.msg_control = cbuf;
     msg.msg_controllen = sizeof(cbuf);  // OPT_TSONLY → no iovec needed
     ssize_t n = ::recvmsg(fd, &msg, MSG_ERRQUEUE);
-    if (n < 0) return false;
+    if (n < 0) { hw = false; return false; }
     return extractTimestamp(msg, tsNs, hw);
 #else
     (void)fd;
     (void)tsNs;
-    (void)hw;
     (void)timeoutMs;
+    hw = false;
     return false;
 #endif
 }

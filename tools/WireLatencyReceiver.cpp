@@ -140,9 +140,15 @@ int runKernelReceiver(const Config& c) {
     uint64_t processed = 0;
 
     for (;;) {
+        // Software mode: plain recv + softwareNowNs (recvFrameSoftware) — zero
+        // recvmsg/cmsg/SO_TIMESTAMPING/errqueue machinery on the hot path,
+        // matching the sender.
         uint64_t rxNs = 0;
         bool rxHw = false;
-        if (!wirelat::recvFrameWithTs(clientFd, orderBuf, OUCH_SIZE_ENTER_ORDER, rxNs, rxHw)) {
+        bool rxOk = c.softwareOnly
+            ? wirelat::recvFrameSoftware(clientFd, orderBuf, OUCH_SIZE_ENTER_ORDER, rxNs)
+            : wirelat::recvFrameWithTs(clientFd, orderBuf, OUCH_SIZE_ENTER_ORDER, rxNs, rxHw);
+        if (!rxOk) {
             break;  // peer disconnected / error
         }
 

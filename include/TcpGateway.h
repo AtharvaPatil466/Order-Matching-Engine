@@ -135,6 +135,10 @@ private:
     void eventLoop();
     void handleAccept();
     void handleClientData(int fd);
+    // Frame + decode + submit every whole frame currently buffered in `state`.
+    // Extracted from handleClientData so kernel and kernel-bypass transports
+    // share one framer. Returns false if the client was removed (caller stops).
+    bool feedBytes(int fd, ClientState& state);
     void processMessage(int fd, const OrderRequest& req);
     void removeClient(int fd);
     bool sendResponse(int fd, const GatewayResponse& resp);

@@ -139,6 +139,7 @@ add_library(OrderMatcher
     src/TcpGateway.cpp
     src/FaultInjector.cpp
     src/SimulationDriver.cpp
+    src/DpdkGateway.cpp
 )
 target_link_libraries(OrderMatcher PUBLIC Threads::Threads)
 
@@ -159,6 +160,32 @@ if(ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(STATUS "io_uring journal path enabled (liburing: ${URING_LIB})")
     else()
         message(STATUS "io_uring requested but liburing not found — journal uses fwrite + fdatasync")
+    endif()
+endif()
+
+# Optional DPDK + F-Stack kernel-bypass ingestion path (Linux only). When
+# ENABLE_DPDK is on and both libdpdk and F-Stack are found we define OB_HAVE_DPDK
+# and link them; src/DpdkGateway.cpp then compiles its real body. Absent it (any
+# non-Linux platform, or DPDK/F-Stack not installed) DpdkGateway.cpp compiles to
+# an empty translation unit and the kernel TcpGateway is the only ingestion path.
+option(ENABLE_DPDK "Build the DPDK/F-Stack kernel-bypass ingestion path" OFF)
+if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DPDK libdpdk)          # DPDK ships libdpdk.pc (>= 20.11)
+    find_library(FSTACK_LIB fstack)          # F-Stack libfstack (set FF_PATH / CMAKE_PREFIX_PATH)
+    find_path(FSTACK_INCLUDE ff_api.h)
+    if(DPDK_FOUND AND FSTACK_LIB AND FSTACK_INCLUDE)
+        target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_DPDK=1)
+        target_include_directories(OrderMatcher PUBLIC ${DPDK_INCLUDE_DIRS} ${FSTACK_INCLUDE})
+        target_compile_options(OrderMatcher PUBLIC ${DPDK_CFLAGS_OTHER})
+        # F-Stack must precede DPDK on the link line, and the DPDK PMD + F-Stack
+        # constructors (RTE_PMD_REGISTER_*, incl. the ENA PMD) are stripped by a
+        # normal static link — wrap them in --whole-archive so they self-register.
+        target_link_libraries(OrderMatcher PUBLIC
+            -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_STATIC_LIBRARIES} -Wl,--no-whole-archive)
+        message(STATUS "DPDK/F-Stack kernel-bypass ingestion enabled (dpdk ${DPDK_VERSION})")
+    else()
+        message(WARNING "ENABLE_DPDK=ON but libdpdk and/or F-Stack not found — kernel TCP only")
     endif()
 endif()
 

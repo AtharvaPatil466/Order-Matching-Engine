@@ -391,51 +391,60 @@ void TcpGateway::handleClientData(int fd) {
         state.readPos += static_cast<size_t>(n);
         state.lastActivity = std::chrono::steady_clock::now();
 
-        while (state.readPos >= sizeof(uint32_t)) {
-            uint32_t msgLen;
-            std::memcpy(&msgLen, state.readBuf.data(), sizeof(uint32_t));
-            msgLen = ntohl(msgLen);
-
-            if (msgLen == 0 || msgLen > GATEWAY_MAX_FRAME_SIZE) {
-                GatewayResponse resp{};
-                resp.type = GatewayResponse::Type::Error;
-                std::snprintf(resp.errorMessage, sizeof(resp.errorMessage),
-                             "Invalid message size: %u", msgLen);
-                sendResponse(fd, resp);
-                removeClient(fd);
-                return;
-            }
-
-            size_t totalMsgSize = sizeof(uint32_t) + static_cast<size_t>(msgLen);
-            if (state.readBuf.size() < totalMsgSize) {
-                state.readBuf.resize(totalMsgSize);
-                break;
-            }
-            if (state.readPos < totalMsgSize) {
-                break;
-            }
-
-            OrderRequest req{};
-            GatewayResponse errorResp{};
-            if (!decodeFrame(state, msgLen, req, errorResp)) {
-                sendResponse(fd, errorResp);
-                removeClient(fd);
-                return;
-            }
-            processMessage(fd, req);
-
-            // Shift buffer (in case of pipelined messages)
-            size_t consumed = totalMsgSize;
-            if (state.readPos > consumed) {
-                std::memmove(state.readBuf.data(), state.readBuf.data() + consumed, state.readPos - consumed);
-            }
-            state.readPos -= consumed;
-            size_t keep = std::max(sizeof(uint32_t), state.readPos);
-            if (state.readBuf.size() != keep) {
-                state.readBuf.resize(keep);
-            }
+        // Frame + decode + submit every whole frame now buffered (shared with
+        // any kernel-bypass transport). false = client removed — stop.
+        if (!feedBytes(fd, state)) {
+            return;
         }
     }
+}
+
+bool TcpGateway::feedBytes(int fd, ClientState& state) {
+    while (state.readPos >= sizeof(uint32_t)) {
+        uint32_t msgLen;
+        std::memcpy(&msgLen, state.readBuf.data(), sizeof(uint32_t));
+        msgLen = ntohl(msgLen);
+
+        if (msgLen == 0 || msgLen > GATEWAY_MAX_FRAME_SIZE) {
+            GatewayResponse resp{};
+            resp.type = GatewayResponse::Type::Error;
+            std::snprintf(resp.errorMessage, sizeof(resp.errorMessage),
+                         "Invalid message size: %u", msgLen);
+            sendResponse(fd, resp);
+            removeClient(fd);
+            return false;
+        }
+
+        size_t totalMsgSize = sizeof(uint32_t) + static_cast<size_t>(msgLen);
+        if (state.readBuf.size() < totalMsgSize) {
+            state.readBuf.resize(totalMsgSize);
+            break;
+        }
+        if (state.readPos < totalMsgSize) {
+            break;
+        }
+
+        OrderRequest req{};
+        GatewayResponse errorResp{};
+        if (!decodeFrame(state, msgLen, req, errorResp)) {
+            sendResponse(fd, errorResp);
+            removeClient(fd);
+            return false;
+        }
+        processMessage(fd, req);
+
+        // Shift buffer (in case of pipelined messages)
+        size_t consumed = totalMsgSize;
+        if (state.readPos > consumed) {
+            std::memmove(state.readBuf.data(), state.readBuf.data() + consumed, state.readPos - consumed);
+        }
+        state.readPos -= consumed;
+        size_t keep = std::max(sizeof(uint32_t), state.readPos);
+        if (state.readBuf.size() != keep) {
+            state.readBuf.resize(keep);
+        }
+    }
+    return true;
 }
 
 bool TcpGateway::decodeFrame(ClientState& state, uint32_t msgLen,

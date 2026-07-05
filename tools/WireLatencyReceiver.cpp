@@ -47,7 +47,6 @@ using namespace OrderMatcher;
 
 namespace {
 
-constexpr int kTxTimestampTimeoutMs = 100;  // errqueue wait for the ack TX timestamp
 
 struct Config {
     uint16_t    port = 12345;
@@ -139,6 +138,50 @@ int runKernelReceiver(const Config& c) {
     uint8_t ackBuf[OUCH_SIZE_ORDER_ACCEPTED];
     uint64_t processed = 0;
 
+    // Pipelined TX-timestamp collection. Collecting an ack's errqueue TX
+    // timestamp is kept OFF the critical path between orders: after sending an
+    // ack we stash the order as `pending` and loop straight back to recv the
+    // next order. The pending ack's TX timestamp is then drained with a
+    // NON-BLOCKING poll (timeout=0) on the next iteration — by then the ack has
+    // long since left the NIC (a full round-trip elapsed while we blocked in
+    // recv), so the timestamp is already on the errqueue and the poll returns
+    // immediately. This is what makes non-blocking collection still capture the
+    // HW timestamp: polling right after send() would always miss it and fall
+    // back to software.
+    struct Pending {
+        bool     active = false;
+        uint64_t seq = 0;
+        uint64_t rxNs = 0;
+        bool     rxHw = false;
+        uint64_t softwareTxAck = 0;  // fallback if the HW TX ts is not (yet) available
+    };
+    Pending pending;
+
+    // Non-blocking drain (timeout=0) + emit of the pending order's CSV row.
+    auto flushPending = [&]() {
+        if (!pending.active) return;
+        uint64_t txAckNs = pending.softwareTxAck;
+        bool txHw = false;
+        if (!c.softwareOnly) {
+            // timeout=0: never blocks. If the errqueue entry has not landed yet,
+            // returns false and we keep the software send-time.
+            if (!wirelat::collectTxTimestamp(clientFd, txAckNs, txHw, 0)) {
+                txAckNs = pending.softwareTxAck;
+                txHw = false;
+            }
+        }
+        const bool hardware = pending.rxHw && txHw;
+        const uint64_t processing =
+            (txAckNs >= pending.rxNs) ? (txAckNs - pending.rxNs) : 0;
+        std::printf("%llu,%llu,%llu,%llu,%d\n",
+                    static_cast<unsigned long long>(pending.seq),
+                    static_cast<unsigned long long>(pending.rxNs),
+                    static_cast<unsigned long long>(txAckNs),
+                    static_cast<unsigned long long>(processing),
+                    hardware ? 1 : 0);
+        pending.active = false;
+    };
+
     for (;;) {
         // Software mode: plain recv + softwareNowNs (recvFrameSoftware) — zero
         // recvmsg/cmsg/SO_TIMESTAMPING/errqueue machinery on the hot path,
@@ -151,6 +194,10 @@ int runKernelReceiver(const Config& c) {
         if (!rxOk) {
             break;  // peer disconnected / error
         }
+
+        // The PREVIOUS ack's TX timestamp is ready now (it landed while we were
+        // blocked in the recv above) — collect it non-blocking and emit its row.
+        flushPending();
 
         OuchEnterOrder o;
         if (!decodeEnterOrder(orderBuf, OUCH_SIZE_ENTER_ORDER, o)) {
@@ -169,28 +216,21 @@ int runKernelReceiver(const Config& c) {
             break;
         }
 
-        uint64_t txAckNs = softwareTxAck;
-        bool txHw = false;
-        if (!c.softwareOnly) {
-            if (!wirelat::collectTxTimestamp(clientFd, txAckNs, txHw, kTxTimestampTimeoutMs)) {
-                txAckNs = softwareTxAck;
-                txHw = false;
-            }
-        }
-
-        const bool hardware = rxHw && txHw;
-        const uint64_t processing = (txAckNs >= rxNs) ? (txAckNs - rxNs) : 0;
-
-        std::printf("%llu,%llu,%llu,%llu,%d\n",
-                    static_cast<unsigned long long>(o.orderToken),
-                    static_cast<unsigned long long>(rxNs),
-                    static_cast<unsigned long long>(txAckNs),
-                    static_cast<unsigned long long>(processing),
-                    hardware ? 1 : 0);
+        // Stash as pending — TX timestamp is drained on the next iteration, NOT
+        // here, so the next recv is not delayed by the errqueue poll.
+        pending.active = true;
+        pending.seq = o.orderToken;
+        pending.rxNs = rxNs;
+        pending.rxHw = rxHw;
+        pending.softwareTxAck = softwareTxAck;
 
         ++processed;
         if (c.count && processed >= c.count) break;
     }
+    // Flush the final acked order. It has no subsequent recv to hide behind, so
+    // its non-blocking drain may miss the errqueue entry and fall back to the
+    // software send-time (one row of N) — acceptable, and still off any hot path.
+    flushPending();
 
     std::printf("[wire-latency] receiver done: %llu orders processed\n",
                 static_cast<unsigned long long>(processed));

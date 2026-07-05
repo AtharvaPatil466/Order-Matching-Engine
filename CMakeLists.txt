@@ -165,10 +165,14 @@ endif()
 
 # Optional DPDK + F-Stack kernel-bypass ingestion path (Linux only). When
 # ENABLE_DPDK is on and both libdpdk and F-Stack are found we define OB_HAVE_DPDK
-# and link them; src/DpdkGateway.cpp then compiles its real body. Absent it (any
-# non-Linux platform, or DPDK/F-Stack not installed) DpdkGateway.cpp compiles to
-# an empty translation unit and the kernel TcpGateway is the only ingestion path.
+# and link F-Stack (which bundles + manages its own DPDK internally);
+# src/DpdkGateway.cpp then compiles its real body. Absent it (any non-Linux
+# platform, or DPDK/F-Stack not installed) DpdkGateway.cpp compiles to an empty
+# translation unit and the kernel TcpGateway is the only ingestion path.
 option(ENABLE_DPDK "Build the DPDK/F-Stack kernel-bypass ingestion path" OFF)
+# F-Stack install prefix (meson+ninja default from scripts/dpdk_aws.sh). Its
+# static lib lives at ${FF_PATH}/lib/libfstack.a and bundles DPDK internally.
+set(FF_PATH "/usr/local" CACHE PATH "F-Stack install prefix (contains lib/libfstack.a)")
 if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig REQUIRED)
     # Resolve F-Stack's bundled/patched DPDK, installed under /usr/local by
@@ -183,34 +187,22 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_DPDK=1)
         target_include_directories(OrderMatcher PUBLIC ${DPDK_INCLUDE_DIRS} ${FSTACK_INCLUDE})
         target_compile_options(OrderMatcher PUBLIC ${DPDK_CFLAGS_OTHER})
-        # F-Stack must precede DPDK on the link line, and the DPDK PMD + F-Stack
-        # constructors (RTE_PMD_REGISTER_*, incl. the ENA PMD) are stripped by a
-        # normal static link — wrap them in --whole-archive so they self-register.
-        #
-        # Ubuntu 26.04's DPDK drags in libibverbs and every RDMA/InfiniBand verbs
-        # provider (libbnxt_re-/libcxgb4-/libmthca-rdmav59.a, ...). Forcing those
-        # into --whole-archive pulls their whole bodies into the link, and they
-        # carry internal undefined references we can't satisfy — and --exclude-libs
-        # only hides exported symbols, it does NOT stop the archive being included,
-        # so it fails too. We use only the ENA (Ethernet) PMD, so drop the RDMA
-        # providers (plus ibverbs/ibumad/rdmacm) from the static list entirely
-        # before linking. Filter out RDMA provider libs we don't need (ENA only):
-        set(DPDK_FILTERED_LIBS "")
-        foreach(lib ${DPDK_STATIC_LIBRARIES})
-            if(NOT lib MATCHES "rdmav|ibverbs|libibumad|rdmacm")
-                list(APPEND DPDK_FILTERED_LIBS ${lib})
-            endif()
-        endforeach()
+        # Link ONLY libfstack — it bundles and internally manages its own DPDK.
+        # Linking the system libdpdk static libs *as well* registers DPDK's tailqs
+        # twice (F-Stack's bundled DPDK + the system DPDK), which trips at startup:
+        #   EAL: PANIC in tailqinitfn_*: Cannot initialize tailq
+        # So ${DPDK_STATIC_LIBRARIES} is deliberately NOT on the link line; F-Stack
+        # already contains everything (incl. the ENA PMD). Its constructors
+        # (RTE_PMD_REGISTER_*) are stripped by a normal static link, so wrap
+        # libfstack in --whole-archive to force them in so they self-register.
         target_link_libraries(OrderMatcher PUBLIC
-            -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_FILTERED_LIBS} -Wl,--no-whole-archive
-            # The ENA PMD still uses libibverbs *core* (InfiniBand-free); re-add it
-            # as a plain shared dependency after the filtered static list so those
-            # references resolve without dragging the RDMA providers back in via
-            # --whole-archive. (-libverbs == -l ibverbs == libibverbs.)
+            -Wl,--whole-archive ${FF_PATH}/lib/libfstack.a -Wl,--no-whole-archive
+            # System deps F-Stack's bundled DPDK needs on Ubuntu 26.04, after the
+            # archive so their references resolve. The ENA PMD uses libibverbs
+            # *core* (InfiniBand-free) — re-add it as a plain shared dep; and
+            # libjitterentropy ships only the versioned .so.3 (no unversioned dev
+            # symlink), so link it by exact name.
             -libverbs
-            # Extra system deps DPDK needs on Ubuntu 26.04; placed after the DPDK
-            # static libs so their references resolve. libjitterentropy ships only
-            # the versioned .so.3 (no unversioned dev symlink) — link by exact name.
             -lz -lzstd -l:libjitterentropy.so.3)
         message(STATUS "DPDK/F-Stack kernel-bypass ingestion enabled (dpdk ${DPDK_VERSION})")
     else()

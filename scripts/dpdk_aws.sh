@@ -5,15 +5,15 @@
 # still uses scripts/wire_latency_aws.sh with ROLE=sender on Instance A.
 #
 # ┌──────────────────────────────────────────────────────────────────────────┐
-# │ WARNING: this script BINDS eth1 (the secondary ENI) to DPDK via vfio-pci  │
-# │ and makes it UNAVAILABLE to the kernel. Ensure your SSH session is on     │
-# │ eth0 (the PRIMARY ENI) before running — otherwise you WILL lose access.   │
+# │ WARNING: this script BINDS the secondary ENI to DPDK via vfio-pci and     │
+# │ makes it UNAVAILABLE to the kernel. Keep your SSH session on the PRIMARY  │
+# │ ENI (the default-route interface) before running — or you WILL lose it.   │
 # └──────────────────────────────────────────────────────────────────────────┘
 #
 # Must run as root (hugepages, vfio bind, mount, install all require it).
 #
 # Steps: (1) prereqs (2) hugepages (3) install DPDK + F-Stack (idempotent)
-#        (4) bind eth1 to vfio-pci (5) build -DENABLE_DPDK=ON (6) write
+#        (4) bind the secondary ENI to vfio-pci (5) build -DENABLE_DPDK=ON (6) write
 #        /etc/f-stack.conf (7) run the F-Stack receiver.
 
 set -euo pipefail
@@ -22,7 +22,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-ENI="${ENI:-eth1}"
+# Interface names are NOT hardcoded (they vary by instance type / kernel — e.g.
+# ens1 + enp154s0 on c6in.metal, not eth0/eth1). Detect them dynamically:
+#   PRIMARY_IF  = the interface carrying the default route (keep SSH here).
+#   SECONDARY_IF = the first non-loopback, non-primary link — the ENI we bind to
+#                  DPDK. Allow an explicit ENI=<name> override to win regardless.
+# `|| true` on each pipeline: under `set -euo pipefail`, a no-match grep or an
+# upstream SIGPIPE from `head -1` would otherwise abort before the checks below.
+PRIMARY_IF="$(ip route | grep default | awk '{print $5}' | head -1 || true)"
+[[ -n "$PRIMARY_IF" ]] || { printf '\033[31mFATAL: %s\033[0m\n' "could not detect the primary interface (no default route found)."; exit 1; }
+SECONDARY_IF="$(ip link show | grep -v lo | grep -v "$PRIMARY_IF" | grep "^[0-9]" | head -1 | awk '{print $2}' | tr -d ':' || true)"
+[[ -n "$SECONDARY_IF" ]] || { printf '\033[31mFATAL: %s\033[0m\n' "could not detect a secondary ENI (no non-loopback, non-primary interface). Attach + configure a second ENI first."; exit 1; }
+ENI="${ENI:-$SECONDARY_IF}"
 PORT="${PORT:-9001}"
 BUILD_DIR="build-dpdk"
 FSTACK_CONF="${FSTACK_CONF:-/etc/f-stack.conf}"
@@ -36,7 +47,7 @@ warn()   { printf '\033[33mWARN: %s\033[0m\n' "$*"; }
 die()    { printf '\033[31mFATAL: %s\033[0m\n' "$*"; exit 1; }
 
 banner "dpdk_aws.sh — F-Stack DPDK receiver setup — run $RUN_ID"
-printf '\033[31m%s\033[0m\n' "!!! This binds $ENI to DPDK and removes it from the kernel. SSH MUST be on eth0. !!!"
+printf '\033[31m%s\033[0m\n' "!!! This binds $ENI to DPDK and removes it from the kernel. SSH MUST be on $PRIMARY_IF (primary ENI). !!!"
 echo "log: $LOG"
 
 # ─── Step 1: prerequisites ──────────────────────────────────────────────────
@@ -180,7 +191,7 @@ if dpdk-devbind.py --status 2>/dev/null | grep -E "$PCI_ADDR" | grep -q vfio-pci
 else
     die "bind verification failed — $PCI_ADDR is not showing vfio-pci in dpdk-devbind.py --status."
 fi
-printf '\033[31mWARNING: %s is now UNBOUND from the kernel — SSH access must be on eth0 (primary ENI).\033[0m\n' "$ENI"
+printf '\033[31mWARNING: %s is now UNBOUND from the kernel — SSH access must be on %s (primary ENI).\033[0m\n' "$ENI" "$PRIMARY_IF"
 
 # ─── Step 5: build with DPDK enabled ────────────────────────────────────────
 banner "STEP 5/7 — build (-DENABLE_DPDK=ON)"

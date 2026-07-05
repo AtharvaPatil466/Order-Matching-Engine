@@ -83,9 +83,12 @@ banner "STEP 3/7 — install DPDK + F-Stack (idempotent)"
 # libcrypto-dev on Debian/Ubuntu), libnuma-dev + libpcap-dev (DPDK), and
 # python3-pyelftools + meson + ninja-build to build the bundled DPDK.
 echo "  installing F-Stack + bundled-DPDK build dependencies..."
+# linux-headers-$(uname -r): the F-Stack dev-branch DPDK build uses
+# `meson setup -Denable_kmods=true`, which compiles kernel modules and needs the
+# running kernel's headers.
 apt-get install -y \
     build-essential pkg-config libssl-dev libnuma-dev libpcap-dev \
-    python3-pyelftools meson ninja-build
+    python3-pyelftools meson ninja-build "linux-headers-$(uname -r)"
 
 if [[ -f /usr/local/lib/libfstack.a ]]; then
     echo "  F-Stack already installed (/usr/local/lib/libfstack.a) — skipping build"
@@ -98,11 +101,13 @@ else
         git clone -b dev https://github.com/F-Stack/f-stack.git /tmp/f-stack
     fi
     # 1) Build + install F-Stack's BUNDLED/patched DPDK (replaces the distro
-    #    libdpdk). meson's default prefix is /usr/local, so libdpdk.pc installs
-    #    under /usr/local/lib*/pkgconfig and the libs under /usr/local/lib*.
+    #    libdpdk). Exact F-Stack dev-branch build (README): meson with
+    #    -Denable_kmods=true, then ninja build + install. meson's default prefix
+    #    is /usr/local, so libdpdk.pc installs under /usr/local/lib*/pkgconfig and
+    #    the libs under /usr/local/lib*. (pyelftools comes from the apt
+    #    python3-pyelftools installed above — no pip needed.)
     ( cd /tmp/f-stack/dpdk \
-        && pip3 install pyelftools --break-system-packages \
-        && meson setup build \
+        && meson setup -Denable_kmods=true build \
         && ninja -C build \
         && ninja -C build install )
     ldconfig

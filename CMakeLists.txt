@@ -187,21 +187,36 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_DPDK=1)
         target_include_directories(OrderMatcher PUBLIC ${DPDK_INCLUDE_DIRS} ${FSTACK_INCLUDE})
         target_compile_options(OrderMatcher PUBLIC ${DPDK_CFLAGS_OTHER})
-        # Link ONLY libfstack — it bundles and internally manages its own DPDK.
-        # Linking the system libdpdk static libs *as well* registers DPDK's tailqs
-        # twice (F-Stack's bundled DPDK + the system DPDK), which trips at startup:
-        #   EAL: PANIC in tailqinitfn_*: Cannot initialize tailq
-        # So ${DPDK_STATIC_LIBRARIES} is deliberately NOT on the link line; F-Stack
-        # already contains everything (incl. the ENA PMD). Its constructors
-        # (RTE_PMD_REGISTER_*) are stripped by a normal static link, so wrap
-        # libfstack in --whole-archive to force them in so they self-register.
+        # libfstack.a is NOT self-contained — it needs rte_* symbols — so we must
+        # link DPDK too. Use F-Stack's OWN bundled DPDK (resolved via the
+        # PKG_CONFIG_PATH set above → /usr/local/lib/x86_64-linux-gnu), NOT the
+        # distro libdpdk. Pairing libfstack with its matching bundled DPDK keeps a
+        # SINGLE DPDK in the image, so EAL registers its tailqs once (mixing
+        # F-Stack's DPDK with the system DPDK double-registers them and panics:
+        # "EAL: PANIC in tailqinitfn_*: Cannot initialize tailq").
+        #
+        # That bundled DPDK also ships the RDMA/InfiniBand verbs providers
+        # (libbnxt_re-/libcxgb4-/libmthca-rdmav59.a, ...) which we don't use (ENA
+        # PMD only) and which break --whole-archive with internal undefined refs —
+        # so filter them (plus ibverbs/ibumad/rdmacm) out of the static list first.
+        set(DPDK_FILTERED_LIBS "")
+        foreach(lib ${DPDK_STATIC_LIBRARIES})
+            if(NOT lib MATCHES "rdmav|ibverbs|libibumad|rdmacm")
+                list(APPEND DPDK_FILTERED_LIBS ${lib})
+            endif()
+        endforeach()
+        # Link order: libfstack.a FIRST, then F-Stack's filtered DPDK static libs,
+        # BOTH inside --whole-archive so the F-Stack + DPDK PMD constructors
+        # (RTE_PMD_REGISTER_*, incl. the ENA PMD) survive the static link and
+        # self-register. System deps come last so their references resolve.
         target_link_libraries(OrderMatcher PUBLIC
-            -Wl,--whole-archive ${FF_PATH}/lib/libfstack.a -Wl,--no-whole-archive
-            # System deps F-Stack's bundled DPDK needs on Ubuntu 26.04, after the
-            # archive so their references resolve. The ENA PMD uses libibverbs
-            # *core* (InfiniBand-free) — re-add it as a plain shared dep; and
-            # libjitterentropy ships only the versioned .so.3 (no unversioned dev
-            # symlink), so link it by exact name.
+            -Wl,--whole-archive
+                ${FF_PATH}/lib/libfstack.a
+                ${DPDK_FILTERED_LIBS}
+            -Wl,--no-whole-archive
+            # The ENA PMD uses libibverbs *core* (InfiniBand-free) — plain shared
+            # dep. libjitterentropy ships only the versioned .so.3 (no unversioned
+            # dev symlink), so link it by exact name.
             -libverbs
             -lz -lzstd -l:libjitterentropy.so.3)
         message(STATUS "DPDK/F-Stack kernel-bypass ingestion enabled (dpdk ${DPDK_VERSION})")

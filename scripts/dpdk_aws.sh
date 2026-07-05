@@ -197,6 +197,12 @@ printf '\033[31mWARNING: %s is now UNBOUND from the kernel — SSH access must b
 banner "STEP 5/7 — build (-DENABLE_DPDK=ON)"
 rm -rf "$BUILD_DIR"
 CFG_LOG="$(mktemp)"
+# Point pkg-config at F-Stack's BUNDLED DPDK (installed under /usr/local by the
+# meson+ninja build above) BEFORE configuring, so CMake's pkg_check_modules(DPDK)
+# resolves F-Stack's libdpdk.pc — not any distro libdpdk. Set here explicitly so
+# it holds even when the "F-Stack already installed" fast path skipped the export
+# in Step 3. Must match the prefix CMakeLists.txt prepends.
+export PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
 # NOTE: BUILD_WIRE_LATENCY_TOOLS (upper-case) is the real CMake option name.
 cmake -B "$BUILD_DIR" -S . \
     -DCMAKE_BUILD_TYPE=Release \
@@ -217,8 +223,8 @@ rm -f "$CFG_LOG"
 # Build ONLY the WireLatencyReceiver target (not the whole project). That target
 # links OrderMatcher, so the DPDK/F-Stack path is still fully exercised, but we
 # skip compiling + linking the entire test suite — an unrelated test-link failure
-# must not abort the measurement session. (The RDMA multiple-definition fix lives
-# in CMakeLists.txt via -Wl,--allow-multiple-definition.)
+# must not abort the measurement session. (The DPDK link — F-Stack's bundled DPDK
+# with RDMA provider libs filtered out — is configured in CMakeLists.txt.)
 cmake --build "$BUILD_DIR" --target WireLatencyReceiver -j"$(nproc)" \
     || die "step 5: WireLatencyReceiver build failed."
 echo "  build OK (WireLatencyReceiver)"

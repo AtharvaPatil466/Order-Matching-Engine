@@ -15,9 +15,12 @@
 // CLOCK_MONOTONIC software timestamps (see WireTimestamp.h). Build with
 // -DBUILD_WIRE_LATENCY_TOOLS=ON.
 //
+// Orders are sent back-to-back: each is sent immediately after the previous
+// order's ack is received (the recv is the only barrier). No pacing / sleep /
+// rate limiting between orders.
+//
 // Usage: WireLatencySender [--host H] [--port P] [--count N]
-//                          [--interval-us US] [--shares Q] [--price P]
-//                          [--stock S] [--firm F]
+//                          [--shares Q] [--price P] [--stock S] [--firm F]
 
 #include "OuchProtocol.h"
 #include "WireTimestamp.h"
@@ -44,7 +47,6 @@ struct Config {
     std::string host = "127.0.0.1";
     uint16_t    port = 12345;
     uint64_t    count = 1000;
-    uint64_t    intervalUs = 0;   // pacing between orders; 0 = back-to-back
     uint32_t    shares = 100;
     uint32_t    price = 100000;
     uint64_t    stock = 1;
@@ -60,7 +62,6 @@ Config parseArgs(int argc, char** argv) {
         if (a == "--host") c.host = next();
         else if (a == "--port") c.port = static_cast<uint16_t>(std::atoi(next()));
         else if (a == "--count") c.count = std::strtoull(next(), nullptr, 10);
-        else if (a == "--interval-us") c.intervalUs = std::strtoull(next(), nullptr, 10);
         else if (a == "--shares") c.shares = static_cast<uint32_t>(std::atoi(next()));
         else if (a == "--price") c.price = static_cast<uint32_t>(std::atoi(next()));
         else if (a == "--stock") c.stock = std::strtoull(next(), nullptr, 10);
@@ -206,8 +207,6 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(oneWay),
                     hardware ? 1 : 0);
         ++completed;
-
-        if (c.intervalUs) ::usleep(static_cast<useconds_t>(c.intervalUs));
     }
 
     std::printf("[wire-latency] done: %llu/%llu orders completed\n",

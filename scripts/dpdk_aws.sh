@@ -106,10 +106,26 @@ else
     #    is /usr/local, so libdpdk.pc installs under /usr/local/lib*/pkgconfig and
     #    the libs under /usr/local/lib*. (pyelftools comes from the apt
     #    python3-pyelftools installed above — no pip needed.)
-    ( cd /tmp/f-stack/dpdk \
-        && meson setup -Denable_kmods=true build \
-        && ninja -C build \
-        && ninja -C build install )
+    # Try the dev-branch build WITH kernel modules first. If the kmods fail to
+    # compile (common on bleeding-edge kernels, e.g. 7.x), fall back to a
+    # kmod-free build in a FRESH build dir (meson won't switch an existing dir's
+    # options). vfio-pci binding does not need the DPDK kmods, so the kmod-free
+    # DPDK is fully usable for our path. The `if ( ... )` condition keeps set -e
+    # from aborting on the first failure.
+    if ( cd /tmp/f-stack/dpdk \
+            && meson setup -Denable_kmods=true build \
+            && ninja -C build \
+            && ninja -C build install ); then
+        echo "  DPDK built with kernel modules (-Denable_kmods=true)"
+    else
+        warn "kmod build failed — retrying without kernel modules (vfio-pci binding still works without kmods)"
+        ( cd /tmp/f-stack/dpdk \
+            && meson setup -Denable_kmods=false build_nokmods \
+            && ninja -C build_nokmods \
+            && ninja -C build_nokmods install ) \
+            || die "DPDK build failed even without kmods — check the meson/ninja output above."
+        echo "  DPDK built without kernel modules (-Denable_kmods=false)"
+    fi
     ldconfig
     # 2) Build + install F-Stack lib against that bundled DPDK. lib/Makefile runs
     #    `pkg-config --exists libdpdk`, so point PKG_CONFIG_PATH at the DPDK we

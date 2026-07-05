@@ -186,7 +186,14 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # F-Stack must precede DPDK on the link line, and the DPDK PMD + F-Stack
         # constructors (RTE_PMD_REGISTER_*, incl. the ENA PMD) are stripped by a
         # normal static link — wrap them in --whole-archive so they self-register.
+        # --allow-multiple-definition: DPDK's libibverbs dependency transitively
+        # pulls in every RDMA verbs provider (libbnxt_re-/libcxgb4-/libmthca-
+        # rdmav*.a, ...); under --whole-archive their symbols collide with
+        # "multiple definition" link errors. We use the ENA (Ethernet) PMD, not
+        # RDMA/InfiniBand, so those providers are dead weight — tolerating the
+        # duplicate symbols is safe here and keeps the ENA link working.
         target_link_libraries(OrderMatcher PUBLIC
+            -Wl,--allow-multiple-definition
             -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_STATIC_LIBRARIES} -Wl,--no-whole-archive)
         message(STATUS "DPDK/F-Stack kernel-bypass ingestion enabled (dpdk ${DPDK_VERSION})")
     else()

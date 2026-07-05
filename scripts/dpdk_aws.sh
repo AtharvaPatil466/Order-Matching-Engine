@@ -214,8 +214,14 @@ else
     warn "CMake did not report DPDK found/enabled — the build may fall back to kernel TCP (OB_HAVE_DPDK undefined). Check that libdpdk + F-Stack are discoverable (pkg-config --libs libdpdk; FF_PATH)."
 fi
 rm -f "$CFG_LOG"
-cmake --build "$BUILD_DIR" -- -j"$(nproc)" || die "step 5: DPDK build failed."
-echo "  build OK"
+# Build ONLY the WireLatencyReceiver target (not the whole project). That target
+# links OrderMatcher, so the DPDK/F-Stack path is still fully exercised, but we
+# skip compiling + linking the entire test suite — an unrelated test-link failure
+# must not abort the measurement session. (The RDMA multiple-definition fix lives
+# in CMakeLists.txt via -Wl,--allow-multiple-definition.)
+cmake --build "$BUILD_DIR" --target WireLatencyReceiver -j"$(nproc)" \
+    || die "step 5: WireLatencyReceiver build failed."
+echo "  build OK (WireLatencyReceiver)"
 
 # ─── Step 6: generate F-Stack config ────────────────────────────────────────
 banner "STEP 6/7 — generate $FSTACK_CONF"

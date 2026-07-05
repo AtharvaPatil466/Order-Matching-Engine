@@ -70,19 +70,28 @@ echo "  hugetlbfs mounted at $HUGE_MNT"
 
 # ─── Step 3: install DPDK + F-Stack (idempotent) ────────────────────────────
 banner "STEP 3/7 — install DPDK + F-Stack (idempotent)"
-if dpkg -l libdpdk-dev 2>/dev/null | grep -q '^ii'; then
-    echo "  DPDK dev packages already installed — skipping"
-else
-    echo "  installing DPDK dev packages..."
-    apt-get install -y dpdk dpdk-dev libdpdk-dev
-fi
+# apt-get install -y is itself idempotent (already-satisfied packages are
+# skipped), so run it unconditionally: the previous libdpdk-dev-only guard would
+# have skipped the F-Stack build deps below whenever DPDK was already present.
+# F-Stack build deps (per its README + lib/Makefile): build-essential (gcc/make),
+# libssl-dev (F-Stack links OpenSSL; also provides libcrypto — there is no
+# separate libcrypto-dev on Debian/Ubuntu), pkg-config (lib/Makefile runs
+# `pkg-config --exists libdpdk`), libnuma-dev + libpcap-dev (DPDK), and
+# python3-pyelftools (DPDK build tooling).
+echo "  installing DPDK + F-Stack build dependencies..."
+apt-get install -y \
+    dpdk dpdk-dev libdpdk-dev \
+    build-essential pkg-config libssl-dev libnuma-dev libpcap-dev python3-pyelftools
 
 if [[ -f /usr/local/lib/libfstack.a ]]; then
     echo "  F-Stack already installed (/usr/local/lib/libfstack.a) — skipping build"
 else
     echo "  building F-Stack from source..."
     if [[ ! -d /tmp/f-stack ]]; then
-        git clone https://github.com/F-Stack/f-stack.git /tmp/f-stack
+        # 'dev' is F-Stack's default/active branch (confirmed via GitHub API,
+        # 2026-07; repo not archived). Pin it explicitly so a future default
+        # rename doesn't silently change what we build.
+        git clone -b dev https://github.com/F-Stack/f-stack.git /tmp/f-stack
     fi
     ( cd /tmp/f-stack/dpdk && pip3 install pyelftools --break-system-packages )
     ( cd /tmp/f-stack/lib && make && make install )

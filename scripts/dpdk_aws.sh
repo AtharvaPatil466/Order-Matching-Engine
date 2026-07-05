@@ -43,6 +43,11 @@ echo "log: $LOG"
 banner "STEP 1/7 — prerequisites"
 [[ "$(uname -s)" == "Linux" ]] || die "not Linux — DPDK/F-Stack require Linux (AWS c6in.metal)."
 echo "  os: $(uname -srm)"
+# F-Stack has historically lagged bleeding-edge kernels; warn (non-fatal) on 7.x+.
+KMAJ="$(uname -r)"; KMAJ="${KMAJ%%.*}"; KMAJ="${KMAJ//[!0-9]/}"
+if [[ -n "$KMAJ" ]] && (( KMAJ > 6 )); then
+    warn "Kernel $(uname -r) detected — F-Stack compatibility unverified, proceed with caution"
+fi
 ip link show "$ENI" >/dev/null 2>&1 || die "secondary ENI '$ENI' not found. Attach + configure a second ENI first."
 echo "  secondary ENI '$ENI' present"
 command -v clang++ >/dev/null 2>&1 || die "clang++ not found — install clang (apt-get install -y clang)."
@@ -70,30 +75,42 @@ echo "  hugetlbfs mounted at $HUGE_MNT"
 
 # ─── Step 3: install DPDK + F-Stack (idempotent) ────────────────────────────
 banner "STEP 3/7 — install DPDK + F-Stack (idempotent)"
-# apt-get install -y is itself idempotent (already-satisfied packages are
-# skipped), so run it unconditionally: the previous libdpdk-dev-only guard would
-# have skipped the F-Stack build deps below whenever DPDK was already present.
-# F-Stack build deps (per its README + lib/Makefile): build-essential (gcc/make),
-# libssl-dev (F-Stack links OpenSSL; also provides libcrypto — there is no
-# separate libcrypto-dev on Debian/Ubuntu), pkg-config (lib/Makefile runs
-# `pkg-config --exists libdpdk`), libnuma-dev + libpcap-dev (DPDK), and
-# python3-pyelftools (DPDK build tooling).
-echo "  installing DPDK + F-Stack build dependencies..."
+# No distro dpdk/dpdk-dev/libdpdk-dev — F-Stack's bundled/patched DPDK replaces
+# them (built from source below). apt-get install -y is idempotent, so run it
+# unconditionally. Deps (F-Stack README + lib/Makefile): build-essential
+# (gcc/make), pkg-config (lib/Makefile runs `pkg-config --exists libdpdk`),
+# libssl-dev (F-Stack links OpenSSL; also provides libcrypto — no separate
+# libcrypto-dev on Debian/Ubuntu), libnuma-dev + libpcap-dev (DPDK), and
+# python3-pyelftools + meson + ninja-build to build the bundled DPDK.
+echo "  installing F-Stack + bundled-DPDK build dependencies..."
 apt-get install -y \
-    dpdk dpdk-dev libdpdk-dev \
-    build-essential pkg-config libssl-dev libnuma-dev libpcap-dev python3-pyelftools
+    build-essential pkg-config libssl-dev libnuma-dev libpcap-dev \
+    python3-pyelftools meson ninja-build
 
 if [[ -f /usr/local/lib/libfstack.a ]]; then
     echo "  F-Stack already installed (/usr/local/lib/libfstack.a) — skipping build"
 else
-    echo "  building F-Stack from source..."
+    echo "  building F-Stack (bundled DPDK) from source..."
     if [[ ! -d /tmp/f-stack ]]; then
         # 'dev' is F-Stack's default/active branch (confirmed via GitHub API,
         # 2026-07; repo not archived). Pin it explicitly so a future default
         # rename doesn't silently change what we build.
         git clone -b dev https://github.com/F-Stack/f-stack.git /tmp/f-stack
     fi
-    ( cd /tmp/f-stack/dpdk && pip3 install pyelftools --break-system-packages )
+    # 1) Build + install F-Stack's BUNDLED/patched DPDK (replaces the distro
+    #    libdpdk). meson's default prefix is /usr/local, so libdpdk.pc installs
+    #    under /usr/local/lib*/pkgconfig and the libs under /usr/local/lib*.
+    ( cd /tmp/f-stack/dpdk \
+        && pip3 install pyelftools --break-system-packages \
+        && meson setup build \
+        && ninja -C build \
+        && ninja -C build install )
+    ldconfig
+    # 2) Build + install F-Stack lib against that bundled DPDK. lib/Makefile runs
+    #    `pkg-config --exists libdpdk`, so point PKG_CONFIG_PATH at the DPDK we
+    #    just installed under /usr/local. FF_PATH is F-Stack's documented root.
+    export PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export FF_PATH=/tmp/f-stack
     ( cd /tmp/f-stack/lib && make && make install )
 fi
 [[ -f /usr/local/lib/libfstack.a ]]   || die "F-Stack install failed: /usr/local/lib/libfstack.a not found."

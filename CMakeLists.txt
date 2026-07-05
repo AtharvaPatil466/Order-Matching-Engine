@@ -171,8 +171,13 @@ endif()
 option(ENABLE_DPDK "Build the DPDK/F-Stack kernel-bypass ingestion path" OFF)
 if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(DPDK libdpdk)          # DPDK ships libdpdk.pc (>= 20.11)
-    find_library(FSTACK_LIB fstack)          # F-Stack libfstack (set FF_PATH / CMAKE_PREFIX_PATH)
+    # Resolve F-Stack's bundled/patched DPDK, installed under /usr/local by
+    # scripts/dpdk_aws.sh (meson+ninja, default prefix) — NOT any distro libdpdk.
+    # Prepend its pkgconfig dirs so pkg_check_modules finds the F-Stack DPDK first.
+    set(ENV{PKG_CONFIG_PATH}
+        "/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    pkg_check_modules(DPDK libdpdk)          # F-Stack bundled DPDK's libdpdk.pc
+    find_library(FSTACK_LIB fstack)          # F-Stack libfstack (/usr/local/lib)
     find_path(FSTACK_INCLUDE ff_api.h)
     if(DPDK_FOUND AND FSTACK_LIB AND FSTACK_INCLUDE)
         target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_DPDK=1)

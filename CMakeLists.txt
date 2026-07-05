@@ -187,25 +187,27 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # constructors (RTE_PMD_REGISTER_*, incl. the ENA PMD) are stripped by a
         # normal static link — wrap them in --whole-archive so they self-register.
         #
-        # Ubuntu 26.04's DPDK pulls in libibverbs, which transitively drags in
-        # every RDMA/InfiniBand verbs provider (libbnxt_re-/libcxgb4-/libmthca-
-        # rdmav59.a, ...). Under --whole-archive those providers' symbols collide
-        # ("multiple definition"). We use only the ENA (Ethernet) PMD — no RDMA —
-        # so --exclude-libs drops each provider's symbols from the link entirely.
-        # This is the targeted fix (vs a blanket --allow-multiple-definition); the
-        # exclusions must precede --whole-archive to apply across the whole link.
+        # Ubuntu 26.04's DPDK drags in libibverbs and every RDMA/InfiniBand verbs
+        # provider (libbnxt_re-/libcxgb4-/libmthca-rdmav59.a, ...). Forcing those
+        # into --whole-archive pulls their whole bodies into the link, and they
+        # carry internal undefined references we can't satisfy — and --exclude-libs
+        # only hides exported symbols, it does NOT stop the archive being included,
+        # so it fails too. We use only the ENA (Ethernet) PMD, so drop the RDMA
+        # providers (plus ibverbs/ibumad/rdmacm) from the static list entirely
+        # before linking. Filter out RDMA provider libs we don't need (ENA only):
+        set(DPDK_FILTERED_LIBS "")
+        foreach(lib ${DPDK_STATIC_LIBRARIES})
+            if(NOT lib MATCHES "rdmav|ibverbs|libibumad|rdmacm")
+                list(APPEND DPDK_FILTERED_LIBS ${lib})
+            endif()
+        endforeach()
         target_link_libraries(OrderMatcher PUBLIC
-            -Wl,--exclude-libs,libbnxt_re-rdmav59.a
-            -Wl,--exclude-libs,libcxgb4-rdmav59.a
-            -Wl,--exclude-libs,libmthca-rdmav59.a
-            -Wl,--exclude-libs,libipathverbs-rdmav59.a
-            -Wl,--exclude-libs,libhfi1verbs-rdmav59.a
-            -Wl,--exclude-libs,librxe-rdmav59.a
-            -Wl,--exclude-libs,libsiw-rdmav59.a
-            -Wl,--exclude-libs,libvmw_pvrdma-rdmav59.a
-            -Wl,--exclude-libs,libqedr-rdmav59.a
-            -Wl,--exclude-libs,libocrdma-rdmav59.a
-            -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_STATIC_LIBRARIES} -Wl,--no-whole-archive
+            -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_FILTERED_LIBS} -Wl,--no-whole-archive
+            # The ENA PMD still uses libibverbs *core* (InfiniBand-free); re-add it
+            # as a plain shared dependency after the filtered static list so those
+            # references resolve without dragging the RDMA providers back in via
+            # --whole-archive. (-libverbs == -l ibverbs == libibverbs.)
+            -libverbs
             # Extra system deps DPDK needs on Ubuntu 26.04; placed after the DPDK
             # static libs so their references resolve. libjitterentropy ships only
             # the versioned .so.3 (no unversioned dev symlink) — link by exact name.

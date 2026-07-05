@@ -186,15 +186,30 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # F-Stack must precede DPDK on the link line, and the DPDK PMD + F-Stack
         # constructors (RTE_PMD_REGISTER_*, incl. the ENA PMD) are stripped by a
         # normal static link — wrap them in --whole-archive so they self-register.
-        # --allow-multiple-definition: DPDK's libibverbs dependency transitively
-        # pulls in every RDMA verbs provider (libbnxt_re-/libcxgb4-/libmthca-
-        # rdmav*.a, ...); under --whole-archive their symbols collide with
-        # "multiple definition" link errors. We use the ENA (Ethernet) PMD, not
-        # RDMA/InfiniBand, so those providers are dead weight — tolerating the
-        # duplicate symbols is safe here and keeps the ENA link working.
+        #
+        # Ubuntu 26.04's DPDK pulls in libibverbs, which transitively drags in
+        # every RDMA/InfiniBand verbs provider (libbnxt_re-/libcxgb4-/libmthca-
+        # rdmav59.a, ...). Under --whole-archive those providers' symbols collide
+        # ("multiple definition"). We use only the ENA (Ethernet) PMD — no RDMA —
+        # so --exclude-libs drops each provider's symbols from the link entirely.
+        # This is the targeted fix (vs a blanket --allow-multiple-definition); the
+        # exclusions must precede --whole-archive to apply across the whole link.
         target_link_libraries(OrderMatcher PUBLIC
-            -Wl,--allow-multiple-definition
-            -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_STATIC_LIBRARIES} -Wl,--no-whole-archive)
+            -Wl,--exclude-libs,libbnxt_re-rdmav59.a
+            -Wl,--exclude-libs,libcxgb4-rdmav59.a
+            -Wl,--exclude-libs,libmthca-rdmav59.a
+            -Wl,--exclude-libs,libipathverbs-rdmav59.a
+            -Wl,--exclude-libs,libhfi1verbs-rdmav59.a
+            -Wl,--exclude-libs,librxe-rdmav59.a
+            -Wl,--exclude-libs,libsiw-rdmav59.a
+            -Wl,--exclude-libs,libvmw_pvrdma-rdmav59.a
+            -Wl,--exclude-libs,libqedr-rdmav59.a
+            -Wl,--exclude-libs,libocrdma-rdmav59.a
+            -Wl,--whole-archive ${FSTACK_LIB} ${DPDK_STATIC_LIBRARIES} -Wl,--no-whole-archive
+            # Extra system deps DPDK needs on Ubuntu 26.04; placed after the DPDK
+            # static libs so their references resolve. libjitterentropy ships only
+            # the versioned .so.3 (no unversioned dev symlink) — link by exact name.
+            -lz -lzstd -l:libjitterentropy.so.3)
         message(STATUS "DPDK/F-Stack kernel-bypass ingestion enabled (dpdk ${DPDK_VERSION})")
     else()
         message(WARNING "ENABLE_DPDK=ON but libdpdk and/or F-Stack not found — kernel TCP only")

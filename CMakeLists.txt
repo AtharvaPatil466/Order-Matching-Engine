@@ -187,58 +187,25 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_DPDK=1)
         target_include_directories(OrderMatcher PUBLIC ${DPDK_INCLUDE_DIRS} ${FSTACK_INCLUDE})
         target_compile_options(OrderMatcher PUBLIC ${DPDK_CFLAGS_OTHER})
-        # libfstack.a is NOT self-contained — it needs rte_* symbols — so we must
-        # link DPDK too. Use F-Stack's OWN bundled DPDK (resolved via the
-        # PKG_CONFIG_PATH set above → /usr/local/lib/x86_64-linux-gnu), NOT the
-        # distro libdpdk, and link its STATIC libs (DPDK_STATIC_LIBRARIES) ONLY —
-        # never the dynamic DPDK_LIBRARIES. Pairing libfstack with its matching
-        # bundled DPDK keeps a SINGLE DPDK in the image so EAL registers its tailqs
-        # once (a second copy panics: "EAL: PANIC in tailqinitfn_*: Cannot
-        # initialize tailq").
+        # libfstack.a already has DPDK's object files compiled IN — including the
+        # tailq init constructors (e.g. tailqinitfn_rte_swx_ipsec_tailq). So linking
+        # ANY librte_*.a alongside it produces a SECOND copy of those same
+        # constructors → "EAL: PANIC in tailqinitfn_*: Cannot initialize tailq".
         #
-        # pkg-config's --static output lists each DPDK lib as a static token
-        # (-l:librte_xxx.a, wrapped in --whole-archive) but ALSO leaks a bare
-        # "rte_xxx" for some libs; because F-Stack's DPDK ships both .a and .so,
-        # that bare -lrte_xxx resolves to librte_xxx.so and its constructors run a
-        # SECOND time → the tailq double-registration panic. So drop each bare
-        # rte_xxx whose static .a form is already on the line. Also drop the RDMA/
-        # InfiniBand verbs providers (libbnxt_re-/libcxgb4-/libmthca-rdmav59.a,
-        # ...) — unused (ENA PMD only) and they break --whole-archive with
-        # internal undefined references.
-        set(DPDK_STATIC_STEMS "")               # DPDK libs present in static .a form
-        foreach(lib ${DPDK_STATIC_LIBRARIES})
-            if(lib MATCHES "librte_([a-z0-9_]+)\\.a$")
-                list(APPEND DPDK_STATIC_STEMS "${CMAKE_MATCH_1}")
-            endif()
-        endforeach()
-        set(DPDK_FILTERED_LIBS "")
-        foreach(lib ${DPDK_STATIC_LIBRARIES})
-            set(_keep TRUE)
-            if(lib MATCHES "rdmav|ibverbs|libibumad|rdmacm")
-                set(_keep FALSE)                # unused RDMA verbs providers
-            elseif(lib MATCHES "^rte_([a-z0-9_]+)$")
-                # bare (dynamic) DPDK lib — drop if its static .a is already linked
-                list(FIND DPDK_STATIC_STEMS "${CMAKE_MATCH_1}" _idx)
-                if(NOT _idx EQUAL -1)
-                    set(_keep FALSE)
-                endif()
-            endif()
-            if(_keep)
-                list(APPEND DPDK_FILTERED_LIBS ${lib})
-            endif()
-        endforeach()
-        # Link order: libfstack.a FIRST, then F-Stack's filtered DPDK static libs,
-        # BOTH inside --whole-archive so the F-Stack + DPDK PMD constructors
-        # (RTE_PMD_REGISTER_*, incl. the ENA PMD) survive the static link and
-        # self-register. --no-as-needed (before --whole-archive) stops the linker
-        # discarding libs whose need isn't yet visible at that point on the line.
-        # System deps come last so their references resolve.
+        # Fix: link ONLY libfstack.a statically (inside --whole-archive so its
+        # F-Stack + DPDK PMD constructors, incl. the ENA PMD, survive the static
+        # link and self-register). Do NOT link any DPDK static lib — resolve the
+        # remaining rte_* symbols from the DPDK *shared* libs already installed
+        # beside it. pkg_check_modules(DPDK) above is kept ONLY for
+        # ${DPDK_INCLUDE_DIRS}/${DPDK_CFLAGS_OTHER}; its static lib list
+        # (DPDK_STATIC_LIBRARIES) is deliberately NOT on the link line.
         target_link_libraries(OrderMatcher PUBLIC
             -Wl,--no-as-needed
-            -Wl,--whole-archive
-                ${FF_PATH}/lib/libfstack.a
-                ${DPDK_FILTERED_LIBS}
-            -Wl,--no-whole-archive
+            -Wl,--whole-archive ${FF_PATH}/lib/libfstack.a -Wl,--no-whole-archive
+            # Point the linker at F-Stack's bundled DPDK shared libs so libfstack's
+            # rte_* references resolve from librte_*.so — NOT a second static copy.
+            # No -lrte_*/librte_*.a on the line; that is the whole point.
+            -L${FF_PATH}/lib/x86_64-linux-gnu
             # The ENA PMD uses libibverbs *core* (InfiniBand-free) — plain shared
             # dep. libjitterentropy ships only the versioned .so.3 (no unversioned
             # dev symlink), so link it by exact name.

@@ -180,7 +180,7 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Prepend its pkgconfig dirs so pkg_check_modules finds the F-Stack DPDK first.
     set(ENV{PKG_CONFIG_PATH}
         "/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-    pkg_check_modules(DPDK libdpdk)          # F-Stack bundled DPDK's libdpdk.pc
+    pkg_check_modules(DPDK REQUIRED libdpdk)  # F-Stack bundled DPDK's libdpdk.pc (static libs only)
     find_library(FSTACK_LIB fstack)          # F-Stack libfstack (/usr/local/lib)
     find_path(FSTACK_INCLUDE ff_api.h)
     if(DPDK_FOUND AND FSTACK_LIB AND FSTACK_INCLUDE)
@@ -190,26 +190,51 @@ if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # libfstack.a is NOT self-contained — it needs rte_* symbols — so we must
         # link DPDK too. Use F-Stack's OWN bundled DPDK (resolved via the
         # PKG_CONFIG_PATH set above → /usr/local/lib/x86_64-linux-gnu), NOT the
-        # distro libdpdk. Pairing libfstack with its matching bundled DPDK keeps a
-        # SINGLE DPDK in the image, so EAL registers its tailqs once (mixing
-        # F-Stack's DPDK with the system DPDK double-registers them and panics:
-        # "EAL: PANIC in tailqinitfn_*: Cannot initialize tailq").
+        # distro libdpdk, and link its STATIC libs (DPDK_STATIC_LIBRARIES) ONLY —
+        # never the dynamic DPDK_LIBRARIES. Pairing libfstack with its matching
+        # bundled DPDK keeps a SINGLE DPDK in the image so EAL registers its tailqs
+        # once (a second copy panics: "EAL: PANIC in tailqinitfn_*: Cannot
+        # initialize tailq").
         #
-        # That bundled DPDK also ships the RDMA/InfiniBand verbs providers
-        # (libbnxt_re-/libcxgb4-/libmthca-rdmav59.a, ...) which we don't use (ENA
-        # PMD only) and which break --whole-archive with internal undefined refs —
-        # so filter them (plus ibverbs/ibumad/rdmacm) out of the static list first.
+        # pkg-config's --static output lists each DPDK lib as a static token
+        # (-l:librte_xxx.a, wrapped in --whole-archive) but ALSO leaks a bare
+        # "rte_xxx" for some libs; because F-Stack's DPDK ships both .a and .so,
+        # that bare -lrte_xxx resolves to librte_xxx.so and its constructors run a
+        # SECOND time → the tailq double-registration panic. So drop each bare
+        # rte_xxx whose static .a form is already on the line. Also drop the RDMA/
+        # InfiniBand verbs providers (libbnxt_re-/libcxgb4-/libmthca-rdmav59.a,
+        # ...) — unused (ENA PMD only) and they break --whole-archive with
+        # internal undefined references.
+        set(DPDK_STATIC_STEMS "")               # DPDK libs present in static .a form
+        foreach(lib ${DPDK_STATIC_LIBRARIES})
+            if(lib MATCHES "librte_([a-z0-9_]+)\\.a$")
+                list(APPEND DPDK_STATIC_STEMS "${CMAKE_MATCH_1}")
+            endif()
+        endforeach()
         set(DPDK_FILTERED_LIBS "")
         foreach(lib ${DPDK_STATIC_LIBRARIES})
-            if(NOT lib MATCHES "rdmav|ibverbs|libibumad|rdmacm")
+            set(_keep TRUE)
+            if(lib MATCHES "rdmav|ibverbs|libibumad|rdmacm")
+                set(_keep FALSE)                # unused RDMA verbs providers
+            elseif(lib MATCHES "^rte_([a-z0-9_]+)$")
+                # bare (dynamic) DPDK lib — drop if its static .a is already linked
+                list(FIND DPDK_STATIC_STEMS "${CMAKE_MATCH_1}" _idx)
+                if(NOT _idx EQUAL -1)
+                    set(_keep FALSE)
+                endif()
+            endif()
+            if(_keep)
                 list(APPEND DPDK_FILTERED_LIBS ${lib})
             endif()
         endforeach()
         # Link order: libfstack.a FIRST, then F-Stack's filtered DPDK static libs,
         # BOTH inside --whole-archive so the F-Stack + DPDK PMD constructors
         # (RTE_PMD_REGISTER_*, incl. the ENA PMD) survive the static link and
-        # self-register. System deps come last so their references resolve.
+        # self-register. --no-as-needed (before --whole-archive) stops the linker
+        # discarding libs whose need isn't yet visible at that point on the line.
+        # System deps come last so their references resolve.
         target_link_libraries(OrderMatcher PUBLIC
+            -Wl,--no-as-needed
             -Wl,--whole-archive
                 ${FF_PATH}/lib/libfstack.a
                 ${DPDK_FILTERED_LIBS}

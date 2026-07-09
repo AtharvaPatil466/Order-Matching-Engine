@@ -123,6 +123,11 @@ private:
         T data;
         alignas(MPSC_CACHE_LINE) std::atomic<size_t> sequence;
     };
+    // alignas(64) on `sequence` forces Slot's alignment to a full cache line,
+    // so sizeof(Slot) is padded up to a 64-byte multiple. Each slot therefore
+    // starts on its own cache line, preventing false sharing between adjacent
+    // slots. This assert guards that invariant if the layout ever changes.
+    static_assert(sizeof(Slot) % 64 == 0, "Slot must be cache-line aligned to prevent false sharing");
 
     size_t capacity_;
     size_t mask_;

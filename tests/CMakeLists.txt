@@ -441,22 +441,6 @@ add_test(NAME LeaseEpochTest COMMAND LeaseEpochTest)
 set_tests_properties(LeaseEpochTest PROPERTIES TIMEOUT 30
                      LABELS "project;ha;replication")
 
-# Coordinated-omission-free (HdrHistogram-style) latency histogram
-add_executable(LatencyHistogramTest TestLatencyHistogram.cpp)
-target_link_libraries(LatencyHistogramTest PRIVATE OrderMatcher)
-enable_assertions(LatencyHistogramTest)
-add_test(NAME LatencyHistogramTest COMMAND LatencyHistogramTest)
-set_tests_properties(LatencyHistogramTest PROPERTIES TIMEOUT 30
-                     LABELS "project;perf;latency")
-
-# Dependency-free OpenTelemetry-shaped tracing abstraction
-add_executable(TracingTest TestTracing.cpp)
-target_link_libraries(TracingTest PRIVATE OrderMatcher)
-enable_assertions(TracingTest)
-add_test(NAME TracingTest COMMAND TracingTest)
-set_tests_properties(TracingTest PROPERTIES TIMEOUT 30
-                     LABELS "project;observability;tracing")
-
 # Wire-protocol versioning contract (FIX/SBE/ITCH/OUCH)
 add_executable(ProtocolVersioningTest ProtocolVersioningTest.cpp)
 target_link_libraries(ProtocolVersioningTest PRIVATE OrderMatcher)

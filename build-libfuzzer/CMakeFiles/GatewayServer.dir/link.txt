@@ -1,1 +1,0 @@
-/opt/homebrew/opt/llvm/bin/clang++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/GatewayServer.dir/src/gateway_main.cpp.o -o GatewayServer  libOrderMatcher.a

@@ -1,2 +1,0 @@
-/usr/bin/ar qc libOrderMatcher.a CMakeFiles/OrderMatcher.dir/src/AdminServer.cpp.o CMakeFiles/OrderMatcher.dir/src/OrderBook.cpp.o CMakeFiles/OrderMatcher.dir/src/MatchingEngine.cpp.o CMakeFiles/OrderMatcher.dir/src/TcpGateway.cpp.o CMakeFiles/OrderMatcher.dir/src/FaultInjector.cpp.o
-/opt/homebrew/opt/llvm/bin/llvm-ranlib libOrderMatcher.a

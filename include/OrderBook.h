@@ -11,6 +11,7 @@
 #include "LULDManager.h"
 #include "WashTradeDetector.h"
 #include "BatchRiskValidator.h"
+#include <array>
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -35,6 +36,16 @@ struct Trade {
     // Set for continuous-match trades; auction-cross trades keep the default
     // (a call auction has no single aggressor — fees treat the buyer as taker).
     Side aggressorSide = Side::Buy;
+};
+
+// A single continuous-match fill, buffered on the stack inside OrderBook::match
+// so the per-fill onTrade dispatch and trade-fill audit logging can be flushed
+// in ONE batch after the matching loop instead of firing interleaved with book
+// mutation on every fill. Wraps the fully-formed Trade — every downstream sink
+// (listeners + structured audit log) is derived from it, so no other per-fill
+// state needs buffering.
+struct FillEvent {
+    Trade trade;
 };
 
 // Market Data: single price level
@@ -408,6 +419,13 @@ private:
     void releaseOnCloseOrders();
     // Cancel any LOC orders remaining in the book after uncross completes.
     void cancelLocOrders();
+
+    // Stack-buffer capacity for the batched per-fill work in match() (onTrade
+    // dispatch, trade-fill audit logging, deferred lookup erases). A single
+    // aggressive order that produces more fills than this is handled by
+    // flush-and-continue inside the loop — the batch is drained and reused, so
+    // no fill is ever truncated regardless of sweep depth.
+    static constexpr int kMaxFillsPerOrder = 256;
 
     void match(Order* order);
     void matchProRata(Order* order);

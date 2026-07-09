@@ -660,6 +660,17 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 // ─── Match (Price-Time FIFO) ─────────────────────────────────────────────────
 
 void OrderBook::match(Order* incoming) {
+    // P1-1 HOIST: incoming->side never changes across the whole match, so the
+    // buy/sell flag and the opposite-side (resting) book are loop invariants.
+    // Resolve them ONCE here instead of re-selecting them every iteration.
+    // Branchless opposite-book select: incoming side is ~50/50 and so
+    // unpredictable by any HW branch predictor. Index a pointer array instead
+    // of branching. books[isBuy] is the same-side book (isBuy=true -> bids_);
+    // the resting/opposite book is books[!isBuy].
+    const bool isBuy = (incoming->side == Side::Buy);
+    FlatPriceMap* books[2] = {&asks_, &bids_};
+    FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
+
     // Market-order sweep protection: cap how far a market order may walk from
     // the arrival touch price so one order can't clear the book at runaway
     // prices. Disabled when marketProtectionPct_ == 0; any unfilled remainder
@@ -668,23 +679,86 @@ void OrderBook::match(Order* incoming) {
         (incoming->type == OrderType::Market && marketProtectionPct_ > 0.0);
     Price mktProtBound = 0;
     if (useMktProt) {
-        const auto& opp = (incoming->side == Side::Buy) ? asks_ : bids_;
-        if (!opp.empty()) {
-            const Price touch = opp.bestPrice();
+        if (!opposite.empty()) {
+            const Price touch = opposite.bestPrice();
             const Price band =
                 static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
-            mktProtBound = (incoming->side == Side::Buy) ? touch + band : touch - band;
+            mktProtBound = isBuy ? touch + band : touch - band;
         }
     }
 
+    // P1-2 checkSMP OFF THE HOT PATH: a self-trade is purely a same-participant
+    // test, so the incoming order can only ever self-trade against its OWN
+    // resting orders. Determine up front — before the loop — whether any resting
+    // order the match can reach belongs to the incoming participant. Scan is
+    // bounded to exactly the crossable levels the loop can walk (same price gate
+    // as the loop's break, all levels for a market order), and short-circuits on
+    // the first self order. If none exist, stpClear stays true and the per-fill
+    // checkSMP()/STP handling is skipped entirely on the common path. When a self
+    // order IS present the flag is false and the loop runs the exact original STP
+    // path, so STP semantics (detection + mode action) are preserved bit-for-bit.
+    // Sound because matching never ADDS an opposite-side order, so a resting order
+    // absent from this pre-scan can never appear mid-loop.
+    bool stpClear = true;
+    {
+        const ParticipantId incomingPid = incoming->participantId;
+        const bool isMarket = (incoming->type == OrderType::Market);
+        const Price limitPrice = incoming->price;
+        opposite.forEachLevelWhile(
+            [&](Price levelPrice, const OrderList& level) -> bool {
+                if (!isMarket) {
+                    if (isBuy  && levelPrice > limitPrice) return false;
+                    if (!isBuy && levelPrice < limitPrice) return false;
+                }
+                for (Order* o = level.front(); o; o = o->next) {
+                    if (o->participantId == incomingPid) {
+                        stpClear = false;
+                        return false;  // stop scanning — one is enough
+                    }
+                }
+                return true;
+            });
+    }
+
+    // P1-3/P1-4/P1-5: buffer per-fill side effects on the stack and flush them
+    // AFTER the loop rather than firing virtual onTrade dispatches, audit logs
+    // and O(1)-lookup erases interleaved with book mutation on every fill.
+    //   pendingFills — batched trade events for onTrade + logTradeFill.
+    //   toErase      — ids of fully-filled resting orders (their nodes are already
+    //                  unlinked from their level and returned to the pool below;
+    //                  matching never consults orderLookup_, so the id is dropped
+    //                  in one batch instead of a hash erase per fill).
+    std::array<FillEvent, kMaxFillsPerOrder> pendingFills;
+    int fillCount = 0;
+    std::array<OrderId, kMaxFillsPerOrder> toErase;
+    int eraseCount = 0;
+
+    // Flush the batched work: dispatch onTrade, emit trade-fill audit logs, then
+    // apply the deferred lookup erases. Order among fills is preserved exactly
+    // (== original per-fill order: logTradeFill then onTrade). Called when the
+    // buffer fills mid-sweep (flush-and-continue — never truncates a fill) and
+    // once after the loop.
+    auto flushFills = [&]() {
+        const bool dispatchTrades = (!replayMode_ && hasTradeListener_);
+        const bool auditLog = obSinkActive();
+        for (int i = 0; i < fillCount; ++i) {
+            const Trade& t = pendingFills[i].trade;
+            if (auditLog) [[unlikely]]
+                obSink().log(logTradeFill(t.buyOrderId, t.sellOrderId,
+                                          t.symbolId, t.price, t.quantity));
+            if (dispatchTrades) { listener_->onTrade(t); engineListener_->onTrade(t); }
+        }
+        for (int i = 0; i < eraseCount; ++i) orderLookup_.erase(toErase[i]);
+        fillCount = 0;
+        eraseCount = 0;
+    };
+
     while (incoming->remainingQty > 0) {
-        bool isBuy = (incoming->side == Side::Buy);
-        // Branchless opposite-book select: incoming side is ~50/50 and so
-        // unpredictable by any HW branch predictor. Index a pointer array
-        // instead of branching. books[isBuy] is the same-side book
-        // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
-        FlatPriceMap* books[2] = {&asks_, &bids_};
-        FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
+        // Overflow guard (flush-and-continue): keep at least one free slot for
+        // this iteration's fill. A fill fully-filling a resting order also
+        // consumes one toErase slot, but eraseCount <= fillCount always, so
+        // guarding fillCount covers both buffers.
+        if (fillCount == kMaxFillsPerOrder) [[unlikely]] flushFills();
 
         if (opposite.empty()) [[unlikely]] break;
 
@@ -706,7 +780,7 @@ void OrderBook::match(Order* incoming) {
         OrderList* level = opposite.bestLevel();
         Order* bookOrder = level->front();
 
-        if (checkSMP(*incoming, *bookOrder)) [[unlikely]] {
+        if (!stpClear && checkSMP(*incoming, *bookOrder)) [[unlikely]] {
             // Phase 4: mode-aware STP — action depends on participant config
             STPMode mode = getSTPMode(incoming->participantId);
             STPResult stp = SelfTradeProtection::check(
@@ -775,10 +849,6 @@ void OrderBook::match(Order* incoming) {
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
-        if (obSinkActive()) [[unlikely]] obSink().log(logTradeFill(
-            isBuy ? incoming->id : bookOrder->id,
-            isBuy ? bookOrder->id : incoming->id,
-            symbolId_, bestPrice, fillQty));
 
         OrderId buyId = isBuy ? incoming->id : bookOrder->id;
         OrderId sellId = isBuy ? bookOrder->id : incoming->id;
@@ -803,16 +873,24 @@ void OrderBook::match(Order* incoming) {
         t.symbolId = symbolId_;
         t.aggressorSide = incoming->side;
         tradeHistory_.push(t);
-        // Skip the per-fill onTrade vtable dispatch entirely when no listener
-        // is wired (the common lean hot path). When one is registered the
-        // virtual call is unavoidable without templating the listener type.
-        if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
+        // P1-3 BATCH FILL EVENTS: buffer the trade instead of firing the onTrade
+        // vtable dispatch here; flushFills() dispatches all of them after the loop
+        // in the exact same order (and P1-5 emits logTradeFill from the same
+        // buffer). tradeHistory_ push stays inline (SPSC ring, not a vtable call),
+        // so its write ordering — and every nextSequenceNumber_/nowNs() stamp —
+        // is byte-for-byte unchanged.
+        pendingFills[fillCount++].trade = t;
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
             notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->initialQty, 0, bestPrice);
             level->remove(bookOrder);
-            orderLookup_.erase(bookOrder->id);
+            // P1-4 DEFER erase: the node is already unlinked from its level and
+            // returned to the pool below, and matching never consults
+            // orderLookup_, so drop the id in one batch in flushFills(). No
+            // allocate() runs during matching, so the pooled slot cannot be
+            // re-handed-out before the deferred erase clears the stale mapping.
+            toErase[eraseCount++] = bookOrder->id;
             orderPool_.deallocate(bookOrder);
             if (level->empty()) [[unlikely]] opposite.eraseBest();
         } else if (bookOrder->type == OrderType::Iceberg && bookOrder->visibleQty == 0) [[unlikely]] {
@@ -831,6 +909,9 @@ void OrderBook::match(Order* incoming) {
             bookOrder->status = OrderStatus::PartiallyFilled;
         }
     }
+
+    // Dispatch any fills still buffered (and apply their deferred erases).
+    flushFills();
 }
 
 // ─── Match (Pro-Rata) ────────────────────────────────────────────────────────

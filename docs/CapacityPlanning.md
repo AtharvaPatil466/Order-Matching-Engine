@@ -77,6 +77,12 @@ taskset -c 2-5 ./bin/OrderEngine --threads 4
 # The engine sets THREAD_AFFINITY_POLICY internally
 ```
 
+> **`taskset` pins your threads but does not stop the kernel from running timer
+> ticks, RCU callbacks, and IRQs on the same cores** — the usual cause of random
+> 50–200 µs P99.9 spikes. For the full host tuning (kernel `isolcpus`/`nohz_full`/
+> `rcu_nocbs`, NIC IRQ affinity, NIC↔core NUMA alignment, C-states/governor) see
+> [OSTuning.md](./OSTuning.md).
+
 ---
 
 ## 3. Disk Sizing (Journal)

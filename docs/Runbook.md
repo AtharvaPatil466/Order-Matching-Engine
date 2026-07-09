@@ -123,6 +123,14 @@ scrape_configs:
 5. If disk-bound: switch to `SyncPolicy::GroupCommit` (default) or `None`
 6. If CPU-bound: increase thread count or reduce symbol count per thread
 
+### Random Tail-Latency Spikes (50–200 µs P99.9, uncorrelated with load)
+`taskset` is not enough — the kernel still runs timer ticks, RCU callbacks, and NIC
+IRQs on the "pinned" cores. Work through [OSTuning.md](./OSTuning.md):
+1. Kernel isolation (`isolcpus`/`nohz_full`/`rcu_nocbs`) applied and verified in `/proc/cmdline` (§2)
+2. NIC IRQs pinned off the isolated cores: `sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>` (§3)
+3. NIC NUMA node == matching/DPDK cores' node (§4)
+4. Performance governor + deep C-states disabled: `sudo scripts/set_cpu_perf.sh` (§5)
+
 ---
 
 ## 4. Backup / Recovery

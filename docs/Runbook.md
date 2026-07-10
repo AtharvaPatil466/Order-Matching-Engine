@@ -6,6 +6,55 @@
 
 ## 1. Starting the Engine
 
+### Journal Storage Pre-Flight (RUN BEFORE EVERY START)
+
+> **HARD REQUIREMENT: the journal MUST be on instance-store (local) NVMe or a
+> RAM-backed tmpfs. EBS / Persistent Disk / Managed Disk / any network block
+> device is NOT acceptable for the journal path** — every group-commit flush
+> would pay a network round-trip that shows up directly in the order-entry P99
+> tail. See [CapacityPlanning.md](./CapacityPlanning.md) §3 "Journal Storage
+> Backing". This is also why the published EBS-backed Path C P99 (3,568 ns)
+> must be re-benchmarked on instance-store NVMe before it is quoted as the
+> production number.
+
+Verify the journal path resolves to a local NVMe or tmpfs device before launch:
+
+```bash
+# Point this at your actual --journal path directory.
+JOURNAL_DIR=/var/lib/orderengine
+
+# What device backs it, and what kind of device is it?
+SRC=$(findmnt -no SOURCE --target "$JOURNAL_DIR")
+FSTYPE=$(findmnt -no FSTYPE --target "$JOURNAL_DIR")
+echo "journal dir $JOURNAL_DIR -> source=$SRC fstype=$FSTYPE"
+
+# Accept tmpfs (RAM), reject anything that looks like a network block device.
+case "$FSTYPE" in
+  tmpfs|ramfs) echo "OK: RAM-backed journal (durability must come from replication)";;
+  nfs*|cifs|9p) echo "FATAL: journal is on a network filesystem ($FSTYPE) — abort"; exit 1;;
+  *)
+    # Block device: confirm it is local NVMe / instance-store, not EBS/PD/SAN.
+    DEV=$(lsblk -no NAME,TRAN,ROTA "$SRC" 2>/dev/null)
+    echo "backing block device: $DEV"
+    # EBS on Nitro shows up as an 'nvme' TRAN too, so also check the model string:
+    MODEL=$(cat "/sys/block/$(lsblk -no PKNAME "$SRC" 2>/dev/null || basename "$SRC")/device/model" 2>/dev/null)
+    echo "device model: $MODEL"
+    case "$MODEL" in
+      *"Instance Storage"*|*"Amazon EC2 NVMe Instance Storage"*) echo "OK: instance-store NVMe";;
+      *"Elastic Block Store"*|*"EBS"*) echo "FATAL: journal is on EBS (network block device) — move to instance-store NVMe or tmpfs"; exit 1;;
+      *) echo "WARN: could not classify '$MODEL' — MANUALLY confirm this is local NVMe, not a network volume";;
+    esac
+    ;;
+esac
+```
+
+> On AWS Nitro, **both** instance-store and EBS present as `/dev/nvme*`, so
+> `TRAN=nvme` alone is NOT sufficient — the model string (`Amazon EC2 NVMe
+> Instance Storage` vs `Amazon Elastic Block Store`) is the discriminator.
+> Wire this snippet into your systemd `ExecStartPre=` or container entrypoint
+> so a mis-provisioned host fails fast instead of silently shipping the EBS
+> latency into production.
+
 ### Bare Metal
 ```bash
 # Load config and start with 4 worker threads
@@ -36,6 +85,9 @@ After=network.target
 
 [Service]
 Type=simple
+# Fail fast if the journal is on EBS / a network block device. Save the §1
+# "Journal Storage Pre-Flight" snippet as this script (it exits non-zero on EBS).
+ExecStartPre=/opt/orderengine/scripts/check_journal_storage.sh /var/lib/orderengine
 ExecStart=/opt/orderengine/bin/OrderEngine --threads 4 --port 8080 --symbols 4
 WorkingDirectory=/opt/orderengine
 Restart=on-failure
@@ -120,8 +172,9 @@ scrape_configs:
 2. Check for competing processes: `top -H -p <pid>`
 3. Check NUMA topology: workers should be on the same NUMA node
 4. Check journal disk latency: `iostat -x 1`
-5. If disk-bound: switch to `SyncPolicy::GroupCommit` (default) or `None`
-6. If CPU-bound: increase thread count or reduce symbol count per thread
+5. **Confirm the journal is NOT on EBS / a network block device** — re-run the §1 "Journal Storage Pre-Flight" check. A network-backed journal adds ~1–4 ms per flush and is the single most common cause of an inflated Path C P99; the fix is to move the journal to instance-store NVMe or tmpfs, not to change code.
+6. If disk-bound: switch to `SyncPolicy::GroupCommit` (default) or `None`
+7. If CPU-bound: increase thread count or reduce symbol count per thread
 
 ### Random Tail-Latency Spikes (50–200 µs P99.9, uncorrelated with load)
 `taskset` is not enough — the kernel still runs timer ticks, RCU callbacks, and NIC

@@ -121,6 +121,39 @@ Journal/day = orders_per_day × avg_entry_size
 - **Production**: NVMe SSD with ≥100K IOPS write
 - **Ultra-low-latency**: Intel Optane or tmpfs (if durability handled by replication)
 
+### Journal Storage Backing — HARD Deployment Constraint
+
+> **The journal MUST live on instance-store (local) NVMe or a RAM-backed
+> tmpfs. A network block device — AWS EBS, GCP Persistent Disk, Azure
+> Managed Disk, or any iSCSI/NFS/SAN volume — is NOT acceptable for the
+> journal path.** The engine `fdatasync()`s (or io_uring-acks) each group
+> commit; on a network volume every flush pays a network round-trip, which
+> lands directly in the order-entry P99 tail. This is a **provisioning
+> requirement**, not a tuning suggestion.
+
+| Backing | Journal flush latency | Verdict |
+|---------|-----------------------|---------|
+| RAM tmpfs (`/dev/shm`) | ~0 (durability via replication) | ✅ Best — ultra-low-latency, requires HA replication for durability |
+| Instance-store NVMe (e.g. `c6id.metal`, `c6gd`, `i4i`) | ~10–30 µs | ✅ Required minimum for production |
+| Local physical NVMe (bare metal) | ~10–30 µs | ✅ Equivalent to instance-store NVMe |
+| **EBS / PD / Managed Disk / SAN / NFS** | **~1–4 ms round-trip** | ❌ **NOT acceptable for the journal** |
+
+**Why this matters for the published numbers.** The current benchmarked
+**Path C P99 of 3,568 ns was measured with the journal on EBS** (see
+[BENCHMARKS.md](../../BENCHMARKS.md) — "async io_uring ack on EBS"). A large
+part of that figure is EBS network-block-device round-trip latency, **not**
+matching-engine or journal-code cost — it is a *deployment* artifact, not a
+code bug. **The production P99 must be re-benchmarked with the journal on
+instance-store NVMe (or tmpfs) and that re-measured number reported as the
+real Path C P99.** Do not cite the EBS-backed 3,568 ns as the engine's
+achievable production tail.
+
+**Instance selection (AWS example).** Choose an instance family with local
+NVMe instance-store — `c6id`/`c7gd`/`m6id`/`i4i`/`c6gd` — and place the
+journal on the mounted instance-store volume (or a tmpfs). Do **not** put
+the journal on the root EBS volume. If durability is delivered by
+primary-backup replication (see §5), a RAM tmpfs journal is preferred.
+
 ---
 
 ## 4. Network Sizing
@@ -185,6 +218,7 @@ Network: 10 GbE
 Run these checks daily:
 
 - [ ] `df -h /journal/path` — disk < 80% used
+- [ ] Journal path is on **local NVMe / tmpfs, not a network block device** — see [Runbook.md](./Runbook.md) §1 "Journal Storage Pre-Flight" (verify at every start, re-check after any host/AMI/volume change)
 - [ ] `curl /prometheus | grep queue_depth` — queue < 50% capacity
 - [ ] `curl /prometheus | grep p99` — latency within SLA
 - [ ] `curl /health` — returns 200

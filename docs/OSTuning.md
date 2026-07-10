@@ -199,15 +199,51 @@ access; rely on the OS-level controls and boot params above.
 
 ---
 
-## 6. Bring-Up Order & Checklist
+## 6. Journal Storage Backing — P2-7
+
+CPU isolation and IRQ pinning remove the *scheduling* tail; a network-backed
+journal re-introduces a much larger *I/O* tail that no amount of core tuning can
+hide. The engine flushes each group commit to durable storage, so the journal
+device's flush latency is added straight onto the order-entry path.
+
+> **HARD REQUIREMENT: the journal MUST be on instance-store (local) NVMe or a
+> RAM-backed tmpfs. EBS / Persistent Disk / Managed Disk / SAN / NFS is NOT
+> acceptable for the journal path.** A network block device pays a ~1–4 ms
+> round-trip on every flush — orders of magnitude larger than the ~10–30 µs of
+> a local NVMe and completely dominant over the ns-scale matching cost.
+
+- **Instance selection**: use a family with local NVMe instance-store
+  (`c6id`/`c7gd`/`m6id`/`i4i`/`c6gd` on AWS; equivalents elsewhere). Bare metal
+  such as `c6id.metal` is ideal.
+- **Placement**: mount the instance-store volume and point `--journal` at it (or
+  at a `tmpfs`). Never leave the journal on the root EBS/boot volume.
+- **tmpfs (RAM) option**: lowest latency, but durability must then come from
+  primary-backup replication (see [CapacityPlanning.md](./CapacityPlanning.md) §5).
+- **Nitro gotcha**: instance-store *and* EBS both appear as `/dev/nvme*`, so
+  `TRAN=nvme` is not proof of locality — check the device model string
+  (`Amazon EC2 NVMe Instance Storage` vs `Amazon Elastic Block Store`). The
+  ready-to-wire check is in [Runbook.md](./Runbook.md) §1 "Journal Storage
+  Pre-Flight".
+
+**Benchmark caveat.** The published Path C P99 of **3,568 ns was measured with
+the journal on EBS** (see [BENCHMARKS.md](../BENCHMARKS.md)); a large part of it
+is EBS network round-trip, a *deployment* artifact rather than a code cost. The
+production P99 must be **re-benchmarked with the journal on instance-store NVMe
+or tmpfs** and that re-measured number reported as the real figure.
+
+---
+
+## 7. Bring-Up Order & Checklist
 
 One-time host setup (survives reboot):
 - [ ] §2 — `isolcpus` / `nohz_full` / `rcu_nocbs` / `irqaffinity` in GRUB, `update-grub`, reboot.
 - [ ] §2 — verified `cat /proc/cmdline` and `/sys/.../cpu/isolated` show the isolated cores.
 - [ ] §4 — verified `<nic_dev>` NUMA node == isolated-cores node (`≠ -1`).
 - [ ] §3 — `irqbalance` stopped **and** disabled.
+- [ ] §6 — instance has **local NVMe instance-store** (or tmpfs) for the journal; journal path is **not** on EBS/PD/SAN/NFS.
 
 Every engine start (before launching `OrderEngine` / the F-Stack receiver):
+- [ ] §6 — journal path verified on local NVMe / tmpfs ([Runbook.md](./Runbook.md) §1 pre-flight).
 - [ ] §3 — `sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>`
 - [ ] §5 — `sudo scripts/set_cpu_perf.sh`
 - [ ] Start the engine pinned to the isolated cores (`taskset -c <matching_core> ...` /

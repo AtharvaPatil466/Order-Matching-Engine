@@ -368,4 +368,4 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 46.5K LOC · 77 test executables · 426 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*
+*C++20 · 46.5K LOC · 77 test executables · 426 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 1.26M states verified on the matching-inclusive MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*

@@ -98,6 +98,15 @@ enable_assertions(SubmitResultTest)
 add_test(NAME SubmitResultTest COMMAND SubmitResultTest)
 set_tests_properties(SubmitResultTest PROPERTIES TIMEOUT 120 LABELS "project;api")
 
+# Hot-path pre-trade risk controls (P2-8 kill switch, P2-9 position limits,
+# P2-10 fat-finger, P2-11 OTR throttle)
+add_executable(RiskControlsTest RiskControlsTest.cpp)
+target_link_libraries(RiskControlsTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(RiskControlsTest)
+gtest_discover_tests(RiskControlsTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;risk")
+
 # AdminServer endpoint integration test (HTTP /prometheus, /health)
 add_executable(AdminServerEndpointsTest AdminServerEndpointsTest.cpp)
 target_link_libraries(AdminServerEndpointsTest PRIVATE OrderMatcher)

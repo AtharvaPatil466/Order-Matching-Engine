@@ -77,7 +77,17 @@ enum class RejectReason : uint8_t {
     MarketClosed,             // Submitted while book is in PostClose state
     DuplicateOrderId,         // AddOrder with an id already in the book
     UnsupportedFixVersion,    // BeginString outside the session's accept-list
-    MissingRequiredField      // Required field absent (e.g. TransactTime on FIX 4.4)
+    MissingRequiredField,     // Required field absent (e.g. TransactTime on FIX 4.4)
+
+    // ─── Hot-path risk controls (P2-8 … P2-11) ──────────────────────────────
+    // NOTE: extending this enum requires a matching case in every exhaustive
+    // switch over RejectReason (FixSession.h, OuchProtocol.h, FIXParser.h,
+    // TcpGateway.cpp). The Release build is -Wall -Wextra -Werror, so a missing
+    // case is a hard compile error, not a warning.
+    KillSwitchActive,          // P2-8: engine kill switch engaged; new orders blocked
+    PositionLimitExceeded,     // P2-9: participant net-position limit would be breached
+    FatFingerReject,           // P2-10: fat-finger guard (max qty / price band / max notional)
+    OrderToTradeRatioExceeded  // P2-11: participant order-to-trade ratio throttle engaged
 };
 
 // Trading state controls how new orders are admitted into the book and

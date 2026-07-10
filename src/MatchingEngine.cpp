@@ -415,6 +415,13 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                                                req.expiryTime, req.stopLimitPrice,
                                                req.pegType, req.pegOffset, req.trailAmount,
                                                req.minQty, req.hidden);
+        // P2-9: reserve the resting remainder as working exposure (see the
+        // sync path in submitOrder for the double-count rationale).
+        if (positionLimitsActive_.load(std::memory_order_relaxed) &&
+            std::holds_alternative<OrderId>(result)) {
+            const Order* o = book->getOrder(req.orderId);
+            reservePosition(req.participantId, req.side, o ? o->remainingQty : 0);
+        }
         if (journal_ && std::holds_alternative<OrderId>(result)) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
@@ -441,6 +448,10 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         auto* book = getOrderBook(req.symbolId);
         if (!book || !book->getOrder(req.orderId)) {
             return;
+        }
+        // P2-9: release working exposure before the order leaves the book.
+        if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+            releasePosition(book->getOrder(req.orderId));
         }
         book->cancelOrder(req.orderId);
         if (journal_) {
@@ -497,7 +508,27 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             return;
         }
         for (SymbolId symbolId : symbolsByThread_[threadIndex]) {
-            if (auto* book = getOrderBook(symbolId)) {
+            auto* book = getOrderBook(symbolId);
+            if (!book) continue;
+            if (req.participantId == kKillAllParticipants) {
+                // P2-8: engine kill switch — cancel EVERY resting order on this
+                // worker's books. The worker owns these books, so the non-locking
+                // forEachOrder walk is safe; ids are collected first, then
+                // cancelled (cancelOrder takes bookLock_, so it must run outside
+                // the walk).
+                std::vector<OrderId> ids;
+                book->forEachOrder([&](const Order& o) { ids.push_back(o.id); });
+                for (OrderId id : ids) {
+                    if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+                        releasePosition(book->getOrder(id));
+                    }
+                    book->cancelOrder(id);
+                    if (journal_) {
+                        std::lock_guard<std::mutex> lock(journalMutex_);
+                        journal_->logCancelOrder(id);
+                    }
+                }
+            } else {
                 book->cancelAllForParticipant(req.participantId);
             }
         }
@@ -549,6 +580,7 @@ void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
     // slot, so gateway/OUCH market-data listeners are untouched). It only
     // buffers while OCO is active, so this is free until an OCO is registered.
     auto oco = std::make_unique<OcoBookListener>();
+    oco->engine = this;
     oco->ocoActive = &ocoActive_;
     oco->tradesActive = &observersActive_;
     // Pre-reserve the observer + drain buffers so a burst of fills in one
@@ -576,6 +608,12 @@ void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
 }
 
 void MatchingEngine::OcoBookListener::onTrade(const Trade& t) {
+    // P2-9/10/11 per-fill accrual (last-trade price, taker position, OTR trade
+    // counts). Runs inline on the matching thread in both sync and async modes,
+    // gated by a single atomic load so the no-risk hot path is untouched.
+    if (engine && engine->anyRiskActive_.load(std::memory_order_relaxed)) {
+        engine->onRiskFill(t);
+    }
     // Buffer executed trades for the trade-driven consumers (fees, risk
     // position accrual, audit trail); drained by driveOco after the request.
     if (tradesActive && tradesActive->load(std::memory_order_relaxed)) {
@@ -651,6 +689,238 @@ bool MatchingEngine::preTradeRiskCheck(ParticipantId trader, Side side, Price pr
     if (!riskActive_.load(std::memory_order_relaxed)) return true;
     std::lock_guard<std::mutex> lock(riskMutex_);
     return riskManager_.check(trader, side, price, qty, referencePrice).allowed;
+}
+
+// ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ────────────────────────
+
+uint64_t MatchingEngine::riskNow() const {
+    return riskClock_ ? riskClock_() : nowNs();
+}
+
+void MatchingEngine::logRiskReject(const char* control, SymbolId sym,
+                                   ParticipantId pid, RejectReason reason) {
+    // Guarded on the sink-active flag: LogEvent construction heap-allocates, so
+    // the reject path stays allocation-free when no structured sink is attached.
+    if (!obSinkActive()) return;
+    obSink().log(obEvent("risk_reject")
+                     .kv("control", control)
+                     .kv("symbol_id", static_cast<long long>(sym))
+                     .kv("participant_id", static_cast<long long>(pid))
+                     .kv("reason", static_cast<long long>(static_cast<int>(reason))));
+}
+
+void MatchingEngine::setKillSwitch(bool engaged) {
+    // ── ORDER OF OPERATIONS (P2-8) ──────────────────────────────────────────
+    // 1. Publish the flag with release semantics FIRST. From this instant every
+    //    thread entering submitOrder observes the switch (acquire-load) and
+    //    rejects new orders with KillSwitchActive. Doing this before the cancel
+    //    sweep closes the race where a fresh order slips in between "cancel
+    //    resting" and "set flag".
+    // 2. THEN cancel all resting orders.
+    // Deactivation (engaged == false) only clears the flag; it does not resurrect
+    // cancelled orders.
+    killSwitchActive_.store(engaged, std::memory_order_release);
+    if (!engaged) return;
+
+    if (async_) {
+        // Book mutations must run on the owning worker in async mode. Dispatch a
+        // cancel-all request to every worker and wait for the sweep to drain.
+        for (size_t i = 0; i < numThreads_; ++i) {
+            OrderRequest req{};
+            req.type = OrderRequest::Type::KillSwitch;
+            req.participantId = kKillAllParticipants;
+            enqueueSafe(i, req);
+        }
+        waitForDrain();
+    } else {
+        cancelAllRestingOrders();
+    }
+}
+
+void MatchingEngine::cancelAllRestingOrders() {
+    // Sync-mode kill-switch sweep. Lock order bookMutex_ -> bookLock_ ->
+    // journalMutex_, matching expireOrders()/driveOco(). Ids are collected under
+    // the book's shared lock (forEachOrderLocked), then cancelled outside it so
+    // cancelOrder can take bookLock_ exclusively without re-entrancy.
+    std::lock_guard<std::mutex> lock(bookMutex_);
+    for (SymbolId sym : symbolIds_) {
+        auto* book = getOrderBook(sym);
+        if (!book) continue;
+        std::vector<OrderId> ids;
+        book->forEachOrderLocked([&](const Order& o) { ids.push_back(o.id); });
+        for (OrderId id : ids) {
+            if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+                releasePosition(book->getOrder(id));
+            }
+            book->cancelOrder(id);
+            if (journal_) {
+                std::lock_guard<std::mutex> jl(journalMutex_);
+                journal_->logCancelOrder(id);
+            }
+        }
+    }
+}
+
+void MatchingEngine::setPositionLimit(ParticipantId pid, int64_t maxAbsPosition) {
+    if (pid >= MAX_PARTICIPANTS) return;
+    positionLimit_[pid].store(maxAbsPosition, std::memory_order_relaxed);
+    positionLimitsActive_.store(true, std::memory_order_relaxed);
+    anyRiskActive_.store(true, std::memory_order_relaxed);
+}
+
+int64_t MatchingEngine::getPosition(ParticipantId pid) const {
+    if (pid >= MAX_PARTICIPANTS) return 0;
+    return positions_[pid].load(std::memory_order_relaxed);
+}
+
+void MatchingEngine::reservePosition(ParticipantId pid, Side side, Quantity restingQty) {
+    if (pid >= MAX_PARTICIPANTS || restingQty == 0) return;
+    int64_t signedRest = (side == Side::Buy) ? static_cast<int64_t>(restingQty)
+                                             : -static_cast<int64_t>(restingQty);
+    positions_[pid].fetch_add(signedRest, std::memory_order_relaxed);
+}
+
+void MatchingEngine::releasePosition(const Order* order) {
+    if (!order || order->participantId >= MAX_PARTICIPANTS || order->remainingQty == 0) return;
+    int64_t signedRest = (order->side == Side::Buy) ? static_cast<int64_t>(order->remainingQty)
+                                                    : -static_cast<int64_t>(order->remainingQty);
+    positions_[order->participantId].fetch_sub(signedRest, std::memory_order_relaxed);
+}
+
+void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
+                                        double maxDeviationPct, int64_t maxNotional) {
+    if (sym >= MAX_RISK_SYMBOLS) return;
+    ffMaxQty_[sym].store(maxQty, std::memory_order_relaxed);
+    ffMaxDeviationBps_[sym].store(
+        static_cast<int64_t>(maxDeviationPct * 10000.0 + 0.5), std::memory_order_relaxed);
+    ffMaxNotional_[sym].store(maxNotional, std::memory_order_relaxed);
+    fatFingerActive_.store(true, std::memory_order_relaxed);
+    anyRiskActive_.store(true, std::memory_order_relaxed);
+}
+
+void MatchingEngine::setReferencePrice(SymbolId sym, Price px) {
+    if (sym >= MAX_RISK_SYMBOLS) return;
+    refPrice_[sym].store(px, std::memory_order_relaxed);
+}
+
+void MatchingEngine::setOtrLimit(double maxRatio, uint64_t windowMs, uint64_t minOrders) {
+    otrMaxRatio_ = maxRatio;
+    otrWindowNs_ = windowMs * 1'000'000ull;
+    otrMinOrders_ = minOrders;
+    otrActive_.store(maxRatio > 0.0, std::memory_order_relaxed);
+    if (maxRatio > 0.0) anyRiskActive_.store(true, std::memory_order_relaxed);
+}
+
+RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
+                                               Price price, Quantity qty, OrderType type) {
+    // ── P2-10 FAT-FINGER (per instrument) ───────────────────────────────────
+    if (fatFingerActive_.load(std::memory_order_relaxed) && sym < MAX_RISK_SYMBOLS) {
+        const uint64_t maxQty = ffMaxQty_[sym].load(std::memory_order_relaxed);
+        if (maxQty != 0 && qty > maxQty) {
+            fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
+            logRiskReject("fat_finger_qty", sym, pid, RejectReason::FatFingerReject);
+            return RejectReason::FatFingerReject;
+        }
+        const int64_t maxNotional = ffMaxNotional_[sym].load(std::memory_order_relaxed);
+        if (maxNotional != 0 && price > 0) {
+            // __int128 avoids overflow for price*qty at venue scale.
+            const __int128 notional = static_cast<__int128>(price) * static_cast<__int128>(qty);
+            if (notional > static_cast<__int128>(maxNotional)) {
+                fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
+                logRiskReject("fat_finger_notional", sym, pid, RejectReason::FatFingerReject);
+                return RejectReason::FatFingerReject;
+            }
+        }
+        // Market orders carry no limit price, so the ±deviation band does not apply.
+        const int64_t devBps = ffMaxDeviationBps_[sym].load(std::memory_order_relaxed);
+        const Price ref = refPrice_[sym].load(std::memory_order_relaxed);
+        if (devBps != 0 && ref > 0 && price > 0 && type != OrderType::Market) {
+            const int64_t diff = price > ref ? price - ref : ref - price;
+            // |price-ref|/ref > devBps/10000  ⇔  diff*10000 > devBps*ref
+            if (static_cast<__int128>(diff) * 10000 >
+                static_cast<__int128>(devBps) * static_cast<__int128>(ref)) {
+                fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
+                logRiskReject("fat_finger_band", sym, pid, RejectReason::FatFingerReject);
+                return RejectReason::FatFingerReject;
+            }
+        }
+    }
+
+    // ── P2-9 POSITION LIMIT (per participant, net signed exposure) ──────────
+    if (positionLimitsActive_.load(std::memory_order_relaxed) && pid < MAX_PARTICIPANTS) {
+        const int64_t limit = positionLimit_[pid].load(std::memory_order_relaxed);
+        if (limit > 0) {
+            const int64_t signedQty = (side == Side::Buy) ? static_cast<int64_t>(qty)
+                                                          : -static_cast<int64_t>(qty);
+            const int64_t projected = positions_[pid].load(std::memory_order_relaxed) + signedQty;
+            if (projected > limit || projected < -limit) {
+                positionRejects_.fetch_add(1, std::memory_order_relaxed);
+                logRiskReject("position_limit", sym, pid, RejectReason::PositionLimitExceeded);
+                return RejectReason::PositionLimitExceeded;
+            }
+        }
+    }
+
+    // ── P2-11 ORDER-TO-TRADE RATIO (per participant, rolling window) ────────
+    if (otrActive_.load(std::memory_order_relaxed) && pid < MAX_PARTICIPANTS &&
+        otrMaxRatio_ > 0.0) {
+        const uint64_t now = riskNow();
+        uint64_t start = otrWindowStart_[pid].load(std::memory_order_relaxed);
+        if (now - start > otrWindowNs_) {
+            // Roll the window; a single CAS winner resets the counters.
+            if (otrWindowStart_[pid].compare_exchange_strong(start, now,
+                                                             std::memory_order_relaxed)) {
+                otrOrders_[pid].store(0, std::memory_order_relaxed);
+                otrTrades_[pid].store(0, std::memory_order_relaxed);
+            }
+        }
+        const uint64_t orders = otrOrders_[pid].fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint64_t trades = otrTrades_[pid].load(std::memory_order_relaxed);
+        // Throttle once past the sample floor and orders/trades exceeds the cap.
+        // Integer form of orders/trades > maxRatio (trades == 0 ⇒ any orders trip).
+        if (orders >= otrMinOrders_ &&
+            static_cast<double>(orders) > otrMaxRatio_ * static_cast<double>(trades)) {
+            otrRejects_.fetch_add(1, std::memory_order_relaxed);
+            logRiskReject("otr", sym, pid, RejectReason::OrderToTradeRatioExceeded);
+            return RejectReason::OrderToTradeRatioExceeded;
+        }
+    }
+
+    return RejectReason::None;
+}
+
+void MatchingEngine::onRiskFill(const Trade& t) {
+    // Called inline from OcoBookListener::onTrade on every fill (both engine
+    // modes), gated upstream by anyRiskActive_. All updates are atomic.
+
+    // P2-10: track the last trade price as the fat-finger deviation reference.
+    if (fatFingerActive_.load(std::memory_order_relaxed) && t.symbolId < MAX_RISK_SYMBOLS) {
+        refPrice_[t.symbolId].store(t.price, std::memory_order_relaxed);
+    }
+
+    // P2-9: increment the TAKER's position by the filled qty. The maker's
+    // exposure was reserved at its own submit (working) and merely converts to a
+    // filled position here — no net change — so only the taker is accrued,
+    // keeping reserved + filled == full order qty for both sides.
+    if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+        const ParticipantId taker = (t.aggressorSide == Side::Buy) ? t.buyerId : t.sellerId;
+        const int64_t signedQ = (t.aggressorSide == Side::Buy)
+                                    ? static_cast<int64_t>(t.quantity)
+                                    : -static_cast<int64_t>(t.quantity);
+        if (taker < MAX_PARTICIPANTS) {
+            positions_[taker].fetch_add(signedQ, std::memory_order_relaxed);
+        }
+    }
+
+    // P2-11: a fill counts as a trade for both counterparties' OTR windows.
+    if (otrActive_.load(std::memory_order_relaxed)) {
+        if (t.buyerId < MAX_PARTICIPANTS) {
+            otrTrades_[t.buyerId].fetch_add(1, std::memory_order_relaxed);
+        }
+        if (t.sellerId < MAX_PARTICIPANTS) {
+            otrTrades_[t.sellerId].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void MatchingEngine::mapParticipant(ParticipantId trader, uint64_t strategyId,
@@ -744,6 +1014,15 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
                                          uint64_t expiryTime, Price stopLimitPrice,
                                          PegType pegType, Price pegOffset, Price trailAmount,
                                          Quantity minQty, bool hidden) {
+    // P2-8 KILL SWITCH — the very first thing checked. Settable from a
+    // monitoring thread; acquire-load pairs with the release-store in
+    // setKillSwitch() so a busy matching thread observes activation promptly.
+    if (killSwitchActive_.load(std::memory_order_acquire)) [[unlikely]] {
+        killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+        logRiskReject("kill_switch", symbolId, participantId, RejectReason::KillSwitchActive);
+        return rejectedAsync(RejectReason::KillSwitchActive);
+    }
+
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
     }
@@ -753,6 +1032,16 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     if (rateLimiter_.isEnabled() && !rateLimiter_.allow(participantId)) {
         rateLimitedCount_.fetch_add(1, std::memory_order_relaxed);
         return rejectedAsync(RejectReason::RateLimitExceeded);
+    }
+
+    // P2-9/10/11 pre-trade risk gate (fat-finger, position, OTR). Enforced at
+    // the submitOrder entry point in BOTH sync and async modes, before the order
+    // is enqueued or booked. Skipped entirely (one atomic load) when unconfigured.
+    if (anyRiskActive_.load(std::memory_order_relaxed)) {
+        RejectReason rr = checkRiskControls(symbolId, participantId, side, price, qty, type);
+        if (rr != RejectReason::None) [[unlikely]] {
+            return rejectedAsync(rr);
+        }
     }
 
     if (async_) {
@@ -795,6 +1084,15 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
                                            type, stopPrice, displayQty, tif, expiryTime,
                                            stopLimitPrice, pegType, pegOffset, trailAmount,
                                            minQty, hidden);
+    // P2-9: reserve the resting remainder as working exposure. Any portion that
+    // filled immediately was already accrued to this (taker) participant by
+    // onRiskFill during the match, so reserving only the remainder avoids double
+    // counting — reserved + filled == full order qty.
+    if (positionLimitsActive_.load(std::memory_order_relaxed) &&
+        std::holds_alternative<OrderId>(result)) {
+        const Order* o = book->getOrder(orderId);
+        reservePosition(participantId, side, o ? o->remainingQty : 0);
+    }
     if (journal_ && std::holds_alternative<OrderId>(result)) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
@@ -838,6 +1136,11 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
     if (!book || !book->getOrder(orderId)) {
         return rejectedAsync(book ? RejectReason::OrderNotFound
                                            : RejectReason::SymbolNotFound);
+    }
+    // P2-9: release the cancelled order's working exposure before it leaves the
+    // book (read remaining qty while the order still exists).
+    if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+        releasePosition(book->getOrder(orderId));
     }
     book->cancelOrder(orderId);
     if (journal_) {

@@ -116,6 +116,10 @@ public:
         case RejectReason::DuplicateOrderId:      return "duplicate id";
         case RejectReason::UnsupportedFixVersion: return "unsupported version";
         case RejectReason::MissingRequiredField:  return "missing required field";
+        case RejectReason::KillSwitchActive:      return "kill switch";
+        case RejectReason::PositionLimitExceeded: return "position limit";
+        case RejectReason::FatFingerReject:       return "fat finger";
+        case RejectReason::OrderToTradeRatioExceeded: return "OTR limit";
         }
         return "rejected";  // unreachable; silences "control reaches end".
     }

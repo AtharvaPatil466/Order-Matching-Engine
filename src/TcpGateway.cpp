@@ -44,6 +44,10 @@ const char* rejectReasonToString(RejectReason reason) {
     case RejectReason::DuplicateOrderId: return "duplicate orderId";
     case RejectReason::UnsupportedFixVersion: return "unsupported FIX version";
     case RejectReason::MissingRequiredField: return "missing required field";
+    case RejectReason::KillSwitchActive: return "kill switch active";
+    case RejectReason::PositionLimitExceeded: return "position limit exceeded";
+    case RejectReason::FatFingerReject: return "fat-finger reject";
+    case RejectReason::OrderToTradeRatioExceeded: return "order-to-trade ratio exceeded";
     }
     return "unknown reject";
 }

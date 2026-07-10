@@ -113,6 +113,10 @@ inline char ouchRejectCode(RejectReason r) {
     case RejectReason::UnsupportedFixVersion:       return OUCH_REJECT_OTHER;
     case RejectReason::MissingRequiredField:        return OUCH_REJECT_OTHER;
     case RejectReason::None:                        return OUCH_REJECT_OTHER;
+    case RejectReason::KillSwitchActive:            return OUCH_REJECT_HALT;
+    case RejectReason::PositionLimitExceeded:       return OUCH_REJECT_RISK;
+    case RejectReason::FatFingerReject:             return OUCH_REJECT_RISK;
+    case RejectReason::OrderToTradeRatioExceeded:   return OUCH_REJECT_RISK;
     }
     return OUCH_REJECT_OTHER;
 }

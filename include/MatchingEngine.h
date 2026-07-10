@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -310,6 +311,59 @@ public:
     }
     size_t getRiskBatchSize() const { return riskBatchSize_; }
 
+    // ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ─────────────────────
+    // All checks below are O(1), lock-free (atomic ops only) and allocation-free
+    // on the accept path. Each control is opt-in: it does nothing until configured
+    // at startup, so the existing hot path is unchanged when unused. Per-id state
+    // lives in fixed-size arrays indexed by participant/symbol id; ids at or above
+    // the bounds bypass the array-indexed controls.
+    static constexpr size_t MAX_PARTICIPANTS = 1024;  // positions_ / OTR array bound
+    static constexpr size_t MAX_RISK_SYMBOLS = 256;   // fat-finger array bound
+
+    // P2-8 Kill switch. setKillSwitch(true) is callable from a monitoring thread
+    // while the matching thread is busy: it publishes the flag first (so new
+    // orders are rejected immediately) THEN cancels all resting orders.
+    void setKillSwitch(bool engaged);
+    bool isKillSwitchActive() const {
+        return killSwitchActive_.load(std::memory_order_acquire);
+    }
+
+    // P2-9 Position limits. Limit is the max absolute net position (signed
+    // exposure = filled ± working orders). 0 = unlimited.
+    void setPositionLimit(ParticipantId pid, int64_t maxAbsPosition);
+    int64_t getPosition(ParticipantId pid) const;
+
+    // P2-10 Fat-finger, per instrument. maxQty / maxNotional 0 = unset;
+    // maxDeviationPct 0 = unset (e.g. 0.10 for ±10% around the reference price).
+    void setFatFingerLimits(SymbolId sym, Quantity maxQty,
+                            double maxDeviationPct, int64_t maxNotional);
+    // Seed / override the reference price used by the ±deviation band. It is
+    // otherwise tracked automatically from the last trade on that symbol.
+    void setReferencePrice(SymbolId sym, Price px);
+
+    // P2-11 Order-to-trade ratio throttle (per participant, shared limit/window).
+    // maxRatio 0 = disabled. A participant whose orders/trades over the rolling
+    // window exceeds maxRatio (after at least minOrders in the window) is throttled
+    // until the window rolls forward.
+    void setOtrLimit(double maxRatio, uint64_t windowMs, uint64_t minOrders);
+    // Inject a clock for the OTR rolling window (defaults to nowNs()). Enables
+    // deterministic tests of the engage/release transition.
+    void setRiskClock(ClockFn clock) { riskClock_ = std::move(clock); }
+
+    // Risk-control rejection counters (observability / tests).
+    uint64_t getKillSwitchRejectCount() const {
+        return killSwitchRejects_.load(std::memory_order_relaxed);
+    }
+    uint64_t getPositionRejectCount() const {
+        return positionRejects_.load(std::memory_order_relaxed);
+    }
+    uint64_t getFatFingerRejectCount() const {
+        return fatFingerRejects_.load(std::memory_order_relaxed);
+    }
+    uint64_t getOtrRejectCount() const {
+        return otrRejects_.load(std::memory_order_relaxed);
+    }
+
     // ─── FIX protocol gateway ─────────────────────────────────────────
     // Process a raw FIX message string and route to appropriate handler
     void processFIXMessage(const std::string& rawFix);
@@ -427,6 +481,7 @@ private:
     // stays free when its feature is unused. A book is driven by exactly one
     // worker thread, so the buffers are single-threaded.
     struct OcoBookListener : EventListener {
+        MatchingEngine* engine = nullptr;                 // for hot-path risk fill accrual
         const std::atomic<bool>* ocoActive = nullptr;     // gates the executed buffer
         const std::atomic<bool>* tradesActive = nullptr;  // gates the trades buffer
         std::vector<OrderId> executed;
@@ -468,6 +523,62 @@ private:
     std::atomic<bool> riskActive_{false};
     std::atomic<bool> catActive_{false};
     std::atomic<bool> observersActive_{false};  // any trade-driven consumer enabled
+
+    // ─── Hot-path pre-trade risk controls state (P2-8 … P2-11) ───────────────
+    // Feature gates. Loaded (relaxed) on the accept path; when all are false the
+    // only added cost is a couple of atomic loads. anyRiskActive_ additionally
+    // gates the per-fill onTrade accrual hook.
+    std::atomic<bool> killSwitchActive_{false};      // P2-8
+    std::atomic<bool> positionLimitsActive_{false};  // P2-9
+    std::atomic<bool> fatFingerActive_{false};       // P2-10
+    std::atomic<bool> otrActive_{false};             // P2-11
+    std::atomic<bool> anyRiskActive_{false};         // gates onRiskFill()
+
+    // P2-9 positions: signed net exposure (filled ± working orders), and the
+    // per-participant absolute limit (0 = unlimited). Value-initialised to 0.
+    std::atomic<int64_t> positions_[MAX_PARTICIPANTS]{};
+    std::atomic<int64_t> positionLimit_[MAX_PARTICIPANTS]{};
+
+    // P2-10 fat-finger per-symbol config + reference (last-trade) price.
+    std::atomic<uint64_t> ffMaxQty_[MAX_RISK_SYMBOLS]{};          // 0 = unset
+    std::atomic<int64_t>  ffMaxDeviationBps_[MAX_RISK_SYMBOLS]{}; // basis points; 0 = unset
+    std::atomic<int64_t>  ffMaxNotional_[MAX_RISK_SYMBOLS]{};     // 0 = unset
+    std::atomic<int64_t>  refPrice_[MAX_RISK_SYMBOLS]{};          // last trade / seed; 0 = none
+
+    // P2-11 OTR rolling window, per participant.
+    std::atomic<uint64_t> otrWindowStart_[MAX_PARTICIPANTS]{};
+    std::atomic<uint64_t> otrOrders_[MAX_PARTICIPANTS]{};
+    std::atomic<uint64_t> otrTrades_[MAX_PARTICIPANTS]{};
+    double   otrMaxRatio_{0.0};                    // 0 = disabled
+    uint64_t otrWindowNs_{1'000'000'000ull};       // 1s default
+    uint64_t otrMinOrders_{20};
+    ClockFn  riskClock_;                           // OTR window clock (default nowNs)
+
+    // Rejection counters (observability).
+    std::atomic<uint64_t> killSwitchRejects_{0};
+    std::atomic<uint64_t> positionRejects_{0};
+    std::atomic<uint64_t> fatFingerRejects_{0};
+    std::atomic<uint64_t> otrRejects_{0};
+
+    // Sentinel participant id meaning "all participants" for the async
+    // KillSwitch request path (cancel every resting order, not one trader's).
+    static constexpr ParticipantId kKillAllParticipants =
+        std::numeric_limits<ParticipantId>::max();
+
+    // Combined pre-trade risk gate (fat-finger, position, OTR). Returns
+    // RejectReason::None to admit. Kill switch is checked separately (first).
+    RejectReason checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
+                                   Price price, Quantity qty, OrderType type);
+    // Reserve/release working-order exposure for the position limit.
+    void reservePosition(ParticipantId pid, Side side, Quantity restingQty);
+    void releasePosition(const Order* order);
+    // Per-fill accrual: last-trade price, taker position, OTR trade counts.
+    void onRiskFill(const Trade& t);
+    // Cancel every resting order across all books (sync path of the kill switch).
+    void cancelAllRestingOrders();
+    uint64_t riskNow() const;
+    void logRiskReject(const char* control, SymbolId sym, ParticipantId pid,
+                       RejectReason reason);
 };
 
 } // namespace OrderMatcher

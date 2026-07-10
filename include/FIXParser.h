@@ -104,6 +104,10 @@ inline int ordRejReasonCode(RejectReason r) {
     case RejectReason::EngineStopped:               return 0;
     case RejectReason::UnsupportedFixVersion:       return 99;  // Other
     case RejectReason::None:                        return kOrdRejReasonOmit;
+    case RejectReason::KillSwitchActive:            return 2;   // Exchange closed
+    case RejectReason::PositionLimitExceeded:       return 3;   // Order exceeds limit
+    case RejectReason::FatFingerReject:             return 3;
+    case RejectReason::OrderToTradeRatioExceeded:   return 3;
     }
     return kOrdRejReasonOmit;
 }

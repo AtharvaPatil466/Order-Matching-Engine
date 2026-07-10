@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FaultInjector.h"
+#include "HugePageAllocator.h"
 
 #include <atomic>
 #include <vector>
@@ -29,8 +30,15 @@ class MpscQueue {
 public:
     explicit MpscQueue(size_t capacity) : capacity_(capacity), mask_(capacity - 1) {
         assert((capacity & (capacity - 1)) == 0 && "Capacity must be power of 2");
-        slots_ = new Slot[capacity];
+        // Back the ring's slot storage with 2 MB huge pages (falls back to the
+        // historical aligned new[] off Linux / when unreserved). Each Slot is
+        // cache-line sized, so a large ring spans many pages on the hot enqueue
+        // path — huge pages keep it TLB-resident. Slots are placement-
+        // constructed into the raw block and destroyed in the dtor.
+        slotsAlloc_ = hugeAlloc(sizeof(Slot) * capacity, alignof(Slot));
+        slots_ = static_cast<Slot*>(slotsAlloc_.ptr);
         for (size_t i = 0; i < capacity; ++i) {
+            new (&slots_[i]) Slot();
             slots_[i].sequence.store(i, std::memory_order_relaxed);
         }
         writePos_.store(0, std::memory_order_relaxed);
@@ -38,7 +46,10 @@ public:
     }
 
     ~MpscQueue() {
-        delete[] slots_;
+        for (size_t i = 0; i < capacity_; ++i) {
+            slots_[i].~Slot();
+        }
+        hugeFree(slotsAlloc_);
     }
 
     MpscQueue(const MpscQueue&) = delete;
@@ -132,6 +143,7 @@ private:
     size_t capacity_;
     size_t mask_;
     Slot* slots_;
+    HugeAllocation slotsAlloc_{};  // huge-page backing for slots_ (release info)
 
     // Separate cache lines for write and read positions
     alignas(MPSC_CACHE_LINE) std::atomic<size_t> writePos_;

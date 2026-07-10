@@ -1,5 +1,6 @@
 #pragma once
 
+#include "HugePageAllocator.h"
 #include "IntrusiveList.h"
 #include "Types.h"
 #include <cassert>
@@ -60,10 +61,18 @@ public:
     }
 
     ~FlatPriceMap() {
-        for (OrderList* block : slabBlocks_) {
-            delete[] block;
+        // Slab blocks are raw huge-page memory with the OrderList objects
+        // placement-constructed into them; destroy each object, then release the
+        // backing block. OrderList's destructor is trivial, but the explicit
+        // call keeps construction/destruction symmetric.
+        for (size_t b = 0; b < slabBlocks_.size(); ++b) {
+            OrderList* block = slabBlocks_[b];
+            for (uint32_t i = 0; i < SLAB_BLOCK; ++i) {
+                block[i].~OrderList();
+            }
+            hugeFree(slabAllocs_[b]);
         }
-        ::operator delete(storage_, std::align_val_t{alignof(uint64_t)});
+        hugeFree(storageAlloc_);
     }
 
     FlatPriceMap(const FlatPriceMap&) = delete;
@@ -306,8 +315,12 @@ private:
         size_t alignPad = alignof(uint64_t) - 1;
         size_t totalBytes = slotBytes + alignPad + bitmap0Bytes + bitmap1Bytes;
 
-        storage_ = static_cast<std::byte*>(
-            ::operator new(totalBytes, std::align_val_t{alignof(uint64_t)}));
+        // Back the directory + bitmaps with 2 MB huge pages (falls back to the
+        // historical aligned ::operator new off Linux / when unreserved). This
+        // block is touched on every insert/remove, so keeping it on huge pages
+        // shrinks its dTLB footprint.
+        storageAlloc_ = hugeAlloc(totalBytes, alignof(uint64_t));
+        storage_ = static_cast<std::byte*>(storageAlloc_.ptr);
 
         std::byte* cursor = storage_;
         slots_ = reinterpret_cast<uint32_t*>(cursor);
@@ -344,7 +357,24 @@ private:
         }
         uint32_t handle = slabHighWater_++;
         if (handle / SLAB_BLOCK >= slabBlocks_.size()) {
-            slabBlocks_.push_back(new OrderList[SLAB_BLOCK]);
+            // Grow by one fixed, never-moving block. The block is raw huge-page
+            // memory (falls back to aligned ::operator new); the OrderList
+            // objects are placement-constructed in place so previously handed
+            // out handles / OrderList* stay valid (blocks never reallocate).
+            //
+            // A block is SLAB_BLOCK * sizeof(OrderList) (~4 KB), far below the
+            // 2 MB page granularity, so on the huge-page path each block rounds
+            // up to a whole 2 MB page. Active levels number in the dozens to low
+            // hundreds, i.e. one or two blocks, so the rounding waste is a few
+            // MB at most and buys a fully TLB-resident resting-order slab.
+            HugeAllocation alloc =
+                hugeAlloc(sizeof(OrderList) * SLAB_BLOCK, alignof(OrderList));
+            OrderList* block = static_cast<OrderList*>(alloc.ptr);
+            for (uint32_t i = 0; i < SLAB_BLOCK; ++i) {
+                new (&block[i]) OrderList();
+            }
+            slabAllocs_.push_back(alloc);
+            slabBlocks_.push_back(block);
         }
         return handle;
     }
@@ -531,7 +561,9 @@ private:
     uint64_t* bitmap0_{nullptr};
     uint64_t* bitmap1_{nullptr};
     std::byte* storage_{nullptr};   // backing block for slots_ + both bitmaps
+    HugeAllocation storageAlloc_{}; // huge-page backing for storage_ (release info)
     std::vector<OrderList*> slabBlocks_;  // never-moving Tier-2 slab blocks
+    std::vector<HugeAllocation> slabAllocs_;  // huge-page backing per slab block
     std::vector<uint32_t> freeSlots_;     // recycled slab handles
     uint32_t slabHighWater_{0};     // next never-used slab handle
     size_t bitmap0Words_{0};

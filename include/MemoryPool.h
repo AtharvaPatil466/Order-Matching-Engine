@@ -1,5 +1,7 @@
 #pragma once
 
+#include "HugePageAllocator.h"
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -7,10 +9,8 @@
 #include <new>
 
 #ifdef __linux__
-#include <sys/mman.h>
-#include <sys/syscall.h>
+#include <sys/mman.h>  // mlock() in lockMemory()
 #include <unistd.h>
-#include <linux/mempolicy.h>
 #endif
 
 namespace OrderMatcher {
@@ -127,70 +127,35 @@ public:
 
 private:
     void allocatePoolStorage() {
+        // Route through the shared huge-page helper (P2-15). The helper tries
+        // explicit 2 MB huge pages first, then — because this pool opts into
+        // THP advice / NUMA binding — a plain mmap it can madvise + mbind, then
+        // the portable aligned ::operator new. The map/queue callers use the
+        // same helper with defaults and fall straight to ::operator new.
+        const size_t bytes = capacity_ * sizeof(T);
+        HugeAllocOptions opts;
+        opts.tryHugePages = options_.useHugePages;
+        opts.adviseTransparentHugePages = options_.adviseTransparentHugePages;
+        opts.preferredNumaNode = options_.preferredNumaNode;
+
+        poolAlloc_ = hugeAlloc(bytes, alignof(T), opts);
+        pool_ = static_cast<T*>(poolAlloc_.ptr);
+        usedHugePages_ = poolAlloc_.usedHugePages;
+
 #ifdef __linux__
-        size_t bytes = capacity_ * sizeof(T);
-        int mmapFlags = MAP_PRIVATE | MAP_ANONYMOUS;
-        if (options_.useHugePages) {
-#ifdef MAP_HUGETLB
-            void* huge = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                              mmapFlags | MAP_HUGETLB, -1, 0);
-            if (huge != MAP_FAILED) {
-                pool_ = static_cast<T*>(huge);
-                mmapBytes_ = bytes;
-                usedHugePages_ = true;
-            }
-#endif
-        }
-
-        if (!pool_) {
-            void* normal = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, mmapFlags, -1, 0);
-            if (normal != MAP_FAILED) {
-                pool_ = static_cast<T*>(normal);
-                mmapBytes_ = bytes;
-            }
-        }
-
-        if (pool_) {
-#ifdef MADV_HUGEPAGE
-            if (!usedHugePages_ && options_.adviseTransparentHugePages) {
-                (void)madvise(pool_, mmapBytes_, MADV_HUGEPAGE);
-            }
-#endif
-            if (options_.preferredNumaNode >= 0) {
-                bindToNode(pool_, mmapBytes_, options_.preferredNumaNode);
-            }
-            return;
+        // Startup check: if explicit huge pages were requested but the kernel
+        // could not honour it, diagnose the /proc/sys/vm/nr_hugepages shortfall.
+        // We warn rather than abort — the 4 KB fallback is already in place and
+        // correct, just with more dTLB pressure.
+        if (options_.useHugePages && !usedHugePages_) {
+            (void)checkHugePageReservation(bytes, /*warn=*/true);
         }
 #endif
-
-        pool_ = static_cast<T*>(::operator new(capacity_ * sizeof(T),
-                                               std::align_val_t{alignof(T)}));
     }
 
     void freePoolStorage() {
-#ifdef __linux__
-        if (mmapBytes_ != 0) {
-            munmap(pool_, mmapBytes_);
-            return;
-        }
-#endif
-        ::operator delete(pool_, std::align_val_t{alignof(T)});
+        hugeFree(poolAlloc_);
     }
-
-#ifdef __linux__
-    static void bindToNode(void* addr, size_t bytes, int node) {
-#ifdef SYS_mbind
-        unsigned long mask = 1UL << static_cast<unsigned long>(node);
-        long rc = syscall(SYS_mbind, addr, bytes, MPOL_BIND, &mask,
-                          sizeof(mask) * 8, 0);
-        (void)rc;
-#else
-        (void)addr;
-        (void)bytes;
-        (void)node;
-#endif
-    }
-#endif
 
 #ifndef NDEBUG
     bool isFromPool(const T* obj) const {
@@ -224,10 +189,7 @@ private:
     size_t capacity_{0};
     size_t nextFree_{0};
     bool usedHugePages_{false};
-
-#ifdef __linux__
-    size_t mmapBytes_{0};
-#endif
+    HugeAllocation poolAlloc_{};  // huge-page backing for pool_ (release info)
 
 #ifndef NDEBUG
     uint64_t* liveBitmap_{nullptr};

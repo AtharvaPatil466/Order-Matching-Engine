@@ -233,7 +233,60 @@ or tmpfs** and that re-measured number reported as the real figure.
 
 ---
 
-## 7. Bring-Up Order & Checklist
+## 7. Huge Pages (2 MB) — P2-15
+
+The hot data structures — the `FlatPriceMap` directory + bitmaps, the resting-order
+slab, the `ObjectPool<Order>` backing store, and the `MpscQueue` slot rings — are
+large enough that 4 KB paging burns real dTLB entries on the matching hot path. A
+2 MB huge page maps 512× the address range per TLB entry, so the whole working set
+stays covered by a handful of entries. `hugeAlloc()` (see `include/HugePageAllocator.h`)
+backs each of those regions with
+`mmap(..., MAP_PRIVATE|MAP_ANONYMOUS|MAP_HUGETLB|MAP_HUGE_2MB, ...)` and falls back
+to the historical aligned allocation on failure or on non-Linux.
+
+> **HARD REQUIREMENT: Transparent Huge Pages (THP) MUST be disabled.** THP's
+> background compaction (`khugepaged`) can stall a core for **10–100 ms** while it
+> defragments and collapses pages — orders of magnitude larger than the ns-scale
+> matching cost, and a direct source of the P99.9 tail this whole guide exists to
+> kill. Explicit (`MAP_HUGETLB`) huge pages are reserved up front and are **not**
+> subject to khugepaged, so they give the TLB win without the pause risk.
+
+```bash
+# Disable THP (do this every boot, before starting the engine):
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+# Verify — the selected value is the one in [brackets]:
+cat /sys/kernel/mm/transparent_hugepage/enabled     # want: always madvise [never]
+```
+
+**Reserve enough explicit 2 MB pages for the working set.** The engine reads
+`/proc/sys/vm/nr_hugepages` at pool construction; if explicit pages were requested
+but the reservation is short, it logs a one-line `[hugepages] WARNING` to stderr
+naming the shortfall and the `sysctl` to fix it, then transparently falls back to
+4 KB pages (correct, just with more dTLB pressure). Size the reservation from the
+configured working set — the dominant consumer is the per-symbol `Order` pool
+(`orderPoolCapacity × sizeof(Order)`, `sizeof(Order) == 192 B`), plus the two
+`FlatPriceMap` storage blocks and the `MpscQueue` rings:
+
+```bash
+# Example: 1,000,000-order pool ≈ 192 MB ≈ 92 x 2MB pages per symbol.
+# Round up generously and reserve the total across all symbols + rings:
+sudo sysctl -w vm.nr_hugepages=256
+# Persist across reboot:
+echo 'vm.nr_hugepages = 256' | sudo tee /etc/sysctl.d/60-hugepages.conf
+# Verify reserved vs free:
+grep -E 'HugePages_(Total|Free|Rsvd)|Hugepagesize' /proc/meminfo
+cat /proc/sys/vm/nr_hugepages
+```
+
+Reserve huge pages **early at boot**, before memory fragments — a busy host may be
+unable to assemble contiguous 2 MB regions later. For a hard guarantee, reserve on
+the kernel command line instead of `sysctl` (add to `GRUB_CMDLINE_LINUX` in §2):
+`default_hugepagesz=2M hugepagesz=2M hugepages=256`.
+
+---
+
+## 8. Bring-Up Order & Checklist
 
 One-time host setup (survives reboot):
 - [ ] §2 — `isolcpus` / `nohz_full` / `rcu_nocbs` / `irqaffinity` in GRUB, `update-grub`, reboot.
@@ -241,9 +294,12 @@ One-time host setup (survives reboot):
 - [ ] §4 — verified `<nic_dev>` NUMA node == isolated-cores node (`≠ -1`).
 - [ ] §3 — `irqbalance` stopped **and** disabled.
 - [ ] §6 — instance has **local NVMe instance-store** (or tmpfs) for the journal; journal path is **not** on EBS/PD/SAN/NFS.
+- [ ] §7 — `vm.nr_hugepages` reserved for the working set (persisted in `/etc/sysctl.d` or on the kernel command line).
 
 Every engine start (before launching `OrderEngine` / the F-Stack receiver):
 - [ ] §6 — journal path verified on local NVMe / tmpfs ([Runbook.md](./Runbook.md) §1 pre-flight).
+- [ ] §7 — Transparent Huge Pages set to `never` (`cat /sys/kernel/mm/transparent_hugepage/enabled`).
+- [ ] §7 — `HugePages_Free` in `/proc/meminfo` covers the working set (no startup `[hugepages] WARNING`).
 - [ ] §3 — `sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>`
 - [ ] §5 — `sudo scripts/set_cpu_perf.sh`
 - [ ] Start the engine pinned to the isolated cores (`taskset -c <matching_core> ...` /

@@ -106,7 +106,7 @@ def _print_summary(report: dict) -> None:
                        for v in vals))
 
 
-def main(n_seeds: int = 20, grid: list | None = None,
+def main(n_seeds: int = 100, grid: list | None = None,  # was 20 (P3-13)
          cfg: dict | None = None, boot_seed: int = 0) -> dict:
     cfg = {**CFG, **(cfg or {})}
     grid = grid or N_HFTS_GRID

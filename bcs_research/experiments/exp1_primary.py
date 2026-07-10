@@ -121,7 +121,7 @@ def _agg(rows):
     return {k: float(statistics.fmean([r[k] for r in rows])) for k in keys}
 
 
-def main(n_seeds=10, cfg=None):
+def main(n_seeds=100, cfg=None):  # was 10 (P3-13): n>=100 for narrower CIs
     cfg = {**CFG, **(cfg or {})}
     base = _agg([_run(s, cfg, with_hft=False) for s in range(1, n_seeds + 1)])
     treat = _agg([_run(s, cfg, with_hft=True) for s in range(1, n_seeds + 1)])

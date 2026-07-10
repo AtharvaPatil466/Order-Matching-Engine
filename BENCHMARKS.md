@@ -15,7 +15,7 @@
 |-------|----------|--------|
 | Core matching (x86, PGO): **237 ns** P50 · 3.10M ops/s | Clang IR-PGO on the seed=42 workload (AWS c6in.metal); 261 ns non-PGO baseline | ✅ Verified |
 | Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack on EBS | ✅ Verified |
-| Safety invariants | TLC: 454M states, 181M distinct, 0 violations | ✅ Verified |
+| Safety invariants | TLC: 1.26M distinct states, 0 violations (matching/cross layer now modeled) | ✅ Verified |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
 | **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |

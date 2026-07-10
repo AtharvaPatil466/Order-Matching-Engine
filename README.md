@@ -6,10 +6,10 @@
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
 [![Tests](https://img.shields.io/badge/Tests-426_CTest_targets-brightgreen.svg)](#verification)
 [![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
-[![TLA+](https://img.shields.io/badge/TLA%2B-454M_states_verified-blueviolet.svg)](#formal-verification)
+[![TLA+](https://img.shields.io/badge/TLA%2B-1.26M_states_verified-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocols-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (454M states on `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 79 test executables, 426 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
+A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (1.26M states on the matching-inclusive `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 77 test executables, 426 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
 
 ## 🚀 Key Features
 
@@ -79,7 +79,7 @@ All four protocols dispatch into the same `MatchingEngine`. Drop a different ses
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes; `.dockerignore` excludes host build artifacts; entrypoint shim conditionally LD_PRELOADs `libfaketime` for chaos clock-skew scenarios
 
 ### Formal Verification & Chaos Engineering
-- **TLA+ Specifications**: 12 specs total. `MatchingEngine.tla` — 454M states, 181M distinct, 0 violations. `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) verified at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Refinement`, `Auction`, `EpochDurability`, `FixSession`, `Oco`, `Risk`.
+- **TLA+ Specifications**: 12 specs total. `MatchingEngine.tla` — 1.26M distinct states, 0 violations (now models the matching/cross layer). `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) verified at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Refinement`, `Auction`, `EpochDurability`, `FixSession`, `Oco`, `Risk`.
 - **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Empirically verifies `NoCommittedLoss` (every primary-committed entry survives `SIGKILL`), no-split-brain under partition / packet loss / asymmetric partition / clock skew, snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-fenced promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md).
 - **TSan**: `ReplicationProtocolTest` is TSan-clean (was previously excluded due to teardown races on non-atomic fds + non-atomic sendSeq_; closed by atomic fds + `shutdown(2)` wakeup + atomic sequence)
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison
@@ -267,7 +267,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 
 ## 🧪 Verification
 
-**79 test executables** covering **426 CTest targets**[^1] across 11 categories:
+**77 test executables** covering **426 CTest targets**[^1] across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -291,7 +291,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
-| `MatchingEngine.tla` | **454M generated, 181M distinct** | NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness *(Model Scope: 2 participants, 2 price levels, 4 orders, qty 1-3)* |
+| `MatchingEngine.tla` | **1.26M distinct (matching + book)** | NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness, MatchingConservation, FIFOExecution *(matching/cross layer modeled; scope: 2 participants, 2 prices, 3 orders, time≤2, qty 1-3)* |
 | `Replication.tla` (lease-propagation model) | **1373 → 4192 states at MaxEntries=6 / 10**, 0 violations | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain. Realistic promotion rule: backup must observe heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Bug-injected variant (lease check stripped) reproduces split brain in 188 states — confirms the verification is genuine. |
 | `Refinement.tla` | written | Refinement mapping from spec to implementation behavior |
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
@@ -368,4 +368,4 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 46.5K LOC · 79 test executables · 426 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*
+*C++20 · 46.5K LOC · 77 test executables · 426 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 454M states verified on MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*

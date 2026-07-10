@@ -64,8 +64,16 @@ struct OrderRequest {
     Price newPrice;
     Quantity newQty;
 
-    // End-to-end latency: stamped at enqueue time (nowNs())
-    uint64_t ingressNs = 0;
+    // End-to-end latency measurement ONLY. Stamped at enqueue with a cheap
+    // monotonic counter (Utils::latencyClockTicks() — raw TSC on x86, portable
+    // steady_clock ns elsewhere); the worker converts the delta to ns via
+    // Utils::latencyTicksToNs() when recording the latency histogram. Purely
+    // local to this host — NOT a wall-clock value and NOT forwarded over the
+    // wire (the gateway re-stamps server-side; the wire OrderRequestV1/V2
+    // .ingressNs field is decoded but not used for this measurement). Same
+    // uint64_t size/offset as before, so the memcpy-compatible wire layout is
+    // unchanged. 0 = unset.
+    uint64_t ingressTsc = 0;
 };
 #pragma pack(pop)
 

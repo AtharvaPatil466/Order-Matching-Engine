@@ -1,5 +1,6 @@
 #include "MatchingEngine.h"
 #include "LatencyTracker.h"
+#include "Utils.h"  // OrderMatcher::Utils::rdtsc / calibrateTsc / tscTicksToNs
 #include "Metrics.h"
 #include "StructuredLog.h"
 #include <iostream>
@@ -187,6 +188,11 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
         return;
     }
 
+    // Calibrate the TSC once here, while still single-threaded, so the ~5 ms
+    // sample never lands on a worker's hot path. Used by the per-order e2e
+    // latency measurement (Utils::rdtsc / tscTicksToNs).
+    Utils::calibrateTsc();
+
     numThreads_ = numThreads > 0 ? numThreads : 1;
     rebuildThreadSymbolIndex();
 
@@ -340,8 +346,14 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             }
 
             processRequest(threadIndex, req);
-            if (req.ingressNs != 0) {
-                e2eLatency_[threadIndex].recordInterval(req.ingressNs, nowNs());
+            if (req.ingressTsc != 0) {
+                // Stamp end with the same cheap counter, then convert the tick
+                // delta to ns ONCE here (metrics write, off the matching path).
+                const uint64_t endTsc = Utils::latencyClockTicks();
+                if (endTsc > req.ingressTsc) {
+                    e2eLatency_[threadIndex].record(
+                        Utils::latencyTicksToNs(endTsc - req.ingressTsc));
+                }
             }
 
             threadStats_[threadIndex].processed.fetch_add(1, std::memory_order_release);
@@ -1157,7 +1169,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         req.trailAmount = trailAmount;
         req.minQty = minQty;
         req.hidden = hidden;
-        req.ingressNs = nowNs();
+        req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
         }
@@ -1214,7 +1226,7 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
         req.type = OrderRequest::Type::Cancel;
         req.symbolId = symbolId;
         req.orderId = orderId;
-        req.ingressNs = nowNs();
+        req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
         }
@@ -1263,7 +1275,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Qu
         req.symbolId = symbolId;
         req.orderId = orderId;
         req.newQty = newQty;
-        req.ingressNs = nowNs();
+        req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
         }
@@ -1310,7 +1322,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         req.orderId = orderId;
         req.newPrice = newPrice;
         req.newQty = newQty;
-        req.ingressNs = nowNs();
+        req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
         }

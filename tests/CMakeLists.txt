@@ -176,6 +176,13 @@ enable_assertions(PoolExhaustionTest)
 add_test(NAME PoolExhaustionTest COMMAND PoolExhaustionTest)
 set_tests_properties(PoolExhaustionTest PROPERTIES TIMEOUT 60 LABELS "project;chaos")
 
+# Order lifecycle audit trail (include/AuditLog.h)
+add_executable(AuditLogTest AuditLogTest.cpp)
+target_link_libraries(AuditLogTest PRIVATE OrderMatcher)
+enable_assertions(AuditLogTest)
+add_test(NAME AuditLogTest COMMAND AuditLogTest)
+set_tests_properties(AuditLogTest PROPERTIES TIMEOUT 30 LABELS "project;compliance")
+
 # Journal chaos test — only meaningful when ENABLE_FAULT_INJECTION=ON, but
 # always built so the harness compiles in both configurations.
 add_executable(JournalChaosTest JournalChaosTest.cpp)

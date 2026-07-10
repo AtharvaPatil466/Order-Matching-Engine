@@ -40,3 +40,20 @@ target_link_libraries(HonestBenchmark PRIVATE OrderMatcher)
 add_executable(BinaryCodecBenchmark BinaryCodecBenchmark.cpp)
 target_link_libraries(BinaryCodecBenchmark PRIVATE OrderMatcher)
 
+# ─── Honest-tail benchmarks (P2-18..21) ──────────────────────────────────────
+# All use the VENDORED header-only bench::BenchLatencyRecorder (BenchLatencyRecorder.h)
+# and shared bench::WorkloadGenerator (RealisticWorkload.h) under benchmarks/.
+# ZERO external dependencies — no HdrHistogram, no FetchContent.
+
+# P2-18: realistic flow (Poisson arrivals, power-law sizes, ~65% cancel, ~15% fill)
+add_executable(RealisticFlowBenchmark RealisticFlowBenchmark.cpp)
+target_link_libraries(RealisticFlowBenchmark PRIVATE OrderMatcher)
+
+# P2-19: coordinated-omission correction (latency vs INTENDED start at fixed rate)
+add_executable(CoordinatedOmissionBenchmark CoordinatedOmissionBenchmark.cpp)
+target_link_libraries(CoordinatedOmissionBenchmark PRIVATE OrderMatcher)
+
+# P2-20: cold-cache variant (evict working set before each timed op)
+add_executable(ColdCacheBenchmark ColdCacheBenchmark.cpp)
+target_link_libraries(ColdCacheBenchmark PRIVATE OrderMatcher)
+

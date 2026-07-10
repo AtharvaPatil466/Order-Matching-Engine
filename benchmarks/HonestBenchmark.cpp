@@ -38,6 +38,7 @@
 
 #include "MatchingEngine.h"
 #include "LatencyTracker.h"
+#include "BenchLatencyRecorder.h"  // vendored recorder — full P50..P99.99 tail (P2-21)
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -106,7 +107,7 @@ private:
 
 struct PathResult {
     const char* name;
-    LatencyTracker tracker;
+    bench::BenchLatencyRecorder tracker;  // vendored recorder (P2-21)
     uint64_t fillCount{0};
     double durationSec{0};
 };
@@ -128,6 +129,7 @@ static void printResult(const PathResult& r) {
     std::printf("  P90:     %6llu ns\n", (unsigned long long)r.tracker.getP90());
     std::printf("  P99:     %6llu ns\n", (unsigned long long)r.tracker.getP99());
     std::printf("  P99.9:   %6llu ns\n", (unsigned long long)r.tracker.getP999());
+    std::printf("  P99.99:  %6llu ns\n", (unsigned long long)r.tracker.getP9999());
     std::printf("  Max:     %6llu ns\n", (unsigned long long)r.tracker.getMax());
     std::printf("  Mean:    %6.0f ns\n", r.tracker.getMean());
 }

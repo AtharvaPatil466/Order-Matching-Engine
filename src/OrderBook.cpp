@@ -1,26 +1,73 @@
 #include "OrderBook.h"
 #include "FaultInjector.h"
 #include "LatencyTracker.h"  // for nowNs()
+#include "Metrics.h"         // for the per-symbol pool-utilization gauge (P3-8)
 #include "StructuredLog.h"
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <string>
 
 namespace OrderMatcher {
 
 constexpr size_t INITIAL_CAPACITY = 200000;
 
-OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo)
+OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCapacity)
     : bids_(Side::Buy, 200001), asks_(Side::Sell, 200001),
-      orderLookup_(INITIAL_CAPACITY), orderPool_(INITIAL_CAPACITY),
+      orderLookup_(INITIAL_CAPACITY),
+      orderPool_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
       symbolId_(symbolId), matchAlgorithm_(algo),
       participantRisk_(1024), participantOrders_(64) {
-    // orderLookup_ is sized to the order pool capacity, so with the 50% load
-    // factor its rehash threshold sits well above the max live orders the pool
-    // can hand out — it can never rehash during matching. Freeze it so any
-    // future sizing regression that breaks that invariant is caught (debug
-    // assert) instead of silently paying a stop-the-world rehash on the hot path.
+    // orderLookup_ is sized to the engine's default pool capacity (>= any custom
+    // orderPoolCapacity), so with the 50% load factor its rehash threshold sits
+    // well above the max live orders the pool can hand out — it can never rehash
+    // during matching. Freeze it so any future sizing regression that breaks that
+    // invariant is caught (debug assert) instead of silently paying a
+    // stop-the-world rehash on the hot path.
     orderLookup_.disallowRehash();
+
+    // P3-8: per-symbol pool-utilization gauge. The label is embedded in the
+    // metric name so each book gets its own series in the simple registry.
+    poolGauge_ = &MetricsRegistry::instance().gauge(
+        "order_pool_utilization_percent{symbol=\"" + std::to_string(symbolId) + "\"}",
+        "Order pool utilization percent (in-use / capacity) for this symbol's book");
+}
+
+void OrderBook::updatePoolUtilization(size_t inUse, size_t cap) {
+    if (cap == 0) return;
+    if (poolGauge_) poolGauge_->set(static_cast<int64_t>((inUse * 100) / cap));
+
+    int band = 0;
+    if (inUse >= cap)                 band = 3;   // 100% — exhausted (kill-switch-like)
+    else if (inUse * 100 >= cap * 95) band = 2;   // >= 95% — reject new orders
+    else if (inUse * 100 >= cap * 80) band = 1;   // >= 80% — warn
+    // Log/alert only when pressure escalates, so a full book does not spam.
+    if (band > poolPressureBand_) {
+        switch (band) {
+        case 1:
+            obSink().log(obEvent("order_pool_pressure_warn", LogSeverity::Warn)
+                             .kv("symbol", (long long)symbolId_)
+                             .kv("in_use", (unsigned long long)inUse)
+                             .kv("capacity", (unsigned long long)cap));
+            break;
+        case 2:
+            obSink().log(obEvent("order_pool_rejecting_new", LogSeverity::Warn)
+                             .kv("symbol", (long long)symbolId_)
+                             .kv("in_use", (unsigned long long)inUse)
+                             .kv("capacity", (unsigned long long)cap));
+            break;
+        case 3:
+            // 100%: behave like the kill switch — no new orders + a critical alert.
+            obSink().log(obEvent("order_pool_exhausted", LogSeverity::Error)
+                             .kv("symbol", (long long)symbolId_)
+                             .kv("in_use", (unsigned long long)inUse)
+                             .kv("capacity", (unsigned long long)cap));
+            break;
+        default:
+            break;
+        }
+    }
+    poolPressureBand_ = band;
 }
 
 // ─── Notifications ───────────────────────────────────────────────────────────
@@ -292,6 +339,28 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
                           RejectReason::DuplicateOrderId);
         return RejectReason::DuplicateOrderId;
+    }
+
+    // --- P3-8: order-pool pressure, controlled degradation ---
+    // Measure utilization and shed NEW orders before the pool is fully
+    // exhausted, so the book keeps serving cancels/matches for resting orders.
+    // 80% warns, >= 95% rejects with PoolCapacityExceeded, 100% additionally
+    // raises a critical (kill-switch-like) alert. Never crashes, never drops
+    // silently — the client always gets an explicit reject. This runs before
+    // either allocation site (MOC/LOC park and the main path) so both are covered.
+    {
+        const size_t poolCap = orderPool_.capacity();
+        const size_t poolInUseNow = poolCap - orderPool_.available();
+        updatePoolUtilization(poolInUseNow, poolCap);
+        if (poolCap > 0 && poolInUseNow * 100 >= poolCap * 95) [[unlikely]] {
+            ++poolRejects_;
+#ifndef OB_LEAN_MODE
+            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
+#endif
+            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
+                              RejectReason::PoolCapacityExceeded);
+            return RejectReason::PoolCapacityExceeded;
+        }
     }
 
     // --- Pre-trade risk checks ---

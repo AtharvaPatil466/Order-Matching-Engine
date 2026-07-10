@@ -21,6 +21,8 @@
 
 namespace OrderMatcher {
 
+class Gauge;  // Metrics.h — pointer only; avoids pulling Metrics into this header
+
 struct Trade {
     uint64_t tradeId;
     OrderId buyOrderId;
@@ -172,7 +174,11 @@ private:
 
 class OrderBook {
 public:
-    explicit OrderBook(SymbolId symbolId = 0, MatchAlgorithm algo = MatchAlgorithm::PriceTime);
+    // orderPoolCapacity: number of Order slots to pre-allocate. 0 = engine
+    // default (INITIAL_CAPACITY). A smaller pool is used by pool-pressure tests
+    // to exercise the degradation thresholds without allocating 200k orders.
+    explicit OrderBook(SymbolId symbolId = 0, MatchAlgorithm algo = MatchAlgorithm::PriceTime,
+                       size_t orderPoolCapacity = 0);
 
     // Core Actions
     AddOrderResult addOrder(OrderId orderId, ParticipantId participantId, Side side, Price price, Quantity qty, OrderType type,
@@ -408,7 +414,31 @@ public:
 
     void setMatchAlgorithm(MatchAlgorithm algo) { matchAlgorithm_ = algo; }
 
+    // ─── P3-8 Order-pool utilization / controlled degradation ─────────
+    // Fixed-size Order pool. When it fills, new orders are shed (rejected)
+    // BEFORE true exhaustion so resting orders can still be cancelled/matched.
+    size_t poolCapacity() const { return orderPool_.capacity(); }
+    size_t poolInUse() const { return orderPool_.capacity() - orderPool_.available(); }
+    double poolUtilization() const {
+        const size_t cap = orderPool_.capacity();
+        return cap ? static_cast<double>(cap - orderPool_.available()) /
+                         static_cast<double>(cap)
+                   : 0.0;
+    }
+    // Count of new orders shed due to pool pressure (RejectReason::PoolCapacityExceeded).
+    uint64_t getPoolRejectCount() const { return poolRejects_; }
+
+    // Degradation thresholds (fractions of pool capacity).
+    static constexpr double kPoolWarnPct   = 0.80;  // warn / observe
+    static constexpr double kPoolRejectPct = 0.95;  // reject new orders
+
 private:
+    // Update the utilization gauge and, on an upward band crossing, warn (≥80%),
+    // note the reject band (≥95%), or raise a critical alert (100%). Cheap:
+    // one gauge store + a couple of integer compares. Called on the book's
+    // owning worker thread (the addOrder path).
+    void updatePoolUtilization(size_t inUse, size_t cap);
+
     // Internal cancel that does NOT take bookLock_. Public cancelOrder
     // wraps this with a unique_lock; callers that already hold the lock
     // (expireOrders, cancelAllForParticipant) call this directly to
@@ -505,6 +535,15 @@ private:
     // O(1) Lookup — open-addressing hash map (replaces std::unordered_map)
     FlatHashMap<OrderId, Order*> orderLookup_;
     ObjectPool<Order> orderPool_;
+
+    // ─── P3-8 pool-pressure state (owning worker thread only) ─────────
+    // Per-symbol utilization gauge in the global MetricsRegistry (set in ctor).
+    Gauge* poolGauge_ = nullptr;
+    // Last-observed pressure band (0 normal, 1 warn ≥80%, 2 reject ≥95%,
+    // 3 exhausted 100%). Used to log/alert only on upward transitions.
+    int poolPressureBand_ = 0;
+    // New orders shed due to pool pressure.
+    uint64_t poolRejects_ = 0;
 
     // Event listener (replaces std::function callbacks — zero-cost vtable dispatch)
     EventListener* listener_ = &nullListener();

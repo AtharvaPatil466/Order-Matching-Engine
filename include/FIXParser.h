@@ -108,6 +108,7 @@ inline int ordRejReasonCode(RejectReason r) {
     case RejectReason::PositionLimitExceeded:       return 3;   // Order exceeds limit
     case RejectReason::FatFingerReject:             return 3;
     case RejectReason::OrderToTradeRatioExceeded:   return 3;
+    case RejectReason::PoolCapacityExceeded:        return 0;   // Broker / Exchange option
     }
     return kOrdRejReasonOmit;
 }

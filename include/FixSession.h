@@ -120,6 +120,7 @@ public:
         case RejectReason::PositionLimitExceeded: return "position limit";
         case RejectReason::FatFingerReject:       return "fat finger";
         case RejectReason::OrderToTradeRatioExceeded: return "OTR limit";
+        case RejectReason::PoolCapacityExceeded:  return "pool capacity";
         }
         return "rejected";  // unreachable; silences "control reaches end".
     }

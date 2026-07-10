@@ -48,6 +48,7 @@ const char* rejectReasonToString(RejectReason reason) {
     case RejectReason::PositionLimitExceeded: return "position limit exceeded";
     case RejectReason::FatFingerReject: return "fat-finger reject";
     case RejectReason::OrderToTradeRatioExceeded: return "order-to-trade ratio exceeded";
+    case RejectReason::PoolCapacityExceeded: return "pool capacity exceeded";
     }
     return "unknown reject";
 }

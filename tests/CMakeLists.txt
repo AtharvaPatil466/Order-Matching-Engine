@@ -176,6 +176,14 @@ enable_assertions(PoolExhaustionTest)
 add_test(NAME PoolExhaustionTest COMMAND PoolExhaustionTest)
 set_tests_properties(PoolExhaustionTest PROPERTIES TIMEOUT 60 LABELS "project;chaos")
 
+# Pool capacity monitoring + controlled degradation (P3-8): utilization gauge,
+# 80% warn, 95% shed (PoolCapacityExceeded), 100% kill-switch-like alert.
+add_executable(PoolCapacityTest PoolCapacityTest.cpp)
+target_link_libraries(PoolCapacityTest PRIVATE OrderMatcher)
+enable_assertions(PoolCapacityTest)
+add_test(NAME PoolCapacityTest COMMAND PoolCapacityTest)
+set_tests_properties(PoolCapacityTest PROPERTIES TIMEOUT 30 LABELS "project;ops")
+
 # Order lifecycle audit trail (include/AuditLog.h)
 add_executable(AuditLogTest AuditLogTest.cpp)
 target_link_libraries(AuditLogTest PRIVATE OrderMatcher)

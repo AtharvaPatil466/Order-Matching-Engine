@@ -205,6 +205,7 @@ TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
         RejectReason::DuplicateOrderId,
         RejectReason::UnsupportedFixVersion,
         RejectReason::MissingRequiredField,
+        RejectReason::PoolCapacityExceeded,
     };
 
     for (RejectReason r : kAll) {

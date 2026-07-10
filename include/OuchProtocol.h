@@ -117,6 +117,7 @@ inline char ouchRejectCode(RejectReason r) {
     case RejectReason::PositionLimitExceeded:       return OUCH_REJECT_RISK;
     case RejectReason::FatFingerReject:             return OUCH_REJECT_RISK;
     case RejectReason::OrderToTradeRatioExceeded:   return OUCH_REJECT_RISK;
+    case RejectReason::PoolCapacityExceeded:        return OUCH_REJECT_OTHER;
     }
     return OUCH_REJECT_OTHER;
 }

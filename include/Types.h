@@ -87,7 +87,13 @@ enum class RejectReason : uint8_t {
     KillSwitchActive,          // P2-8: engine kill switch engaged; new orders blocked
     PositionLimitExceeded,     // P2-9: participant net-position limit would be breached
     FatFingerReject,           // P2-10: fat-finger guard (max qty / price band / max notional)
-    OrderToTradeRatioExceeded  // P2-11: participant order-to-trade ratio throttle engaged
+    OrderToTradeRatioExceeded, // P2-11: participant order-to-trade ratio throttle engaged
+
+    // P3-8: order pool under sustained pressure. Distinct from CapacityExhausted
+    // (a hard "no slots left" failure): this is the CONTROLLED-degradation shed
+    // — new orders are rejected at ≥95% utilization so the book keeps serving
+    // cancels/matches for resting orders instead of hitting true exhaustion.
+    PoolCapacityExceeded
 };
 
 // Trading state controls how new orders are admitted into the book and

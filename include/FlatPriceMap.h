@@ -46,7 +46,13 @@ namespace OrderMatcher {
 // once its OrderList is empty), so a reused handle never carries stale orders.
 class FlatPriceMap {
 public:
-    explicit FlatPriceMap(Side side, size_t capacity = 200001)
+    // Default supported price band width (in price ticks). A configured
+    // [minPrice, maxPrice] band must satisfy (maxPrice - minPrice) < capacity;
+    // startup config validation (ConfigValidator) checks this against the real
+    // limit rather than a hard-coded copy.
+    static constexpr size_t DEFAULT_CAPACITY = 200001;
+
+    explicit FlatPriceMap(Side side, size_t capacity = DEFAULT_CAPACITY)
         : side_(side), capacity_(capacity) {
         allocateStorage();
         bestIdx_ = 0;

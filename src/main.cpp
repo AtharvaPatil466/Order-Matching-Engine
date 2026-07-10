@@ -2,6 +2,7 @@
 #include "AdminServer.h"
 #include "ReplicationProtocol.h"
 #include "Config.h"
+#include "ConfigValidator.h"
 #include "Journal.h"
 #include "Metrics.h"
 #ifdef OB_HAVE_DPDK
@@ -100,6 +101,31 @@ int main(int argc, char* argv[]) {
         } else {
             std::cerr << "[Config] WARNING: could not load " << configPath << "\n";
         }
+    }
+
+    // ── Startup config validation (P3-7, fail-fast) ───────────────────
+    // Validate every declared instrument / participant and the journal path
+    // BEFORE constructing the engine. On ANY problem, print each one and
+    // exit(1) — the engine never starts in a silently-degraded state.
+    {
+        ConfigValidationResult vr = validateStartupConfig(cfg);
+
+        // Also validate the journal path we will actually open (from
+        // --journal / OB_JOURNAL_PATH, which is separate from the config key).
+        const std::string resolvedJournal =
+            flagOrEnv(argc, argv, "--journal", "OB_JOURNAL_PATH");
+        if (!resolvedJournal.empty() && !isJournalPathWritable(resolvedJournal)) {
+            vr.fail("journal path '" + resolvedJournal +
+                    "': parent directory does not exist or is not writable");
+        }
+
+        if (!vr.ok) {
+            std::cerr << "[Config] FATAL: startup configuration is invalid — "
+                         "refusing to start:\n";
+            for (const auto& e : vr.errors) std::cerr << "  - " << e << "\n";
+            return 1;
+        }
+        std::cout << "[Config] Startup validation passed\n";
     }
 
     // ── Engine ────────────────────────────────────────────────────────

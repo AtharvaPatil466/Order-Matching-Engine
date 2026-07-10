@@ -400,6 +400,15 @@ add_test(NAME ConfigTest COMMAND ConfigTest)
 set_tests_properties(ConfigTest PROPERTIES TIMEOUT 15
                      LABELS "project;config")
 
+# Startup config validation (P3-7): fail-fast on bad instrument/participant/
+# journal config.
+add_executable(ConfigValidationTest ConfigValidationTest.cpp)
+target_link_libraries(ConfigValidationTest PRIVATE OrderMatcher)
+enable_assertions(ConfigValidationTest)
+add_test(NAME ConfigValidationTest COMMAND ConfigValidationTest)
+set_tests_properties(ConfigValidationTest PROPERTIES TIMEOUT 15
+                     LABELS "project;config")
+
 # AlertDispatcher webhook tests
 add_executable(AlertDispatcherTest AlertDispatcherTest.cpp)
 target_link_libraries(AlertDispatcherTest PRIVATE OrderMatcher)

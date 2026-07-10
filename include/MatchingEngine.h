@@ -110,6 +110,36 @@ public:
 
     bool isAsync() const { return async_; }
 
+    // ─── P3-6 Graceful shutdown with state persistence ───────────────────────
+    // Summary of what a graceful shutdown did, returned so the caller can log /
+    // assert the outcome. All counts are post-drain, point-in-time.
+    struct ShutdownReport {
+        size_t dayOrdersCancelled = 0;    // DAY orders cancelled at session end
+        size_t gtdOrdersPersisted = 0;    // GTD survivors written to the checkpoint
+        size_t otherOrdersPersisted = 0;  // GTC / other survivors written
+        size_t ordersPersisted = 0;       // gtd + other (total snapshotted)
+        bool   journalEnabled = false;    // false ⇒ nothing durable to restore from
+    };
+
+    // Deterministic, fail-safe shutdown. Order of operations (see the .cpp for
+    // the rationale of each step):
+    //   1. Stop admitting NEW orders (shuttingDown_ flag). In-flight requests
+    //      already enqueued still drain — nothing already accepted is dropped.
+    //   2. Drain the worker queues so every in-flight order finishes matching:
+    //        · an in-flight IOC cancels its unmatched remainder during the match;
+    //        · an in-flight partial fill completes (the batched match loop runs
+    //          to completion) and the resting remainder is materialised before
+    //          the snapshot, so it is either persisted (GTD/GTC) or cancelled
+    //          (DAY) — never left half-processed.
+    //   3. Cancel every DAY order (session end) — journaled + logged — so a
+    //      restart does NOT restore them.
+    //   4. Checkpoint the remaining resting orders (GTD + GTC) so a restart's
+    //      replayJournal() restores them byte-for-byte.
+    // Never throws, never crashes; safe to call once at process shutdown. The
+    // engine is NOT torn down here — the caller still calls stop()/stopAsync().
+    ShutdownReport gracefulShutdown();
+    bool isShuttingDown() const { return shuttingDown_.load(std::memory_order_acquire); }
+
     // Automated expiry timer (Gap 3)
     void startExpiryTimer(uint64_t intervalMs = 1000);
     void stopExpiryTimer();
@@ -413,6 +443,9 @@ private:
     std::atomic<bool> running_{false};
     std::unique_ptr<Journal> journal_;
     std::atomic<bool> booksFrozen_{false};
+    // P3-6: set by gracefulShutdown() to refuse NEW orders while draining.
+    // Reset on start()/startAsync() so an engine can be restarted in-process.
+    std::atomic<bool> shuttingDown_{false};
 
     // Thread safety for sync-mode expiry timer
     mutable std::mutex bookMutex_;
@@ -576,6 +609,9 @@ private:
     void onRiskFill(const Trade& t);
     // Cancel every resting order across all books (sync path of the kill switch).
     void cancelAllRestingOrders();
+    // P3-6: cancel every DAY order across all books (session end), journaling +
+    // logging each so a restart does not restore them. Returns the count.
+    size_t cancelDayOrders();
     uint64_t riskNow() const;
     void logRiskReject(const char* control, SymbolId sym, ParticipantId pid,
                        RejectReason reason);

@@ -341,14 +341,22 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    // Graceful shutdown
+    // Graceful shutdown (P3-6): stop admitting new orders, drain in-flight
+    // requests, cancel DAY orders at session end, and checkpoint GTD/GTC
+    // resting orders so a restart restores them.
     std::cout << "\n[Engine] Shutting down — draining queues...\n";
     admin.stop();
 #ifdef OB_HAVE_DPDK
     if (dpdk) dpdk->stop();
 #endif
-    engine.waitForDrain();   // drain all pending queue entries before stopping
-    std::cout << "[Engine] Queues drained.\n";
+    const auto shutdownReport = engine.gracefulShutdown();
+    std::cout << "[Engine] Queues drained. DAY orders cancelled: "
+              << shutdownReport.dayOrdersCancelled
+              << ", persisted for restore: " << shutdownReport.ordersPersisted
+              << " (GTD=" << shutdownReport.gtdOrdersPersisted
+              << ", other=" << shutdownReport.otherOrdersPersisted << ")"
+              << (shutdownReport.journalEnabled ? "" : " [no journal — not durable]")
+              << "\n";
     if (coord) coord->stop();
     engine.stopAsync();
     std::cout << "[Engine] Shutdown complete.\n";

@@ -160,6 +160,7 @@ void MatchingEngine::ensureDefaultSymbol() {
 }
 
 void MatchingEngine::start() {
+    shuttingDown_.store(false, std::memory_order_release);
     booksFrozen_.store(true, std::memory_order_release);
     running_.store(true, std::memory_order_release);
     obSink().log(obEvent("engine_start")
@@ -200,6 +201,7 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     requestQueues_.reserve(numThreads_);
     workerThreads_.reserve(numThreads_);
 
+    shuttingDown_.store(false, std::memory_order_release);
     running_.store(true, std::memory_order_release);
     booksFrozen_.store(true, std::memory_order_release);
     async_ = true;
@@ -761,6 +763,87 @@ void MatchingEngine::cancelAllRestingOrders() {
     }
 }
 
+size_t MatchingEngine::cancelDayOrders() {
+    // Session-end DAY sweep. Same lock discipline as cancelAllRestingOrders()
+    // (bookMutex_ -> book->bookLock_ -> journalMutex_): collect ids under each
+    // book's lock, then cancel outside it so cancelOrder can take bookLock_
+    // exclusively without re-entrancy on the non-recursive mutex.
+    std::lock_guard<std::mutex> lock(bookMutex_);
+    size_t cancelled = 0;
+    for (SymbolId sym : symbolIds_) {
+        auto* book = getOrderBook(sym);
+        if (!book) continue;
+        std::vector<OrderId> dayIds;
+        book->forEachOrderLocked([&](const Order& o) {
+            if (o.timeInForce == TimeInForce::DAY) dayIds.push_back(o.id);
+        });
+        for (OrderId id : dayIds) {
+            if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+                releasePosition(book->getOrder(id));
+            }
+            book->cancelOrder(id);
+            if (journal_) {
+                std::lock_guard<std::mutex> jl(journalMutex_);
+                journal_->logCancelOrder(id);
+            }
+            ++cancelled;
+            // "log at session end" — durable, per-order audit line.
+            obSink().log(obEvent("day_order_cancelled_at_shutdown")
+                             .kv("symbol", (long long)sym)
+                             .kv("order", (unsigned long long)id));
+        }
+    }
+    return cancelled;
+}
+
+MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown() {
+    ShutdownReport report{};
+
+    // 1. Stop admitting new orders. Already-enqueued requests still drain.
+    shuttingDown_.store(true, std::memory_order_release);
+
+    // 2. Drain in-flight work so IOC remainders are cancelled during matching
+    //    and any partial fill completes before we snapshot (see header).
+    if (async_) {
+        waitForDrain();
+    }
+
+    // 3. Session end: cancel every DAY order (journaled + logged). GTD/GTC stay.
+    report.dayOrdersCancelled = cancelDayOrders();
+
+    // 4. Tally the survivors by time-in-force so the caller can see exactly what
+    //    will be restored, then persist them via checkpoint. Restart's
+    //    replayJournal() rebuilds the GTD/GTC book from this snapshot.
+    {
+        std::lock_guard<std::mutex> booksLock(bookMutex_);
+        for (SymbolId sym : symbolIds_) {
+            const OrderBook* book = getOrderBook(sym);
+            if (!book) continue;
+            book->forEachOrderLocked([&](const Order& o) {
+                if (o.timeInForce == TimeInForce::GTD) ++report.gtdOrdersPersisted;
+                else ++report.otherOrdersPersisted;
+            });
+        }
+    }
+    {
+        std::lock_guard<std::mutex> jl(journalMutex_);
+        report.journalEnabled = (journal_ != nullptr);
+    }
+    if (report.journalEnabled) {
+        // Already drained (step 2) and cancelDayOrders() is synchronous, so no
+        // fresh queue entries exist — snapshot the current state directly.
+        checkpointInternal(true);
+    }
+    report.ordersPersisted = report.gtdOrdersPersisted + report.otherOrdersPersisted;
+
+    obSink().log(obEvent("engine_graceful_shutdown")
+                     .kv("day_cancelled", (unsigned long long)report.dayOrdersCancelled)
+                     .kv("gtd_persisted", (unsigned long long)report.gtdOrdersPersisted)
+                     .kv("other_persisted", (unsigned long long)report.otherOrdersPersisted)
+                     .kv("journal", (long long)(report.journalEnabled ? 1 : 0)));
+    return report;
+}
+
 void MatchingEngine::setPositionLimit(ParticipantId pid, int64_t maxAbsPosition) {
     if (pid >= MAX_PARTICIPANTS) return;
     positionLimit_[pid].store(maxAbsPosition, std::memory_order_relaxed);
@@ -1024,6 +1107,12 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     }
 
     if (!running_.load(std::memory_order_acquire)) {
+        return rejectedAsync(RejectReason::EngineStopped);
+    }
+
+    // P3-6: once a graceful shutdown has begun, refuse NEW orders. Requests
+    // already enqueued keep draining; only fresh submissions are turned away.
+    if (shuttingDown_.load(std::memory_order_acquire)) [[unlikely]] {
         return rejectedAsync(RejectReason::EngineStopped);
     }
 

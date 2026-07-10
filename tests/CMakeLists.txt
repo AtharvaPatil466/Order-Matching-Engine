@@ -368,6 +368,15 @@ set_tests_properties(SbeSessionTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;integration")
 
 # GTD virtual clock deterministic replay tests
+# Graceful shutdown with state persistence (P3-6): GTD/GTC persist + restore,
+# DAY cancelled at session end, in-flight IOC/partial-fill drained.
+add_executable(GracefulShutdownTest GracefulShutdownTest.cpp)
+target_link_libraries(GracefulShutdownTest PRIVATE OrderMatcher)
+enable_assertions(GracefulShutdownTest)
+add_test(NAME GracefulShutdownTest COMMAND GracefulShutdownTest)
+set_tests_properties(GracefulShutdownTest PROPERTIES TIMEOUT 60
+                     LABELS "project;persistence")
+
 add_executable(GTDReplayTest GTDReplayTest.cpp)
 target_link_libraries(GTDReplayTest PRIVATE OrderMatcher)
 enable_assertions(GTDReplayTest)

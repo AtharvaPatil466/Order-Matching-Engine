@@ -100,6 +100,12 @@ inline bool moldReadHeader(const uint8_t* data, size_t len, MoldHeader& out) {
 class MoldUDP64Publisher {
 public:
     using SendBytes = std::function<void(std::string_view)>;
+    // Called on each group commit (flush / end-of-session) with the new
+    // high-water mark = the sequence number the NEXT packet will carry.
+    // Persisting this durably (e.g. via EpochStore) lets a restarted
+    // publisher resume the counter instead of resetting to 1 — see
+    // setNextSequence() and P3-3.
+    using SeqPersistFn = std::function<void(uint64_t)>;
 
     MoldUDP64Publisher(std::string session, SendBytes send,
                        size_t mtu = MOLD_DEFAULT_MTU)
@@ -113,8 +119,22 @@ public:
     // Override the starting sequence number. Subscribers reconnecting
     // after a gap-recovery cycle may need replay from a specific
     // sequence; production deployments persist the high-water mark.
-    void setNextSequence(uint64_t seq) { nextSeq_ = seq; }
+    //
+    // On a RESTART, load the persisted high-water and call this so the
+    // feed resumes contiguously — a reconnecting subscriber that held
+    // seq N-1 sees N next, not a false gap back to 1. We also anchor the
+    // persistence floor here so a resumed counter never regresses on
+    // disk (monotonicity, matching spec/EpochDurability.tla).
+    void setNextSequence(uint64_t seq) {
+        nextSeq_ = seq;
+        if (seq > lastPersisted_) lastPersisted_ = seq;
+    }
     uint64_t nextSequence() const { return nextSeq_; }
+
+    // Install the durability hook for the sequence high-water mark. The
+    // callback fires on every group commit with a strictly increasing
+    // value, so a durable sink (EpochStore) never records a regression.
+    void setSequencePersistence(SeqPersistFn fn) { persistSeq_ = std::move(fn); }
 
     // Queue an application message into the current batch. Returns
     // the sequence number assigned to this message. If adding the
@@ -151,6 +171,11 @@ public:
         pendingBuf_.clear();
         batchedMessageBytes_ = 0;
         ++packetsEmitted_;
+        // Group commit: persist the new high-water AFTER the packet is on
+        // the wire. Crashing between send and persist leaves the store one
+        // batch behind, so a restart re-sends already-delivered seqs
+        // (subscribers dedup) — never skips ahead into a false gap.
+        persistHighWater();
     }
 
     // Send a heartbeat packet (MessageCount=0). Used by the venue to
@@ -173,6 +198,9 @@ public:
         flush();
         emit(MOLD_END_OF_SESSION, nullptr, 0);
         ++endOfSessionsEmitted_;
+        // Persist the terminal high-water so a next-session restart that
+        // shares this counter resumes above it.
+        persistHighWater();
     }
 
     uint64_t packetsEmitted()       const { return packetsEmitted_; }
@@ -183,6 +211,16 @@ public:
 
 private:
     struct PendingMessage { uint16_t offset; uint16_t length; };
+
+    // Persist the high-water mark durably, but only when it advances —
+    // the value handed to the sink is strictly monotonic, so a durable
+    // store never records a regression even across restarts.
+    void persistHighWater() {
+        if (persistSeq_ && nextSeq_ > lastPersisted_) {
+            lastPersisted_ = nextSeq_;
+            persistSeq_(nextSeq_);
+        }
+    }
 
     void emit(uint16_t messageCount, const uint8_t* body, size_t bodyLen) {
         if (!send_) return;
@@ -197,8 +235,10 @@ private:
 
     std::string                  session_;
     SendBytes                    send_;
+    SeqPersistFn                 persistSeq_;
     size_t                       mtu_;
     uint64_t                     nextSeq_;
+    uint64_t                     lastPersisted_{0};
     std::vector<PendingMessage>  pending_;
     std::vector<uint8_t>         pendingBuf_;
     size_t                       batchedMessageBytes_{0};

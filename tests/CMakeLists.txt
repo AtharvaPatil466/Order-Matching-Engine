@@ -317,6 +317,33 @@ add_test(NAME ItchMarketDataFeedTest COMMAND ItchMarketDataFeedTest)
 set_tests_properties(ItchMarketDataFeedTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;integration;recovery")
 
+# P3-1: ITCH publication decoupled from the matching thread (async ring +
+# dedicated publisher thread; matching thread only does a non-blocking push)
+add_executable(ItchPublisherAsyncTest ItchPublisherAsyncTest.cpp)
+target_link_libraries(ItchPublisherAsyncTest PRIVATE OrderMatcher)
+enable_assertions(ItchPublisherAsyncTest)
+add_test(NAME ItchPublisherAsyncTest COMMAND ItchPublisherAsyncTest)
+set_tests_properties(ItchPublisherAsyncTest PROPERTIES TIMEOUT 60
+                     LABELS "project;protocol;concurrency")
+
+# P3-2: 10k-packet burst gap recovery — service keeps up, live UDP feed not
+# stalled by TCP retransmit, journal ring holds the backlog without overflow
+add_executable(MoldUDP64BurstRecoveryTest MoldUDP64BurstRecoveryTest.cpp)
+target_link_libraries(MoldUDP64BurstRecoveryTest PRIVATE OrderMatcher)
+enable_assertions(MoldUDP64BurstRecoveryTest)
+add_test(NAME MoldUDP64BurstRecoveryTest COMMAND MoldUDP64BurstRecoveryTest)
+set_tests_properties(MoldUDP64BurstRecoveryTest PROPERTIES TIMEOUT 90
+                     LABELS "project;protocol;integration;recovery")
+
+# P3-3: MoldUDP64 sequence-number continuity across a restart (persist the
+# high-water on each group commit; resume from it, never rewind to 1)
+add_executable(MoldSeqPersistenceTest MoldSeqPersistenceTest.cpp)
+target_link_libraries(MoldSeqPersistenceTest PRIVATE OrderMatcher)
+enable_assertions(MoldSeqPersistenceTest)
+add_test(NAME MoldSeqPersistenceTest COMMAND MoldSeqPersistenceTest)
+set_tests_properties(MoldSeqPersistenceTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;durability;recovery")
+
 # SBE — schema-driven binary protocol with forward-compat versioning
 add_executable(SbeProtocolTest SbeProtocolTest.cpp)
 target_link_libraries(SbeProtocolTest PRIVATE OrderMatcher)

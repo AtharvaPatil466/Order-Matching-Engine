@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Exp 1 hardening — closes the three pre-registered soft spots.
 
-  1. BOOTSTRAP CIs ON EXP 1 (n=20). Rerun the operating point with 20 seeds and
-     bootstrap CIs on every reported metric, replacing the n=10 point estimates.
+  1. BOOTSTRAP CIs ON EXP 1 (n=100; was 20). Rerun the operating point with 100
+     seeds and bootstrap CIs on every reported metric, replacing the n=10 point
+     estimates.
 
   2. CALIBRATION ROBUSTNESS (3x3). Sweep sens in {0.05,0.10,0.20} x decay in
-     {0.05,0.10,0.20} around the operating point, 20 seeds, both arms. Show the
+     {0.05,0.10,0.20} around the operating point, 100 seeds, both arms. Show the
      primary result (HFT rent significantly > 0; welfare closes to zero) holds in
      every cell, and report the range of HFT rent across the grid.
 
@@ -21,6 +22,7 @@ Run: bcs_research/.venv/bin/python bcs_research/experiments/exp1_hardening.py
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -34,6 +36,11 @@ for _d in ("build", "agents", "simulation", "metrics", "experiments"):
 
 from exp1_primary import CFG, _run               # noqa: E402  verified-engine harness
 from bootstrap import bootstrap_ci, bootstrap_ci_table  # noqa: E402
+
+# Seeds / replications per cell. Raised 20 -> 100 (P3-13) so the headline
+# bootstrap CIs stop spanning ~2:1 ratios (e.g. HFT rent was [25.65, 70.04] at
+# n=20). Override at run time with --n-seeds; the n>=100 sweep must run on compute.
+N_SEEDS = 100
 
 SENS_GRID = [0.05, 0.10, 0.20]
 DECAY_GRID = [0.05, 0.10, 0.20]
@@ -65,7 +72,7 @@ def ci_separated(lower_ci: dict, upper_ci: dict) -> bool:
 
 # --- soft spot 1: CI-annotated Exp 1 -----------------------------------------
 
-def harden_exp1(n_seeds: int = 20, cfg: dict | None = None, boot_seed: int = 0) -> dict:
+def harden_exp1(n_seeds: int = N_SEEDS, cfg: dict | None = None, boot_seed: int = 0) -> dict:
     cfg = {**CFG, **(cfg or {})}
     seeds = range(1, n_seeds + 1)
     treat = [_run(s, cfg, with_hft=True) for s in seeds]
@@ -93,7 +100,7 @@ def harden_exp1(n_seeds: int = 20, cfg: dict | None = None, boot_seed: int = 0) 
 
 # --- soft spot 2: 3x3 calibration robustness ---------------------------------
 
-def calibration_sweep(n_seeds: int = 20, sens_grid: list | None = None,
+def calibration_sweep(n_seeds: int = N_SEEDS, sens_grid: list | None = None,
                       decay_grid: list | None = None, boot_seed: int = 0) -> dict:
     sens_grid = sens_grid or SENS_GRID
     decay_grid = decay_grid or DECAY_GRID
@@ -137,7 +144,7 @@ def baseline_gaps(n_seeds: int = 100, cfg: dict | None = None,
 
 # --- driver ------------------------------------------------------------------
 
-def main(n_seeds: int = 20, baseline_seeds: int = 100, boot_seed: int = 0) -> dict:
+def main(n_seeds: int = N_SEEDS, baseline_seeds: int = 100, boot_seed: int = 0) -> dict:
     exp1 = harden_exp1(n_seeds=n_seeds, boot_seed=boot_seed)
     calib = calibration_sweep(n_seeds=n_seeds, boot_seed=boot_seed)
     base_gaps = baseline_gaps(n_seeds=baseline_seeds, boot_seed=boot_seed)
@@ -191,4 +198,14 @@ def _print_summary(report: dict) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Exp 1 hardening (bootstrap CIs).")
+    parser.add_argument("--n-seeds", type=int, default=N_SEEDS,
+                        help=f"replications per cell (default: {N_SEEDS})")
+    parser.add_argument("--baseline-seeds", type=int, default=100,
+                        help="seeds for the no-HFT baseline gap characterization "
+                             "(default: 100)")
+    parser.add_argument("--boot-seed", type=int, default=0,
+                        help="bootstrap RNG seed (default: 0)")
+    args = parser.parse_args()
+    main(n_seeds=args.n_seeds, baseline_seeds=args.baseline_seeds,
+         boot_seed=args.boot_seed)

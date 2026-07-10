@@ -2,18 +2,48 @@
 
 #include "IntrusiveList.h"
 #include "Types.h"
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <new>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace OrderMatcher {
 
-// Flat array-based price level map for O(1) insert/remove/best-price access.
-// Levels and both bitmap tiers are allocated in one contiguous block at
-// construction to avoid fragmented heap allocations.
+// Two-tier flat price-level map for O(1) insert/remove/best-price access.
+//
+// The map spans a fixed, contiguous band of price ticks [minPrice, maxPrice]
+// chosen at startup (see setRange). It is deliberately split into two tiers so
+// that the hot working set stays tiny even though the addressable price band is
+// large (~200K ticks):
+//
+//   Tier 1 — best-price bitmap (compact, always hot):
+//     A two-level bitmap (bitmap0_ / bitmap1_) with one bit per price index.
+//     A set bit means "this price level is active". Used for O(1)-ish best-price
+//     lookup and ordered iteration. Sized by capacity but only a few words are
+//     touched around the active band, so it stays resident in cache.
+//
+//   Tier 2 — active-level slab (a few KB in practice):
+//     OrderList objects are NOT stored inline in a capacity-sized array (that
+//     array would be multiple megabytes — larger than L3 — and mostly empty).
+//     Instead they live in a compact slab that is grown in fixed, never-moving
+//     blocks and holds ONE OrderList per *currently active* price level. Active
+//     levels number in the dozens to low hundreds, so the resting-order working
+//     set is a few KB rather than megabytes.
+//
+//     A per-price directory (slots_) maps price index -> slab handle, or
+//     INVALID_SLOT when the level is inactive. Handles into the slab are stable
+//     across growth (blocks never move / reallocate), so an OrderList* handed
+//     out by at()/bestLevel() stays valid until that level is deactivated.
+//
+// Slab lifetime / recycling: a slab slot is allocated on the FIRST insert into
+// a price level and returned to a free list on the LAST removal (when the level
+// becomes empty). Recycled slots are always empty (a level is only deactivated
+// once its OrderList is empty), so a reused handle never carries stale orders.
 class FlatPriceMap {
 public:
     explicit FlatPriceMap(Side side, size_t capacity = 200001)
@@ -24,12 +54,10 @@ public:
     }
 
     ~FlatPriceMap() {
-        if (levels_) {
-            for (size_t i = 0; i < capacity_; ++i) {
-                levels_[i].~OrderList();
-            }
+        for (OrderList* block : slabBlocks_) {
+            delete[] block;
         }
-        ::operator delete(storage_, std::align_val_t{alignof(OrderList)});
+        ::operator delete(storage_, std::align_val_t{alignof(uint64_t)});
     }
 
     FlatPriceMap(const FlatPriceMap&) = delete;
@@ -38,12 +66,49 @@ public:
     FlatPriceMap(FlatPriceMap&&) = delete;
     FlatPriceMap& operator=(FlatPriceMap&&) = delete;
 
+    // Lazy single-argument range setup: anchors the band at minPrice and
+    // derives maxPrice from the fixed capacity. Retained for the existing
+    // call-site that centres the band on the first order seen.
     void setRange(Price minPrice) {
         minPrice_ = minPrice;
         maxPrice_ = minPrice + static_cast<Price>(capacity_) - 1;
         rangeSet_ = true;
     }
 
+    // Explicit startup range configuration + validation (P1-9).
+    //
+    // The supported price band MUST be configured once at startup with the
+    // real [minPrice, maxPrice] the venue trades — it is NOT meant to be
+    // derived lazily from the first order. This overload validates that the
+    // requested band actually fits the fixed FlatPriceMap capacity and rejects
+    // (throws) with a clear message otherwise, so a misconfiguration fails fast
+    // at init instead of silently truncating the book.
+    //
+    // Once configured, a price outside [minPrice, maxPrice] is a DELIBERATE
+    // fat-finger-style reject via inRange() (insert() returns false and the
+    // caller surfaces an explicit rejection) — it is NOT a silent capacity miss
+    // or dropped order.
+    void setRange(Price minPrice, Price maxPrice) {
+        if (minPrice > maxPrice) {
+            throw std::invalid_argument(
+                "FlatPriceMap::setRange: minPrice must be <= maxPrice");
+        }
+        // Inclusive width == span + 1. Compare span against capacity to avoid
+        // the +1 overflowing for a full-int64 span; unsigned subtraction with
+        // minPrice <= maxPrice yields the exact tick distance.
+        uint64_t span = static_cast<uint64_t>(maxPrice) -
+                        static_cast<uint64_t>(minPrice);
+        if (span >= static_cast<uint64_t>(capacity_)) {
+            throw std::invalid_argument(
+                "FlatPriceMap::setRange: price range exceeds map capacity");
+        }
+        minPrice_ = minPrice;
+        maxPrice_ = maxPrice;
+        rangeSet_ = true;
+    }
+
+    // True iff a range has been configured AND price sits within it. A false
+    // result for an in-config-but-out-of-band price is the intended reject.
     bool inRange(Price price) const {
         return rangeSet_ && price >= minPrice_ && price <= maxPrice_;
     }
@@ -59,12 +124,16 @@ public:
         }
 
         size_t idx = priceToIndex(price);
-        bool wasEmpty = levels_[idx].empty();
-        levels_[idx].push_back(order);
-        if (wasEmpty) {
+        if (slots_[idx] == INVALID_SLOT) {
+            // First order at this price -> activate the level: grab a slab slot.
+            uint32_t handle = allocSlot();
+            slots_[idx] = handle;
+            slabEntry(handle).push_back(order);
             ++levelCount_;
             setBit(idx);
             updateBestAfterInsert(idx);
+        } else {
+            slabEntry(slots_[idx]).push_back(order);
         }
         return true;
     }
@@ -75,34 +144,56 @@ public:
         }
 
         size_t idx = priceToIndex(price);
-        levels_[idx].remove(order);
-        if (levels_[idx].empty()) {
-            --levelCount_;
-            clearBit(idx);
+        uint32_t handle = slots_[idx];
+        if (handle == INVALID_SLOT) {
+            return;  // no active level here — nothing to remove
+        }
+
+        OrderList& list = slabEntry(handle);
+        list.remove(order);
+        if (list.empty()) {
+            deactivate(idx, handle);
             if (hasBest_ && idx == bestIdx_) {
                 scanForNewBest();
             }
         }
     }
 
+    // Returns the active level at price, or nullptr when the price is inactive
+    // OR its level is (transiently) empty — matching the original inline-array
+    // semantics exactly. An active level is non-empty except for the brief
+    // window where the caller has drained the best level but not yet called
+    // eraseBest(); this keeps at()/contains() behaviour identical to before.
     OrderList* at(Price price) {
         if (!inRange(price)) {
             return nullptr;
         }
-        size_t idx = priceToIndex(price);
-        return levels_[idx].empty() ? nullptr : &levels_[idx];
+        uint32_t handle = slots_[priceToIndex(price)];
+        if (handle == INVALID_SLOT) {
+            return nullptr;
+        }
+        OrderList& list = slabEntry(handle);
+        return list.empty() ? nullptr : &list;
     }
 
     const OrderList* at(Price price) const {
         if (!inRange(price)) {
             return nullptr;
         }
-        size_t idx = priceToIndex(price);
-        return levels_[idx].empty() ? nullptr : &levels_[idx];
+        uint32_t handle = slots_[priceToIndex(price)];
+        if (handle == INVALID_SLOT) {
+            return nullptr;
+        }
+        const OrderList& list = slabEntry(handle);
+        return list.empty() ? nullptr : &list;
     }
 
     bool contains(Price price) const {
-        return inRange(price) && !levels_[priceToIndex(price)].empty();
+        if (!inRange(price)) {
+            return false;
+        }
+        uint32_t handle = slots_[priceToIndex(price)];
+        return handle != INVALID_SLOT && !slabEntry(handle).empty();
     }
 
     Price bestPrice() const {
@@ -113,16 +204,20 @@ public:
     }
 
     OrderList* bestLevel() {
-        return hasBest_ ? &levels_[bestIdx_] : nullptr;
+        return hasBest_ ? &slabEntry(slots_[bestIdx_]) : nullptr;
     }
 
     void eraseBest() {
-        if (!hasBest_ || !levels_[bestIdx_].empty()) {
+        if (!hasBest_) {
+            return;
+        }
+        uint32_t handle = slots_[bestIdx_];
+        // Only erase a best level that the caller has already drained empty.
+        if (handle == INVALID_SLOT || !slabEntry(handle).empty()) {
             return;
         }
 
-        --levelCount_;
-        clearBit(bestIdx_);
+        deactivate(bestIdx_, handle);
         scanForNewBest();
     }
 
@@ -131,81 +226,89 @@ public:
 
     template <typename Fn>
     void forEachLevel(Fn&& fn) {
-        forEachLevelImpl(levels_, std::forward<Fn>(fn));
+        forEachLevelImpl(std::forward<Fn>(fn));
     }
 
     template <typename Fn>
     void forEachLevel(Fn&& fn) const {
-        forEachLevelImpl(levels_, std::forward<Fn>(fn));
+        forEachLevelImpl(std::forward<Fn>(fn));
     }
 
     template <typename Fn>
     void forEachLevelWhile(Fn&& fn) {
-        forEachLevelWhileImpl(levels_, std::forward<Fn>(fn));
+        forEachLevelWhileImpl(std::forward<Fn>(fn));
     }
 
     template <typename Fn>
     void forEachLevelWhile(Fn&& fn) const {
-        forEachLevelWhileImpl(levels_, std::forward<Fn>(fn));
+        forEachLevelWhileImpl(std::forward<Fn>(fn));
     }
 
 private:
-    template <typename Levels, typename Fn>
-    void forEachLevelImpl(Levels& lvls, Fn&& fn) const {
+    // Slab blocks are fixed-size and never moved once allocated, so handles and
+    // OrderList pointers stay valid across growth. Power-of-two size lets the
+    // handle -> (block, offset) split compile to a shift + mask.
+    static constexpr uint32_t SLAB_BLOCK = 256;
+    static constexpr uint32_t INVALID_SLOT = std::numeric_limits<uint32_t>::max();
+
+    template <typename Fn>
+    void forEachLevelImpl(Fn&& fn) const {
         if (levelCount_ == 0 || !hasBest_) {
             return;
         }
 
         if (side_ == Side::Buy) {
             iterateDescending(bestIdx_, [&](size_t idx) {
-                fn(indexToPrice(idx), lvls[idx]);
+                fn(indexToPrice(idx), levelAt(idx));
                 return true;
             });
         } else {
             iterateAscending(bestIdx_, [&](size_t idx) {
-                fn(indexToPrice(idx), lvls[idx]);
+                fn(indexToPrice(idx), levelAt(idx));
                 return true;
             });
         }
     }
 
-    template <typename Levels, typename Fn>
-    void forEachLevelWhileImpl(Levels& lvls, Fn&& fn) const {
+    template <typename Fn>
+    void forEachLevelWhileImpl(Fn&& fn) const {
         if (levelCount_ == 0 || !hasBest_) {
             return;
         }
 
         if (side_ == Side::Buy) {
             iterateDescending(bestIdx_, [&](size_t idx) {
-                return fn(indexToPrice(idx), lvls[idx]);
+                return fn(indexToPrice(idx), levelAt(idx));
             });
         } else {
             iterateAscending(bestIdx_, [&](size_t idx) {
-                return fn(indexToPrice(idx), lvls[idx]);
+                return fn(indexToPrice(idx), levelAt(idx));
             });
         }
     }
 
+    // Directory + both bitmap tiers share one contiguous allocation. The
+    // OrderList objects themselves live in the separately-grown slab, so this
+    // block is only ~(4 bytes/tick + bitmap) instead of sizeof(OrderList)/tick.
     void allocateStorage() {
         bitmap0Words_ = (capacity_ + 63) / 64;
         bitmap1Words_ = (bitmap0Words_ + 63) / 64;
 
-        size_t levelBytes = sizeof(OrderList) * capacity_;
+        size_t slotBytes = sizeof(uint32_t) * capacity_;
         size_t bitmap0Bytes = sizeof(uint64_t) * bitmap0Words_;
         size_t bitmap1Bytes = sizeof(uint64_t) * bitmap1Words_;
         size_t alignPad = alignof(uint64_t) - 1;
-        size_t totalBytes = levelBytes + alignPad + bitmap0Bytes + bitmap1Bytes;
+        size_t totalBytes = slotBytes + alignPad + bitmap0Bytes + bitmap1Bytes;
 
         storage_ = static_cast<std::byte*>(
-            ::operator new(totalBytes, std::align_val_t{alignof(OrderList)}));
+            ::operator new(totalBytes, std::align_val_t{alignof(uint64_t)}));
 
         std::byte* cursor = storage_;
-        levels_ = reinterpret_cast<OrderList*>(cursor);
-        for (size_t i = 0; i < capacity_; ++i) {
-            new (&levels_[i]) OrderList();
-        }
+        slots_ = reinterpret_cast<uint32_t*>(cursor);
+        // All price levels start inactive (no slab slot assigned).
+        std::memset(slots_, 0xFF, slotBytes);  // 0xFFFFFFFF == INVALID_SLOT
 
-        cursor += levelBytes;
+        cursor += slotBytes;
         uintptr_t aligned = (reinterpret_cast<uintptr_t>(cursor) + alignPad) &
                             ~static_cast<uintptr_t>(alignPad);
         cursor = reinterpret_cast<std::byte*>(aligned);
@@ -215,6 +318,40 @@ private:
         cursor += bitmap0Bytes;
         bitmap1_ = reinterpret_cast<uint64_t*>(cursor);
         std::memset(bitmap1_, 0, bitmap1Bytes);
+    }
+
+    // ── Slab (Tier 2) ────────────────────────────────────────────────────────
+    OrderList& slabEntry(uint32_t handle) const {
+        return slabBlocks_[handle / SLAB_BLOCK][handle % SLAB_BLOCK];
+    }
+
+    OrderList& levelAt(size_t idx) const { return slabEntry(slots_[idx]); }
+
+    uint32_t allocSlot() {
+        if (!freeSlots_.empty()) {
+            uint32_t handle = freeSlots_.back();
+            freeSlots_.pop_back();
+            // Recycled slots are always empty (levels deactivate only when
+            // empty), so there is no stale order state to clear.
+            assert(slabEntry(handle).empty());
+            return handle;
+        }
+        uint32_t handle = slabHighWater_++;
+        if (handle / SLAB_BLOCK >= slabBlocks_.size()) {
+            slabBlocks_.push_back(new OrderList[SLAB_BLOCK]);
+        }
+        return handle;
+    }
+
+    // Deactivate a price level: recycle its (now-empty) slab slot, clear the
+    // directory entry and the bitmap bit. Does NOT rescan for a new best; the
+    // caller decides whether the best pointer was affected.
+    void deactivate(size_t idx, uint32_t handle) {
+        assert(slabEntry(handle).empty());
+        slots_[idx] = INVALID_SLOT;
+        freeSlots_.push_back(handle);
+        --levelCount_;
+        clearBit(idx);
     }
 
     template <typename Fn>
@@ -384,10 +521,13 @@ private:
 
     Side side_;
     size_t capacity_;
-    OrderList* levels_{nullptr};
+    uint32_t* slots_{nullptr};      // price index -> slab handle (or INVALID_SLOT)
     uint64_t* bitmap0_{nullptr};
     uint64_t* bitmap1_{nullptr};
-    std::byte* storage_{nullptr};
+    std::byte* storage_{nullptr};   // backing block for slots_ + both bitmaps
+    std::vector<OrderList*> slabBlocks_;  // never-moving Tier-2 slab blocks
+    std::vector<uint32_t> freeSlots_;     // recycled slab handles
+    uint32_t slabHighWater_{0};     // next never-used slab handle
     size_t bitmap0Words_{0};
     size_t bitmap1Words_{0};
     size_t levelCount_{0};

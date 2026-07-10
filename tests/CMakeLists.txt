@@ -199,6 +199,16 @@ enable_assertions(JournalAckDurabilityTest)
 add_test(NAME JournalAckDurabilityTest COMMAND JournalAckDurabilityTest)
 set_tests_properties(JournalAckDurabilityTest PROPERTIES TIMEOUT 60 LABELS "project;chaos")
 
+# Journal crash-replay test — kill -9 mid-journal-write, restart, replay, and
+# assert the recovered state equals the pre-crash committed state with contiguous
+# sequences across the crash boundary. Portable (fdatasync/F_FULLFSYNC path);
+# richer torn-write coverage when configured with -DENABLE_FAULT_INJECTION=ON.
+add_executable(JournalCrashReplayTest JournalCrashReplayTest.cpp)
+target_link_libraries(JournalCrashReplayTest PRIVATE OrderMatcher)
+enable_assertions(JournalCrashReplayTest)
+add_test(NAME JournalCrashReplayTest COMMAND JournalCrashReplayTest)
+set_tests_properties(JournalCrashReplayTest PROPERTIES TIMEOUT 60 LABELS "project;recovery;chaos")
+
 # Gateway chaos test — fragmented recv + spurious EAGAIN.
 add_executable(GatewayChaosTest GatewayChaosTest.cpp)
 target_link_libraries(GatewayChaosTest PRIVATE OrderMatcher)

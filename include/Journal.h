@@ -688,9 +688,22 @@ protected:
     void reaperLoop() {
         for (;;) {
             struct io_uring_cqe* cqe = nullptr;
-            int rc = io_uring_wait_cqe(&ring_, &cqe);
+            // Bound worst-case reaper wakeup latency during quiet periods.
+            // A bare io_uring_wait_cqe() blocks unboundedly until the next
+            // completion (or the shutdown NOP), so a chain that completed just
+            // after we parked — or a reaperStop_ set between iterations — could
+            // sit unobserved. Peek first (non-blocking); only if the CQ is empty
+            // do we block, and even then with a 1µs timeout so we loop back and
+            // re-check reaperStop_ rather than parking indefinitely. Completion
+            // processing below is byte-for-byte identical to the prior code.
+            int rc = io_uring_peek_cqe(&ring_, &cqe);
+            if (rc != 0 || !cqe) {
+                struct __kernel_timespec ts{0, 1000};  // 1µs quiet-period cap
+                rc = io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
+            }
             if (rc < 0 || !cqe) {
-                // EINTR / spurious — exit if we're shutting down, else retry.
+                // ETIME (quiet-period timeout), EINTR, or spurious — exit if
+                // we're shutting down, else loop back and peek again.
                 if (reaperStop_.load(std::memory_order_acquire)) return;
                 continue;
             }
@@ -911,6 +924,18 @@ private:
     // background checkpoint thread via needsCheckpoint().
     std::atomic<size_t> persistedEntries_{0};
     std::vector<JournalEntry> batch_;
+    // CONTRACT: onCommit_ fires on the reaper thread — must be lock-free and
+    // must not touch OrderBook state.
+    //
+    // On the async io_uring path finalizeChain() invokes onCommit_ from the
+    // reaper thread, concurrently with the matching thread that owns and mutates
+    // the OrderBook. A callback that grabbed a lock the matching thread also
+    // holds, or that read/wrote OrderBook state without external synchronization,
+    // would either stall the durability reaper or race the matching thread. On
+    // the synchronous path it fires inline on the writer thread, but the same
+    // discipline is required so a single callback body is safe under both paths.
+    // Keep it to lock-free byte-shipping only — e.g. hand committed bytes to the
+    // ReplicationCoordinator's transport; never reach back into engine state.
     OnCommitFn onCommit_;
     size_t maxSizeMb_{0};
 

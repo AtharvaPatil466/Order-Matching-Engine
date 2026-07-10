@@ -241,9 +241,13 @@ public:
         case OrderStatus::Cancelled:
         case OrderStatus::Filled: {
             RawEvent e;
-            e.kind    = RawEvent::Kind::Delete;
-            e.orderId = u.orderId;
-            e.ts      = now();
+            e.kind     = RawEvent::Kind::Delete;
+            e.orderId  = u.orderId;
+            // A Filled delete is preceded/followed by an Executed that carries
+            // the maker side; a Cancel has no trade. The serializer needs this
+            // to know whether an 'E' is still pending for this order.
+            e.fromFill = (u.status == OrderStatus::Filled);
+            e.ts       = now();
             dispatch(e);
             break;
         }
@@ -287,8 +291,17 @@ public:
 private:
     struct LiveOrder {
         Side     side;
-        Quantity shares;     // current leaves (decremented on fills)
+        Quantity shares;            // current leaves (decremented on fills)
         Price    price;
+        // A fully-filled resting order's Delete (from notifyOrderUpdate(Filled))
+        // can be dispatched BEFORE its Executed: OrderBook batches onTrade to
+        // AFTER the match loop (P1-3) while the Filled notify stays inline in the
+        // loop, so the publisher sees D-then-E for the maker side. We must not
+        // tear the order down before its 'E' fires. When that happens we stash
+        // the delete here (no emit, no erase) and let the pending Executed emit
+        // 'E' first, then flush this 'D' — restoring correct E→D wire order.
+        bool     pendingDelete{false};
+        uint64_t pendingDeleteTs{0};  // original delete event timestamp
     };
 
     // POD event carried through the ring. One flat struct (no union) —
@@ -301,6 +314,7 @@ private:
         };
         Kind     kind{Kind::Add};
         Side     side{Side::Buy};    // Add
+        bool     fromFill{false};    // Delete: true iff driven by Filled (vs Cancel)
         char     c0{' '};            // SystemEvent code / StockDir marketCat /
                                      // TradingAction wireState / CrossTrade type
         char     c1{' '};            // StockDir financialStatus
@@ -367,18 +381,29 @@ private:
             emit(buf, n);
             executedEmitted_.fetch_add(1, std::memory_order_relaxed);
             messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
-            // Do NOT erase here — the subsequent Delete drives removal.
+            // If a Filled delete for this order was stashed ahead of this 'E'
+            // (batched-dispatch reorder), the order is now fully executed —
+            // flush the deferred 'D' so the wire reads E→D, then erase.
+            if (it->second.pendingDelete && it->second.shares == 0) {
+                emitOrderDelete(e.orderId, it->second.pendingDeleteTs);
+                liveOrders_.erase(it);
+            }
             break;
         }
         case RawEvent::Kind::Delete: {
             auto it = liveOrders_.find(e.orderId);
             if (it == liveOrders_.end()) break;
-            uint8_t buf[ITCH_SIZE_ORDER_DELETE];
-            size_t n = encodeOrderDelete(buf, locateOf(), nextTracking(),
-                                         e.ts, static_cast<uint64_t>(e.orderId));
-            emit(buf, n);
-            deletesEmitted_.fetch_add(1, std::memory_order_relaxed);
-            messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
+            // A Filled delete whose Executed hasn't arrived yet (leaves still
+            // > 0) must wait: emitting 'D' now would drop the maker's 'E'
+            // (the state machine only emits 'E' for tracked orders). Stash it;
+            // the pending Executed above will flush it. Cancels and already-
+            // executed fills (leaves == 0) delete immediately.
+            if (e.fromFill && it->second.shares > 0) {
+                it->second.pendingDelete   = true;
+                it->second.pendingDeleteTs = e.ts;
+                break;
+            }
+            emitOrderDelete(e.orderId, e.ts);
             liveOrders_.erase(it);
             break;
         }
@@ -426,6 +451,17 @@ private:
 
     void emit(const uint8_t* buf, size_t n) {
         send_(std::string_view(reinterpret_cast<const char*>(buf), n));
+    }
+
+    // Encode + send an Order Delete and bump counters. Does NOT touch
+    // liveOrders_ — the caller owns the erase (it may hold an iterator).
+    void emitOrderDelete(OrderId orderId, uint64_t ts) {
+        uint8_t buf[ITCH_SIZE_ORDER_DELETE];
+        size_t n = encodeOrderDelete(buf, locateOf(), nextTracking(), ts,
+                                     static_cast<uint64_t>(orderId));
+        emit(buf, n);
+        deletesEmitted_.fetch_add(1, std::memory_order_relaxed);
+        messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
     }
 
     uint16_t locateOf() const {

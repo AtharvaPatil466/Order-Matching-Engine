@@ -428,6 +428,27 @@ public:
     // Count of new orders shed due to pool pressure (RejectReason::PoolCapacityExceeded).
     uint64_t getPoolRejectCount() const { return poolRejects_; }
 
+    // Current count of orders participant `pid` has resting in this book — the
+    // O(1) value backing the self-trade pre-check. Exposed for tests/telemetry;
+    // a parity test asserts it equals a ground-truth scan of bids_/asks_.
+    uint32_t stpRestingCount(ParticipantId pid) const {
+        return pid < kStpMaxParticipants ? stpResting_[pid] : 0;
+    }
+
+    // Test-only ground truth: count orders for `pid` ACTUALLY resting in
+    // bids_/asks_ by scanning. The O(1) counter (stpRestingCount) must always
+    // equal this for any tracked id — the StpOccupancyTest parity assertion.
+    uint32_t debugScanRestingCount(ParticipantId pid) const {
+        uint32_t n = 0;
+        auto count = [&](Price, const OrderList& level) {
+            for (const Order* o = level.front(); o; o = o->next)
+                if (o->participantId == pid) ++n;
+        };
+        bids_.forEachLevel(count);
+        asks_.forEachLevel(count);
+        return n;
+    }
+
     // Degradation thresholds (fractions of pool capacity).
     static constexpr double kPoolWarnPct   = 0.80;  // warn / observe
     static constexpr double kPoolRejectPct = 0.95;  // reject new orders
@@ -489,6 +510,35 @@ private:
     bool canAddToBook(const Order* order) const;
     void ensurePriceRange(Price price);
 
+    // ── Self-trade-protection occupancy (P1-2) ───────────────────────────────
+    // Per-participant count of orders currently RESTING in THIS book, so the
+    // pre-match self-trade check is an O(1) array lookup instead of the former
+    // O(depth) scan of every crossable level. Maintained via Order::inBook:
+    // stpNoteAdded on book entry (addToBook), stpNoteRemoved on every book exit
+    // (cancel / fill / STP removal / expiry / uncross). Non-idempotent add +
+    // idempotent remove: a missed removal site can only OVERcount -> the STP path
+    // runs when it need not (safe, slower), never UNDERcount -> a self-trade slips
+    // through (unsafe). Ids >= kStpMaxParticipants are untracked; stpNoneResting
+    // returns false for them so they take the full STP path (conservative).
+    static constexpr size_t kStpMaxParticipants = 1024;
+
+    void stpNoteAdded(Order* order) {
+        order->inBook = true;
+        const ParticipantId pid = order->participantId;
+        if (pid < kStpMaxParticipants) ++stpResting_[pid];
+    }
+    void stpNoteRemoved(Order* order) {
+        if (!order->inBook) return;  // parked / never rested / already removed
+        order->inBook = false;
+        const ParticipantId pid = order->participantId;
+        if (pid < kStpMaxParticipants && stpResting_[pid] > 0) --stpResting_[pid];
+    }
+    // True iff this participant has NO order a fill could self-match against.
+    // Out-of-range ids conservatively return false (run the full STP path).
+    bool stpNoneResting(ParticipantId pid) const {
+        return pid < kStpMaxParticipants && stpResting_[pid] == 0;
+    }
+
     // Mutex protecting the book's mutable state. Writers (addOrder,
     // cancelOrder, modifyOrder, cancelReplace, expireOrders,
     // cancelAllForParticipant, uncross) and the snapshot/auction readers
@@ -510,6 +560,10 @@ private:
     FlatPriceMap bids_;
     // Asks: Ascending Price (flat array, O(1) best-ask)
     FlatPriceMap asks_;
+
+    // STP occupancy counter (see stpNoteAdded/stpNoteRemoved). Zero-initialized;
+    // uint32 x 1024 = 4 KiB per book. Indexed by participant id (< bound).
+    uint32_t stpResting_[kStpMaxParticipants]{};
 
     // Pending orders by type — pre-allocated fixed vectors (no heap allocation).
     // Memory note: each `FixedVector<Order*, 16384>` is 128 KiB; the four

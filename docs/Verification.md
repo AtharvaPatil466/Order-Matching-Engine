@@ -1,6 +1,6 @@
 # TLA+ Verification Report
 
-> **MatchingEngine.tla**: VERIFIED — 454M states explored, 181M distinct, zero violations · 2026-05-12 · TLC 2026.05.04 · 12m 35s  
+> **MatchingEngine.tla** (order book **+ matching/cross layer**): VERIFIED — 368,192,427 states generated, 171,187,419 distinct, **zero violations**, complete exploration · 2026-07-12 · `MatchingEngine4.cfg` (MaxOrders=4, MaxTime=2) · BFS depth 11 · 17m 21s · non-vacuity: `MatchingEngineBroken.cfg` (BROKEN_NO_FIFO=TRUE) reproduces a `FIFOExecution` violation, so the price-time invariant is not vacuous  
 > **Replication.tla** (lease-propagation model): VERIFIED — 1373 states at default cfg, 4192 states at stronger MaxEntries=10, zero violations · 2026-05-19 · realistic promotion rule (heartbeat-miss AND lease-expiry required) · bug-injected variant (lease check stripped) reproduces split-brain in 188 states, confirming the verification is genuine
 
 > **New specs (2026-05-28)**: Auction.tla · EpochDurability.tla · FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states)
@@ -10,12 +10,21 @@
 ```
 SPECIFICATION Spec
 CONSTANTS
-    MaxOrders    = 4
-    Participants = {1, 2}
-    Prices       = {100, 200}
-    MaxQty       = 3
-    MaxTime      = 5
+    MaxOrders      = 4
+    Participants   = {1, 2}
+    Prices         = {100, 200}
+    MaxQty         = 3
+    MaxTime        = 2
+    BROKEN_NO_FIFO = FALSE
 ```
+
+MaxOrders=4 admits up to 3 resting orders on one side at a single price level
+(place 3, cross with a 4th) — the regime where FIFO time-priority defects
+manifest. MaxOrders=5 was attempted and is intractable on commodity hardware
+(>228M distinct states with >200M still queued after ~20 min, no convergence);
+4 is the largest exhaustively-checkable bound. The default `MatchingEngine.cfg`
+runs MaxOrders=3 (1.26M distinct) for a fast exhaustive check; `MatchingEngine4.cfg`
+is the deeper run reported here.
 
 **Workers**: 11 (Apple Silicon M-series, auto-detected)  
 **Memory**: 4096MB heap + 64MB offheap  
@@ -27,35 +36,37 @@ CONSTANTS
 |-----------|-------------|--------|
 | `NoNegativeQuantity` | No order has negative `qty` or `remainingQty` | ✅ Verified |
 | `FIFO_Preservation` | Orders at the same price maintain timestamp ordering | ✅ Verified |
+| `MatchingConservation` | `placed = resting + filled + cancelled` across every order's lifecycle | ✅ Verified |
+| `FIFOExecution` | A fill always consumes the earliest-timestamped resting order at a price (price-time priority) — **non-vacuous**, broken variant violates it | ✅ Verified |
 | `GTD_Expiry_Correctness` | Expired GTD orders are always cancelled | ✅ Verified |
 
 ## State Space Coverage
 
 ```
-454,022,166 states generated
-181,004,838 distinct states found
-14 levels deep (BFS depth)
+368,192,427 states generated
+171,187,419 distinct states found
+11 levels deep (BFS depth)
 0 states left on queue (complete exploration)
 ```
 
-**Fingerprint collision probability**: 0.33% (acceptable for this state space size)
+**Fingerprint collision probability**: ~0.18% (calculated, optimistic; 0.13% from
+actual fingerprints) — acceptable for this state space size
 
 ## What This Proves
 
-The spec models a simplified order book with:
+The spec models a simplified order book **with matching** at:
 - 4 orders maximum, 2 participants, 2 price levels, quantities 1–3
 - Order types: Limit, GTD with time-based expiry
-- Actions: PlaceLimit, CancelOrder, ExpireGTD, AdvanceTime
+- Actions: PlaceLimit, **Match** (price-cross, FIFO front-of-queue, min-fill),
+  CancelOrder, ExpireGTD, AdvanceTime
 
 All safety properties hold across every reachable state — no sequence of
-events can produce negative quantities, violate FIFO, or leave an expired
-GTD order active.
+events can produce negative quantities, violate FIFO ordering, execute out of
+price-time priority, lose quantity across a fill/cancel (conservation), or leave
+an expired GTD order active.
 
 ## What This Does NOT Prove
 
-- **No matching in the spec**: The spec does not model order matching/trade
-  execution. `PlaceLimit` adds to the book but never crosses. Adding matching
-  would dramatically expand the state space.
 - **No concurrent access**: Single-threaded sequential model only.
 - **Small constants**: 2 participants, 2 prices, qty ≤ 3. Real systems operate
   at much larger scales — the spec proves the algorithm is correct for the
@@ -103,8 +114,10 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 
 | File | Purpose |
 |------|---------|
-| `spec/MatchingEngine.tla` | Core matching engine TLA+ specification (454M states verified) |
-| `spec/MatchingEngine.cfg` | TLC configuration (constants, invariants) |
+| `spec/MatchingEngine.tla` | Core matching engine spec — order book + matching/cross layer (171M distinct states verified at MaxOrders=4) |
+| `spec/MatchingEngine.cfg` | Fast exhaustive config, MaxOrders=3 (1.26M distinct) |
+| `spec/MatchingEngine4.cfg` | Deep config, MaxOrders=4 (171M distinct, reported above) |
+| `spec/MatchingEngineBroken.cfg` | Non-vacuity variant (BROKEN_NO_FIFO=TRUE → FIFOExecution violation) |
 | `spec/Replication.tla` | Primary-backup replication spec with lease propagation (verified) |
 | `spec/Replication.cfg` | TLC configuration for Replication |
 | `spec/Refinement.tla` | C++ → TLA+ refinement mapping (proof sketches) |
@@ -138,9 +151,12 @@ Each new spec follows the same pattern as `Replication.tla`: a correct spec is v
 
 ```bash
 cd spec/
-# Full MatchingEngine verification (~12 min):
-java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC MatchingEngine \
-     -config MatchingEngine.cfg -workers auto -deadlock
+# Deep MatchingEngine verification, MaxOrders=4 (~17 min, 171M distinct states):
+./check.sh MatchingEngine MatchingEngine4.cfg
+# Fast exhaustive check, MaxOrders=3 (~seconds, 1.26M distinct):
+./check.sh MatchingEngine MatchingEngine.cfg
+# Non-vacuity: broken variant must report "Invariant FIFOExecution is violated":
+./check.sh MatchingEngine MatchingEngineBroken.cfg
 
 # Replication lease-propagation verification (seconds):
 ./check.sh Replication

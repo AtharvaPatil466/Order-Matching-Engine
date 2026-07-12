@@ -62,7 +62,9 @@
 #include "MatchingEngine.h"
 #include "MpscQueue.h"
 #include "OuchSession.h"
-#include "UdpSequencer.h"
+#include "RxMessage.h"         // shared payload POD (kMaxOrderBytes)
+#include "UdpReorderBuffer.h"  // Option A gap recovery (receiver side)
+#include "UdpSequencer.h"      // kSeqHeaderBytes / readSeqBE (pure helpers)
 
 #include <atomic>
 #include <cstdint>
@@ -86,6 +88,11 @@ struct DpdkConfig {
     // selected by portId/queueId, and NIC flow steering must direct this UDP
     // flow to queueId.
     uint16_t port = 6001;
+
+    // UDP L4 destination port of NAK/resend requests sent back to the order-entry
+    // client over the raw TX path (Component 1). The sender listens here for
+    // retransmit requests; see UdpRetransmitBuffer on the sender side.
+    uint16_t nakPort = 6003;
 
     // ── Control plane (F-Stack TCP admin/config) — OPTIONAL ─────────────────
     // Disabled by default: see reviewer-check (C) on EAL ownership. When true,
@@ -118,7 +125,16 @@ public:
     uint64_t queueFullDrops() const { return queueFullDrops_.load(std::memory_order_relaxed); }
     uint64_t framingResets() const { return framingResets_.load(std::memory_order_relaxed); }
     uint64_t responseBytesDropped() const { return responseBytesDropped_.load(std::memory_order_relaxed); }
-    const UdpSequencer& sequencer() const { return sequencer_; }
+
+    // ── Option A gap-recovery counters (exposed like the telemetry above; the
+    //    five rx_* live in the reorder buffer, the two tx_* here) ──────────────
+    uint64_t rxGapsDetected()     const { return reorder_.gapsDetected(); }
+    uint64_t rxGapDatagrams()     const { return reorder_.gapDatagrams(); }
+    uint64_t rxReorderBuffered()  const { return reorder_.reorderBuffered(); }
+    uint64_t rxReorderRecovered() const { return reorder_.reorderRecovered(); }
+    uint64_t rxReorderOverflow()  const { return reorder_.reorderOverflow(); }
+    uint64_t txNaksSent()  const { return txNaksSent_.load(std::memory_order_relaxed); }
+    uint64_t txNakDrops()  const { return txNakDrops_.load(std::memory_order_relaxed); }
 
 private:
     // Bytes stripped off the front of every received frame before the OUCH
@@ -126,24 +142,39 @@ private:
     static constexpr uint32_t kL2L3L4HeaderBytes = 14 + 20 + 8;  // 42
     static constexpr uint16_t kBurstSize   = 32;    // rte_eth_rx_burst batch
     static constexpr size_t   kRxQueueSize = 4096;  // MpscQueue capacity (pow2)
-    // Upper bound on a single OUCH order message copied into a queue slot. The
-    // largest OUCH 4.2 inbound frame (Enter Order) is well under this; a datagram
-    // may pack several frames, so this bounds one *datagram's* OUCH payload.
-    static constexpr uint16_t kMaxOrderBytes = 512;
+    // (RxMessage payload POD + kMaxOrderBytes now live in RxMessage.h so the
+    // reorder/retransmit buffers and tests can share them DPDK-free.)
 
-    // One handed-off datagram payload: the OUCH bytes (post sequence header),
-    // copied out of the mbuf so the mbuf can be freed immediately on the poll
-    // core (holding mbufs across the queue would pin the finite mbuf pool).
-    // POD + trivially copyable so it lives directly in MpscQueue slots.
-    struct RxMessage {
-        uint16_t len{0};
-        uint8_t  bytes[kMaxOrderBytes];
+    // ── TX / NAK path (Component 1) ─────────────────────────────────────────
+    static constexpr uint16_t kTxQueue       = 1;    // TX queue for NAK/resend
+    static constexpr uint16_t kTxDescriptors = 256;  // TX ring depth
+    static constexpr unsigned kNakMbufs      = 256;  // dedicated NAK mbuf pool
+    static constexpr uint16_t kNakMbufSize   = 128;  // per-mbuf data room (bytes)
+    static constexpr unsigned kNakMbufCache  = 32;   // per-lcore cache
+
+    // NAK / resend-request packet. The header bytes are pre-built once
+    // (learnSender) from the first received frame with src/dst swapped; only
+    // seqStart+count are filled per send. All multi-byte fields are big-endian
+    // on the wire (htobe64/htobe32).
+    struct __attribute__((packed)) NakPacket {
+        uint8_t  etherHeader[14];  // dst = sender MAC, src = our MAC
+        uint8_t  ipv4Header[20];   // src/dst swapped from RX; length + csum fixed
+        uint8_t  udpHeader[8];     // dst = nakPort; length fixed; csum 0 (IPv4 UDP)
+        uint64_t seqStart;         // big-endian: first missing sequence
+        uint32_t count;            // big-endian: number of missing datagrams
     };
 
-    bool initPort();          // mempool + configure + rx queue + start
-    void pollLoop();          // pinned hot thread: rx_burst -> seq -> push
+    bool initPort();          // mempool(s) + configure + rx/tx queue + start
+    void pollLoop();          // pinned hot thread: rx_burst -> seq -> reorder
     void consumeLoop();       // decode/submit thread: pop -> OuchSession::feed
-    void onResendRequest(uint64_t fromSeqInclusive, uint64_t toSeqExclusive);
+    // Build the NAK header template from the first valid RX frame (learn the
+    // sender's MAC/IP, src/dst swapped). Skips silently on a too-short/malformed
+    // frame (constraint 6) — never crashes.
+    void learnSender(const uint8_t* frame, uint32_t frameLen);
+    // Fire-and-forget NAK for [seqStart, seqStart+count). Never blocks or retries;
+    // on an exhausted TX pool or full TX ring it frees and counts a drop. Returns
+    // true iff the datagram was handed to rte_eth_tx_burst.
+    bool sendNak(uint64_t seqStart, uint32_t count);
     std::unique_ptr<OuchSession> makeSession();  // session + send callback
 
     // ── Control plane (F-Stack) — compiled but optional ─────────────────────
@@ -156,10 +187,14 @@ private:
     DpdkConfig                   config_;
 
     // Data plane
-    void*                        mbufPool_{nullptr};  // rte_mempool* (opaque here)
+    void*                        mbufPool_{nullptr};    // rte_mempool* RX (opaque)
+    void*                        txMbufPool_{nullptr};  // rte_mempool* NAK TX (opaque)
     std::unique_ptr<OuchSession> ouchSession_;
     MpscQueue<RxMessage>         rxQueue_;
-    UdpSequencer                 sequencer_;
+    UdpReorderBuffer<>           reorder_;              // gap recovery + NAK decision
+    bool                         senderLearned_{false}; // NAK template built yet?
+                                                        // (poll-thread only)
+    NakPacket                    nakTemplate_{};        // pre-built NAK header bytes
     std::thread                  pollThread_;
     std::thread                  consumeThread_;
 
@@ -177,6 +212,9 @@ private:
     std::atomic<uint64_t>        queueFullDrops_{0};
     std::atomic<uint64_t>        framingResets_{0};
     std::atomic<uint64_t>        responseBytesDropped_{0};
+    // Option A TX-side counters (rx_* gap/reorder counters live in reorder_).
+    std::atomic<uint64_t>        txNaksSent_{0};
+    std::atomic<uint64_t>        txNakDrops_{0};
 };
 
 }  // namespace OrderMatcher

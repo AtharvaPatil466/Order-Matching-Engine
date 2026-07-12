@@ -161,10 +161,12 @@ bool OrderBook::addToBook(Order* order) {
                           0, RejectReason::OutOfPriceRange);
         return false;
     }
+    stpNoteAdded(order);  // now resting: bump this participant's STP occupancy
     return true;
 }
 
 void OrderBook::removeFromBook(Order* order) {
+    stpNoteRemoved(order);  // leaving the book: drop STP occupancy (no-op if parked)
     auto& book = (order->side == Side::Buy) ? bids_ : asks_;
     book.remove(order->price, order);
 }
@@ -473,6 +475,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             return RejectReason::CapacityExhausted;
         }
         order->id = orderId;
+        order->inBook = false;  // pool reuse hands back raw memory — start clean
         order->participantId = participantId;
         order->side = side;
         order->price = price;   // only meaningful for LOC
@@ -537,6 +540,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     }
 
     order->id = orderId;
+    order->inBook = false;  // pool reuse hands back raw memory — start clean
     order->participantId = participantId;
     order->side = side;
     order->price = price;
@@ -758,36 +762,19 @@ void OrderBook::match(Order* incoming) {
 
     // P1-2 checkSMP OFF THE HOT PATH: a self-trade is purely a same-participant
     // test, so the incoming order can only ever self-trade against its OWN
-    // resting orders. Determine up front — before the loop — whether any resting
-    // order the match can reach belongs to the incoming participant. Scan is
-    // bounded to exactly the crossable levels the loop can walk (same price gate
-    // as the loop's break, all levels for a market order), and short-circuits on
-    // the first self order. If none exist, stpClear stays true and the per-fill
-    // checkSMP()/STP handling is skipped entirely on the common path. When a self
-    // order IS present the flag is false and the loop runs the exact original STP
-    // path, so STP semantics (detection + mode action) are preserved bit-for-bit.
-    // Sound because matching never ADDS an opposite-side order, so a resting order
-    // absent from this pre-scan can never appear mid-loop.
-    bool stpClear = true;
-    {
-        const ParticipantId incomingPid = incoming->participantId;
-        const bool isMarket = (incoming->type == OrderType::Market);
-        const Price limitPrice = incoming->price;
-        opposite.forEachLevelWhile(
-            [&](Price levelPrice, const OrderList& level) -> bool {
-                if (!isMarket) {
-                    if (isBuy  && levelPrice > limitPrice) return false;
-                    if (!isBuy && levelPrice < limitPrice) return false;
-                }
-                for (Order* o = level.front(); o; o = o->next) {
-                    if (o->participantId == incomingPid) {
-                        stpClear = false;
-                        return false;  // stop scanning — one is enough
-                    }
-                }
-                return true;
-            });
-    }
+    // resting orders. The per-participant occupancy counter (stpResting_) answers
+    // "does this participant have ANY resting order in this book?" in O(1) — no
+    // scan. If none, stpClear is true and the per-fill checkSMP()/STP handling is
+    // skipped entirely on the common path. If some rest (or the id is outside the
+    // counter's range), stpClear is false and the loop runs the exact original STP
+    // path, so semantics are preserved. The counter is maintained by
+    // stpNoteAdded/stpNoteRemoved at every book entry/exit; it can only overcount
+    // (=> stpClear=false, a harmless extra STP pass), never undercount, so a
+    // self-trade can never slip past this check. Note it counts BOTH sides, which
+    // is at worst slightly conservative vs the old crossable-levels-only scan
+    // (the per-fill checkSMP still gates the actual STP action, so no behaviour
+    // change) — and O(1) instead of O(depth).
+    const bool stpClear = stpNoneResting(incoming->participantId);
 
     // P1-3/P1-4/P1-5: buffer per-fill side effects on the stack and flush them
     // AFTER the loop rather than firing virtual onTrade dispatches, audit logs
@@ -867,6 +854,7 @@ void OrderBook::match(Order* incoming) {
                 bookOrder->status = OrderStatus::Cancelled;
                 notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
                     bookOrder->initialQty - bookOrder->remainingQty, 0);
+                stpNoteRemoved(bookOrder);
                 level->remove(bookOrder);
                 orderLookup_.erase(bookOrder->id);
                 orderPool_.deallocate(bookOrder);
@@ -877,6 +865,7 @@ void OrderBook::match(Order* incoming) {
                 bookOrder->status = OrderStatus::Cancelled;
                 notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
                     bookOrder->initialQty - bookOrder->remainingQty, 0);
+                stpNoteRemoved(bookOrder);
                 level->remove(bookOrder);
                 orderLookup_.erase(bookOrder->id);
                 orderPool_.deallocate(bookOrder);
@@ -887,6 +876,7 @@ void OrderBook::match(Order* incoming) {
                     bookOrder->status = OrderStatus::Cancelled;
                     notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
                         bookOrder->initialQty - bookOrder->remainingQty, 0);
+                    stpNoteRemoved(bookOrder);
                     level->remove(bookOrder);
                     orderLookup_.erase(bookOrder->id);
                     orderPool_.deallocate(bookOrder);
@@ -953,6 +943,7 @@ void OrderBook::match(Order* incoming) {
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
             notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->initialQty, 0, bestPrice);
+            stpNoteRemoved(bookOrder);
             level->remove(bookOrder);
             // P1-4 DEFER erase: the node is already unlinked from its level and
             // returned to the pool below, and matching never consults
@@ -1155,6 +1146,7 @@ void OrderBook::matchProRata(Order* incoming) {
         }
 
         for (size_t i = 0; i < removeCount; ++i) {
+            stpNoteRemoved(toRemove[i]);
             level.remove(toRemove[i]);
             orderLookup_.erase(toRemove[i]->id);
             orderPool_.deallocate(toRemove[i]);
@@ -1633,6 +1625,7 @@ void OrderBook::uncross() {
 
         // SMP check — skip this pair in auction
         if (checkSMP(*buyer, *seller)) {
+            stpNoteRemoved(buyer);
             bidLevel->remove(buyer);
             notifyOrderUpdate(buyer->id, OrderStatus::Cancelled, 0, buyer->remainingQty);
             orderLookup_.erase(buyer->id);
@@ -1670,6 +1663,7 @@ void OrderBook::uncross() {
         if (buyer->remainingQty == 0) {
             buyer->status = OrderStatus::Filled;
             notifyOrderUpdate(buyer->id, OrderStatus::Filled, buyer->initialQty, 0, bestUncrossPrice);
+            stpNoteRemoved(buyer);
             bidLevel->remove(buyer);
             orderLookup_.erase(buyer->id);
             orderPool_.deallocate(buyer);
@@ -1679,6 +1673,7 @@ void OrderBook::uncross() {
         if (seller->remainingQty == 0) {
             seller->status = OrderStatus::Filled;
             notifyOrderUpdate(seller->id, OrderStatus::Filled, seller->initialQty, 0, bestUncrossPrice);
+            stpNoteRemoved(seller);
             askLevel->remove(seller);
             orderLookup_.erase(seller->id);
             orderPool_.deallocate(seller);

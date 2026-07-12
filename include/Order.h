@@ -80,6 +80,14 @@ struct alignas(64) Order {
 
     // Minimum execution quantity
     Quantity minQty = 0;
+
+    // Book-membership flag for the STP occupancy counter (OrderBook::stpResting_):
+    // true iff this order is currently RESTING in bids_/asks_. Set on book entry
+    // (addToBook), cleared on every book exit, so the per-participant resting
+    // count stays balanced across cancel/fill/expiry/uncross without an O(depth)
+    // rescan. Cold field — touched only at book entry/exit, never in the fill
+    // math, and absorbed by existing padding (sizeof(Order) stays 192).
+    bool inBook = false;
 };
 
 // The hot working set must fit in the first 64-byte cache line. displayQty is

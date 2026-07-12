@@ -359,6 +359,26 @@ add_test(NAME MoldSeqPersistenceTest COMMAND MoldSeqPersistenceTest)
 set_tests_properties(MoldSeqPersistenceTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;durability;recovery")
 
+# Option A UDP gap recovery: reorder buffer (hold-and-drain out-of-order
+# datagrams, NAK only the new gap) + sender retransmit window. DPDK-free logic,
+# runs headless on CI; the rte_eth_tx_burst NAK path is validated on hardware.
+add_executable(UdpGapRecoveryTest UdpGapRecoveryTest.cpp)
+target_link_libraries(UdpGapRecoveryTest PRIVATE OrderMatcher)
+enable_assertions(UdpGapRecoveryTest)
+add_test(NAME UdpGapRecoveryTest COMMAND UdpGapRecoveryTest)
+set_tests_properties(UdpGapRecoveryTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;recovery")
+
+# STP occupancy counter (P1-2): O(1) self-trade pre-check replacing the O(depth)
+# scan. Parity test — the counter must always equal a ground-truth resting scan
+# across fill/cancel/STP/expiry/iceberg-reorder/pro-rata/uncross.
+add_executable(StpOccupancyTest StpOccupancyTest.cpp)
+target_link_libraries(StpOccupancyTest PRIVATE OrderMatcher)
+enable_assertions(StpOccupancyTest)
+add_test(NAME StpOccupancyTest COMMAND StpOccupancyTest)
+set_tests_properties(StpOccupancyTest PROPERTIES TIMEOUT 30
+                     LABELS "project;matching;stp")
+
 # SBE — schema-driven binary protocol with forward-compat versioning
 add_executable(SbeProtocolTest SbeProtocolTest.cpp)
 target_link_libraries(SbeProtocolTest PRIVATE OrderMatcher)

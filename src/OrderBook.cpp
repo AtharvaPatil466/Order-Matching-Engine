@@ -797,14 +797,28 @@ void OrderBook::match(Order* incoming) {
     auto flushFills = [&]() {
         const bool dispatchTrades = (!replayMode_ && hasTradeListener_);
         const bool auditLog = obSinkActive();
-        for (int i = 0; i < fillCount; ++i) {
-            const Trade& t = pendingFills[i].trade;
+        // dispatchOne carries the exact per-fill side effects (audit log then
+        // onTrade, in the original order), shared by the fast and slow paths so
+        // the two cannot drift.
+        auto dispatchOne = [&](const Trade& t) {
             if (auditLog) [[unlikely]]
                 obSink().log(logTradeFill(t.buyOrderId, t.sellOrderId,
                                           t.symbolId, t.price, t.quantity));
             if (dispatchTrades) { listener_->onTrade(t); engineListener_->onTrade(t); }
+        };
+        // Fast path: a marketable order almost always produces exactly one fill —
+        // dispatch it (and its single deferred erase) directly, skipping the loop
+        // setup. Falls back to the batched loop for multi-fill sweeps.
+        if (fillCount == 1) [[likely]] {
+            dispatchOne(pendingFills[0].trade);
+        } else {
+            for (int i = 0; i < fillCount; ++i) dispatchOne(pendingFills[i].trade);
         }
-        for (int i = 0; i < eraseCount; ++i) orderLookup_.erase(toErase[i]);
+        if (eraseCount == 1) {
+            orderLookup_.erase(toErase[0]);
+        } else {
+            for (int i = 0; i < eraseCount; ++i) orderLookup_.erase(toErase[i]);
+        }
         fillCount = 0;
         eraseCount = 0;
     };

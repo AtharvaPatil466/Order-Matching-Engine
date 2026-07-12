@@ -341,6 +341,12 @@ private:
 
     // ── Slab (Tier 2) ────────────────────────────────────────────────────────
     OrderList& slabEntry(uint32_t handle) const {
+        // Single-block fast path: block 0 holds handles 0..SLAB_BLOCK-1, and
+        // active levels almost always number in the dozens–low hundreds (a single
+        // block), so index the cached block-0 pointer directly — no integer
+        // division and no slabBlocks_ (vector) dereference. Handles that spill
+        // into a second-or-later block take the two-tier directory path.
+        if (handle < SLAB_BLOCK) return block0_[handle];
         return slabBlocks_[handle / SLAB_BLOCK][handle % SLAB_BLOCK];
     }
 
@@ -374,6 +380,7 @@ private:
                 new (&block[i]) OrderList();
             }
             slabAllocs_.push_back(alloc);
+            if (slabBlocks_.empty()) block0_ = block;  // cache block 0 for slabEntry fast path
             slabBlocks_.push_back(block);
         }
         return handle;
@@ -563,6 +570,7 @@ private:
     std::byte* storage_{nullptr};   // backing block for slots_ + both bitmaps
     HugeAllocation storageAlloc_{}; // huge-page backing for storage_ (release info)
     std::vector<OrderList*> slabBlocks_;  // never-moving Tier-2 slab blocks
+    OrderList* block0_{nullptr};          // cached slabBlocks_[0] — single-block fast path
     std::vector<HugeAllocation> slabAllocs_;  // huge-page backing per slab block
     std::vector<uint32_t> freeSlots_;     // recycled slab handles
     uint32_t slabHighWater_{0};     // next never-used slab handle

@@ -129,8 +129,8 @@ The core of the engine is purely single-threaded and deterministic.
 To scale beyond a single core, the engine utilizes the `ShardedOrderBook`.
 Instead of placing all instruments in one book, instruments are sharded across $N$ instances. Each worker thread runs an independent event loop pinned to a specific CPU core. Affinity is set inline at thread startup in `MatchingEngine.cpp` — `pthread_setaffinity_np` with a `cpu_set_t` on Linux, and `thread_policy_set(..., THREAD_AFFINITY_POLICY, ...)` on macOS. Cross-symbol interactions are heavily restricted to maintain this isolation.
 
-### 3.3 ShadowEngine (Dark Launching)
-For algorithmic testing and capacity planning, the `ShadowEngine` allows cloning production state. It consumes production traffic (via a fork or replay) but suppresses all outbound executions and market data. By taking a read-only snapshot of the production book and replaying subsequent events from a specific journal offset, the shadow instance accurately mirrors live execution logic without corrupting the production order book or impacting live network egress. This allows safe, realistic load testing of new engine versions against live market flow.
+### 3.3 Shadow Mode (Dark Launching)
+Shadow mode runs a parallel matching instance over the same order flow with all outbound executions and market data suppressed, then compares its book state against the primary to catch logic divergences that replication alone cannot (a bug present in both primary and backup replicates cleanly but still produces wrong output). The core divergence-detection principle — feed identical flow to a second engine, diff the resulting book state — is validated by `ShadowModeTest`. A production-wired `ShadowEngine` service is a roadmap item, not a shipped component.
 
 ### 3.4 Structured Logging & Observability
 

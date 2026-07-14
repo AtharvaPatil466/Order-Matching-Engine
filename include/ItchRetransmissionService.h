@@ -102,26 +102,27 @@ public:
     bool start(uint16_t port = 0, int backlog = 16) {
         if (running_.load()) return false;
 
-        listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (listenFd_ < 0) return false;
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return false;
         int opt = 1;
-        ::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(port);
-        if (::bind(listenFd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            ::close(listenFd_); listenFd_ = -1; return false;
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            ::close(fd); return false;
         }
-        if (::listen(listenFd_, backlog) < 0) {
-            ::close(listenFd_); listenFd_ = -1; return false;
+        if (::listen(fd, backlog) < 0) {
+            ::close(fd); return false;
         }
         sockaddr_in bound{};
         socklen_t boundLen = sizeof(bound);
-        ::getsockname(listenFd_, reinterpret_cast<sockaddr*>(&bound), &boundLen);
+        ::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &boundLen);
         boundPort_ = ntohs(bound.sin_port);
 
+        listenFd_.store(fd);
         running_.store(true);
         acceptorThread_ = std::thread(
             &ItchRetransmissionService::acceptorLoop, this);
@@ -130,10 +131,13 @@ public:
 
     void stop() {
         if (!running_.exchange(false)) return;
-        if (listenFd_ >= 0) {
-            ::shutdown(listenFd_, SHUT_RDWR);
-            ::close(listenFd_);
-            listenFd_ = -1;
+        // shutdown() wakes a blocked accept(); close() is what wakes it on
+        // macOS (shutdown alone doesn't on listening sockets), so keep the
+        // close here rather than deferring past the join.
+        int lfd = listenFd_.exchange(-1);
+        if (lfd >= 0) {
+            ::shutdown(lfd, SHUT_RDWR);
+            ::close(lfd);
         }
         if (acceptorThread_.joinable()) acceptorThread_.join();
 
@@ -155,7 +159,7 @@ public:
 
 private:
     void acceptorLoop() {
-        int lfd = listenFd_;
+        int lfd = listenFd_.load();
         while (running_.load()) {
             sockaddr_in peer{};
             socklen_t peerLen = sizeof(peer);
@@ -287,7 +291,9 @@ private:
     LoginValidator           loginValidator_;
 
     std::atomic<bool>        running_{false};
-    int                      listenFd_{-1};
+    // ponytail: atomic — stop() writes -1 while acceptorLoop() reads it on
+    // another thread (TSan data race on the plain int otherwise).
+    std::atomic<int>         listenFd_{-1};
     uint16_t                 boundPort_{0};
 
     std::thread              acceptorThread_;

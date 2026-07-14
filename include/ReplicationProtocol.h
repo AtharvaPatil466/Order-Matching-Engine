@@ -351,22 +351,21 @@ public:
 
     void stop() {
         receiving_.store(false, std::memory_order_release);
-        // shutdown() before close() wakes up any blocked recv()/accept()
-        // in receiveLoop, which would otherwise hang on the syscall
-        // until the kernel processes the close. shutdown(SHUT_RDWR)
-        // sends a TCP RST/FIN and recv returns 0 immediately on the
-        // other thread; then we close to release the fd number.
+        // shutdown() (not close) wakes any blocked recv()/accept() in
+        // receiveLoop: it sends a TCP FIN/RST so recv returns immediately
+        // without freeing the fd number. We close ONLY after join(), once
+        // the receive thread is guaranteed done touching the fd — closing
+        // it while recv() is still in flight is a data race on the fd
+        // (TSan flags close-during-recv even though shutdown woke it).
         int lfd = listenFd_.exchange(-1, std::memory_order_acq_rel);
-        if (lfd >= 0) {
-            ::shutdown(lfd, SHUT_RDWR);
-            ::close(lfd);
-        }
+        if (lfd >= 0) ::shutdown(lfd, SHUT_RDWR);
         int pfd = peerFd_.exchange(-1, std::memory_order_acq_rel);
-        if (pfd >= 0) {
-            ::shutdown(pfd, SHUT_RDWR);
-            ::close(pfd);
-        }
+        if (pfd >= 0) ::shutdown(pfd, SHUT_RDWR);
+
         if (recvThread_.joinable()) recvThread_.join();
+
+        if (lfd >= 0) ::close(lfd);
+        if (pfd >= 0) ::close(pfd);
     }
 
     // Send a message to the peer. Loads peerFd_ once and uses the

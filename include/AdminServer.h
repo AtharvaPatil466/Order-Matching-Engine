@@ -71,7 +71,9 @@ private:
 
     MatchingEngine& engine_;
     uint16_t port_;
-    int serverSocket_{-1};
+    // ponytail: atomic — stop() writes -1 while listenLoop()'s accept()
+    // reads it on another thread (TSan data race on the plain int otherwise).
+    std::atomic<int> serverSocket_{-1};
     std::atomic<bool> running_{false};
     std::thread listenThread_;
     ReplicationCoordinator* coord_{nullptr};

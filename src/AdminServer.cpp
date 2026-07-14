@@ -71,34 +71,33 @@ AdminServer::~AdminServer() {
 void AdminServer::start() {
     if (running_) return;
     
-    serverSocket_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket_ < 0) {
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
         std::cerr << "[AdminServer] Failed to create socket\n";
         return;
     }
 
     int opt = 1;
-    setsockopt(serverSocket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port_);
 
-    if (::bind(serverSocket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (::bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         std::cerr << "[AdminServer] Failed to bind to port " << port_ << "\n";
-        ::close(serverSocket_);
-        serverSocket_ = -1;
+        ::close(sock);
         return;
     }
 
-    if (::listen(serverSocket_, 8) < 0) {
+    if (::listen(sock, 8) < 0) {
         std::cerr << "[AdminServer] Failed to listen\n";
-        ::close(serverSocket_);
-        serverSocket_ = -1;
+        ::close(sock);
         return;
     }
 
+    serverSocket_.store(sock);
     running_ = true;
     listenThread_ = std::thread(&AdminServer::listenLoop, this);
     std::cout << "[AdminServer] Listening on http://0.0.0.0:" << port_ << "\n";
@@ -108,10 +107,13 @@ void AdminServer::stop() {
     if (!running_) return;
     running_ = false;
 
-    if (serverSocket_ >= 0) {
-        ::shutdown(serverSocket_, SHUT_RDWR);
-        ::close(serverSocket_);
-        serverSocket_ = -1;
+    // shutdown() wakes the blocked accept(); close() is what wakes it on
+    // macOS (shutdown alone doesn't on listening sockets), so keep the
+    // close here rather than deferring past the join.
+    int sock = serverSocket_.exchange(-1);
+    if (sock >= 0) {
+        ::shutdown(sock, SHUT_RDWR);
+        ::close(sock);
     }
 
     if (listenThread_.joinable()) {
@@ -123,7 +125,7 @@ void AdminServer::listenLoop() {
     while (running_) {
         struct sockaddr_in clientAddr{};
         socklen_t clientLen = sizeof(clientAddr);
-        int clientSock = ::accept(serverSocket_, (struct sockaddr*)&clientAddr, &clientLen);
+        int clientSock = ::accept(serverSocket_.load(), (struct sockaddr*)&clientAddr, &clientLen);
         if (clientSock < 0) {
             if (!running_) break; // Server shutting down
             continue;

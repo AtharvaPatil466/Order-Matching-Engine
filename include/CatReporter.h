@@ -1,41 +1,26 @@
 #pragma once
 
-// CatReporter — engine-agnostic Consolidated Audit Trail (CAT) recorder.
+// CatReporter — engine-agnostic Consolidated Audit Trail recorder. Captures the
+// regulator-relevant facts of every order action (new/modify/cancel/trade) into
+// an append-only, monotonically-sequenced log and serializes it to JSON Lines,
+// in the spirit of US CAT / European audit-trail regimes.
 //
-// What this is: a standalone order-lifecycle event recorder that captures
-// the regulator-relevant facts of every order action (new / modify /
-// cancel / trade) into an append-only, monotonically-sequenced log, and
-// serializes that log to JSON Lines (JSONL). It mirrors the spirit of the
-// US CAT / European audit-trail regimes: who did what, to which order, on
-// which symbol, at what time, in a strictly ordered stream.
+// FORMAT/serialization only — not a network client, submission pipeline, or
+// schema validator. No I/O beyond producing a string; an integration team owns
+// transport, batching, encryption, and the official record layout.
 //
-// What this is NOT: a network client, a regulatory submission pipeline, a
-// schema validator, or anything that talks to a CAT processor. This is
-// FORMAT/serialization only. There is no I/O beyond producing a string.
-// An integration team owns transport, batching, encryption, and the
-// official record layout; this class gives them ONE in-memory seam that
-// already guarantees ordering and a stable, parseable shape.
-//
-// Design choices:
-//   * Engine-agnostic by construction: depends ONLY on Types.h and the
-//     standard library. It never includes OrderBook.h / MatchingEngine.h,
-//     so it can be unit-tested and reused in isolation (replay tools,
-//     gateways, post-trade services) without dragging in the engine.
-//   * The reporter — not the caller — owns sequencing. Every record gets
-//     the next value of a monotonic counter starting at 1, assigned in
-//     call order. Callers cannot fabricate or reorder sequence numbers;
-//     this is the property a downstream auditor relies on.
-//   * Timestamps are caller-supplied (the engine already has a clock; the
-//     reporter must not impose a second, divergent one). The reporter
-//     stays deterministic and trivially testable as a result.
-//   * A Trade is recorded as a SINGLE record. By convention the aggressor/
-//     buy order id is carried in `orderId` and the resting/sell order id
-//     in the dedicated `contraOrderId` field; both ids therefore survive
-//     into the JSON. (See recordTrade.) Non-trade events leave
-//     contraOrderId and tradeId at 0.
-//   * Storage is a plain std::vector<CatRecord> — append-only until
-//     clear(). Allocation is kept modest (amortized push_back, a single
-//     reserve-friendly buffer in toJsonl), but correctness comes first.
+// Design:
+//   * Engine-agnostic: depends only on Types.h + stdlib (never OrderBook.h /
+//     MatchingEngine.h), so it reuses in replay tools, gateways, post-trade.
+//   * The reporter owns sequencing — every record gets the next value of a
+//     monotonic counter (from 1) in call order; callers can't fabricate or
+//     reorder. Downstream auditors rely on this.
+//   * Timestamps are caller-supplied (the engine already has a clock), keeping
+//     the reporter deterministic and testable.
+//   * A Trade is ONE record: aggressor/buy id in orderId, resting/sell id in
+//     contraOrderId (see recordTrade). Non-trade events leave contraOrderId and
+//     tradeId at 0.
+//   * Storage is an append-only std::vector<CatRecord> until clear().
 
 #include "Types.h"
 

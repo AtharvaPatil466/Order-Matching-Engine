@@ -1,61 +1,33 @@
 #pragma once
 //
-// DpdkGateway — kernel-bypass OUCH order ingestion. Entirely gated by
-// OB_HAVE_DPDK: when it is not defined (any non-Linux platform, or DPDK/F-Stack
-// not installed) this header is empty and src/DpdkGateway.cpp is an empty
-// translation unit, so the kernel TcpGateway remains the only ingestion path and
-// the default build is unchanged.
+// DpdkGateway — kernel-bypass OUCH order ingestion. Gated by OB_HAVE_DPDK:
+// undefined (non-Linux, or DPDK/F-Stack absent) → empty header + empty .cpp, so
+// the kernel TcpGateway stays the only ingestion path.
 //
-// DATA PLANE vs CONTROL PLANE (the P2 split)
-// ------------------------------------------
-// The hot order-entry path is now a RAW POLL-MODE DPDK receive, NOT F-Stack's
-// TCP stack:
+// Data plane (orders in): a poll thread pinned to an isolated core calls
+// rte_eth_rx_burst() directly, strips the 42B Eth+IPv4+UDP headers, reads the 8B
+// per-datagram sequence (UdpSequencer), and pushes the OUCH payload onto an
+// MpscQueue; a consumer thread drains it into one persistent OuchSession
+// (parser/submit path reused unchanged). No TCP, no reassembly, no kernel. UDP
+// is message-atomic; TCP's reliability is replaced by the 64-bit sequence + gap
+// detection + resend in UdpSequencer (fine for a trusted co-lo link). Control
+// plane (admin/config) is OPTIONAL F-Stack, off the hot path.
 //
-//   * DATA PLANE (orders in) — a dedicated poll thread, pinned to an isolated
-//     core, calls rte_eth_rx_burst() directly on a DPDK port/queue. For each
-//     mbuf it skips the Ethernet(14)+IPv4(20)+UDP(8)=42B headers, reads an
-//     8-byte per-datagram sequence number (UdpSequencer), and pushes the OUCH
-//     payload onto an MpscQueue. A separate consumer thread drains that queue
-//     into a single persistent OuchSession (the parser + engine-submit path is
-//     reused UNCHANGED). No TCP state machine, no reassembly, no ACK/retransmit.
-//
-//   * CONTROL PLANE (admin/config) — OPTIONAL and still F-Stack. When enabled it
-//     runs ff_init()/ff_run() on its own thread and serves administrative /
-//     configuration traffic over F-Stack's BSD-socket shim. F-Stack is NO LONGER
-//     on the order-entry hot path; it exists only for the control plane.
-//
-// Why UDP + raw poll for order entry
-// ----------------------------------
-// Co-located clients on the same LAN want the lowest possible order-entry
-// latency. Raw poll-mode receive removes the kernel, the TCP stack, and every
-// interrupt/wakeup from the path. UDP is message-atomic, so we lose nothing to
-// stream reassembly; the reliability TCP would have given us is replaced by the
-// explicit 64-bit sequence number + gap detection + resend request in
-// UdpSequencer (appropriate for a short, trusted, low-loss co-lo link).
-//
-// !!! REVIEWER-CHECK ASSUMPTIONS (this path cannot be compiled or run locally;
-//     macOS has no DPDK) — validate ALL of these against the pinned DPDK /
-//     F-Stack version on AWS:
-//   (A) DATAGRAM FRAMING: every UDP datagram carries the 8-byte big-endian
-//       sequence header followed by one or MORE *complete* OUCH frames. An OUCH
-//       frame MUST NOT straddle a datagram boundary. OuchSession::feed()
-//       accumulates a byte stream and only drains whole frames, so a datagram
-//       that ends mid-frame would leave a partial in the persistent buffer and
-//       desynchronize the parser. On a trusted co-lo sender this is a sender-side
-//       invariant, not something the receiver can recover from mid-stream.
-//   (B) HEADER LAYOUT: exactly Ethernet(14)+IPv4(20, no options)+UDP(8) = 42B is
-//       stripped. VLAN tags, IP options, or IPv6 would change this offset. The
-//       NIC/flow config must steer ONLY the order-entry UDP flow to our queue.
-//   (C) EAL OWNERSHIP: rte_eal_init() (data plane) and ff_init() (F-Stack control
-//       plane) BOTH initialize DPDK's EAL, which may be initialized only once per
-//       process. This build has the DATA PLANE own EAL (rte_eal_init in start())
-//       and DISABLES the F-Stack control plane by default. Enabling both requires
-//       reconciling EAL ownership (shared EAL / secondary process) on AWS.
-//   (D) PORT BRING-UP: initPort() uses a single-RX-queue default configuration;
-//       the real ENA/port needs its offloads, RSS, and queue counts validated.
-//   (E) ISOLATION: the poll thread busy-spins at 100% CPU on its core BY DESIGN.
-//       That core MUST be isolated (isolcpus / nohz_full / rcu_nocbs). See
-//       docs/OSTuning.md.
+// UNTESTABLE LOCALLY (no DPDK on macOS) — validate against the pinned DPDK/
+// F-Stack version on AWS:
+//   (A) Every datagram = 8B big-endian seq + one or more COMPLETE OUCH frames;
+//       a frame must not straddle a datagram (sender-side invariant —
+//       OuchSession::feed() desyncs on a partial, can't recover mid-stream).
+//   (B) Exactly Eth(14)+IPv4-no-options(20)+UDP(8)=42B is stripped; VLAN/IP
+//       options/IPv6 shift this. NIC flow steering must send ONLY this UDP flow
+//       to our queue.
+//   (C) rte_eal_init (data plane) and ff_init (control plane) both init EAL,
+//       which inits once per process. Data plane owns EAL; control plane off by
+//       default. Enabling both needs EAL-ownership reconciliation on AWS.
+//   (D) initPort() uses a single-RX-queue default; validate offloads/RSS/queue
+//       counts on the real ENA port.
+//   (E) The poll thread busy-spins at 100% CPU by design — its core must be
+//       isolated (isolcpus/nohz_full/rcu_nocbs). See docs/OSTuning.md.
 
 #if defined(OB_HAVE_DPDK)
 

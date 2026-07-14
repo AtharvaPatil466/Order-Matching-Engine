@@ -1,54 +1,31 @@
 #pragma once
 
-// ItchPublisher — converts engine events for one OrderBook into ITCH
-// 5.0 wire frames.
-//
-// Per-book scope: each publisher is bound to a single OrderBook at
-// construction so it knows its symbol and can look up resting orders
-// to fetch the side/price the EventListener path doesn't surface.
-// Real ITCH feeds aggregate across all symbols on the venue — to wire
-// that up, fan out via MultiplexListener (one ItchPublisher per book,
-// each writing to a shared sink).
-//
-// Sink shape `void(std::string_view)` is transport-agnostic: tests
-// accumulate to a string; production wires to UDP multicast or the
-// existing SHM market-data fan-out.
+// ItchPublisher — converts one OrderBook's engine events into ITCH 5.0 wire
+// frames. Bound to a single OrderBook at construction (so it knows its symbol
+// and can look up resting orders for the side/price the EventListener path
+// doesn't surface); fan out via MultiplexListener for a full multi-symbol feed.
+// Sink `void(std::string_view)` is transport-agnostic: tests accumulate to a
+// string, production wires to UDP multicast or the SHM fan-out.
 //
 // Mapping (per ITCH 5.0):
-//   onOrderUpdate(Accepted,   remaining>0) → 'A' (AddOrder)
-//   onTrade                                → 'E' (Executed) per live side
-//   onOrderUpdate(Filled,     remaining=0) → 'D' (Delete) — order is now
-//                                             off the book
-//   onOrderUpdate(Cancelled)               → 'D' (Delete)
-//   onOrderUpdate(Rejected)                → nothing (rejects are private)
-//   onOrderUpdate(PartiallyFilled)         → nothing (the 'E' was the
-//                                             public event)
+//   onOrderUpdate(Accepted, remaining>0)  → 'A' AddOrder
+//   onTrade                               → 'E' Executed (per live side)
+//   onOrderUpdate(Filled, remaining=0)    → 'D' Delete (order off the book)
+//   onOrderUpdate(Cancelled)              → 'D' Delete
+//   onOrderUpdate(Rejected)               → nothing (rejects are private)
+//   onOrderUpdate(PartiallyFilled)        → nothing ('E' was the public event)
+// Live order IDs are tracked internally so 'D' only follows a prior 'A', and
+// 'E' only fires for sides we publicly announced.
 //
-// The publisher tracks "live" order IDs internally so 'D' is only
-// ever emitted for orders previously announced via 'A', and 'E' is
-// only emitted for sides we publicly know about.
-//
-// ── Threading / decoupling (P3-1) ───────────────────────────────────
-// By DEFAULT the publisher is synchronous: onOrderUpdate/onTrade and the
-// publishXxx control calls serialize the ITCH frame and invoke the sink
-// INLINE on the calling (matching) thread. That puts ITCH serialization
-// and the downstream UDP send on the matching engine's critical path.
-//
-// Call enableAsyncPublishing() to DECOUPLE that path. In async mode the
-// engine-facing calls only capture a small POD RawEvent and push it into
-// a lock-free MPSC ring (MpscQueue) — a non-blocking enqueue, no encode,
-// no send on the caller thread. A dedicated publisher thread owned by
-// this object drains the ring, runs the live-order state machine,
-// serializes each frame, and invokes the sink (UDP + journal). The ring
-// is MPSC because the matching thread (A/E/D) and any control thread
-// (S/R/H/Q) are independent producers; the single consumer is our
-// worker thread, so the live-order map, tracking counter, and sink are
-// only ever touched by that one thread — no locks on the hot path.
-//
-// Lifecycle contract: stop the event sources (detach this listener,
-// quiesce control callers) BEFORE stopAsyncPublishing()/destruction, so
-// no producer races the ring teardown. The worker drains anything still
-// buffered on stop, so no captured event is lost.
+// Threading (P3-1): synchronous by default — engine calls serialize the frame
+// and invoke the sink inline on the matching thread. enableAsyncPublishing()
+// decouples it: engine-facing calls only push a small POD RawEvent onto a
+// lock-free MPSC ring (MpscQueue) and a dedicated worker thread drains it, runs
+// the live-order state machine, serializes, and invokes the sink. MPSC because
+// the matching thread (A/E/D) and control thread (S/R/H/Q) are independent
+// producers; the single consumer keeps the live-order map lock-free.
+// Lifecycle: quiesce all event sources BEFORE stopAsyncPublishing()/destruction
+// so no producer races ring teardown; the worker drains buffered events on stop.
 
 #include "EventListener.h"
 #include "ItchProtocol.h"

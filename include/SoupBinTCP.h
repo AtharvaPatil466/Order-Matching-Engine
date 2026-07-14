@@ -1,46 +1,26 @@
 #pragma once
 
-// SoupBinTCP — Nasdaq's lightweight TCP session-framing protocol.
-//
-// SoupBinTCP wraps application-layer messages (OUCH, ITCH gap-fill,
-// etc.) with a 3-byte envelope plus a session-level state machine
-// (login negotiation, heartbeats every second, logout handshake).
-// Real Nasdaq deployments unconditionally use SoupBinTCP as the
-// transport for OUCH order entry and the SoupBinTCP-over-TCP gap
-// recovery channel for ITCH multicast.
+// SoupBinTCP — Nasdaq's lightweight TCP session-framing protocol. Wraps
+// application messages (OUCH, ITCH gap-fill) with a 3-byte envelope plus a
+// session state machine (login, 1s heartbeats, logout). Nasdaq uses it as the
+// OUCH order-entry transport and the ITCH multicast gap-recovery channel.
 //
 // Wire envelope:
-//   [packet length: 2 bytes, big-endian, EXCLUDES the length field]
-//   [packet type:   1 byte]
-//   [payload:       (length - 1) bytes]
-//
-// The length field counts the type byte plus the payload — so an
-// OUCH EnterOrder (49 bytes) wrapped in a Sequenced Data packet
-// produces 2 (len) + 1 (type) + 49 (payload) = 52 wire bytes, with
-// the length field reading 50.
+//   [length: 2 bytes BE, EXCLUDES the length field][type: 1 byte][payload]
+// The length counts type+payload, so a 49-byte OUCH EnterOrder in a Sequenced
+// Data packet is 2+1+49=52 wire bytes with the length field reading 50.
 //
 // Packet types:
-//   Application-layer payloads:
-//     'S'  SequencedData       — server → client, gets a seqnum
-//     'U'  UnsequencedData     — client → server (or unsequenced
-//                                server msgs), no seqnum
-//     '+'  Debug               — diagnostic, may carry text
-//   Session control:
-//     'L'  LoginRequest        — client → server
-//     'A'  LoginAccepted       — server → client (session + seq)
-//     'J'  LoginRejected       — server → client (1-char reason)
-//     'O'  LogoutRequest       — client → server
-//     'Z'  EndOfSession        — server → client (terminal)
-//   Liveness:
-//     'H'  ServerHeartbeat     — server → client every ~1s idle
-//     'R'  ClientHeartbeat     — client → server every ~1s idle
+//   'S' SequencedData    server→client, gets a seqnum
+//   'U' UnsequencedData  client→server (or unsequenced server msgs), no seqnum
+//   '+' Debug            diagnostic text
+//   'L' LoginRequest / 'A' LoginAccepted / 'J' LoginRejected  (login handshake)
+//   'O' LogoutRequest / 'Z' EndOfSession (terminal)
+//   'H' ServerHeartbeat / 'R' ClientHeartbeat  every ~1s idle
 //
-// Heartbeat policy (per spec): each side emits a heartbeat every
-// second of idle in their send direction; each side disconnects if
-// it sees no traffic from the peer for 15 seconds. Both timers are
-// caller-driven via `tick(nowMs)` in this implementation — no
-// background thread — which keeps the session deterministic and
-// avoids the usual thread-shutdown gotchas.
+// Heartbeat policy (per spec): emit every 1s idle in the send direction;
+// disconnect after 15s of peer silence. Both timers are caller-driven via
+// tick(nowMs) — no background thread — keeping the session deterministic.
 
 #include "OuchProtocol.h"  // reuses writeU16BE / readU16BE / writeAsciiDecimal
 

@@ -2,42 +2,19 @@
 
 // FaultInjector — non-invasive, header-only chaos / fault-injection harness.
 //
-// Goals:
-//   - Zero overhead when disabled. With OB_ENABLE_FAULT_INJECTION undefined
-//     (the default), shouldFail() is a constexpr false call that the optimizer
-//     erases, so production builds carry no cost.
-//   - Per-point named faults with independent probability and counters.
-//   - Deterministic when seeded. Fault decisions are reproducible run-to-run
-//     for a given seed, which is what makes failures actionable instead of
-//     flaky.
-//   - Thread-local PRNG so concurrent tests don't serialize on a global lock.
+// Zero overhead when disabled: with OB_ENABLE_FAULT_INJECTION undefined (the
+// default) shouldFail() is a constexpr-false the optimizer erases. Per-point
+// named faults with independent probability and counters; deterministic when
+// seeded (reproducible run-to-run); thread-local PRNG so concurrent tests don't
+// serialize on a global lock.
 //
-// Typical use at an injection point:
-//
-//     #include "FaultInjector.h"
-//     ...
-//     if (FaultInjector::instance().shouldFail("journal.fwrite")) {
-//         return false;  // simulate write failure
-//     }
-//
+// At an injection point:
+//   if (FaultInjector::instance().shouldFail("journal.fwrite")) return false;
 // In a test:
-//
-//     auto& fi = FaultInjector::instance();
-//     fi.reset();
-//     fi.seed(0xC0FFEE);
-//     fi.arm("journal.fwrite", /*probability=*/0.1);
-//     ... drive the system ...
-//     EXPECT_GT(fi.activations("journal.fwrite"), 0);
-//     fi.disarm();
-//
-// Suggested injection points (deliberately not yet wired — sprinkle in a
-// follow-up pass so we can land the scaffold without destabilizing hot paths):
-//
-//     Journal::flush()     "journal.fwrite", "journal.fsync"
-//     MpscQueue::push()    "queue.push.spurious_fail"
-//     TcpGateway::recv()   "gateway.recv.short_read", "gateway.recv.eintr"
-//     FixSession::feed     "session.parse.fail" (synthetic parse failures)
-//     MatchingEngine::start "engine.thread_spawn.fail"
+//   auto& fi = FaultInjector::instance();
+//   fi.reset(); fi.seed(0xC0FFEE); fi.arm("journal.fwrite", 0.1);
+//   ... drive the system ...
+//   EXPECT_GT(fi.activations("journal.fwrite"), 0); fi.disarm();
 
 #include <array>
 #include <atomic>

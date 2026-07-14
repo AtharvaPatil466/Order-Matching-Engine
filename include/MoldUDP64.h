@@ -1,43 +1,23 @@
 #pragma once
 
-// MoldUDP64 — Nasdaq's UDP multicast wrapper for ITCH and similar
-// market-data feeds.
+// MoldUDP64 — Nasdaq's UDP multicast wrapper for ITCH-style market data. One
+// datagram = one packet carrying an ordered batch of application messages, with
+// a header giving the session (detect venue restart), the sequence number of
+// the FIRST message (subscribers track next-expected; a gap triggers
+// re-request), and the message count (batching for throughput).
 //
-// One UDP datagram = one MoldUDP64 packet. Each packet carries an
-// ordered sequence of application messages (typically ITCH frames),
-// with a header that tells subscribers:
-//   * which session they're in (so a subscriber can detect a venue
-//     restart and re-subscribe),
-//   * the sequence number of the FIRST message in this packet
-//     (subscribers maintain a per-session next-expected counter;
-//     any gap triggers re-request from the TCP retransmission
-//     service),
-//   * how many application messages are concatenated in this packet
-//     (batching for throughput; the venue typically flushes every
-//     few hundred microseconds or when a batch reaches a target
-//     size).
+// Wire format (network byte order):
+//   Session          [10 bytes ASCII, space-padded]
+//   SequenceNumber   [8 bytes uint64 BE]
+//   MessageCount     [2 bytes uint16 BE]
+//   then N × { MessageLength [2 bytes uint16 BE] + MessageData }
 //
-// Wire format (network byte order throughout):
-//   Session            [10 bytes ASCII, space-padded]
-//   SequenceNumber     [8 bytes, uint64, BE]
-//   MessageCount       [2 bytes, uint16, BE]
-//   then N messages, each:
-//     MessageLength    [2 bytes, uint16, BE]
-//     MessageData      [MessageLength bytes]
+// Special MessageCount: 0 = heartbeat (no messages, ~1/s, distinguishes quiet
+// market from partition); 0xFFFF = end-of-session (terminal).
 //
-// Special MessageCount values:
-//   0      : heartbeat (no messages) — emitted every ~second by the
-//            venue when no real messages are queued so subscribers
-//            can distinguish "quiet market" from "network partition"
-//   0xFFFF : end-of-session indicator — terminal; subscribers
-//            disconnect and wait for the next trading day's session
-//
-// Gap recovery: subscribers don't ask the multicast publisher for
-// retransmission (it's UDP — gone is gone). Instead they connect
-// to a separate TCP-based "Request Server" (a SoupBinTCP-style
-// service) and request the missing sequence range. This codec
-// produces the multicast wire frames; the recovery channel is the
-// caller's wiring.
+// Gap recovery is not via multicast (UDP — gone is gone): subscribers request
+// missing ranges from a separate SoupBinTCP-style Request Server. This codec
+// produces the multicast frames only; the recovery channel is the caller's.
 
 #include "OuchProtocol.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
 

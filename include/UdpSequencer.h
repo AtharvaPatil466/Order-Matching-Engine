@@ -1,47 +1,25 @@
 #pragma once
 //
-// UdpSequencer — 64-bit per-datagram sequence tracking with gap detection and
-// a resend-request hook, for co-located LAN UDP order entry.
+// UdpSequencer — 64-bit per-datagram sequence tracking with gap detection and a
+// resend-request hook, for co-located LAN UDP order entry.
 //
-// Why this exists
-// ---------------
-// The DPDK data plane (see DpdkGateway) receives OUCH order-entry messages over
-// raw UDP. UDP gives us kernel-bypass, message-atomic datagrams, and no
-// head-of-line blocking — but, unlike TCP, it does NOT guarantee in-order,
-// gap-free delivery. On a co-located LAN, loss is rare but not impossible
-// (buffer overrun on a burst, a transient link error). Because the receiver
-// feeds every datagram's payload into a SINGLE, PERSISTENT OuchSession parser,
-// a lost or reordered datagram would corrupt the OUCH frame stream. So we stamp
-// every datagram with a monotonically increasing 64-bit sequence number and
-// verify it before delivery.
+// The DPDK data plane (DpdkGateway) feeds every datagram's payload into ONE
+// persistent OuchSession parser. UDP is kernel-bypass and message-atomic but,
+// unlike TCP, not gap-free — a lost or reordered datagram would corrupt the OUCH
+// frame stream. So every datagram carries a big-endian 64-bit sequence as its
+// first 8 bytes, verified before delivery. Pure logic, header-only, DPDK-free
+// (classifySeq is a constexpr pure function; UdpSequencer wraps it with state),
+// so it unit-tests on any platform including the default macOS build.
 //
-// Design
-// ------
-// Pure logic, header-only, and free of any DPDK dependency, so it is
-// unit-testable on ANY platform — including the default macOS build where
-// OB_HAVE_DPDK is undefined and none of the DPDK path compiles. The
-// classification is a stand-alone `constexpr` pure function (`classifySeq`);
-// the stateful `UdpSequencer` wraps it, tracks the next-expected sequence, fires
-// a resend-request hook on a gap, and keeps counters.
-//
-// Wire model
-// ----------
-// Every order-entry datagram carries a big-endian 64-bit sequence number as the
-// first 8 bytes of the UDP payload, ahead of the OUCH frame(s). A received
-// sequence is classified against the next-expected one:
-//   received == expected -> InOrder   : accept, expected := received + 1
+// Classification against the next-expected sequence:
+//   received == expected -> InOrder   : accept; expected := received + 1
 //   received  > expected -> Gap       : [expected, received) missing -> request
-//                                       resend, still accept this datagram, then
-//                                       expected := received + 1 (resync forward)
-//   received  < expected -> Duplicate : already delivered (or a stale resend) ->
-//                                       drop, do not re-deliver
+//                                       resend, still accept, resync forward
+//   received  < expected -> Duplicate : already delivered/stale resend -> drop
 //
-// Threading
-// ---------
-// Single-consumer: `observe()` is called only from the DPDK poll thread. It is
-// intentionally NOT internally synchronized — adding a lock would defeat the
-// point of the isolated poll core. Read the counters from another thread only
-// as approximate telemetry.
+// Threading: observe() is called only from the DPDK poll thread and is
+// intentionally unsynchronized (a lock would defeat the isolated poll core);
+// read counters from other threads as approximate telemetry only.
 
 #include <cstddef>
 #include <cstdint>

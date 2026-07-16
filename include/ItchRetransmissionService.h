@@ -17,11 +17,9 @@
 // this is the same shape with our tag instead of a multi-byte
 // header. Documented inline so consumers know what to expect.
 //
-// Response: the service sends each found message back as a
-// SoupBinTCP SequencedData packet. After the last requested message
-// is sent, the service sends EndOfSession to terminate the request
-// session (real venues keep the connection open for further
-// requests; we close per-request here for simpler test semantics).
+// Response: the service streams each found message back as a
+// SoupBinTCP SequencedData packet, then leaves the connection open
+// for follow-up re-requests until the subscriber disconnects.
 //
 // Composition: an OuchTcpGateway-style server (acceptor + per-
 // connection thread). Each connection runs a SoupBinTcpSession;
@@ -220,8 +218,8 @@ private:
                 // journal") and any count above the cap down to
                 // ITCH_RETRANSMIT_MAX_REPLAY, so one slow subscriber can't
                 // monopolize the connection thread streaming an unbounded
-                // run. A client needing more re-requests from the next
-                // uncovered sequence.
+                // run. A client needing more issues a follow-up
+                // re-request from the next uncovered sequence.
                 uint16_t replayCount = req.count;
                 if (replayCount == 0 || replayCount > ITCH_RETRANSMIT_MAX_REPLAY) {
                     replayCount = ITCH_RETRANSMIT_MAX_REPLAY;
@@ -231,29 +229,9 @@ private:
                         s->sendSequenced(data, len);
                         ++*messagesCtr;
                     });
-                // After streaming the requested range the server can
-                // either keep the connection open or close it. We
-                // choose to close — simpler client semantics for
-                // tests. Production deployments would normally
-                // leave the connection open for follow-up requests.
-                uint8_t eos[3];
-                size_t en = soupWriteEndOfSession(eos);
-                // We don't have direct access to soup's send_ here;
-                // forge the EndOfSession via the soup's writer
-                // function would require restructuring. Instead,
-                // mark the session closed by piggy-backing on the
-                // existing logout handler — the session will send
-                // EndOfSession and mark closed on the next logout.
-                // For the simpler path, we send EndOfSession through
-                // soup's sendUnsequenced helper isn't appropriate
-                // (different packet type). Use raw socket send via
-                // the SoupBinTcpSession's send wrapper instead — we
-                // already have it. Since we only have the high-level
-                // sendSequenced API, and the spec allows the server
-                // to simply close the TCP connection after the
-                // replay completes, defer to that: the OS will see
-                // the close when connectionLoop exits below.
-                (void)eos; (void)en;
+                // No terminator: the connection stays open so the
+                // subscriber can issue further re-requests, and closes
+                // when the peer disconnects (poll loop below exits).
             });
 
         constexpr int kPollTimeoutMs = 100;

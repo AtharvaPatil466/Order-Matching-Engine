@@ -17,9 +17,7 @@
 // epoch + lease can promote itself via JournalFollower::promote().
 //
 // Wire format for replication:
-//   [ReplicationHeader (24B)] [payload (variable)]
-//
-// This is the "hard part" that was listed in the honest accounting.
+//   [ReplicationHeader (25B)] [payload (variable)]
 
 #include "Metrics.h"
 #include "EpochStore.h"
@@ -368,14 +366,12 @@ public:
         if (pfd >= 0) ::close(pfd);
     }
 
-    // Send a message to the peer. Loads peerFd_ once and uses the
-    // local — avoids a TOCTOU between the "is fd valid?" check and
-    // the syscall use (stop() can null peerFd_ between the two).
-    // Residual: if stop() closes the fd between our load and the
-    // syscall and the kernel reuses the fd number, we'd write to the
-    // wrong file. Acceptable for now — stop() is the teardown path,
-    // not a hot path. Full fix would require an fd-refcount or
-    // per-send lock that includes the fd lifetime.
+    // Send a message to the peer. Loads peerFd_ once into a local so the
+    // validity check and the syscall use the same fd — avoids a TOCTOU with
+    // stop() nulling peerFd_ between them. Residual: if stop() closes the fd
+    // after our load and the kernel reuses the number, we write to the wrong
+    // fd. Acceptable — teardown path, not hot. Full fix: fd refcount or a
+    // per-send lock spanning the fd lifetime.
     bool send(ReplicationHeader::Type type, uint64_t epoch,
               uint32_t senderId, const uint8_t* payload, size_t payloadLen) {
         int fd = peerFd_.load(std::memory_order_acquire);
@@ -388,15 +384,13 @@ public:
         hdr.senderId = senderId;
         hdr.payloadSize = static_cast<uint32_t>(payloadLen);
 
-        // Assign the sequence number and frame the message under the SAME
-        // lock that serializes the socket writes, so the on-wire byte order
-        // is strictly monotonic in sequenceNum (usable for receiver-side gap
-        // detection). Multiple threads (the heartbeat thread + every
-        // replicateEntry caller) race into send(); if the number were taken
-        // before acquiring sendMu_, two messages could grab sequence numbers
-        // in one order and then serialize onto the socket in the opposite
-        // order, producing a non-monotonic wire sequence. Holding the lock
-        // across both the fetch_add and the sendAll() closes that window.
+        // Assign the sequence number and write under the SAME lock that
+        // serializes socket writes, so the on-wire order is strictly monotonic
+        // in sequenceNum (receiver-side gap detection relies on it). The
+        // heartbeat thread and every replicateEntry caller race into send();
+        // numbering outside the lock could interleave the fetch_add and
+        // sendAll() oppositely, yielding a non-monotonic wire sequence. One
+        // lock over both closes that window.
         std::lock_guard<std::mutex> lock(sendMu_);
         hdr.sequenceNum = sendSeq_.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -605,9 +599,7 @@ private:
     // attempt connectTo() with these on every disconnection.
     std::string connectHost_;
     int connectPort_{0};
-    // Exponential backoff state for reconnection attempts.
-    // Starts at 500ms, doubles on each failure, caps at 30s.
-    // Reset to 500ms on successful connection.
+    // Reconnect backoff: 500ms, doubles per failure, caps at 30s, resets on connect.
     uint32_t reconnectDelayMs_{500};
 };
 
@@ -668,20 +660,14 @@ public:
             return ok;
         });
 
-        // On backup failure detection (for logging/alerting only)
-        heartbeat_.setFailureCallback([]() {
-            // Backup went dark — primary continues operating.
-            // In a real system, this would trigger an alert.
-        });
+        // Backup failure is log/alert-only here; the primary keeps operating.
+        heartbeat_.setFailureCallback([]() {});
 
-        // Acquire the lease BEFORE any background thread is started.
-        // startReceiving()/heartbeat_.start() are below this point, so on a
-        // failed acquisition they never run — no thread is leaked. We still
-        // tear down anything already opened above (the transport's listen
-        // socket) and, defensively, stop the heartbeat in case a future
-        // re-ordering of this function starts threads earlier: both stop()s
-        // join their worker thread if (and only if) it was started, so they
-        // are safe no-ops on this path.
+        // Acquire the lease BEFORE starting any background thread (both starts
+        // are below, so a failed acquisition leaks no thread). We still stop()
+        // the transport (closes the listen socket opened above) and,
+        // defensively, the heartbeat — each stop() joins its worker only if one
+        // was started, so both are safe no-ops here.
         if (!lease_.tryAcquire()) {
             heartbeat_.stop();   // joins heartbeat worker_ if started
             transport_.stop();   // closes the listen socket; joins recvThread_ if started
@@ -710,16 +696,11 @@ public:
     bool startAsBackup(const std::string& primaryHost, int primaryPort) {
         role_ = NodeRole::Backup;
 
-        // Engage snapshot buffering on EVERY (re)connection, BEFORE the
-        // first byte is processed on the link. The primary streams a full
-        // snapshot (SnapshotStart … SnapshotEnd) on every peer join, so a
-        // snapshot is "pending" from the instant we connect. Any live
-        // JournalEntry that races ahead of SnapshotStart (the primary
-        // exposes the new peer fd a few instructions before it sends
-        // SnapshotStart, so a concurrent replicateEntry can slip in front)
-        // is then buffered instead of being applied immediately — closing
-        // the Cancel-before-Insert window. Registered before connectTo()
-        // because the initial connect fires this hook synchronously.
+        // Engage snapshot buffering on EVERY (re)connection, before the first
+        // byte is processed: the primary streams a full snapshot on every peer
+        // join, so one is "pending" from the instant we connect (see
+        // inSnapshot_ for the full race argument). Registered before
+        // connectTo() because the initial connect fires this hook synchronously.
         transport_.setOnPeerConnected([this]() {
             inSnapshot_ = true;       // snapshot pending until SnapshotEnd
             snapshotBuffer_.clear();
@@ -870,11 +851,9 @@ public:
     // engine state via MatchingEngine::streamSnapshot and ships each
     // resting order via replicateEntry().
     //
-    // The transport wraps the callback with SnapshotStart / SnapshotEnd
-    // markers so the backup can buffer live JournalEntry messages that
-    // arrive concurrently during the snapshot stream, then replay them
-    // after all snapshot entries are applied — eliminating the race where
-    // a Cancel arrives before the snapshot entry for the same order.
+    // The transport brackets the callback with SnapshotStart/SnapshotEnd so
+    // the backup can buffer concurrent live entries during the stream (see
+    // inSnapshot_ for the race).
     using OnPeerJoinedCallback = std::function<void()>;
     void setOnPeerJoined(OnPeerJoinedCallback cb) {
         transport_.setOnPeerConnected([this, cb = std::move(cb)]() {

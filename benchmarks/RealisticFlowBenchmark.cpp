@@ -1,159 +1,246 @@
-// RealisticFlowBenchmark (P2-18) — latency on a realistic order flow.
+// RealisticFlowBenchmark (P2-18) — latency on a realistic, cancel-heavy order flow.
 //
-// The headline PGO number is measured on a seed=42 stream where ~100% of
-// submissions are accepted and there is no cancel traffic. Real venues do not
-// look like that. This benchmark drives the core matching path with:
+// The PGO headline is a seed=42 stream where ~100% of submissions fill and there
+// is no cancel traffic. Real venues are cancel-dominated churn. This benchmark
+// drives the core matching path with the venue-shaped event mix:
 //
-//   • Poisson arrivals (configurable --lambda, orders/sec)
-//   • power-law (Pareto) order sizes
-//   • a random-walk mid price
-//   • ~15% of submissions marketable (cross the book → fill)
-//   • ~65% of resting orders cancelled before they fill
+//   • 65% CANCEL   — cancel a randomly selected resting order (no-op if the book
+//                    pool is empty)
+//   • 25% NEW      — passive limit that rests, priced away from the mid so it is
+//                    never immediately aggressive
+//   •  8% IOC      — aggressive immediate-or-cancel that crosses and may sweep
+//                    multiple levels; unfilled remainder is cancelled (does not rest)
+//   •  2% MODIFY   — cancel a resting order + resubmit at a new price
 //
-// It reports P50/P90/P99/P99.9/P99.99/max on THIS workload (via the vendored
-// BenchLatencyRecorder), broken out for New / Cancel / combined, and prints the
-// realized fill and cancel rates so the contrast with the 100%-fill PGO number
-// is explicit.
+// Order sizes are power-law (Pareto): most small, occasional large. The mid price
+// is a bounded random walk of +/- 5 ticks per event. Orders are spread across a
+// handful of participants so IOCs cross OTHERS' liquidity (a single participant
+// would self-trade and STP-cancel instead of filling).
 //
-// The order flow is generated up-front (deterministic for a given seed); only
-// the engine operations are timed. Poisson gaps describe the arrival process
-// and are reported, but this variant measures service latency (not queueing) —
-// coordinated-omission correction is the job of CoordinatedOmissionBenchmark.
+// Timing uses the SAME infrastructure as HonestBenchmark: bench::nowNs() around
+// each engine call and bench::BenchLatencyRecorder for the percentile tables
+// (P50/P90/P99/P99.9/P99.99/max). Only the engine operation is timed — RNG draws
+// and resting-pool bookkeeping happen outside the timed region.
+//
+// The event mix is net-draining (cancel > new), so the book runs THIN and a
+// share of cancels/IOCs find little or no liquidity. That is faithful to the
+// requested mix; the realized fill / no-op / mean-depth numbers are reported so
+// the regime is explicit rather than hidden.
+//
+// instructions/order: NOT measurable on macOS/Apple Silicon (no perf, no HW
+// counters). Run the printed perf command on the x86 CI box for that metric.
 //
 // Usage:
-//   RealisticFlowBenchmark [--orders N] [--warmup N] [--seed S]
-//                          [--lambda L] [--marketable F] [--cancel F]
+//   RealisticFlowBenchmark [--events N] [--orders N] [--warmup N] [--seed S]
 
 #include "OrderBook.h"
 #include "BenchLatencyRecorder.h"
-#include "RealisticWorkload.h"
 
-#include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <string>
+#include <random>
 #include <vector>
 
 using namespace OrderMatcher;
 using bench::BenchLatencyRecorder;
-using bench::WorkloadConfig;
-using bench::WorkloadGenerator;
-using bench::WorkloadOp;
+
+namespace {
+
+// Event mix (cumulative thresholds on a U[0,1) draw): 65% / 25% / 8% / 2%.
+constexpr double kCancelCum = 0.65;
+constexpr double kNewCum    = 0.90;  // 0.65..0.90 -> 25% new
+constexpr double kIocCum    = 0.98;  // 0.90..0.98 -> 8% IOC; remainder -> 2% modify
+
+constexpr Price     kStartMid    = 100000;  // mid in ticks
+constexpr int       kWalkTicks   = 5;       // +/- ticks of random walk per event
+constexpr Price     kMidFloor    = 1000;    // keep the mid (and prices) positive
+constexpr Quantity  kMaxQty      = 10000;   // power-law tail clamp
+constexpr double    kParetoAlpha = 1.5;     // size exponent (most small, some large)
+constexpr uint64_t  kParticipants = 8;      // so IOCs cross others, not self-trade
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
-    WorkloadConfig cfg;
-    cfg.newOrders = 50000;
-    cfg.seed = 7;
-    size_t warmup = 5000;
+    size_t   events = 500000;   // total events
+    uint64_t seed   = 42;
+    size_t   warmup = 5000;
 
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--orders") == 0 && i + 1 < argc)
-            cfg.newOrders = std::stoull(argv[++i]);
+        if ((std::strcmp(argv[i], "--events") == 0 ||
+             std::strcmp(argv[i], "--orders") == 0) && i + 1 < argc)
+            events = std::stoull(argv[++i]);
         else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc)
             warmup = std::stoull(argv[++i]);
         else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
-            cfg.seed = std::stoull(argv[++i]);
-        else if (std::strcmp(argv[i], "--lambda") == 0 && i + 1 < argc)
-            cfg.lambdaPerSec = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--marketable") == 0 && i + 1 < argc)
-            cfg.marketableFrac = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--cancel") == 0 && i + 1 < argc)
-            cfg.restingCancelFrac = std::stod(argv[++i]);
+            seed = std::stoull(argv[++i]);
         else if (std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: RealisticFlowBenchmark [--orders N] [--warmup N] "
-                        "[--seed S] [--lambda L] [--marketable F] [--cancel F]\n");
+            std::printf("Usage: RealisticFlowBenchmark [--events N] [--warmup N] [--seed S]\n");
             return 0;
         }
     }
+    if (warmup >= events) warmup = events / 10;
+
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    std::uniform_int_distribution<int>     walk(-kWalkTicks, kWalkTicks);
+    std::uniform_int_distribution<Price>   passiveOff(1, 20);   // rest away from mid
+    std::uniform_int_distribution<Price>   iocAggr(20, 60);     // cross deep enough to sweep
+    std::uniform_int_distribution<uint64_t> pidPick(1, kParticipants);
+
+    // Pareto(alpha) size: q = floor((1-U)^(-1/alpha)), clamped to [1, kMaxQty].
+    auto drawQty = [&]() -> Quantity {
+        double v = std::pow(1.0 - u01(rng), -1.0 / kParetoAlpha);
+        if (v < 1.0) v = 1.0;
+        Quantity q = static_cast<Quantity>(v);
+        return q > kMaxQty ? kMaxQty : q;
+    };
+
+    OrderBook book(0, MatchAlgorithm::PriceTime);
+    book.setTradingState(TradingState::Continuous);
+
+    // Approximate resting-order pool. IOC fills consume resting orders without us
+    // knowing which, so entries can go stale; cancelOrder() on a stale id is a
+    // safe no-op, and we drop it from the pool regardless. Superset of the true
+    // resting set — never causes a wrong cancel, only occasional no-op cancels.
+    std::vector<OrderId> resting;
+    resting.reserve(events / 4);
+
+    BenchLatencyRecorder recCancel, recNew, recIoc, recModify, recAll;
+    uint64_t nCancel = 0, nNew = 0, nIoc = 0, nModify = 0;
+    uint64_t noopCancel = 0, noopModify = 0, iocFilled = 0;
+    uint64_t depthSum = 0, depthSamples = 0;
+
+    OrderId  nextId = 1;
+    Price    mid = kStartMid;
+
+    for (size_t i = 0; i < events; ++i) {
+        const bool warm = i >= warmup;
+        mid += walk(rng);
+        if (mid < kMidFloor) mid = kMidFloor;
+        if (warm) { depthSum += resting.size(); ++depthSamples; }
+
+        const double r = u01(rng);
+
+        if (r < kCancelCum) {
+            // ── 65% CANCEL a randomly selected resting order ──────────────────
+            if (resting.empty()) { if (warm) ++noopCancel; continue; }
+            const size_t idx = static_cast<size_t>(rng() % resting.size());
+            const OrderId id = resting[idx];
+            resting[idx] = resting.back();
+            resting.pop_back();
+
+            const uint64_t t0 = bench::nowNs();
+            book.cancelOrder(id);
+            const uint64_t t1 = bench::nowNs();
+            if (warm) { recCancel.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nCancel; }
+
+        } else if (r < kNewCum) {
+            // ── 25% NEW passive limit that rests (never aggressive) ───────────
+            const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
+            const Price off = passiveOff(rng);
+            Price px = (side == Side::Buy) ? mid - off : mid + off;
+            if (px < 1) px = 1;
+            const OrderId id = nextId++;
+            const Quantity q = drawQty();
+            const ParticipantId pid = pidPick(rng);
+
+            const uint64_t t0 = bench::nowNs();
+            book.addOrder(id, pid, side, px, q, OrderType::Limit);
+            const uint64_t t1 = bench::nowNs();
+            resting.push_back(id);
+            if (warm) { recNew.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nNew; }
+
+        } else if (r < kIocCum) {
+            // ── 8% aggressive IOC that may sweep multiple levels ──────────────
+            const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
+            const Price aggr = iocAggr(rng);
+            Price px = (side == Side::Buy) ? mid + aggr : mid - aggr;
+            if (px < 1) px = 1;
+            const OrderId id = nextId++;
+            const Quantity q = drawQty();
+            const ParticipantId pid = pidPick(rng);
+            const uint64_t tradesBefore = book.getTradeCount();
+
+            const uint64_t t0 = bench::nowNs();
+            book.addOrder(id, pid, side, px, q, OrderType::IOC);
+            const uint64_t t1 = bench::nowNs();
+            // IOC never rests — nothing added to the pool.
+            if (warm) {
+                recIoc.recordInterval(t0, t1);
+                recAll.recordInterval(t0, t1);
+                ++nIoc;
+                if (book.getTradeCount() > tradesBefore) ++iocFilled;
+            }
+
+        } else {
+            // ── 2% MODIFY = cancel a resting order + resubmit at a new price ──
+            if (resting.empty()) { if (warm) ++noopModify; continue; }
+            const size_t idx = static_cast<size_t>(rng() % resting.size());
+            const OrderId oldId = resting[idx];
+            const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
+            const Price off = passiveOff(rng);
+            Price px = (side == Side::Buy) ? mid - off : mid + off;
+            if (px < 1) px = 1;
+            const OrderId newId = nextId++;
+            const Quantity q = drawQty();
+            const ParticipantId pid = pidPick(rng);
+
+            const uint64_t t0 = bench::nowNs();
+            book.cancelOrder(oldId);
+            book.addOrder(newId, pid, side, px, q, OrderType::Limit);
+            const uint64_t t1 = bench::nowNs();
+            resting[idx] = newId;
+            if (warm) { recModify.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nModify; }
+        }
+    }
+
+    const uint64_t timed = nCancel + nNew + nIoc + nModify;
+    auto pct = [&](uint64_t n) { return timed ? 100.0 * (double)n / (double)timed : 0.0; };
 
     std::printf("=======================================================\n");
     std::printf("  Realistic Flow Benchmark (P2-18)\n");
     std::printf("=======================================================\n\n");
     std::printf("Configuration:\n");
-    std::printf("  New orders:        %zu\n", cfg.newOrders);
-    std::printf("  Warmup:            %zu\n", warmup);
-    std::printf("  Seed:              %llu\n", (unsigned long long)cfg.seed);
-    std::printf("  Poisson lambda:    %.0f orders/sec\n", cfg.lambdaPerSec);
-    std::printf("  Marketable target: %.1f%%\n", 100.0 * cfg.marketableFrac);
-    std::printf("  Resting-cancel:    %.1f%%\n", 100.0 * cfg.restingCancelFrac);
+    std::printf("  Events:            %zu (warmup %zu, seed %llu)\n",
+                events, warmup, (unsigned long long)seed);
+    std::printf("  Target mix:        65%% cancel / 25%% new / 8%% IOC / 2%% modify\n");
     std::printf("  Order sizes:       Pareto(alpha=%.2f), clamp %llu\n",
-                cfg.paretoAlpha, (unsigned long long)cfg.maxQty);
+                kParetoAlpha, (unsigned long long)kMaxQty);
+    std::printf("  Mid random walk:   +/-%d ticks/event from %lld\n",
+                kWalkTicks, (long long)kStartMid);
+    std::printf("  Participants:      %llu\n", (unsigned long long)kParticipants);
 
-    std::printf("\nGenerating realistic order flow...\n");
-    WorkloadGenerator gen(cfg);
-    const auto& ops = gen.ops();
-    std::printf("  Total ops:         %zu (New=%zu, Cancel=%zu)\n",
-                ops.size(),
-                gen.marketableCount() + gen.passiveCount(),
-                ops.size() - gen.marketableCount() - gen.passiveCount());
-    std::printf("  Marketable (design): %zu  Scheduled cancels: %zu\n",
-                gen.marketableCount(), gen.scheduledCancels());
+    std::printf("\n── Realized workload (warm ops only) ──\n");
+    std::printf("  Timed ops:         %llu\n", (unsigned long long)timed);
+    std::printf("  Cancel:  %8llu (%.1f%%)   [no-op empty-book: %llu]\n",
+                (unsigned long long)nCancel, pct(nCancel), (unsigned long long)noopCancel);
+    std::printf("  New:     %8llu (%.1f%%)\n", (unsigned long long)nNew, pct(nNew));
+    std::printf("  IOC:     %8llu (%.1f%%)   [filled: %llu (%.1f%%)]\n",
+                (unsigned long long)nIoc, pct(nIoc), (unsigned long long)iocFilled,
+                nIoc ? 100.0 * (double)iocFilled / (double)nIoc : 0.0);
+    std::printf("  Modify:  %8llu (%.1f%%)   [no-op empty-book: %llu]\n",
+                (unsigned long long)nModify, pct(nModify), (unsigned long long)noopModify);
+    std::printf("  Mean resting depth: %.1f orders\n",
+                depthSamples ? (double)depthSum / (double)depthSamples : 0.0);
 
-    OrderBook book(0, MatchAlgorithm::PriceTime);
+    std::printf("\n── Latency: CANCEL ──\n");   recCancel.printTable("cancel");
+    std::printf("\n── Latency: NEW ──\n");      recNew.printTable("new");
+    std::printf("\n── Latency: IOC ──\n");      recIoc.printTable("ioc");
+    std::printf("\n── Latency: MODIFY (cancel+resubmit) ──\n"); recModify.printTable("modify");
+    std::printf("\n── Latency: COMBINED flow ──\n"); recAll.printTable("combined");
 
-    BenchLatencyRecorder recNew, recCancel, recAll;
-    uint64_t submissions = 0, filledSubmissions = 0, cancelsIssued = 0;
-    uint64_t poissonSpanNs = 0;
-
-    auto wallStart = std::chrono::high_resolution_clock::now();
-
-    for (size_t i = 0; i < ops.size(); ++i) {
-        const WorkloadOp& op = ops[i];
-        const bool warm = i >= warmup;
-        poissonSpanNs += op.gapNs;
-
-        if (op.kind == WorkloadOp::Kind::New) {
-            uint64_t tradesBefore = book.getTradeCount();
-            uint64_t t0 = bench::nowNs();
-            book.addOrder(op.orderId, op.participantId, op.side,
-                          op.price, op.qty, OrderType::Limit);
-            uint64_t t1 = bench::nowNs();
-            if (warm) {
-                recNew.recordInterval(t0, t1);
-                recAll.recordInterval(t0, t1);
-                ++submissions;
-                if (book.getTradeCount() > tradesBefore) ++filledSubmissions;
-            }
-        } else {
-            uint64_t t0 = bench::nowNs();
-            book.cancelOrder(op.orderId);
-            uint64_t t1 = bench::nowNs();
-            if (warm) {
-                recCancel.recordInterval(t0, t1);
-                recAll.recordInterval(t0, t1);
-                ++cancelsIssued;
-            }
-        }
-    }
-
-    auto wallEnd = std::chrono::high_resolution_clock::now();
-    double wallSec = std::chrono::duration<double>(wallEnd - wallStart).count();
-
-    std::printf("\n── Realized workload characteristics ──\n");
-    std::printf("  Submissions (timed):  %llu\n", (unsigned long long)submissions);
-    std::printf("  Filled submissions:   %llu (%.1f%% fill rate)\n",
-                (unsigned long long)filledSubmissions,
-                submissions ? 100.0 * (double)filledSubmissions / (double)submissions : 0.0);
-    std::printf("  Cancels issued:       %llu\n", (unsigned long long)cancelsIssued);
-    std::printf("  Modelled arrival span: %.3f s @ lambda=%.0f/s\n",
-                (double)poissonSpanNs / 1e9, cfg.lambdaPerSec);
-    std::printf("  Actual processing:     %.3f s (%.0f ops/sec)\n",
-                wallSec, wallSec > 0 ? (double)ops.size() / wallSec : 0.0);
-
-    std::printf("\n── Latency: NEW orders ──\n");
-    recNew.printTable("new");
-    std::printf("\n── Latency: CANCEL orders ──\n");
-    recCancel.printTable("cancel");
-    std::printf("\n── Latency: COMBINED flow ──\n");
-    recAll.printTable("combined");
-
-    std::printf("\n── Contrast with the seed=42 / 100%%-fill PGO number ──\n");
-    std::printf("  The PGO headline uses a 100%%-accepted, cancel-free stream, so its\n");
-    std::printf("  tail reflects a best case. This workload mixes ~%.0f%% fills with a\n",
-                100.0 * cfg.marketableFrac);
-    std::printf("  heavy cancel load and power-law sizes; the P99.9/P99.99 above are\n");
-    std::printf("  the honest tail for realistic flow. (Apple-Silicon absolute numbers\n");
-    std::printf("  are NOT authoritative — trust the x86 CI baseline for magnitudes.)\n");
+    std::printf("\n── instructions/order ──\n");
+    std::printf("  NOT measured here: this is Apple Silicon (no perf / HW counters).\n");
+    std::printf("  Run on the x86 CI box:\n");
+    std::printf("    numactl --cpunodebind=0 --membind=0 \\\n");
+    std::printf("      perf stat -e instructions,cycles,branch-misses,L1-dcache-load-misses \\\n");
+    std::printf("      -r 5 ./build/benchmarks/RealisticFlowBenchmark --events 500000 --seed 42\n");
+    std::printf("  instructions/order = <instructions> / %llu (timed ops).\n",
+                (unsigned long long)timed);
+    std::printf("  (Apple-Silicon absolute latencies above are NOT authoritative —\n");
+    std::printf("   trust the x86 CI baseline for magnitudes.)\n");
     std::printf("=======================================================\n");
     return 0;
 }

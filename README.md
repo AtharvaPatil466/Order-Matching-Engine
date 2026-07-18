@@ -1,6 +1,7 @@
 # High-Performance Order Matching Engine
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
+[![CI](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml)
 [![Latency](https://img.shields.io/badge/Matching_P50_PGO-237ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-3.10M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)

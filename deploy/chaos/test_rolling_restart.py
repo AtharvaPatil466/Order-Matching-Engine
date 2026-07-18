@@ -21,7 +21,7 @@ import time
 import pytest
 import requests
 
-from cluster import BACKUP, PRIMARY, Cluster, _ADMIN_PORTS
+from cluster import ADMIN_HEADERS, BACKUP, PRIMARY, Cluster, _ADMIN_PORTS
 from loaddriver import ChaosLoadDriver
 
 POST_RESTART_BUDGET_S = 20.0
@@ -143,6 +143,8 @@ def test_orders_during_backup_restart_eventually_replicate(cluster: Cluster) -> 
 
 def _journal_head(cluster: Cluster, node: str) -> int:
     port = _ADMIN_PORTS[node]
-    r = requests.get(f"http://localhost:{port}/journal/head", timeout=1.5)
+    r = requests.get(
+        f"http://localhost:{port}/journal/head", headers=ADMIN_HEADERS, timeout=1.5
+    )
     r.raise_for_status()
     return int(r.json()["sequence"])

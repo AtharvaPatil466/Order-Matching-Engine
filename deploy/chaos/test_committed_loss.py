@@ -25,7 +25,7 @@ import time
 import pytest
 import requests
 
-from cluster import BACKUP, PRIMARY, Cluster, _ADMIN_PORTS
+from cluster import ADMIN_HEADERS, BACKUP, PRIMARY, Cluster, _ADMIN_PORTS
 from loaddriver import ChaosLoadDriver
 
 
@@ -48,7 +48,9 @@ def _book_order_ids(cluster: Cluster, node: str, symbol_id: int = 0) -> set[int]
 
 def _journal_head(cluster: Cluster, node: str) -> int:
     port = _ADMIN_PORTS[node]
-    r = requests.get(f"http://localhost:{port}/journal/head", timeout=1.5)
+    r = requests.get(
+        f"http://localhost:{port}/journal/head", headers=ADMIN_HEADERS, timeout=1.5
+    )
     r.raise_for_status()
     body = r.json()
     if not body.get("journalEnabled"):

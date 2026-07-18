@@ -29,6 +29,8 @@ from typing import Iterator, List
 
 import requests
 
+from cluster import ADMIN_HEADERS
+
 
 @dataclass
 class OrderSubmission:
@@ -73,7 +75,9 @@ class ChaosLoadDriver:
             "participantId": participant_id,
             "symbolId": symbol_id,
         }
-        headers = {"X-Chaos-Token": self.token} if self.token else {}
+        headers = dict(ADMIN_HEADERS)
+        if self.token:
+            headers["X-Chaos-Token"] = self.token
         sub = OrderSubmission(
             order_id=order_id, side=side, price=price, qty=qty,
             participant_id=participant_id, symbol_id=symbol_id,

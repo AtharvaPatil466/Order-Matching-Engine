@@ -249,20 +249,31 @@ ctest --test-dir build-asan --output-on-failure -L project
 The GitHub Actions workflow runs release tests and sanitizer tests on every push/PR.
 
 ### Admin Server
+
+When `OB_ADMIN_TOKEN` (or `--admin-token`) is set, every endpoint except the
+k8s probes (`/health`, `/readyz`) requires `Authorization: Bearer <token>`
+(constant-time compare, 401 otherwise). The production compose fails closed
+if the token is unset.
+
 ```bash
-# Liveness / build / replication state
+AUTH="Authorization: Bearer $OB_ADMIN_TOKEN"
+
+# Probes — always credential-free (k8s liveness/readiness)
 curl localhost:8080/health                # k8s liveness probe
-curl localhost:8080/version               # gitSha + buildTime + engineVersion
-curl localhost:8080/role                  # primary | backup | standalone, epoch, isLeader
-curl localhost:8080/replication           # peerAlive, running, epoch
-curl localhost:8080/journal/head          # last committed journal sequence
+curl localhost:8080/readyz                # 503 until warmup completes, then 200
+
+# Liveness / build / replication state
+curl -H "$AUTH" localhost:8080/version               # gitSha + buildTime + engineVersion
+curl -H "$AUTH" localhost:8080/role                  # primary | backup | standalone, epoch, isLeader
+curl -H "$AUTH" localhost:8080/replication           # peerAlive, running, epoch
+curl -H "$AUTH" localhost:8080/journal/head          # last committed journal sequence
 
 # Operational state
-curl localhost:8080/metrics               # throughput & queue depth (JSON)
-curl localhost:8080/prometheus            # Prometheus text exposition (incl. replication counters)
-curl "localhost:8080/book?symbolId=0"     # L2 order book snapshot
-curl "localhost:8080/audit?symbolId=0"    # spread / depth / level counts
-curl "localhost:8080/otr?participantId=1" # order-to-trade ratio
+curl -H "$AUTH" localhost:8080/metrics               # throughput & queue depth (JSON)
+curl -H "$AUTH" localhost:8080/prometheus            # Prometheus text exposition (incl. replication counters)
+curl -H "$AUTH" "localhost:8080/book?symbolId=0"     # L2 order book snapshot
+curl -H "$AUTH" "localhost:8080/audit?symbolId=0"    # spread / depth / level counts
+curl -H "$AUTH" "localhost:8080/otr?participantId=1" # order-to-trade ratio
 
 # Chaos-only (gated by OB_CHAOS_INJECT=1; X-Chaos-Token required when OB_CHAOS_TOKEN is set)
 curl -H "X-Chaos-Token: $TOK" \

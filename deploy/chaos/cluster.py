@@ -35,6 +35,12 @@ import requests
 PRIMARY = "chaos-engine-primary"
 BACKUP = "chaos-engine-backup"
 
+# Shared-secret bearer token for the admin API. Must match
+# OB_ADMIN_TOKEN in docker-compose.chaos.yml. Test-topology-only
+# secret (same pattern as OB_CHAOS_TOKEN).
+ADMIN_TOKEN = "admin-suite-shared-secret"
+ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+
 # Host-mapped admin ports (also from compose).
 _ADMIN_PORTS = {
     PRIMARY: 18080,
@@ -205,7 +211,9 @@ class Cluster:
 
     def _get_json(self, name: str, path: str) -> Optional[Dict]:
         try:
-            r = requests.get(self._admin_url(name, path), timeout=1.5)
+            r = requests.get(
+                self._admin_url(name, path), headers=ADMIN_HEADERS, timeout=1.5
+            )
             if r.status_code != 200:
                 return None
             return r.json()

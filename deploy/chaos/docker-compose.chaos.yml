@@ -31,6 +31,7 @@ services:
       - OB_JOURNAL_PATH=/app/journal/primary.wal
       - OB_CHAOS_INJECT=1                          # enables /chaos/order endpoint
       - OB_CHAOS_TOKEN=chaos-suite-shared-secret   # auth gate; harness sends matching X-Chaos-Token
+      - OB_ADMIN_TOKEN=admin-suite-shared-secret   # bearer auth on admin API; must match cluster.py ADMIN_TOKEN
     volumes:
       - journal-primary:/app/journal
     healthcheck:
@@ -60,6 +61,7 @@ services:
       - OB_PRIMARY_HOST=primary
       - OB_PRIMARY_REPLICATION_PORT=9002
       - OB_JOURNAL_PATH=/app/journal/backup.wal
+      - OB_ADMIN_TOKEN=admin-suite-shared-secret   # bearer auth on admin API; must match cluster.py ADMIN_TOKEN
       - OB_ENABLE_FAKETIME=1   # opt-in libfaketime preload for clock-skew scenarios
     volumes:
       - journal-backup:/app/journal

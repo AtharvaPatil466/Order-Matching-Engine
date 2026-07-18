@@ -39,6 +39,19 @@ T parseQueryUInt(std::string_view query, std::string_view key, T defaultVal = 0)
     return value;
 }
 
+// Constant-time string equality for shared-secret token checks. A
+// short-circuiting == leaks the position of the first mismatching byte
+// through response timing, which lets an attacker recover the token
+// byte-by-byte. Length is still leaked; that is standard and harmless.
+bool constantTimeEquals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
 }  // namespace
 
 namespace OrderMatcher {
@@ -252,13 +265,14 @@ void AdminServer::handleConnection(int clientSocket) {
     if (!adminToken_.empty() && path != "/health" && path != "/readyz") {
         const std::string authHeader = headerValue("Authorization");
         const std::string expected = "Bearer " + adminToken_;
-        if (authHeader != expected) {
+        if (!constantTimeEquals(authHeader, expected)) {
+            const std::string body = "{\"error\":\"unauthorized\"}";
             const std::string resp =
                 "HTTP/1.1 401 Unauthorized\r\n"
-                "Content-Length: 21\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: " + std::to_string(body.size()) + "\r\n"
                 "Connection: close\r\n"
-                "\r\n"
-                "Unauthorized: token required";
+                "\r\n" + body;
             ::send(clientSocket, resp.c_str(), resp.size(), MSG_NOSIGNAL);
             return;
         }
@@ -650,7 +664,7 @@ std::string AdminServer::generateChaosOrderResponse(const std::string& query,
     // Token check: when OB_CHAOS_TOKEN is configured, the request
     // must carry a matching X-Chaos-Token header. Empty server-side
     // token means no auth (warned at startup) — allow.
-    if (!chaosToken_.empty() && token != chaosToken_) {
+    if (!chaosToken_.empty() && !constantTimeEquals(token, chaosToken_)) {
         return "{\"enabled\":true,\"accepted\":false,\"error\":\"unauthorized\"}";
     }
 

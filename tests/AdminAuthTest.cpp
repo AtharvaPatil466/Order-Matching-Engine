@@ -158,6 +158,26 @@ int main() {
         std::puts("/readyz (after setReady): 200 OK");
     }
 
+    // ── 8. 401 response is well-formed HTTP: Content-Length == body ────
+    // Regression guard: the 401 previously hardcoded Content-Length: 21
+    // for a 28-byte body, so spec-compliant clients truncated it.
+    {
+        auto r = httpGet(port, "/metrics");
+        assert(r.find("HTTP/1.1 401") != std::string::npos &&
+               "/metrics without token must return 401");
+        size_t clPos = r.find("Content-Length: ");
+        assert(clPos != std::string::npos && "401 must declare Content-Length");
+        size_t clEnd = r.find("\r\n", clPos);
+        const size_t declared =
+            std::stoul(r.substr(clPos + 16, clEnd - clPos - 16));
+        size_t bodyPos = r.find("\r\n\r\n");
+        assert(bodyPos != std::string::npos && "401 must terminate headers");
+        const size_t actual = r.size() - (bodyPos + 4);
+        assert(declared == actual &&
+               "401 Content-Length must match actual body size");
+        std::puts("/metrics 401 response: Content-Length matches body");
+    }
+
     admin.stop();
     engine.stopAsync();
 

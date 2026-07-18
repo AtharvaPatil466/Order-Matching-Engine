@@ -19,6 +19,10 @@ services:
       - OB_REPLICATION_PORT=9002
       - OB_NODE_ROLE=primary
       - OB_NODE_ID=1
+      # Fail-closed: compose refuses to start without a token so the
+      # admin API is never exposed unauthenticated. Set in .env or:
+      #   OB_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up
+      - OB_ADMIN_TOKEN=${OB_ADMIN_TOKEN:?set OB_ADMIN_TOKEN — bearer token for the admin API}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 10s
@@ -42,6 +46,7 @@ services:
       - OB_NODE_ID=2
       - OB_PRIMARY_HOST=engine-primary
       - OB_PRIMARY_REPLICATION_PORT=9002
+      - OB_ADMIN_TOKEN=${OB_ADMIN_TOKEN:?set OB_ADMIN_TOKEN — bearer token for the admin API}
     depends_on:
       engine-primary:
         condition: service_healthy

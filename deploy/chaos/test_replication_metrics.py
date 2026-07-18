@@ -26,7 +26,7 @@ import time
 import pytest
 import requests
 
-from cluster import BACKUP, PRIMARY, Cluster, _ADMIN_PORTS
+from cluster import ADMIN_HEADERS, BACKUP, PRIMARY, Cluster, _ADMIN_PORTS
 from loaddriver import ChaosLoadDriver
 
 
@@ -36,7 +36,9 @@ PARTICIPANT_ID = 11
 def _scrape(host_port_node: str) -> dict[str, float]:
     """Fetch /prometheus and parse into a {metric_name: value} dict."""
     port = _ADMIN_PORTS[host_port_node]
-    r = requests.get(f"http://localhost:{port}/prometheus", timeout=2.0)
+    r = requests.get(
+        f"http://localhost:{port}/prometheus", headers=ADMIN_HEADERS, timeout=2.0
+    )
     r.raise_for_status()
     out: dict[str, float] = {}
     # The exposition format is "name value" or "name{labels} value"

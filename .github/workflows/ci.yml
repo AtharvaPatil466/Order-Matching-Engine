@@ -63,8 +63,13 @@ jobs:
 
       - name: Benchmark smoke
         if: matrix.os == 'ubuntu-latest' && matrix.thread_sanitizer != 'ON'
+        # This is a "does it run + emit output" smoke, not a timing measurement.
+        # It runs on the Debug+sanitizer build (the only non-TSan ubuntu job), where
+        # ASan/UBSan instrumentation makes E2EBenchmark run many times slower than
+        # Release — so the ceiling is generous. It only costs wall-time if the binary
+        # actually hangs; a healthy run finishes well under it.
         run: |
-          timeout 30s ./build/benchmarks/E2EBenchmark > e2e_benchmark_smoke.txt
+          timeout 300s ./build/benchmarks/E2EBenchmark > e2e_benchmark_smoke.txt
           test -s e2e_benchmark_smoke.txt
 
       - name: Upload benchmark smoke artifact

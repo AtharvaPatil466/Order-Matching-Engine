@@ -37,7 +37,17 @@ endif()
 # Aggressive Optimizations for HFT
 if(CMAKE_BUILD_TYPE MATCHES "Release")
     message(STATUS "Enabling HFT Optimizations: -O3 -march=native -mtune=native")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -Wall -Wextra -Werror -Wno-error=character-conversion")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -Wall -Wextra -Werror")
+    # -Wcharacter-conversion only exists in newer Clang (Apple clang has it;
+    # clang-18 in the chaos Docker image does not, and rejects the unknown
+    # flag as an error under -Werror — this silently killed the chaos image
+    # build for weeks). Demote it only where the compiler knows the warning;
+    # where it doesn't, the warning can't fire so no demotion is needed.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-Wno-error=character-conversion" HAS_WNO_ERROR_CHARACTER_CONVERSION)
+    if(HAS_WNO_ERROR_CHARACTER_CONVERSION)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wno-error=character-conversion")
+    endif()
     
     if(ENABLE_LTO)
         # Link Time Optimization (LTO)

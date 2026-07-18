@@ -1,9 +1,9 @@
 name: Chaos
 
 # Chaos suite — multi-container replication failure-injection.
-# Initially WARN-ONLY (continue-on-error) so a flaky first scenario
-# doesn't block PRs while we stabilize. Flip continue-on-error to
-# false once the suite has been green for ~2 weeks of nightlies.
+# BLOCKING. This was warn-only during initial stabilization, and the
+# mask hid a broken Docker image build for ~4 weeks of green nightlies.
+# A red run here means a real regression; do not re-add continue-on-error.
 
 on:
   pull_request:
@@ -21,9 +21,8 @@ on:
 
 jobs:
   chaos:
-    name: Chaos suite (warn-only)
+    name: Chaos suite
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 20
 
     steps:

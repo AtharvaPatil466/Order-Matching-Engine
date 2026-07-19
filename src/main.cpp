@@ -172,13 +172,16 @@ int main(int argc, char* argv[]) {
         coord = std::make_unique<ReplicationCoordinator>(nodeId);
 
         if (role == "primary") {
-            if (!coord->startAsPrimary(replPort)) {
-                std::cerr << "[Replication] FATAL: failed to start as primary on port "
-                          << replPort << "\n";
-                return 1;
-            }
-            std::cout << "[Replication] Started as PRIMARY (nodeId=" << nodeId
-                      << ", port=" << replPort << ")\n";
+            // Both hooks below MUST be registered before startAsPrimary():
+            // its accept loop is live once it returns, and a backup that
+            // connects before setOnPeerJoined is armed receives no
+            // SnapshotStart/SnapshotEnd bracket — the backup engages
+            // snapshot buffering on connect and would buffer live entries
+            // forever, never applying them. Registering the commit hook
+            // first closes the sibling window where entries committed
+            // pre-registration are never shipped to that early joiner.
+            // replicateEntry() no-ops until the role flips to Primary, so
+            // early registration is safe.
 
             // Hook the journal's onCommit so every fsync-durable batch
             // is shipped to the backup. The callback runs synchronously
@@ -227,6 +230,14 @@ int main(int argc, char* argv[]) {
                               << " resting orders to joining backup\n";
                 });
             }
+
+            if (!coord->startAsPrimary(replPort)) {
+                std::cerr << "[Replication] FATAL: failed to start as primary on port "
+                          << replPort << "\n";
+                return 1;
+            }
+            std::cout << "[Replication] Started as PRIMARY (nodeId=" << nodeId
+                      << ", port=" << replPort << ")\n";
         } else if (role == "backup") {
             const std::string primaryHost = flagOrEnv(argc, argv, "--primary-host",
                                                        "OB_PRIMARY_HOST");

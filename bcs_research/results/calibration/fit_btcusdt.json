@@ -1,0 +1,26 @@
+{
+  "fitted": {
+    "lambda_per_tick": 0.1758209314571456,
+    "sigma": 55.67535369582828
+  },
+  "n_seeds": 5,
+  "prior": {
+    "lambda_per_tick": 0.15,
+    "sigma": 20.0
+  },
+  "sim_moments_at_fit": {
+    "lambda_per_s": 7.034666666666666,
+    "rv_1s_bp": 1.7173332591801973,
+    "spread_p50_bp": 1.2450475846032014
+  },
+  "targets": {
+    "lambda_per_s": 14.065674516571649,
+    "rv_1s_bp": 1.7606092721429076,
+    "size_p50": 0.003,
+    "size_p99": 2.214,
+    "spread_p50_bp": 0.015629896553302217,
+    "top_depth_p50": 6.156499999999999
+  },
+  "targets_file": "targets_btcusdt.json",
+  "tau_s": 0.1
+}

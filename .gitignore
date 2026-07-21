@@ -44,3 +44,6 @@ tsan_out*.txt
 .venv/
 __pycache__/
 *.pyc
+
+# Generated knowledge-graph cache (regenerable via /graphify)
+graphify-out/

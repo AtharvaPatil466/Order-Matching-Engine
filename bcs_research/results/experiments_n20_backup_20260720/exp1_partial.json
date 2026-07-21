@@ -1,0 +1,42 @@
+{
+  "baseline": {
+    "crashes": 0.0,
+    "hft_fills": 0.0,
+    "hft_pnl": 0.0,
+    "hft_snipes": 0.0,
+    "kyle_lambda": 0.15428614327423681,
+    "mm_pnl": 104.88810000000872,
+    "n_trades": 1831.5,
+    "nt_pnl": -104.88809999999312,
+    "spread_ticks": 100.0
+  },
+  "config": {
+    "dt_us": 1000,
+    "duration_us": 3000000,
+    "half_spread": 50,
+    "hft_cost_bps": 0.0,
+    "hft_latency_us": 0,
+    "hft_qty": 50,
+    "hft_race_noise_us": 100,
+    "lambda_per_tick": 0.15,
+    "mm_inventory_skew": 0.2,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "n_noise": 8,
+    "noise_qty": 10,
+    "quote_qty": 50,
+    "sigma": 20.0
+  },
+  "n_seeds": 10,
+  "treatment": {
+    "crashes": 0.0,
+    "hft_fills": 327.7,
+    "hft_pnl": 72.93480000000368,
+    "hft_snipes": 3278.7,
+    "kyle_lambda": 1.3873373520438217,
+    "mm_pnl": 39.15049999999694,
+    "n_trades": 2157.4,
+    "nt_pnl": -112.08529999999573,
+    "spread_ticks": 100.0
+  }
+}

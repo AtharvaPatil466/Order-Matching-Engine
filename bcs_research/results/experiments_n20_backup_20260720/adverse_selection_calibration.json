@@ -1,0 +1,142 @@
+{
+  "config": {
+    "base_half_spread": 50,
+    "dt_us": 1000,
+    "duration_us": 2000000,
+    "hft_latency_us": 0,
+    "hft_qty": 50,
+    "hft_race_noise_us": 100,
+    "lambda_per_tick": 0.15,
+    "mm_inventory_skew": 0.2,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "n_noise": 8,
+    "noise_qty": 10,
+    "quote_qty": 50,
+    "sigma": 20.0,
+    "spread_cap_mult": 10.0
+  },
+  "grid": [
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": -0.01298753334293079,
+      "hft_pnl": 15.862840000002029,
+      "spread_decay": 0.02,
+      "spread_mult_HFT": 1.3598409937358444,
+      "spread_mult_noHFT": 1.3728285270787752
+    },
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.014684623480820447,
+      "hft_pnl": 24.389479999998184,
+      "spread_decay": 0.05,
+      "spread_mult_HFT": 1.1714780255077084,
+      "spread_mult_noHFT": 1.156793402026888
+    },
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.01486614603186287,
+      "hft_pnl": 29.440900000000376,
+      "spread_decay": 0.1,
+      "spread_mult_HFT": 1.087057621120247,
+      "spread_mult_noHFT": 1.072191475088384
+    },
+    {
+      "adverse_sensitivity": 0.05,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.007863304255785408,
+      "hft_pnl": 29.605879999991885,
+      "spread_decay": 0.2,
+      "spread_mult_HFT": 1.0401671989756207,
+      "spread_mult_noHFT": 1.0323038947198353
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": -0.043871839765461385,
+      "hft_pnl": 5.588799999999606,
+      "spread_decay": 0.02,
+      "spread_mult_HFT": 1.5806426827295064,
+      "spread_mult_noHFT": 1.6245145224949677
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.013444142255245373,
+      "hft_pnl": 16.26729999999484,
+      "spread_decay": 0.05,
+      "spread_mult_HFT": 1.3146368541702202,
+      "spread_mult_noHFT": 1.3011927119149749
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.028533568991696123,
+      "hft_pnl": 23.538100000005578,
+      "spread_decay": 0.1,
+      "spread_mult_HFT": 1.1728172863062831,
+      "spread_mult_noHFT": 1.144283717314587
+    },
+    {
+      "adverse_sensitivity": 0.1,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.01491078206534846,
+      "hft_pnl": 31.92243999999564,
+      "spread_decay": 0.2,
+      "spread_mult_HFT": 1.0809379129420242,
+      "spread_mult_noHFT": 1.0660271308766758
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.013499519693496165,
+      "hft_pnl": 3.3485199999980977,
+      "spread_decay": 0.02,
+      "spread_mult_HFT": 1.9031632658346538,
+      "spread_mult_noHFT": 1.8896637461411576
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.0016902776624549976,
+      "hft_pnl": 11.099739999994563,
+      "spread_decay": 0.05,
+      "spread_mult_HFT": 1.5390200417817568,
+      "spread_mult_noHFT": 1.5373297641193018
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.025955517690976926,
+      "hft_pnl": 21.154600000004667,
+      "spread_decay": 0.1,
+      "spread_mult_HFT": 1.314813367292078,
+      "spread_mult_noHFT": 1.2888578496011012
+    },
+    {
+      "adverse_sensitivity": 0.2,
+      "crashes_HFT": 0.0,
+      "crashes_noHFT": 0.0,
+      "divergence": 0.030425226788042492,
+      "hft_pnl": 26.759420000004503,
+      "spread_decay": 0.2,
+      "spread_mult_HFT": 1.1627421042689943,
+      "spread_mult_noHFT": 1.1323168774809518
+    }
+  ],
+  "n_seeds": 5
+}

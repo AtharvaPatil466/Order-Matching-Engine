@@ -1,0 +1,99 @@
+{
+  "continuous_gaps": 10.4,
+  "continuous_mm_loss": 42.019469999994485,
+  "continuous_rent": 45.59401000000279,
+  "min_interval_mm_recovery": {
+    "50pct": 25,
+    "90pct": 500
+  },
+  "min_interval_rent_elim": {
+    "50pct": 5,
+    "90pct": null
+  },
+  "per_interval": [
+    {
+      "hft_rent": 46.54288000000819,
+      "hft_rent_ci": [
+        25.521212250017165,
+        73.98636612501568
+      ],
+      "interval": 1,
+      "liquidity_gaps": 134.75,
+      "mm_loss": 57.05832500000885,
+      "mm_recovery": -0.3579020630202223,
+      "rent_elimination": -0.02081128639497476
+    },
+    {
+      "hft_rent": 22.035470000008957,
+      "hft_rent_ci": [
+        -0.9878497499791511,
+        49.61189537501481
+      ],
+      "interval": 5,
+      "liquidity_gaps": 66.0,
+      "mm_loss": 30.4160649999885,
+      "mm_recovery": 0.27614353536604597,
+      "rent_elimination": 0.5167025229847604
+    },
+    {
+      "hft_rent": 21.015914999975344,
+      "hft_rent_ci": [
+        -14.867787250082243,
+        66.0996625000033
+      ],
+      "interval": 10,
+      "liquidity_gaps": 28.6,
+      "mm_loss": 24.177625000001495,
+      "mm_recovery": 0.42460899673402186,
+      "rent_elimination": 0.5390641226780873
+    },
+    {
+      "hft_rent": 30.38697499996124,
+      "hft_rent_ci": [
+        -21.732713124983427,
+        100.76489812491643
+      ],
+      "interval": 25,
+      "liquidity_gaps": 13.85,
+      "mm_loss": 15.264165000006608,
+      "mm_recovery": 0.63673589885811,
+      "rent_elimination": 0.33353142222060794
+    },
+    {
+      "hft_rent": 21.305949999990162,
+      "hft_rent_ci": [
+        -38.773658750014604,
+        102.91386250008345
+      ],
+      "interval": 50,
+      "liquidity_gaps": 17.05,
+      "mm_loss": 8.384100000007646,
+      "mm_recovery": 0.8004710673407174,
+      "rent_elimination": 0.5327028703992288
+    },
+    {
+      "hft_rent": 18.533900000045833,
+      "hft_rent_ci": [
+        -79.91485249996113,
+        146.58127750004655
+      ],
+      "interval": 100,
+      "liquidity_gaps": 15.75,
+      "mm_loss": 6.823500000000815,
+      "mm_recovery": 0.837610993189545,
+      "rent_elimination": 0.5935014270505117
+    },
+    {
+      "hft_rent": 13.457849999890641,
+      "hft_rent_ci": [
+        -51.21351250022043,
+        88.76231124980565
+      ],
+      "interval": 500,
+      "liquidity_gaps": 4.9,
+      "mm_loss": 2.0957999999998607,
+      "mm_recovery": 0.9501231214958177,
+      "rent_elimination": 0.7048329374869677
+    }
+  ]
+}

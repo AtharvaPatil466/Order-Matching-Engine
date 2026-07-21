@@ -1,0 +1,1374 @@
+{
+  "baseline_gaps": {
+    "gaps_ci": {
+      "lower": 2.47,
+      "mean": 2.84,
+      "n": 100,
+      "std": 2.0529003872570146,
+      "upper": 3.26
+    },
+    "gaps_significantly_higher": true,
+    "n_seeds": 100,
+    "treatment_gaps_ci": {
+      "lower": 9.15,
+      "mean": 10.4,
+      "n": 20,
+      "std": 3.2,
+      "upper": 11.85
+    }
+  },
+  "calibration": {
+    "all_rent_significant": true,
+    "all_zero_sum_ok": true,
+    "cells": [
+      {
+        "decay": 0.05,
+        "rent_significant": true,
+        "sens": 0.05,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 24.168954125001115,
+            "mean": 45.50756500000371,
+            "n": 20,
+            "std": 54.4327314502342,
+            "upper": 71.5534042500087
+          },
+          "kyle_lambda": {
+            "lower": 1.339895374934734,
+            "mean": 1.3697941076869429,
+            "n": 20,
+            "std": 0.06609757160303939,
+            "upper": 1.3963247455843988
+          },
+          "liquidity_gaps": {
+            "lower": 8.1,
+            "mean": 9.3,
+            "n": 20,
+            "std": 2.628687885618983,
+            "upper": 10.45
+          },
+          "mm_pnl": {
+            "lower": 73.21436862500387,
+            "mean": 77.16614500000401,
+            "n": 20,
+            "std": 8.53731468556508,
+            "upper": 80.67738450000284
+          },
+          "n_trades": {
+            "lower": 2077.1462500000002,
+            "mean": 2091.45,
+            "n": 20,
+            "std": 32.736027553751846,
+            "upper": 2105.6012499999997
+          },
+          "nt_pnl": {
+            "lower": -146.65289762501789,
+            "mean": -122.67371000000499,
+            "n": 20,
+            "std": 50.50018206420805,
+            "upper": -102.74113612499968
+          },
+          "spread_ticks": {
+            "lower": 116.66086300574607,
+            "mean": 117.10371603733138,
+            "n": 20,
+            "std": 0.9808165189855572,
+            "upper": 117.53381950288613
+          },
+          "zero_sum_residual": {
+            "lower": -1.2425616091604749e-11,
+            "mean": 2.7199575924896636e-12,
+            "n": 20,
+            "std": 3.491968658855942e-11,
+            "upper": 1.772995972260105e-11
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.1,
+        "rent_significant": true,
+        "sens": 0.05,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 33.41279650000571,
+            "mean": 55.760725000003696,
+            "n": 20,
+            "std": 56.131940280008116,
+            "upper": 82.77573025000545
+          },
+          "kyle_lambda": {
+            "lower": 1.3765566246957712,
+            "mean": 1.3994025761329794,
+            "n": 20,
+            "std": 0.04986768585871084,
+            "upper": 1.4199328907744608
+          },
+          "liquidity_gaps": {
+            "lower": 9.05,
+            "mean": 10.3,
+            "n": 20,
+            "std": 2.951270912674741,
+            "upper": 11.6
+          },
+          "mm_pnl": {
+            "lower": 55.1252776249978,
+            "mean": 59.84835500000312,
+            "n": 20,
+            "std": 10.033558617533382,
+            "upper": 63.94539887500486
+          },
+          "n_trades": {
+            "lower": 2115.845,
+            "mean": 2131.6,
+            "n": 20,
+            "std": 36.24968965384394,
+            "upper": 2146.55125
+          },
+          "nt_pnl": {
+            "lower": -140.26438600000196,
+            "mean": -115.60908000000154,
+            "n": 20,
+            "std": 51.112389536891186,
+            "upper": -95.15359450000297
+          },
+          "spread_ticks": {
+            "lower": 108.44427227206091,
+            "mean": 108.67823443193913,
+            "n": 20,
+            "std": 0.5335585003395672,
+            "upper": 108.91208970765712
+          },
+          "zero_sum_residual": {
+            "lower": -1.3491501249518469e-11,
+            "mean": 5.266542757453863e-12,
+            "n": 20,
+            "std": 4.1952724014986e-11,
+            "upper": 2.2261446019911084e-11
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.2,
+        "rent_significant": true,
+        "sens": 0.05,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 38.04784637499225,
+            "mean": 61.02905999999807,
+            "n": 20,
+            "std": 57.65405695923419,
+            "upper": 89.1250867500127
+          },
+          "kyle_lambda": {
+            "lower": 1.380649106317131,
+            "mean": 1.4047156895813036,
+            "n": 20,
+            "std": 0.05213995367349953,
+            "upper": 1.425543159938623
+          },
+          "liquidity_gaps": {
+            "lower": 9.05,
+            "mean": 10.25,
+            "n": 20,
+            "std": 2.6052830940226053,
+            "upper": 11.4
+          },
+          "mm_pnl": {
+            "lower": 44.23918424999952,
+            "mean": 49.48663999999884,
+            "n": 20,
+            "std": 10.886547117529142,
+            "upper": 54.05230624999658
+          },
+          "n_trades": {
+            "lower": 2134.59375,
+            "mean": 2150.7,
+            "n": 20,
+            "std": 37.3056296019783,
+            "upper": 2166.4512499999996
+          },
+          "nt_pnl": {
+            "lower": -135.63871274999943,
+            "mean": -110.51569999999883,
+            "n": 20,
+            "std": 51.441251832522646,
+            "upper": -89.6090363749974
+          },
+          "spread_ticks": {
+            "lower": 103.89155063953717,
+            "mean": 103.9875432235162,
+            "n": 20,
+            "std": 0.21604971982130367,
+            "upper": 104.07811304684837
+          },
+          "zero_sum_residual": {
+            "lower": -2.0135786371611173e-11,
+            "mean": -1.9213075574953107e-12,
+            "n": 20,
+            "std": 4.395906919161148e-11,
+            "upper": 1.831040208344347e-11
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.05,
+        "rent_significant": true,
+        "sens": 0.1,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 15.082746249996779,
+            "mean": 33.057854999998966,
+            "n": 20,
+            "std": 45.43455754655711,
+            "upper": 54.52172049999565
+          },
+          "kyle_lambda": {
+            "lower": 1.2589592976552255,
+            "mean": 1.2852222812463352,
+            "n": 20,
+            "std": 0.06073009390991981,
+            "upper": 1.3111857846999033
+          },
+          "liquidity_gaps": {
+            "lower": 12.0,
+            "mean": 14.0,
+            "n": 20,
+            "std": 4.61519230368573,
+            "upper": 16.05
+          },
+          "mm_pnl": {
+            "lower": 95.92537012499658,
+            "mean": 99.68683999999186,
+            "n": 20,
+            "std": 8.43877888230703,
+            "upper": 103.3000658749931
+          },
+          "n_trades": {
+            "lower": 2037.85,
+            "mean": 2049.35,
+            "n": 20,
+            "std": 26.74934578639261,
+            "upper": 2060.7012499999996
+          },
+          "nt_pnl": {
+            "lower": -152.72209737501154,
+            "mean": -132.74469500000288,
+            "n": 20,
+            "std": 42.593546047881006,
+            "upper": -115.64112799999324
+          },
+          "spread_ticks": {
+            "lower": 130.6117175678579,
+            "mean": 131.33038836020916,
+            "n": 20,
+            "std": 1.5578193823465614,
+            "upper": 131.99547426885957
+          },
+          "zero_sum_residual": {
+            "lower": -2.6052315860169983e-11,
+            "mean": -1.2071410537828343e-11,
+            "n": 20,
+            "std": 3.234676094911042e-11,
+            "upper": 1.9944579321418015e-12
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.1,
+        "rent_significant": true,
+        "sens": 0.1,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 25.649867250014886,
+            "mean": 45.59401000000279,
+            "n": 20,
+            "std": 51.435404977250926,
+            "upper": 70.0449246249993
+          },
+          "kyle_lambda": {
+            "lower": 1.3515667007068297,
+            "mean": 1.374988017078423,
+            "n": 20,
+            "std": 0.05207475965692846,
+            "upper": 1.3961860452772652
+          },
+          "liquidity_gaps": {
+            "lower": 9.15,
+            "mean": 10.4,
+            "n": 20,
+            "std": 3.2,
+            "upper": 11.85
+          },
+          "mm_pnl": {
+            "lower": 70.42649200000413,
+            "mean": 74.95558499999873,
+            "n": 20,
+            "std": 9.948822962450661,
+            "upper": 79.10354912500743
+          },
+          "n_trades": {
+            "lower": 2095.99875,
+            "mean": 2109.95,
+            "n": 20,
+            "std": 32.492268311092104,
+            "upper": 2123.2
+          },
+          "nt_pnl": {
+            "lower": -142.59815237500453,
+            "mean": -120.54959500000136,
+            "n": 20,
+            "std": 46.03906342461446,
+            "upper": -101.67589337500766
+          },
+          "spread_ticks": {
+            "lower": 116.75711843621562,
+            "mean": 117.17571792657115,
+            "n": 20,
+            "std": 0.8888737269134216,
+            "upper": 117.5399833337535
+          },
+          "zero_sum_residual": {
+            "lower": -1.4252492519517542e-11,
+            "mean": 1.5916157281026243e-13,
+            "n": 20,
+            "std": 3.412077816159834e-11,
+            "upper": 1.4632774991696342e-11
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.2,
+        "rent_significant": true,
+        "sens": 0.1,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 35.71889987499935,
+            "mean": 55.96008999999533,
+            "n": 20,
+            "std": 52.30171747530157,
+            "upper": 80.54294899999724
+          },
+          "kyle_lambda": {
+            "lower": 1.3846857531964756,
+            "mean": 1.4045807818654747,
+            "n": 20,
+            "std": 0.04503630807887154,
+            "upper": 1.4232008878232068
+          },
+          "liquidity_gaps": {
+            "lower": 8.6,
+            "mean": 9.8,
+            "n": 20,
+            "std": 2.6191601707417584,
+            "upper": 10.9
+          },
+          "mm_pnl": {
+            "lower": 51.79143587499113,
+            "mean": 56.75322499999417,
+            "n": 20,
+            "std": 10.350680930057182,
+            "upper": 61.05062037498916
+          },
+          "n_trades": {
+            "lower": 2128.1475,
+            "mean": 2144.4,
+            "n": 20,
+            "std": 36.3240966852584,
+            "upper": 2158.90125
+          },
+          "nt_pnl": {
+            "lower": -134.54790674999936,
+            "mean": -112.713314999998,
+            "n": 20,
+            "std": 46.68605843626754,
+            "upper": -93.89832587499791
+          },
+          "spread_ticks": {
+            "lower": 107.89974513369054,
+            "mean": 108.12070513856759,
+            "n": 20,
+            "std": 0.5217187703037556,
+            "upper": 108.3596134395453
+          },
+          "zero_sum_residual": {
+            "lower": -2.0516814913662527e-11,
+            "mean": -8.519407401763601e-12,
+            "n": 20,
+            "std": 2.819786765457292e-11,
+            "upper": 3.897522304896482e-12
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.05,
+        "rent_significant": true,
+        "sens": 0.2,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 7.024321374997397,
+            "mean": 24.35409499999505,
+            "n": 20,
+            "std": 42.89084628329294,
+            "upper": 44.465247249992494
+          },
+          "kyle_lambda": {
+            "lower": 1.1085404398076086,
+            "mean": 1.1453345372050967,
+            "n": 20,
+            "std": 0.08338060408804945,
+            "upper": 1.1820327430042514
+          },
+          "liquidity_gaps": {
+            "lower": 32.35,
+            "mean": 35.85,
+            "n": 20,
+            "std": 8.374216381250248,
+            "upper": 39.6
+          },
+          "mm_pnl": {
+            "lower": 122.44284987499776,
+            "mean": 127.7112049999989,
+            "n": 20,
+            "std": 11.646482626331375,
+            "upper": 132.81161549999217
+          },
+          "n_trades": {
+            "lower": 1994.3,
+            "mean": 2005.0,
+            "n": 20,
+            "std": 24.21982658897458,
+            "upper": 2015.1525000000001
+          },
+          "nt_pnl": {
+            "lower": -169.7681867500031,
+            "mean": -152.06530000000464,
+            "n": 20,
+            "std": 37.97980701386468,
+            "upper": -136.2914506250117
+          },
+          "spread_ticks": {
+            "lower": 153.95485753679873,
+            "mean": 155.20494791881077,
+            "n": 20,
+            "std": 3.1828667251040903,
+            "upper": 156.63359626029836
+          },
+          "zero_sum_residual": {
+            "lower": -2.6472051217751866e-11,
+            "mean": -1.0672351891116705e-11,
+            "n": 20,
+            "std": 3.43718098988697e-11,
+            "upper": 3.814690785475247e-12
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.1,
+        "rent_significant": true,
+        "sens": 0.2,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 19.862129499997287,
+            "mean": 37.82048499999826,
+            "n": 20,
+            "std": 47.091845894086994,
+            "upper": 60.110455874995864
+          },
+          "kyle_lambda": {
+            "lower": 1.27041176465097,
+            "mean": 1.2973363203196966,
+            "n": 20,
+            "std": 0.05825355821929639,
+            "upper": 1.3221125921787011
+          },
+          "liquidity_gaps": {
+            "lower": 17.9,
+            "mean": 19.85,
+            "n": 20,
+            "std": 4.5307284182568255,
+            "upper": 21.75124999999999
+          },
+          "mm_pnl": {
+            "lower": 93.73546937500747,
+            "mean": 97.90670500000772,
+            "n": 20,
+            "std": 9.149475286019692,
+            "upper": 101.7084661250114
+          },
+          "n_trades": {
+            "lower": 2059.59875,
+            "mean": 2074.85,
+            "n": 20,
+            "std": 33.66938520377228,
+            "upper": 2089.00375
+          },
+          "nt_pnl": {
+            "lower": -155.69419650000978,
+            "mean": -135.72719000000782,
+            "n": 20,
+            "std": 42.33695012399659,
+            "upper": -119.10966087499217
+          },
+          "spread_ticks": {
+            "lower": 131.91011793463068,
+            "mean": 132.69161861447324,
+            "n": 20,
+            "std": 1.7034018472527195,
+            "upper": 133.4179594085447
+          },
+          "zero_sum_residual": {
+            "lower": -1.0683809392730834e-11,
+            "mean": -1.831068630053778e-12,
+            "n": 20,
+            "std": 1.9247625277556397e-11,
+            "upper": 5.730687036020734e-12
+          }
+        },
+        "zero_sum_ok": true
+      },
+      {
+        "decay": 0.2,
+        "rent_significant": true,
+        "sens": 0.2,
+        "treatment_ci": {
+          "hft_rent": {
+            "lower": 28.71653412500836,
+            "mean": 47.9842300000041,
+            "n": 20,
+            "std": 48.83319124462103,
+            "upper": 71.03121962500684
+          },
+          "kyle_lambda": {
+            "lower": 1.358987746116482,
+            "mean": 1.381698173089062,
+            "n": 20,
+            "std": 0.05158147101320894,
+            "upper": 1.4027749484998464
+          },
+          "liquidity_gaps": {
+            "lower": 11.9,
+            "mean": 12.95,
+            "n": 20,
+            "std": 2.376446927663229,
+            "upper": 13.95
+          },
+          "mm_pnl": {
+            "lower": 67.70262037500216,
+            "mean": 72.26501500000026,
+            "n": 20,
+            "std": 9.763843311796586,
+            "upper": 76.24110287500534
+          },
+          "n_trades": {
+            "lower": 2115.84625,
+            "mean": 2130.15,
+            "n": 20,
+            "std": 33.07608652788295,
+            "upper": 2144.15125
+          },
+          "nt_pnl": {
+            "lower": -141.45332912500402,
+            "mean": -120.24924500000853,
+            "n": 20,
+            "std": 44.32995657311339,
+            "upper": -102.28293250000915
+          },
+          "spread_ticks": {
+            "lower": 116.00549857192075,
+            "mean": 116.47980913192148,
+            "n": 20,
+            "std": 1.0835759776590335,
+            "upper": 116.96044311854826
+          },
+          "zero_sum_residual": {
+            "lower": -1.5872529957050572e-11,
+            "mean": -4.127542752030422e-12,
+            "n": 20,
+            "std": 2.5845864203167388e-11,
+            "upper": 6.797353790943815e-12
+          }
+        },
+        "zero_sum_ok": true
+      }
+    ],
+    "decay_grid": [
+      0.05,
+      0.1,
+      0.2
+    ],
+    "n_seeds": 20,
+    "rent_range": [
+      24.35409499999505,
+      61.02905999999807
+    ],
+    "sens_grid": [
+      0.05,
+      0.1,
+      0.2
+    ]
+  },
+  "exp1_hardened": {
+    "baseline_ci": {
+      "hft_rent": {
+        "lower": 0.0,
+        "mean": 0.0,
+        "n": 20,
+        "std": 0.0,
+        "upper": 0.0
+      },
+      "kyle_lambda": {
+        "lower": 0.14851183303243437,
+        "mean": 0.1795548623800126,
+        "n": 20,
+        "std": 0.07579309106937031,
+        "upper": 0.21232316864319783
+      },
+      "liquidity_gaps": {
+        "lower": 2.35,
+        "mean": 3.45,
+        "n": 20,
+        "std": 2.692118125194361,
+        "upper": 4.7
+      },
+      "mm_pnl": {
+        "lower": 99.18532037498568,
+        "mean": 116.9750549999932,
+        "n": 20,
+        "std": 46.07392374026402,
+        "upper": 139.39121737502884
+      },
+      "n_trades": {
+        "lower": 1836.2,
+        "mean": 1847.0,
+        "n": 20,
+        "std": 26.074892137840187,
+        "upper": 1858.45125
+      },
+      "nt_pnl": {
+        "lower": -139.39121737499775,
+        "mean": -116.97505499999525,
+        "n": 20,
+        "std": 46.073923740223826,
+        "upper": -99.18532037499317
+      },
+      "spread_ticks": {
+        "lower": 114.02592510806727,
+        "mean": 116.75309396529933,
+        "n": 20,
+        "std": 6.595508412839017,
+        "upper": 119.81553315966555
+      },
+      "zero_sum_residual": {
+        "lower": -3.3060416626540247e-11,
+        "mean": -2.0520474208751694e-12,
+        "n": 20,
+        "std": 7.346750513331985e-11,
+        "upper": 3.0746605261810963e-11
+      }
+    },
+    "baseline_rows": [
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.2304459717607132,
+        "liquidity_gaps": 3,
+        "mm_max_half_spread": 124.84111650823567,
+        "mm_min_qty": 21,
+        "mm_pnl": 73.59699999989243,
+        "n_trades": 1859,
+        "nt_pnl": -73.5970000000068,
+        "spread_ticks": 122.53923205342237,
+        "zero_sum_residual": -1.1436895874794573e-10
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.15267534482004283,
+        "liquidity_gaps": 2,
+        "mm_max_half_spread": 116.17432230742568,
+        "mm_min_qty": 23,
+        "mm_pnl": 125.05399999995643,
+        "n_trades": 1810,
+        "nt_pnl": -125.05400000003578,
+        "spread_ticks": 115.8915220293725,
+        "zero_sum_residual": -7.935341272968799e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.14562136491323913,
+        "liquidity_gaps": 1,
+        "mm_max_half_spread": 93.62841180232536,
+        "mm_min_qty": 28,
+        "mm_pnl": 117.93099999997503,
+        "n_trades": 1817,
+        "nt_pnl": -117.93099999996957,
+        "spread_ticks": 112.73907240573907,
+        "zero_sum_residual": 5.4569682106375694e-12
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.19565507860106168,
+        "liquidity_gaps": 2,
+        "mm_max_half_spread": 87.47830693622207,
+        "mm_min_qty": 30,
+        "mm_pnl": 95.71690000000308,
+        "n_trades": 1863,
+        "nt_pnl": -95.7169000000049,
+        "spread_ticks": 110.33711615487316,
+        "zero_sum_residual": -1.8189894035458565e-12
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.0932572901819199,
+        "liquidity_gaps": 3,
+        "mm_max_half_spread": 96.52732070999369,
+        "mm_min_qty": 27,
+        "mm_pnl": 112.47879999996076,
+        "n_trades": 1864,
+        "nt_pnl": -112.47880000001669,
+        "spread_ticks": 114.54023372287145,
+        "zero_sum_residual": -5.5933924159035087e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.10260923645594165,
+        "liquidity_gaps": 3,
+        "mm_max_half_spread": 106.37640602783355,
+        "mm_min_qty": 25,
+        "mm_pnl": 132.57010000000446,
+        "n_trades": 1824,
+        "nt_pnl": -132.5700999999451,
+        "spread_ticks": 119.12888146911519,
+        "zero_sum_residual": 5.934452929068357e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.04154785259577147,
+        "liquidity_gaps": 7,
+        "mm_max_half_spread": 135.10415116382316,
+        "mm_min_qty": 20,
+        "mm_pnl": 175.5268999998807,
+        "n_trades": 1828,
+        "nt_pnl": -175.52689999999302,
+        "spread_ticks": 131.38214643931795,
+        "zero_sum_residual": -1.1232259566895664e-10
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.15441700987009943,
+        "liquidity_gaps": 5,
+        "mm_max_half_spread": 124.34821257387432,
+        "mm_min_qty": 21,
+        "mm_pnl": 96.41650000008303,
+        "n_trades": 1824,
+        "nt_pnl": -96.41650000000118,
+        "spread_ticks": 115.65619779485466,
+        "zero_sum_residual": 8.185452315956354e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.2049859423504237,
+        "liquidity_gaps": 1,
+        "mm_max_half_spread": 117.98703889134096,
+        "mm_min_qty": 22,
+        "mm_pnl": 86.67299999997704,
+        "n_trades": 1852,
+        "nt_pnl": -86.67299999998761,
+        "spread_ticks": 111.25792459125792,
+        "zero_sum_residual": -1.057287590811029e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.21421810352992393,
+        "liquidity_gaps": 5,
+        "mm_max_half_spread": 107.54270544412384,
+        "mm_min_qty": 25,
+        "mm_pnl": 201.50070000012056,
+        "n_trades": 1860,
+        "nt_pnl": -201.50070000000687,
+        "spread_ticks": 124.462746408286,
+        "zero_sum_residual": 1.1368683772161603e-10
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.2271356833471806,
+        "liquidity_gaps": 1,
+        "mm_max_half_spread": 93.9468682158769,
+        "mm_min_qty": 28,
+        "mm_pnl": 120.34899999994377,
+        "n_trades": 1835,
+        "nt_pnl": -120.34899999998197,
+        "spread_ticks": 114.08708708708708,
+        "zero_sum_residual": -3.8198777474462986e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.21655479067068698,
+        "liquidity_gaps": 2,
+        "mm_max_half_spread": 80.96299616787213,
+        "mm_min_qty": 32,
+        "mm_pnl": 85.70789999999943,
+        "n_trades": 1862,
+        "nt_pnl": -85.70789999999602,
+        "spread_ticks": 110.06475300400534,
+        "zero_sum_residual": 3.410605131648481e-12
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.3612253493091933,
+        "liquidity_gaps": 1,
+        "mm_max_half_spread": 89.5452427915634,
+        "mm_min_qty": 29,
+        "mm_pnl": 79.61500000000069,
+        "n_trades": 1813,
+        "nt_pnl": -79.61500000001251,
+        "spread_ticks": 109.32499165832499,
+        "zero_sum_residual": -1.1823431123048067e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.18600332152423205,
+        "liquidity_gaps": 1,
+        "mm_max_half_spread": 121.08191108027219,
+        "mm_min_qty": 22,
+        "mm_pnl": 113.75199999995311,
+        "n_trades": 1863,
+        "nt_pnl": -113.75199999997221,
+        "spread_ticks": 118.98131464798132,
+        "zero_sum_residual": -1.9099388737231493e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.23850409575287415,
+        "liquidity_gaps": 1,
+        "mm_max_half_spread": 92.45904004063905,
+        "mm_min_qty": 28,
+        "mm_pnl": 80.90500000002794,
+        "n_trades": 1805,
+        "nt_pnl": -80.90499999999986,
+        "spread_ticks": 115.50083416750084,
+        "zero_sum_residual": 2.808064891723916e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.18520135475540067,
+        "liquidity_gaps": 6,
+        "mm_max_half_spread": 108.11969433660207,
+        "mm_min_qty": 24,
+        "mm_pnl": 87.86510000000999,
+        "n_trades": 1842,
+        "nt_pnl": -87.86509999999203,
+        "spread_ticks": 114.06082887700535,
+        "zero_sum_residual": 1.7962520360015333e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.13228471723538573,
+        "liquidity_gaps": 3,
+        "mm_max_half_spread": 79.4597023248144,
+        "mm_min_qty": 33,
+        "mm_pnl": 82.20600000001673,
+        "n_trades": 1867,
+        "nt_pnl": -82.20600000001559,
+        "spread_ticks": 108.94190317195326,
+        "zero_sum_residual": 1.1368683772161603e-12
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.11096874581561421,
+        "liquidity_gaps": 3,
+        "mm_max_half_spread": 91.37026704514174,
+        "mm_min_qty": 29,
+        "mm_pnl": 101.37599999996746,
+        "n_trades": 1899,
+        "nt_pnl": -101.37600000001896,
+        "spread_ticks": 111.94023372287145,
+        "zero_sum_residual": -5.150013748789206e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.08184024824520304,
+        "liquidity_gaps": 8,
+        "mm_max_half_spread": 105.13455764500226,
+        "mm_min_qty": 25,
+        "mm_pnl": 105.77919999991718,
+        "n_trades": 1894,
+        "nt_pnl": -105.77919999997539,
+        "spread_ticks": 122.44782608695652,
+        "zero_sum_residual": -5.820766091346741e-11
+      },
+      {
+        "hft_fills": 0,
+        "hft_rent": 0.0,
+        "hft_rent_per_sec": 0.0,
+        "hft_snipes": 0,
+        "kyle_lambda": 0.3159457458653443,
+        "liquidity_gaps": 11,
+        "mm_max_half_spread": 130.52990650723393,
+        "mm_min_qty": 20,
+        "mm_pnl": 264.4810000001744,
+        "n_trades": 1859,
+        "nt_pnl": -264.48099999997316,
+        "spread_ticks": 131.77703381319049,
+        "zero_sum_residual": 2.0122570276726037e-10
+      }
+    ],
+    "delta_ci": {
+      "liquidity_gaps": {
+        "lower": 5.05,
+        "mean": 6.95,
+        "n": 20,
+        "std": 4.271709259769443,
+        "upper": 8.85
+      },
+      "mm_pnl": {
+        "lower": -67.41089075001105,
+        "mean": -42.019469999994485,
+        "n": 20,
+        "std": 52.37166765235326,
+        "upper": -22.281257374987494
+      },
+      "nt_pnl": {
+        "lower": -7.247017249998525,
+        "mean": -3.5745400000060954,
+        "n": 20,
+        "std": 9.071960410534018,
+        "upper": 0.6952413749898949
+      }
+    },
+    "n_seeds": 20,
+    "treatment_ci": {
+      "hft_rent": {
+        "lower": 25.649867250014886,
+        "mean": 45.59401000000279,
+        "n": 20,
+        "std": 51.435404977250926,
+        "upper": 70.0449246249993
+      },
+      "kyle_lambda": {
+        "lower": 1.3515667007068297,
+        "mean": 1.374988017078423,
+        "n": 20,
+        "std": 0.05207475965692846,
+        "upper": 1.3961860452772652
+      },
+      "liquidity_gaps": {
+        "lower": 9.15,
+        "mean": 10.4,
+        "n": 20,
+        "std": 3.2,
+        "upper": 11.85
+      },
+      "mm_pnl": {
+        "lower": 70.42649200000413,
+        "mean": 74.95558499999873,
+        "n": 20,
+        "std": 9.948822962450661,
+        "upper": 79.10354912500743
+      },
+      "n_trades": {
+        "lower": 2095.99875,
+        "mean": 2109.95,
+        "n": 20,
+        "std": 32.492268311092104,
+        "upper": 2123.2
+      },
+      "nt_pnl": {
+        "lower": -142.59815237500453,
+        "mean": -120.54959500000136,
+        "n": 20,
+        "std": 46.03906342461446,
+        "upper": -101.67589337500766
+      },
+      "spread_ticks": {
+        "lower": 116.75711843621562,
+        "mean": 117.17571792657115,
+        "n": 20,
+        "std": 0.8888737269134216,
+        "upper": 117.5399833337535
+      },
+      "zero_sum_residual": {
+        "lower": -1.4252492519517542e-11,
+        "mean": 1.5916157281026243e-13,
+        "n": 20,
+        "std": 3.412077816159834e-11,
+        "upper": 1.4632774991696342e-11
+      }
+    },
+    "treatment_rows": [
+      {
+        "hft_fills": 237,
+        "hft_rent": -6.327300000015384,
+        "hft_rent_per_sec": -2.109100000005128,
+        "hft_snipes": 2487,
+        "kyle_lambda": 1.310892753912561,
+        "liquidity_gaps": 11,
+        "mm_max_half_spread": 110.43439915601485,
+        "mm_min_qty": 24,
+        "mm_pnl": 61.86740000004647,
+        "n_trades": 2083,
+        "nt_pnl": -55.5401000000154,
+        "spread_ticks": 116.35185805155675,
+        "zero_sum_residual": 1.5688783605583012e-11
+      },
+      {
+        "hft_fills": 251,
+        "hft_rent": 49.913599999988946,
+        "hft_rent_per_sec": 16.637866666662983,
+        "hft_snipes": 2487,
+        "kyle_lambda": 1.335026759115061,
+        "liquidity_gaps": 11,
+        "mm_max_half_spread": 105.62745887055569,
+        "mm_min_qty": 25,
+        "mm_pnl": 83.60260000002074,
+        "n_trades": 2092,
+        "nt_pnl": -133.51619999998752,
+        "spread_ticks": 116.50351523267493,
+        "zero_sum_residual": 2.2168933355715126e-11
+      },
+      {
+        "hft_fills": 288,
+        "hft_rent": 46.765699999961726,
+        "hft_rent_per_sec": 15.588566666653909,
+        "hft_snipes": 2862,
+        "kyle_lambda": 1.4505926610711612,
+        "liquidity_gaps": 10,
+        "mm_max_half_spread": 94.10881432989221,
+        "mm_min_qty": 28,
+        "mm_pnl": 83.55039999998371,
+        "n_trades": 2121,
+        "nt_pnl": -130.31610000001365,
+        "spread_ticks": 117.82998661311915,
+        "zero_sum_residual": -6.821210263296962e-11
+      },
+      {
+        "hft_fills": 254,
+        "hft_rent": 8.58069999998952,
+        "hft_rent_per_sec": 2.8602333333298398,
+        "hft_snipes": 2595,
+        "kyle_lambda": 1.3682312110341628,
+        "liquidity_gaps": 16,
+        "mm_max_half_spread": 98.24518323620819,
+        "mm_min_qty": 27,
+        "mm_pnl": 93.1505999999863,
+        "n_trades": 2118,
+        "nt_pnl": -101.73129999997127,
+        "spread_ticks": 117.24279007377599,
+        "zero_sum_residual": 4.547473508864641e-12
+      },
+      {
+        "hft_fills": 266,
+        "hft_rent": 45.51390000005449,
+        "hft_rent_per_sec": 15.171300000018164,
+        "hft_snipes": 2670,
+        "kyle_lambda": 1.390970259174248,
+        "liquidity_gaps": 11,
+        "mm_max_half_spread": 105.86984704669035,
+        "mm_min_qty": 25,
+        "mm_pnl": 74.07189999999787,
+        "n_trades": 2154,
+        "nt_pnl": -119.5857999999871,
+        "spread_ticks": 117.75292936056243,
+        "zero_sum_residual": 6.52562448522076e-11
+      },
+      {
+        "hft_fills": 249,
+        "hft_rent": 62.39370000001327,
+        "hft_rent_per_sec": 20.79790000000442,
+        "hft_snipes": 2670,
+        "kyle_lambda": 1.3764958300757129,
+        "liquidity_gaps": 7,
+        "mm_max_half_spread": 103.43951762452117,
+        "mm_min_qty": 25,
+        "mm_pnl": 73.15030000000479,
+        "n_trades": 2061,
+        "nt_pnl": -135.54400000000396,
+        "spread_ticks": 116.47609495152123,
+        "zero_sum_residual": 1.4097167877480388e-11
+      },
+      {
+        "hft_fills": 267,
+        "hft_rent": 117.48909999997295,
+        "hft_rent_per_sec": 39.163033333324314,
+        "hft_snipes": 2835,
+        "kyle_lambda": 1.412732387294639,
+        "liquidity_gaps": 10,
+        "mm_max_half_spread": 109.04948429554126,
+        "mm_min_qty": 24,
+        "mm_pnl": 68.05019999998876,
+        "n_trades": 2109,
+        "nt_pnl": -185.539299999999,
+        "spread_ticks": 117.69210174029452,
+        "zero_sum_residual": -3.728928277269006e-11
+      },
+      {
+        "hft_fills": 250,
+        "hft_rent": 12.659900000036941,
+        "hft_rent_per_sec": 4.219966666678981,
+        "hft_snipes": 2559,
+        "kyle_lambda": 1.3394186846907965,
+        "liquidity_gaps": 15,
+        "mm_max_half_spread": 109.57888983987944,
+        "mm_min_qty": 24,
+        "mm_pnl": 79.52869999998939,
+        "n_trades": 2087,
+        "nt_pnl": -92.18860000000132,
+        "spread_ticks": 117.68253436138116,
+        "zero_sum_residual": 2.5011104298755527e-11
+      },
+      {
+        "hft_fills": 237,
+        "hft_rent": 7.929100000009157,
+        "hft_rent_per_sec": 2.6430333333363856,
+        "hft_snipes": 2628,
+        "kyle_lambda": 1.2986707289591828,
+        "liquidity_gaps": 8,
+        "mm_max_half_spread": 96.47653219005906,
+        "mm_min_qty": 27,
+        "mm_pnl": 84.8154999999806,
+        "n_trades": 2106,
+        "nt_pnl": -92.74459999999192,
+        "spread_ticks": 116.89899665551839,
+        "zero_sum_residual": -2.1600499167107046e-12
+      },
+      {
+        "hft_fills": 246,
+        "hft_rent": 143.39500000001954,
+        "hft_rent_per_sec": 47.79833333333985,
+        "hft_snipes": 2544,
+        "kyle_lambda": 1.3635500136399799,
+        "liquidity_gaps": 9,
+        "mm_max_half_spread": 111.69585293636054,
+        "mm_min_qty": 24,
+        "mm_pnl": 69.22440000001598,
+        "n_trades": 2135,
+        "nt_pnl": -212.6194000000164,
+        "spread_ticks": 116.55436600869857,
+        "zero_sum_residual": 1.9099388737231493e-11
+      },
+      {
+        "hft_fills": 260,
+        "hft_rent": 37.480899999980466,
+        "hft_rent_per_sec": 12.493633333326821,
+        "hft_snipes": 2649,
+        "kyle_lambda": 1.4409703014025859,
+        "liquidity_gaps": 11,
+        "mm_max_half_spread": 95.29682205823879,
+        "mm_min_qty": 28,
+        "mm_pnl": 85.20320000001584,
+        "n_trades": 2116,
+        "nt_pnl": -122.68409999998016,
+        "spread_ticks": 117.90391697355206,
+        "zero_sum_residual": 1.6143530956469476e-11
+      },
+      {
+        "hft_fills": 260,
+        "hft_rent": 13.849299999999857,
+        "hft_rent_per_sec": 4.616433333333286,
+        "hft_snipes": 2655,
+        "kyle_lambda": 1.413917084132247,
+        "liquidity_gaps": 13,
+        "mm_max_half_spread": 108.93172143331773,
+        "mm_min_qty": 24,
+        "mm_pnl": 81.63380000000461,
+        "n_trades": 2147,
+        "nt_pnl": -95.48310000005483,
+        "spread_ticks": 117.6676716917923,
+        "zero_sum_residual": -5.03632691106759e-11
+      },
+      {
+        "hft_fills": 233,
+        "hft_rent": 22.57709999999679,
+        "hft_rent_per_sec": 7.52569999999893,
+        "hft_snipes": 2508,
+        "kyle_lambda": 1.4108808555028927,
+        "liquidity_gaps": 8,
+        "mm_max_half_spread": 118.37785923304726,
+        "mm_min_qty": 22,
+        "mm_pnl": 72.95010000001776,
+        "n_trades": 2058,
+        "nt_pnl": -95.52720000001909,
+        "spread_ticks": 116.53678929765886,
+        "zero_sum_residual": -4.547473508864641e-12
+      },
+      {
+        "hft_fills": 263,
+        "hft_rent": 39.494000000031974,
+        "hft_rent_per_sec": 13.164666666677325,
+        "hft_snipes": 2700,
+        "kyle_lambda": 1.341158752909779,
+        "liquidity_gaps": 11,
+        "mm_max_half_spread": 103.2268219628513,
+        "mm_min_qty": 26,
+        "mm_pnl": 70.97720000000118,
+        "n_trades": 2133,
+        "nt_pnl": -110.47120000004008,
+        "spread_ticks": 118.46702376966856,
+        "zero_sum_residual": -6.934897101018578e-12
+      },
+      {
+        "hft_fills": 231,
+        "hft_rent": 4.059500000007574,
+        "hft_rent_per_sec": 1.3531666666691915,
+        "hft_snipes": 2457,
+        "kyle_lambda": 1.4197486828331087,
+        "liquidity_gaps": 8,
+        "mm_max_half_spread": 107.04986576904051,
+        "mm_min_qty": 25,
+        "mm_pnl": 68.29310000000078,
+        "n_trades": 2038,
+        "nt_pnl": -72.35259999997652,
+        "spread_ticks": 115.9685618729097,
+        "zero_sum_residual": 3.183231456205249e-11
+      },
+      {
+        "hft_fills": 264,
+        "hft_rent": 11.685600000000704,
+        "hft_rent_per_sec": 3.895200000000235,
+        "hft_snipes": 2748,
+        "kyle_lambda": 1.4500876094122337,
+        "liquidity_gaps": 19,
+        "mm_max_half_spread": 117.52040793162654,
+        "mm_min_qty": 23,
+        "mm_pnl": 82.21299999998428,
+        "n_trades": 2118,
+        "nt_pnl": -93.89859999995122,
+        "spread_ticks": 118.33400469956361,
+        "zero_sum_residual": 3.376499080331996e-11
+      },
+      {
+        "hft_fills": 242,
+        "hft_rent": 24.7319000000316,
+        "hft_rent_per_sec": 8.243966666677201,
+        "hft_snipes": 2625,
+        "kyle_lambda": 1.3018340779784046,
+        "liquidity_gaps": 7,
+        "mm_max_half_spread": 107.07889814141753,
+        "mm_min_qty": 25,
+        "mm_pnl": 71.65049999997973,
+        "n_trades": 2127,
+        "nt_pnl": -96.38239999998268,
+        "spread_ticks": 117.27181544633902,
+        "zero_sum_residual": 2.864908310584724e-11
+      },
+      {
+        "hft_fills": 261,
+        "hft_rent": 34.342099999983475,
+        "hft_rent_per_sec": 11.447366666661159,
+        "hft_snipes": 2751,
+        "kyle_lambda": 1.3899598103219606,
+        "liquidity_gaps": 8,
+        "mm_max_half_spread": 132.17613711976819,
+        "mm_min_qty": 20,
+        "mm_pnl": 78.28299999997944,
+        "n_trades": 2173,
+        "nt_pnl": -112.62510000002567,
+        "spread_ticks": 117.96688963210703,
+        "zero_sum_residual": -6.275513442233205e-11
+      },
+      {
+        "hft_fills": 231,
+        "hft_rent": 28.68269999999211,
+        "hft_rent_per_sec": 9.56089999999737,
+        "hft_snipes": 2430,
+        "kyle_lambda": 1.270863188168577,
+        "liquidity_gaps": 9,
+        "mm_max_half_spread": 93.05828108072748,
+        "mm_min_qty": 28,
+        "mm_pnl": 70.53829999997834,
+        "n_trades": 2101,
+        "nt_pnl": -99.22100000000535,
+        "spread_ticks": 114.74539979926396,
+        "zero_sum_residual": -3.490185918053612e-11
+      },
+      {
+        "hft_fills": 260,
+        "hft_rent": 206.66370000000006,
+        "hft_rent_per_sec": 68.88790000000002,
+        "hft_snipes": 2583,
+        "kyle_lambda": 1.4137586899391648,
+        "liquidity_gaps": 6,
+        "mm_max_half_spread": 100.39935085831756,
+        "mm_min_qty": 26,
+        "mm_pnl": 46.357499999998026,
+        "n_trades": 2122,
+        "nt_pnl": -253.021200000004,
+        "spread_ticks": 117.66711229946524,
+        "zero_sum_residual": -5.9117155615240335e-12
+      }
+    ],
+    "verdict": {
+      "gaps_increase": true,
+      "rent_significant": true,
+      "zero_sum_ok": true
+    }
+  },
+  "operating_point": {
+    "adverse_sensitivity": 0.1,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "spread_decay": 0.1
+  }
+}

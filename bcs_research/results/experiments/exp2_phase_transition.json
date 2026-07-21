@@ -1,12 +1,12 @@
 {
-  "linear_intercept": 12.90898457335587,
-  "linear_slope_per_tick": 10.804023046407243,
-  "n_points": 160,
+  "linear_intercept": 4.709872071855935,
+  "linear_slope_per_tick": 10.459827815868538,
+  "n_points": 800,
   "phase_transition": {
-    "delta_bic_linear_minus_segmented": -7.858665996997615,
-    "knee_us": 11285.714285714284,
-    "post_slope_per_tick": 7.526805821955196,
-    "pre_slope_per_tick": 12.860696438571205,
+    "delta_bic_linear_minus_segmented": -0.17273597597886692,
+    "knee_us": 6510.204081632653,
+    "post_slope_per_tick": 8.924475204364777,
+    "pre_slope_per_tick": 13.696138865563107,
     "prefers_segmented": false,
     "strong_evidence": false
   },

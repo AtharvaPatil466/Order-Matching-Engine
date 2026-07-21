@@ -52,3 +52,35 @@ def test_fit_params_inversion():
     f = fit_params(targets, n_noise=8, v0=1_000_000)
     assert abs(f["lambda_per_tick"] - 6.2 * TAU_S / 8) < 1e-12
     assert abs(f["sigma"] - 0.33 * math.sqrt(TAU_S) * 1e-4 * 1_000_000) < 1e-9
+
+
+def test_size_model_matches_p50_p99_and_reports_p90_gap():
+    from fit import size_model
+    targets = {"size_p50": 0.003, "size_p90": 0.201, "size_p99": 2.214,
+               "top_depth_p50": 6.1565}
+    sm = size_model(targets)
+    # p99/p50 reproduced exactly by construction.
+    assert abs(math.exp(2.326348 * sm["sigma_ln"]) - 2.214 / 0.003) < 1e-6
+    assert sm["quote_qty_units"] == round(6.1565 / 0.003)
+    # Two-quantile lognormal under-predicts p90 -- disclosed, not hidden.
+    assert sm["p90_ratio_model"] < sm["p90_ratio_real"]
+
+
+def test_noise_trader_lognormal_sizes():
+    for _d in ("agents", "simulation", "build"):
+        p = str(_R / _d)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from noise_trader import NoiseTrader
+
+    nt = NoiseTrader(100, qty=10, size_sigma_ln=2.84, seed=7)
+    draws = [nt._draw_qty() for _ in range(4000)]
+    assert min(draws) >= 1                              # integer floor
+    assert sorted(draws)[2000] <= 30                    # median near qty=10
+    assert max(draws) > 500                             # heavy tail present
+    nt2 = NoiseTrader(100, qty=10, size_sigma_ln=2.84, seed=7)
+    assert draws[:50] == [nt2._draw_qty() for _ in range(50)]  # seeded determinism
+
+    # Default path unchanged: constant qty, no RNG consumed by sizing.
+    const = NoiseTrader(101, qty=10, seed=7)
+    assert [const._draw_qty() for _ in range(5)] == [10] * 5

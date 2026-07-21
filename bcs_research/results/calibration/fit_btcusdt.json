@@ -27,6 +27,13 @@
     "rv_1s_bp": 1.7945883728530567,
     "spread_p50_bp": 1.6623569133461764
   },
+  "size_model": {
+    "median_units": 1,
+    "p90_ratio_model": 38.01643828146636,
+    "p90_ratio_real": 67.0,
+    "quote_qty_units": 2052,
+    "sigma_ln": 2.838760075706847
+  },
   "targets": {
     "lambda_per_s": 14.065674516571649,
     "rv_1s_bp": 1.7606092721429076,

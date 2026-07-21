@@ -43,6 +43,28 @@ def fit_params(targets: dict, n_noise: int, v0: int) -> dict:
     }
 
 
+Z90, Z99 = 1.281552, 2.326348   # standard normal quantiles
+
+
+def size_model(targets: dict) -> dict:
+    """Lognormal size shape for NoiseTrader(size_sigma_ln=...), calibrated runs.
+
+    Fitted on (p50, p99) — the tail drives depth consumption, which is what
+    the BCS mechanism cares about. A two-quantile lognormal under-predicts
+    the p90 ratio (reported below, not hidden). Unit mapping: median trade =
+    1 unit, so the calibrated book needs quote_qty ~ depth_p50 / size_p50
+    units for the sim's depth-to-median-trade ratio to match the real one.
+    """
+    sigma_ln = math.log(targets["size_p99"] / targets["size_p50"]) / Z99
+    return {
+        "sigma_ln": sigma_ln,
+        "median_units": 1,
+        "quote_qty_units": round(targets["top_depth_p50"] / targets["size_p50"]),
+        "p90_ratio_model": math.exp(Z90 * sigma_ln),
+        "p90_ratio_real": targets["size_p90"] / targets["size_p50"],
+    }
+
+
 def sim_moments(result, v0: int) -> dict:
     """Same moment definitions as targets.py, on a SimResult, real units."""
     dur_s = len(result.snapshots) * TAU_S
@@ -132,8 +154,14 @@ def main(n_seeds: int = 5) -> dict:
           f"vs sim {CFG['quote_qty'] / CFG['noise_qty']:.0f}x), "
           f"size tail (real p99/p50 {targets['size_p99'] / targets['size_p50']:.0f}x vs sim 1x)")
 
+    sm = size_model(targets)
+    print(f"size model: sigma_ln {sm['sigma_ln']:.3f}, median 1 unit, "
+          f"quote_qty {sm['quote_qty_units']} units; p90 ratio model "
+          f"{sm['p90_ratio_model']:.0f}x vs real {sm['p90_ratio_real']:.0f}x")
+
     report = {"targets_file": "targets_btcusdt.json", "n_seeds": n_seeds,
               "tau_s": TAU_S, "fitted": fitted, "iterations": iterations,
+              "size_model": sm,
               "prior": {k: CFG[k] for k in ("lambda_per_tick", "sigma")},
               "sim_moments_at_fit": sim,
               "targets": {k: targets[k] for k in ("lambda_per_s", "rv_1s_bp",

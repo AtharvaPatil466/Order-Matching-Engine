@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 import bcs_engine as be
+from position import EMPTY, apply_fill, total_pnl
 from scheduler import Action
 
 
@@ -30,7 +31,8 @@ class HFTAgent:
         self.qty = int(qty)
         self._rng = np.random.default_rng(seed)
         self._oid = self.participant_id * 1_000_000_000
-        self.inventory = 0
+        self.pos = EMPTY
+        self.inventory = 0       # mirrors self.pos, kept for callers that read it
         self.cash = 0.0
         self.fills = 0
         self.snipes = 0          # IOC orders sent (opportunities acted on)
@@ -68,14 +70,20 @@ class HFTAgent:
         return []
 
     def on_fill(self, trade, is_buyer):
-        notional = trade.price * trade.quantity / be.PRICE_PRECISION
-        if is_buyer:
-            self.inventory += trade.quantity
-            self.cash -= notional
-        else:
-            self.inventory -= trade.quantity
-            self.cash += notional
+        qty = trade.quantity if is_buyer else -trade.quantity
+        self.pos = apply_fill(self.pos, qty, trade.price / be.PRICE_PRECISION)
+        self.inventory = self.pos.inventory
+        self.cash = self.pos.cash
         self.fills += 1
 
     def pnl(self, mark_price):
-        return self.cash + self.inventory * mark_price / be.PRICE_PRECISION
+        return total_pnl(self.pos, mark_price / be.PRICE_PRECISION)
+
+    def realized_pnl(self):
+        """Round-trip P&L only — excludes mark-to-market on the open lot.
+
+        This is the inventory-controlled rent measure: it isolates profit the
+        sniper actually closed, rather than directional exposure whose variance
+        grows with run length (see metrics/position.py).
+        """
+        return self.pos.realized

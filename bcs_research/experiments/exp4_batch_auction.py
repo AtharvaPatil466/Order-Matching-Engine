@@ -49,7 +49,8 @@ BATCH_INTERVALS = [1, 5, 10, 25, 50, 100, 500]            # + "continuous"
 CONTINUOUS = "continuous"
 
 CELL_METRICS = (
-    "hft_rent", "mm_pnl", "nt_pnl", "zero_sum_residual",
+    "hft_rent", "hft_rent_realized", "hft_rent_inventory",
+    "mm_pnl", "nt_pnl", "zero_sum_residual",
     "liquidity_gaps", "kyle_lambda", "spread_ticks", "n_trades",
     "hft_snipes", "hft_fills", "hft_fill_rate",
 )
@@ -88,6 +89,8 @@ def _run_batch(seed: int, cfg: dict, batch_interval: int, with_hft: bool) -> dic
     return {
         "mm_pnl": welfare["mm_pnl"], "nt_pnl": welfare["noise_trader_pnl"],
         "hft_rent": welfare["hft_rent"], "hft_rent_per_sec": welfare["hft_rent_per_sec"],
+        "hft_rent_realized": welfare["hft_rent_realized"],
+        "hft_rent_inventory": welfare["hft_rent_inventory"],
         "zero_sum_residual": welfare["zero_sum_residual"],
         "liquidity_gaps": gaps, "kyle_lambda": m["kyle_lambda"],
         "spread_ticks": m["time_weighted_avg_spread_ticks"], "n_trades": m["n_trades"],

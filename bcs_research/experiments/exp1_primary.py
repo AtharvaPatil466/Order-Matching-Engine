@@ -102,6 +102,8 @@ def _run(seed, cfg, with_hft):
         "mm_pnl": welfare["mm_pnl"],
         "nt_pnl": welfare["noise_trader_pnl"],
         "hft_rent": welfare["hft_rent"],
+        "hft_rent_realized": welfare["hft_rent_realized"],
+        "hft_rent_inventory": welfare["hft_rent_inventory"],
         "hft_rent_per_sec": welfare["hft_rent_per_sec"],
         "zero_sum_residual": welfare["zero_sum_residual"],
         # instability + quality (secondary)

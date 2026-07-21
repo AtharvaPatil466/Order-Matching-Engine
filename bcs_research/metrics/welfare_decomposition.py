@@ -25,9 +25,16 @@ def decompose_welfare(result, mm_id, nt_ids, hft_ids, mark=None):
         a = agents.get(pid)
         return float(a.pnl(mark)) if a is not None else 0.0
 
+    def realized(pid):
+        """Round-trip P&L where the agent tracks it; falls back to total."""
+        a = agents.get(pid)
+        fn = getattr(a, "realized_pnl", None)
+        return float(fn()) if fn is not None else pnl(pid)
+
     mm_pnl = pnl(mm_id)
     nt_pnl = float(sum(pnl(i) for i in nt_ids))
     hft_pnl = float(sum(pnl(j) for j in hft_ids))
+    hft_realized = float(sum(realized(j) for j in hft_ids))
     n_hft = sum(1 for j in hft_ids if j in agents)
     duration_s = result.duration_us / 1_000_000.0
 
@@ -37,6 +44,11 @@ def decompose_welfare(result, mm_id, nt_ids, hft_ids, mark=None):
         "noise_trader_pnl": nt_pnl,
         "hft_pnl": hft_pnl,
         "hft_rent": hft_pnl,                       # rent extracted by the arms race
+        # Inventory-controlled rent. `hft_rent` includes mark-to-market on the
+        # HFT's open lot, whose variance grows with run length and swamps the
+        # latency signal over long simulations (§4.4). These two terms split it.
+        "hft_rent_realized": hft_realized,
+        "hft_rent_inventory": hft_pnl - hft_realized,
         "hft_pnl_per_agent": hft_pnl / n_hft if n_hft else 0.0,
         "noise_trader_loss": -nt_pnl,
         "mm_pnl_per_sec": mm_pnl / duration_s if duration_s else 0.0,

@@ -160,6 +160,34 @@ public:
         return b ? b->getTradeCount() : 0;
     }
 
+    // Run one uniform-price call auction on the resting book. Exposed so the
+    // batch-auction arm of Experiment 4 clears through the SAME model-checked
+    // code path as the continuous arm, rather than a Python re-implementation
+    // of the clearing rule. Trades land in the usual collector, so drain_trades
+    // reports auction fills exactly as it reports continuous fills.
+    void uncross(SymbolId sym) {
+        if (OrderBook* b = engine_.getOrderBook(sym)) {
+            b->uncross();
+        }
+    }
+
+    // A call auction needs orders to ACCUMULATE rather than match on arrival, so
+    // the batch arm must park the book in an auction state (AuctionOpen/Close,
+    // PreOpen) before submitting and restore Continuous after uncross(). Calling
+    // uncross() while the book is Continuous is a no-op: arrivals have already
+    // matched pairwise at their own prices, which is precisely the uniform-price
+    // property the batch arm exists to test.
+    void setTradingState(SymbolId sym, TradingState s) {
+        if (OrderBook* b = engine_.getOrderBook(sym)) {
+            b->setTradingState(s);
+        }
+    }
+
+    TradingState tradingState(SymbolId sym) {
+        OrderBook* b = engine_.getOrderBook(sym);
+        return b ? b->getTradingState() : TradingState::Continuous;
+    }
+
 private:
     // Point every book's listener slot back at the shared null listener.
     void detachListeners() {
@@ -195,6 +223,15 @@ PYBIND11_MODULE(bcs_engine, m) {
         .value("IOC", OrderType::IOC)
         .value("FOK", OrderType::FOK)
         .value("PostOnly", OrderType::PostOnly);
+
+    py::enum_<TradingState>(m, "TradingState")
+        .value("Continuous", TradingState::Continuous)
+        .value("Halted", TradingState::Halted)
+        .value("AuctionOpen", TradingState::AuctionOpen)
+        .value("AuctionClose", TradingState::AuctionClose)
+        .value("PreOpen", TradingState::PreOpen)
+        .value("PostClose", TradingState::PostClose)
+        .value("VolatilityAuction", TradingState::VolatilityAuction);
 
     py::enum_<TimeInForce>(m, "TimeInForce")
         .value("GTC", TimeInForce::GTC)
@@ -272,5 +309,9 @@ PYBIND11_MODULE(bcs_engine, m) {
         .def("snapshot", &EngineHarness::snapshot,
              py::arg("symbol"), py::arg("depth") = 10)
         .def("vwap", &EngineHarness::vwap, py::arg("symbol"))
-        .def("trade_count", &EngineHarness::tradeCount, py::arg("symbol"));
+        .def("trade_count", &EngineHarness::tradeCount, py::arg("symbol"))
+        .def("uncross", &EngineHarness::uncross, py::arg("symbol"))
+        .def("set_trading_state", &EngineHarness::setTradingState,
+             py::arg("symbol"), py::arg("state"))
+        .def("trading_state", &EngineHarness::tradingState, py::arg("symbol"));
 }

@@ -96,15 +96,33 @@ def main(n_seeds: int = 5) -> dict:
     targets = json.loads((OUT / "targets_btcusdt.json").read_text())
     v0 = 100 * be.PRICE_PRECISION
     fitted = fit_params(targets, CFG["n_noise"], v0)
-    cfg = {**CFG, **{"lambda_per_tick": fitted["lambda_per_tick"],
-                     "sigma": fitted["sigma"]}}
 
-    sims = [sim_moments(_baseline_run(s, cfg), v0) for s in range(1, n_seeds + 1)]
-    sim = {k: statistics.fmean(r[k] for r in sims) for k in sims[0]}
+    # Fill-rate fixed point: the closed form assumes every noise arrival
+    # trades, but only a fraction of IOCs find a quote (the MM requotes with
+    # latency), and that fraction itself moves with arrival intensity. So
+    # iterate lambda <- lambda * target/sim until the SIMULATED trade rate
+    # matches the target; the last iteration doubles as the verification run.
+    lam = fitted["lambda_per_tick"]
+    iterations = []
+    for _ in range(4):
+        cfg = {**CFG, "lambda_per_tick": lam, "sigma": fitted["sigma"]}
+        sims = [sim_moments(_baseline_run(s, cfg), v0) for s in range(1, n_seeds + 1)]
+        sim = {k: statistics.fmean(r[k] for r in sims) for k in sims[0]}
+        iterations.append({"lambda_per_tick": lam,
+                           "sim_lambda_per_s": sim["lambda_per_s"]})
+        ratio = targets["lambda_per_s"] / sim["lambda_per_s"]
+        if abs(ratio - 1.0) < 0.05:
+            break
+        lam = min(1.0, lam * ratio)   # per-tick probability, capped
+    fitted["lambda_per_tick"] = lam
 
     print(f"fitted: lambda_per_tick {fitted['lambda_per_tick']:.4f} "
-          f"(was {CFG['lambda_per_tick']}), sigma {fitted['sigma']:.2f} "
+          f"(closed-form {iterations[0]['lambda_per_tick']:.4f}, "
+          f"was {CFG['lambda_per_tick']}), sigma {fitted['sigma']:.2f} "
           f"(was {CFG['sigma']})")
+    for i, it in enumerate(iterations):
+        print(f"  iter {i}: lambda {it['lambda_per_tick']:.4f} -> "
+              f"sim {it['sim_lambda_per_s']:.2f}/s (target {targets['lambda_per_s']:.2f})")
     print(f"{'moment':>16} {'target':>12} {'sim@fitted':>12}")
     for k in ("lambda_per_s", "rv_1s_bp", "spread_p50_bp"):
         print(f"{k:>16} {targets[k]:>12.4g} {sim[k]:>12.4g}")
@@ -115,7 +133,7 @@ def main(n_seeds: int = 5) -> dict:
           f"size tail (real p99/p50 {targets['size_p99'] / targets['size_p50']:.0f}x vs sim 1x)")
 
     report = {"targets_file": "targets_btcusdt.json", "n_seeds": n_seeds,
-              "tau_s": TAU_S, "fitted": fitted,
+              "tau_s": TAU_S, "fitted": fitted, "iterations": iterations,
               "prior": {k: CFG[k] for k in ("lambda_per_tick", "sigma")},
               "sim_moments_at_fit": sim,
               "targets": {k: targets[k] for k in ("lambda_per_s", "rv_1s_bp",

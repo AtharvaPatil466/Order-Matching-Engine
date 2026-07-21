@@ -1,17 +1,31 @@
 {
   "fitted": {
-    "lambda_per_tick": 0.1758209314571456,
+    "lambda_per_tick": 0.37622067448118096,
     "sigma": 55.67535369582828
   },
+  "iterations": [
+    {
+      "lambda_per_tick": 0.1758209314571456,
+      "sim_lambda_per_s": 7.034666666666666
+    },
+    {
+      "lambda_per_tick": 0.3515504162826948,
+      "sim_lambda_per_s": 13.143333333333334
+    },
+    {
+      "lambda_per_tick": 0.37622067448118096,
+      "sim_lambda_per_s": 13.862
+    }
+  ],
   "n_seeds": 5,
   "prior": {
     "lambda_per_tick": 0.15,
     "sigma": 20.0
   },
   "sim_moments_at_fit": {
-    "lambda_per_s": 7.034666666666666,
-    "rv_1s_bp": 1.7173332591801973,
-    "spread_p50_bp": 1.2450475846032014
+    "lambda_per_s": 13.862,
+    "rv_1s_bp": 1.7945883728530567,
+    "spread_p50_bp": 1.6623569133461764
   },
   "targets": {
     "lambda_per_s": 14.065674516571649,

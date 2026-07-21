@@ -1,22 +1,30 @@
-"""BatchAuctionScheduler — frequent batch auction above the pybind11 bridge.
+"""BatchAuctionScheduler — frequent batch auction on the verified C++ engine.
 
-The continuous arm (LatencyScheduler) routes every order through the verified C++
-matcher, which matches immediately. A batch auction instead ACCUMULATES orders
-for `batch_interval_ticks` and then clears them all at ONE uniform price — the
-discrete "uncross" the engine's Auction.tla spec models (SingleClearingPrice).
-The pybind bridge does not expose uncross, so the clearing is done here in Python,
-replicating OrderBook::discoverUncrossPrice (src/OrderBook.cpp) faithfully so it
-is the same rule the engine proves SingleClearingPrice over.
+The continuous arm (LatencyScheduler) routes every order through the verified
+C++ matcher, which matches immediately. A batch auction instead ACCUMULATES
+orders for `batch_interval_ticks` and then clears them all at ONE uniform
+price. Both arms share the same model-checked matching substrate: this
+scheduler parks the book in TradingState.AuctionOpen (orders rest instead of
+matching on arrival), lets Limit orders accumulate in the engine book, buffers
+IOC/Market orders in Python for the current window, then flushes the buffer
+and calls OrderBook::uncross() — the code path Auction.tla proves
+SingleClearingPrice over — every batch_interval ticks. Unfilled flushed
+remainders are cancelled (true to IOC), which also keeps the resting Limit
+book two-sided between uncrosses (no spurious empty-book "gap" artifact).
 
-Why a batch neutralizes the HFT race (BCS): submission TIME within an interval is
-irrelevant — only price-time priority among accumulated orders at the uncross
-matters. The market maker posts resting Limit quotes; its (latency-delayed)
-cancel of a stale quote lands in the same batch before the uncross, so the stale
-quote is gone by clearing time and the HFT's IOC finds nothing to pick off at the
-stale price. Noise and HFT orders are IOC (aggressive): they accumulate, take
-part in the uncross at P*, and any unfilled remainder is cancelled (true to IOC),
-which also keeps the resting Limit book two-sided between uncrosses (no spurious
-empty-book "gap" artifact).
+Why a batch neutralizes the HFT race (BCS): submission TIME within an interval
+is irrelevant — only price-time priority among accumulated orders at the
+uncross matters. The market maker posts resting Limit quotes; its
+(latency-delayed) cancel of a stale quote lands in the same batch before the
+uncross, so the stale quote is gone by clearing time and the HFT's IOC finds
+nothing to pick off at the stale price.
+
+discover_uncross_price below is the RETIRED Python re-implementation of the
+clearing rule, kept as a cross-check. It agrees with the engine on executable
+volume but can pick a different clearing price when several prices tie on max
+volume (tie-break cascade divergence — pinned in
+tests/test_batch_auction.py::test_python_matcher_divergence_pinned and
+reported in the paper, §4.4).
 
 Produces the same SimResult shape as LatencyScheduler, so all existing metrics
 (welfare decomposition, liquidity gaps, Kyle's lambda) apply unchanged.
@@ -26,11 +34,16 @@ from __future__ import annotations
 import heapq
 
 import bcs_engine as be
-from scheduler import Action, SimResult  # noqa: F401  (Action re-exported for agents)
+from scheduler import Action, LatencyScheduler, SimResult  # noqa: F401  (Action re-exported for agents)
 
 
 def discover_uncross_price(buys, sells, reference=None):
     """Uniform clearing price replicating OrderBook::discoverUncrossPrice.
+
+    RETIRED from the simulation path — clearing now runs through the engine's
+    own uncross() via the pybind bridge. Kept as the reference implementation
+    the engine is cross-checked against; see the module docstring for the
+    known tie-break divergence.
 
     buys / sells: iterables of (price, qty). Candidate prices are the populated
     limit levels on either side. Returns (price, volume, buy_surplus); price is
@@ -82,163 +95,52 @@ def discover_uncross_price(buys, sells, reference=None):
     return (best_price, best_vol, best_buy_surplus)
 
 
-class _Trade:
-    """Minimal trade record passed to agent.on_fill (price/quantity are read)."""
+class BatchAuctionScheduler(LatencyScheduler):
+    """LatencyScheduler with clearing deferred to a per-interval engine uncross.
 
-    __slots__ = ("price", "quantity", "buyer_id", "seller_id", "aggressor_buy")
+    Same latency-queue semantics as the parent; only the clearing differs:
+    the book is parked in AuctionOpen for the whole run, so nothing matches
+    on arrival, and every batch_interval ticks the accumulated book is
+    uncrossed at one uniform price by the verified engine.
+    """
 
-    def __init__(self, price, quantity, buyer_id, seller_id, aggressor_buy):
-        self.price = price
-        self.quantity = quantity
-        self.buyer_id = buyer_id
-        self.seller_id = seller_id
-        self.aggressor_buy = aggressor_buy
-
-
-class _BatchMarketView:
-    """Read-only best bid/ask/mid over the resting Limit book."""
-
-    def __init__(self, sched):
-        self._s = sched
-
-    def best_bid(self):
-        return self._s._best_bid()
-
-    def best_ask(self):
-        return self._s._best_ask()
-
-    def mid(self):
-        bb, ba = self._s._best_bid(), self._s._best_ask()
-        return (bb + ba) // 2 if bb > 0 and ba > 0 else 0
-
-
-class BatchAuctionScheduler:
-    def __init__(self, symbol, dt_us, batch_interval_ticks):
-        self._sym = symbol
-        self.dt_us = int(dt_us)
+    def __init__(self, harness, symbol, dt_us, batch_interval_ticks):
+        super().__init__(harness, symbol, dt_us)
         self.batch_interval = max(1, int(batch_interval_ticks))
-        self.market = _BatchMarketView(self)
-        self._pending = []          # heap of (submit_at, enqueue_seq, Action)
-        self._enq_seq = 0
-        self._order_seq = 0         # arrival order for price-time priority
-        self._limits = {}           # order_id -> resting Limit order dict
-        self._aggressive = []       # IOC/Market orders accumulated this window
-        self._by_id = {}
-        self._reference = None      # last clearing price (tie-break anchor)
-        self.snapshots = []
-        self.trades = []
-        self._tick_volume = 0
-        self._tick_signed = 0
-
-    # --- book queries --------------------------------------------------------
-
-    def _best_bid(self):
-        bids = [o["price"] for o in self._limits.values()
-                if o["side"] == be.Side.Buy and o["qty"] > 0]
-        return max(bids) if bids else 0
-
-    def _best_ask(self):
-        asks = [o["price"] for o in self._limits.values()
-                if o["side"] == be.Side.Sell and o["qty"] > 0]
-        return min(asks) if asks else 0
-
-    # --- scheduling ----------------------------------------------------------
-
-    def _enqueue(self, action):
-        heapq.heappush(self._pending, (action.submit_at, self._enq_seq, action))
-        self._enq_seq += 1
+        self._aggressive = []   # due IOC/Market Actions; current window only
+        harness.set_trading_state(symbol, be.TradingState.AuctionOpen)
 
     def _submit_due(self, t):
+        # Limits rest in the parked engine book. IOC/Market orders are held
+        # back until the uncross so they never post visible liquidity
+        # mid-window (they take part in clearing, not in quoting).
         while self._pending and self._pending[0][0] <= t:
             _, _, a = heapq.heappop(self._pending)
             if a.kind == "cancel":
-                self._limits.pop(a.cancel_order_id, None)
-                continue
-            order = {
-                "order_id": a.order_id, "participant_id": a.participant_id,
-                "side": a.side, "price": int(a.price), "qty": int(a.quantity),
-                "seq": self._order_seq,
-            }
-            self._order_seq += 1
-            if a.order_type == be.OrderType.Limit:
-                self._limits[a.order_id] = order   # rests across windows
+                self._h.submit_cancel(self._sym, a.cancel_order_id)
+            elif a.order_type == be.OrderType.Limit:
+                self._h.submit_order(self._sym, a.order_id, a.participant_id,
+                                     a.side, a.price, a.quantity,
+                                     be.OrderType.Limit, be.TimeInForce.GTC)
             else:
-                self._aggressive.append(order)     # IOC/Market: this window only
-
-    # --- clearing ------------------------------------------------------------
+                self._aggressive.append(a)
 
     def _uncross(self, t):
-        participating = list(self._limits.values()) + self._aggressive
-        buys = [(o["price"], o["qty"]) for o in participating
-                if o["side"] == be.Side.Buy and o["qty"] > 0]
-        sells = [(o["price"], o["qty"]) for o in participating
-                 if o["side"] == be.Side.Sell and o["qty"] > 0]
-        price, vol, buy_surplus = discover_uncross_price(buys, sells, self._reference)
-        if price is None or vol == 0:
-            self._aggressive = []   # unfilled aggressive orders cancelled
-            return
-
-        buy_orders = sorted(
-            (o for o in participating
-             if o["side"] == be.Side.Buy and o["qty"] > 0 and o["price"] >= price),
-            key=lambda o: (-o["price"], o["seq"]))
-        sell_orders = sorted(
-            (o for o in participating
-             if o["side"] == be.Side.Sell and o["qty"] > 0 and o["price"] <= price),
-            key=lambda o: (o["price"], o["seq"]))
-
-        remaining = vol
-        bi = si = 0
-        filled_total = 0
-        while remaining > 0 and bi < len(buy_orders) and si < len(sell_orders):
-            b, s = buy_orders[bi], sell_orders[si]
-            fill = min(b["qty"], s["qty"], remaining)
-            if fill <= 0:
-                break
-            b["qty"] -= fill
-            s["qty"] -= fill
-            remaining -= fill
-            filled_total += fill
-            self._route_fill(t, price, fill, b["participant_id"],
-                             s["participant_id"], buy_surplus)
-            if b["qty"] == 0:
-                bi += 1
-            if s["qty"] == 0:
-                si += 1
-
-        # Fully-filled limits drop out; partials rest on. Aggressive buffer clears.
-        self._limits = {oid: o for oid, o in self._limits.items() if o["qty"] > 0}
+        # Flush the window's aggressive orders as parked limits, clear at one
+        # uniform price through the verified engine, then cancel unfilled
+        # remainders (IOC semantics: this window only). Cancelling a fully
+        # filled id is a harmless OrderNotFound reject.
+        flushed = [a.order_id for a in self._aggressive]
+        for a in self._aggressive:
+            self._h.submit_order(self._sym, a.order_id, a.participant_id,
+                                 a.side, a.price, a.quantity,
+                                 be.OrderType.Limit, be.TimeInForce.GTC)
         self._aggressive = []
-        self._reference = price
-        self._tick_volume += filled_total
-        self._tick_signed += filled_total if buy_surplus else -filled_total
-
-    def _route_fill(self, t, price, qty, buyer_id, seller_id, buy_surplus):
-        self.trades.append({
-            "t": t, "price": price, "quantity": qty,
-            "buyer_id": buyer_id, "seller_id": seller_id,
-            "aggressor_buy": buy_surplus,
-        })
-        tr = _Trade(price, qty, buyer_id, seller_id, buy_surplus)
-        buyer = self._by_id.get(buyer_id)
-        seller = self._by_id.get(seller_id)
-        if buyer is not None:
-            buyer.on_fill(tr, True)
-        if seller is not None:
-            seller.on_fill(tr, False)
-
-    def _record(self, t, v):
-        self.snapshots.append({
-            "t": t,
-            "best_bid": self._best_bid(),
-            "best_ask": self._best_ask(),
-            "mid": self.market.mid(),
-            "v": v,
-            "tick_volume": self._tick_volume,
-            "signed_volume": self._tick_signed,
-        })
-
-    # --- driver --------------------------------------------------------------
+        self._h.uncross(self._sym)
+        for tr in self._h.drain_trades(self._sym):
+            self._route_fill(t, tr)
+        for oid in flushed:
+            self._h.submit_cancel(self._sym, oid)
 
     def run(self, agents, fundamental, duration_us):
         for ag in agents:
@@ -259,5 +161,6 @@ class BatchAuctionScheduler:
                 self._uncross(t)
             self._record(t, v)
             t += self.dt_us
+        self._h.set_trading_state(self._sym, be.TradingState.Continuous)
         return SimResult(self.snapshots, self.trades, list(agents),
                          duration_us, self.dt_us)

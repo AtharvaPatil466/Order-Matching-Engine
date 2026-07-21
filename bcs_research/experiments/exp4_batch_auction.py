@@ -6,12 +6,12 @@ liquidity fragility caused by the HFT arms race, and what batch interval is
 sufficient to eliminate most of the effect?
 
 Operating point = Exp 1 (n_hft=3, mm_latency_us=3000, sens=0.1, decay=0.1). The
-swept variable is batch_interval_ticks. The 'continuous' arm reuses the verified
-C++ matching engine via the Exp 1 harness (LatencyScheduler); every finite
-interval runs the Python BatchAuctionScheduler, which accumulates orders and
-clears at one uniform price per OrderBook::discoverUncrossPrice. There is a
-methodological seam between the two matchers — the batch_interval=1 point (a
-per-tick call auction) is the bridge/control closest to continuous.
+swept variable is batch_interval_ticks. BOTH arms run the verified C++ matching
+engine: the 'continuous' arm via the Exp 1 harness (LatencyScheduler), every
+finite interval via BatchAuctionScheduler, which parks the book in AuctionOpen
+so orders accumulate and then clears through OrderBook::uncross() — the same
+model-checked code path. The batch_interval=1 point (a per-tick call auction)
+is the control closest to continuous.
 
 Each cell runs BOTH arms (no-HFT baseline + HFT treatment) at the same interval
 so welfare deltas are matched. Every metric is a bootstrap CI across seeds.
@@ -58,8 +58,11 @@ DELTA_METRICS = ("mm_pnl", "nt_pnl", "liquidity_gaps")
 
 
 def _run_batch(seed: int, cfg: dict, batch_interval: int, with_hft: bool) -> dict:
-    """Mirror of exp1._run but driven by the BatchAuctionScheduler (no C++ engine)."""
+    """Mirror of exp1._run, cleared in batches by the engine's own uncross()."""
     v0 = 100 * be.PRICE_PRECISION
+    h = be.EngineHarness()
+    h.add_symbol(SYMBOL)
+    h.start()
     fund = FundamentalValueProcess(v0=v0, sigma=cfg["sigma"], dt_us=cfg["dt_us"], seed=seed)
     mm = BCSMarketMaker(MM_ID, base_half_spread=cfg["base_half_spread"],
                         quote_qty=cfg["quote_qty"], latency_us=cfg["mm_latency_us"],
@@ -80,12 +83,13 @@ def _run_batch(seed: int, cfg: dict, batch_interval: int, with_hft: bool) -> dic
                 for j in range(cfg["n_hft"])]
     nt_ids = [a.participant_id for a in noise]
     hft_ids = [a.participant_id for a in hfts]
-    sched = BatchAuctionScheduler(SYMBOL, cfg["dt_us"], batch_interval)
+    sched = BatchAuctionScheduler(h, SYMBOL, cfg["dt_us"], batch_interval)
     result = sched.run([mm] + noise + hfts, fund, cfg["duration_us"])
 
     m = compute_metrics(result, MM_ID, nt_ids)
     welfare = decompose_welfare(result, MM_ID, nt_ids, hft_ids, mark=mark_price(result))
     gaps = count_liquidity_gaps(result.snapshots, cfg["dt_us"], cfg["sigma"])
+    h.stop()
     return {
         "mm_pnl": welfare["mm_pnl"], "nt_pnl": welfare["noise_trader_pnl"],
         "hft_rent": welfare["hft_rent"], "hft_rent_per_sec": welfare["hft_rent_per_sec"],

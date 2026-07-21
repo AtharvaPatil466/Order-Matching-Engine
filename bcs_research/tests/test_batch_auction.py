@@ -1,12 +1,15 @@
-"""Unit tests for the batch-auction uniform-price clearing + scheduler.
+"""Unit tests for the batch-auction scheduler + the retired Python matcher.
 
-The clearing rule replicates the verified C++ OrderBook::discoverUncrossPrice
-(src/OrderBook.cpp): candidate prices are the populated limit levels; the
-clearing price maximizes executable volume, then minimizes imbalance, then (if a
-reference exists) minimizes distance to it, then breaks ties by market pressure
-(buy surplus clears higher, sell surplus lower). The Auction.tla invariant
-SingleClearingPrice — every uncross executes at exactly one price — is the
-property the scheduler smoke test checks.
+The scheduler now clears through the verified engine's own uncross() via the
+pybind bridge (park in AuctionOpen -> accumulate -> uncross). The Auction.tla
+invariant SingleClearingPrice — every uncross executes at exactly one price —
+is asserted directly on engine-produced fills.
+
+discover_uncross_price is the RETIRED Python re-implementation, kept as a
+cross-check. Its tie-break cascade (max volume, min imbalance, reference
+distance, market pressure) can pick a different price than the engine when
+several prices tie on max volume; that divergence is pinned below so it
+cannot regress silently.
 """
 import sys
 import pathlib
@@ -17,7 +20,8 @@ for _d in ("build", "agents", "simulation", "metrics"):
 
 import pytest
 
-from batch_auction import discover_uncross_price, BatchAuctionScheduler
+import bcs_engine as be
+from batch_auction import Action, discover_uncross_price, BatchAuctionScheduler
 
 
 # --- clearing price discovery ------------------------------------------------
@@ -88,7 +92,58 @@ def test_reference_price_breaks_ties_toward_reference():
     assert price == 101
 
 
-# --- scheduler integration ---------------------------------------------------
+# --- scheduler integration (verified engine via pybind bridge) ---------------
+
+def _make_sched(batch_interval_ticks=5):
+    h = be.EngineHarness()
+    h.add_symbol(1)
+    h.start()
+    return BatchAuctionScheduler(h, 1, dt_us=1000,
+                                 batch_interval_ticks=batch_interval_ticks), h
+
+
+# The fact-4 book: two prices (100, 101) tie on max executable volume (80).
+_TIE_BUYS = [(102, 50), (101, 30)]
+_TIE_SELLS = [(99, 40), (100, 60)]
+
+
+def _submit_tie_book(sched):
+    oid = 0
+    for side, levels in ((be.Side.Buy, _TIE_BUYS), (be.Side.Sell, _TIE_SELLS)):
+        for price, qty in levels:
+            oid += 1
+            sched._enqueue(Action(participant_id=oid, submit_at=0, order_id=oid,
+                                  side=side, price=price, quantity=qty,
+                                  order_type=be.OrderType.Limit))
+    sched._submit_due(0)
+
+
+def test_engine_uncross_clears_batch_at_single_price():
+    # SingleClearingPrice on real engine fills: a book crossed at multiple
+    # limit prices clears entirely at ONE price per batch.
+    sched, h = _make_sched()
+    _submit_tie_book(sched)
+    assert sched.trades == []                     # parked: nothing matched on arrival
+    sched._uncross(0)
+    assert sum(tr["quantity"] for tr in sched.trades) == 80
+    assert len({tr["price"] for tr in sched.trades}) == 1
+    h.stop()
+
+
+def test_python_matcher_divergence_pinned():
+    # Same book, two matchers: the retired Python rule clears the volume-80
+    # tie at 100, the verified engine at 101. Both move all 80 units. Pinned
+    # so the documented divergence (paper §4.4) cannot regress silently.
+    py_price, py_vol, _ = discover_uncross_price(_TIE_BUYS, _TIE_SELLS)
+    assert (py_price, py_vol) == (100, 80)
+
+    sched, h = _make_sched()
+    _submit_tie_book(sched)
+    sched._uncross(0)
+    assert {tr["price"] for tr in sched.trades} == {101}
+    assert sum(tr["quantity"] for tr in sched.trades) == 80
+    h.stop()
+
 
 class _ConstFund:
     """Fundamental stub: flat V, supports step()/observe()/current_v."""
@@ -144,22 +199,25 @@ class _OneShotLimitMM:
         return self.cash + self.inventory * mark
 
 
-def test_scheduler_runs_and_single_price_per_uncross():
-    sched = BatchAuctionScheduler(symbol=1, dt_us=1000, batch_interval_ticks=5)
+def test_scheduler_runs_and_produces_simresult_shape():
+    sched, h = _make_sched()
     mm = _OneShotLimitMM(1, v=100, half=2)
     result = sched.run([mm], _ConstFund(100), duration_us=20000)
     # Produces the metrics-compatible SimResult shape.
     assert hasattr(result, "snapshots") and hasattr(result, "trades")
     assert len(result.snapshots) == 20
-    # SingleClearingPrice: each recorded trade carries one price field.
     for tr in result.trades:
         assert set(tr) >= {"t", "price", "quantity", "buyer_id", "seller_id"}
+    # run() restores continuous trading after the last uncross.
+    assert h.trading_state(1) == be.TradingState.Continuous
+    h.stop()
 
 
 def test_resting_limit_keeps_book_two_sided_between_uncrosses():
     # The MM's limits rest, so the book is never spuriously empty post-uncross.
-    sched = BatchAuctionScheduler(symbol=1, dt_us=1000, batch_interval_ticks=5)
+    sched, h = _make_sched()
     mm = _OneShotLimitMM(1, v=100, half=2)
     result = sched.run([mm], _ConstFund(100), duration_us=20000)
     two_sided = [s for s in result.snapshots if s["best_bid"] > 0 and s["best_ask"] > 0]
     assert len(two_sided) >= 15  # quotes rest across the run
+    h.stop()

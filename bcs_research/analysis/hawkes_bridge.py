@@ -115,13 +115,18 @@ def rank_biserial(group1, group2):
 
 # --- simulation + rolling calibration ----------------------------------------
 
-def _simulate_tape(seed, cfg, with_hft=True):
-    """Mirror of exp1._run agent setup, returning the raw SimResult (tape)."""
+def _simulate_tape(seed, cfg, with_hft=True, fund=None):
+    """Mirror of exp1._run agent setup, returning the raw SimResult (tape).
+
+    `fund` overrides the fundamental process (exp5_redesigned's placebo arm
+    injects exogenous shocks); None keeps the standard random walk.
+    """
     v0 = 100 * be.PRICE_PRECISION
     h = be.EngineHarness()
     h.add_symbol(SYMBOL)
     h.start()
-    fund = FundamentalValueProcess(v0=v0, sigma=cfg["sigma"], dt_us=cfg["dt_us"], seed=seed)
+    if fund is None:
+        fund = FundamentalValueProcess(v0=v0, sigma=cfg["sigma"], dt_us=cfg["dt_us"], seed=seed)
     mm = BCSMarketMaker(MM_ID, base_half_spread=cfg["base_half_spread"],
                         quote_qty=cfg["quote_qty"], latency_us=cfg["mm_latency_us"],
                         inventory_skew=cfg["mm_inventory_skew"],

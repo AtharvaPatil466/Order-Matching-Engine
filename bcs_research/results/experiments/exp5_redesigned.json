@@ -1,0 +1,422 @@
+{
+  "config": {
+    "duration_ticks": 50000,
+    "lead_ticks": 100,
+    "n_sims_per_arm": 10,
+    "operating_point": {
+      "adverse_sensitivity": 0.1,
+      "mm_latency_us": 3000,
+      "n_hft": 3,
+      "sigma": 20.0,
+      "spread_decay": 0.1
+    },
+    "shock_every_ticks": 2500,
+    "shock_size_sigmas": 50,
+    "stride_ticks": 50,
+    "window_ticks": 200
+  },
+  "placebo": {
+    "quotes": {
+      "U": 1291870.0,
+      "n_normal": 7707,
+      "n_pre": 335,
+      "normal_mean": 5.663542600855832e-13,
+      "p_value": 0.49091888782935206,
+      "pre_mean": 5.655531304317372e-13,
+      "rank_biserial": 0.0007339712492422379
+    },
+    "trades": {
+      "U": 1545052.0,
+      "n_normal": 8614,
+      "n_pre": 373,
+      "normal_mean": 0.01681543269197162,
+      "p_value": 0.8948657473054586,
+      "pre_mean": 0.01112783442941142,
+      "rank_biserial": -0.03825619619162268
+    }
+  },
+  "placebo_per_sim": [
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 65,
+        "n_events": 98109,
+        "n_normal": 780,
+        "n_pre": 31,
+        "n_windows": 876
+      },
+      "seed": 1,
+      "trades": {
+        "n_dropped": 75,
+        "n_events": 34849,
+        "n_normal": 867,
+        "n_pre": 38,
+        "n_windows": 980
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 65,
+        "n_events": 98073,
+        "n_normal": 781,
+        "n_pre": 31,
+        "n_windows": 877
+      },
+      "seed": 2,
+      "trades": {
+        "n_dropped": 74,
+        "n_events": 34998,
+        "n_normal": 863,
+        "n_pre": 38,
+        "n_windows": 975
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 64,
+        "n_events": 98021,
+        "n_normal": 774,
+        "n_pre": 34,
+        "n_windows": 872
+      },
+      "seed": 3,
+      "trades": {
+        "n_dropped": 76,
+        "n_events": 35300,
+        "n_normal": 861,
+        "n_pre": 38,
+        "n_windows": 975
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 66,
+        "n_events": 98136,
+        "n_normal": 762,
+        "n_pre": 35,
+        "n_windows": 863
+      },
+      "seed": 4,
+      "trades": {
+        "n_dropped": 74,
+        "n_events": 34842,
+        "n_normal": 862,
+        "n_pre": 38,
+        "n_windows": 974
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 66,
+        "n_events": 98052,
+        "n_normal": 786,
+        "n_pre": 36,
+        "n_windows": 888
+      },
+      "seed": 5,
+      "trades": {
+        "n_dropped": 74,
+        "n_events": 35005,
+        "n_normal": 858,
+        "n_pre": 35,
+        "n_windows": 967
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 61,
+        "n_events": 98121,
+        "n_normal": 769,
+        "n_pre": 33,
+        "n_windows": 863
+      },
+      "seed": 6,
+      "trades": {
+        "n_dropped": 73,
+        "n_events": 34689,
+        "n_normal": 862,
+        "n_pre": 38,
+        "n_windows": 973
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 63,
+        "n_events": 98056,
+        "n_normal": 772,
+        "n_pre": 34,
+        "n_windows": 869
+      },
+      "seed": 7,
+      "trades": {
+        "n_dropped": 76,
+        "n_events": 35232,
+        "n_normal": 860,
+        "n_pre": 36,
+        "n_windows": 972
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 68,
+        "n_events": 98010,
+        "n_normal": 772,
+        "n_pre": 34,
+        "n_windows": 874
+      },
+      "seed": 8,
+      "trades": {
+        "n_dropped": 74,
+        "n_events": 35166,
+        "n_normal": 860,
+        "n_pre": 37,
+        "n_windows": 971
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 66,
+        "n_events": 98025,
+        "n_normal": 757,
+        "n_pre": 34,
+        "n_windows": 857
+      },
+      "seed": 9,
+      "trades": {
+        "n_dropped": 75,
+        "n_events": 35201,
+        "n_normal": 856,
+        "n_pre": 38,
+        "n_windows": 969
+      }
+    },
+    {
+      "n_marks": 19,
+      "quotes": {
+        "n_dropped": 67,
+        "n_events": 98066,
+        "n_normal": 754,
+        "n_pre": 33,
+        "n_windows": 854
+      },
+      "seed": 10,
+      "trades": {
+        "n_dropped": 71,
+        "n_events": 35159,
+        "n_normal": 865,
+        "n_pre": 37,
+        "n_windows": 973
+      }
+    }
+  ],
+  "treatment": {
+    "quotes": {
+      "U": 1960527.0,
+      "n_normal": 3206,
+      "n_pre": 1260,
+      "normal_mean": 5.738209998698024e-13,
+      "p_value": 0.9367464693224968,
+      "pre_mean": 5.622940338333793e-13,
+      "rank_biserial": -0.029336363366307183
+    },
+    "trades": {
+      "U": 2588754.0,
+      "n_normal": 3614,
+      "n_pre": 1416,
+      "normal_mean": 0.01670474239582412,
+      "p_value": 0.25830695880230314,
+      "pre_mean": 0.0161948196861838,
+      "rank_biserial": 0.011741063472559654
+    }
+  },
+  "treatment_per_sim": [
+    {
+      "n_marks": 165,
+      "quotes": {
+        "n_dropped": 421,
+        "n_events": 98010,
+        "n_normal": 335,
+        "n_pre": 122,
+        "n_windows": 878
+      },
+      "seed": 1,
+      "trades": {
+        "n_dropped": 475,
+        "n_events": 34902,
+        "n_normal": 369,
+        "n_pre": 133,
+        "n_windows": 977
+      }
+    },
+    {
+      "n_marks": 181,
+      "quotes": {
+        "n_dropped": 448,
+        "n_events": 97950,
+        "n_normal": 283,
+        "n_pre": 132,
+        "n_windows": 863
+      },
+      "seed": 2,
+      "trades": {
+        "n_dropped": 500,
+        "n_events": 34869,
+        "n_normal": 323,
+        "n_pre": 142,
+        "n_windows": 965
+      }
+    },
+    {
+      "n_marks": 178,
+      "quotes": {
+        "n_dropped": 441,
+        "n_events": 98073,
+        "n_normal": 303,
+        "n_pre": 116,
+        "n_windows": 860
+      },
+      "seed": 3,
+      "trades": {
+        "n_dropped": 491,
+        "n_events": 35019,
+        "n_normal": 350,
+        "n_pre": 135,
+        "n_windows": 976
+      }
+    },
+    {
+      "n_marks": 169,
+      "quotes": {
+        "n_dropped": 424,
+        "n_events": 98073,
+        "n_normal": 319,
+        "n_pre": 121,
+        "n_windows": 864
+      },
+      "seed": 4,
+      "trades": {
+        "n_dropped": 486,
+        "n_events": 35000,
+        "n_normal": 358,
+        "n_pre": 135,
+        "n_windows": 979
+      }
+    },
+    {
+      "n_marks": 172,
+      "quotes": {
+        "n_dropped": 446,
+        "n_events": 98056,
+        "n_normal": 274,
+        "n_pre": 148,
+        "n_windows": 868
+      },
+      "seed": 5,
+      "trades": {
+        "n_dropped": 502,
+        "n_events": 35031,
+        "n_normal": 307,
+        "n_pre": 168,
+        "n_windows": 977
+      }
+    },
+    {
+      "n_marks": 167,
+      "quotes": {
+        "n_dropped": 422,
+        "n_events": 97988,
+        "n_normal": 310,
+        "n_pre": 126,
+        "n_windows": 858
+      },
+      "seed": 6,
+      "trades": {
+        "n_dropped": 470,
+        "n_events": 34939,
+        "n_normal": 354,
+        "n_pre": 145,
+        "n_windows": 969
+      }
+    },
+    {
+      "n_marks": 150,
+      "quotes": {
+        "n_dropped": 371,
+        "n_events": 98026,
+        "n_normal": 354,
+        "n_pre": 126,
+        "n_windows": 851
+      },
+      "seed": 7,
+      "trades": {
+        "n_dropped": 429,
+        "n_events": 35344,
+        "n_normal": 402,
+        "n_pre": 140,
+        "n_windows": 971
+      }
+    },
+    {
+      "n_marks": 161,
+      "quotes": {
+        "n_dropped": 405,
+        "n_events": 98009,
+        "n_normal": 340,
+        "n_pre": 110,
+        "n_windows": 855
+      },
+      "seed": 8,
+      "trades": {
+        "n_dropped": 439,
+        "n_events": 34912,
+        "n_normal": 400,
+        "n_pre": 127,
+        "n_windows": 966
+      }
+    },
+    {
+      "n_marks": 162,
+      "quotes": {
+        "n_dropped": 395,
+        "n_events": 98096,
+        "n_normal": 358,
+        "n_pre": 126,
+        "n_windows": 879
+      },
+      "seed": 9,
+      "trades": {
+        "n_dropped": 448,
+        "n_events": 34847,
+        "n_normal": 390,
+        "n_pre": 140,
+        "n_windows": 978
+      }
+    },
+    {
+      "n_marks": 158,
+      "quotes": {
+        "n_dropped": 385,
+        "n_events": 98052,
+        "n_normal": 330,
+        "n_pre": 133,
+        "n_windows": 848
+      },
+      "seed": 10,
+      "trades": {
+        "n_dropped": 460,
+        "n_events": 35002,
+        "n_normal": 361,
+        "n_pre": 151,
+        "n_windows": 972
+      }
+    }
+  ]
+}

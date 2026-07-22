@@ -24,11 +24,23 @@ def test_trade_moments_arrival_rate_and_buyer_fraction():
     assert m["size_p50"] == 0.01
 
 
-def test_trade_moments_sums_durations_across_days():
-    day = ([0, 10_000_000_000], [1.0, 2.0], [True, False])  # 10 s each
-    m = trade_moments([day, day])
+def test_trade_moments_sums_durations_per_file():
+    f = ([0, 10_000_000_000], [1.0, 2.0], [True, False])    # 10 s each
+    m = trade_moments([f, f])
     assert abs(m["duration_s"] - 20.0) < 1e-9
     assert abs(m["lambda_per_s"] - 4 / 20) < 1e-9
+
+
+def test_trade_moments_ignores_the_gap_between_files():
+    # Two 10 s files an hour apart. Per-file spans total 20 s, so the rate is
+    # 4/20; charging the idle hour to the denominator would give 4/3620.
+    early = ([0, 10_000_000_000], [1.0, 2.0], [True, False])
+    late = ([3_600_000_000_000, 3_610_000_000_000], [1.0, 2.0], [True, False])
+
+    m = trade_moments([early, late])
+
+    assert abs(m["duration_s"] - 20.0) < 1e-9
+    assert abs(m["lambda_per_s"] - 0.2) < 1e-9
 
 
 def test_book_moments_spread_and_vol():
@@ -45,6 +57,26 @@ def test_book_moments_spread_and_vol():
     assert m["top_depth_p50"] == 2.0
     assert m["rv_1s_bp"] > 0
     assert m["n_snapshots"] == n
+
+
+def test_book_moments_drops_returns_spanning_a_gap():
+    # Two 100 s blocks of steady +1 bp/s drift, an hour apart, across which
+    # the mid doubles. The cross-gap jump must not enter the vol.
+    def block(start_s, base):
+        ts = [(start_s + i) * 1_000_000_000 for i in range(100)]
+        mid = [base * (1.0001 ** i) for i in range(100)]
+        return ts, mid
+
+    ts_a, mid_a = block(0, 100.0)
+    ts_b, mid_b = block(3600, 200.0)
+    ts, mid = ts_a + ts_b, mid_a + mid_b
+    flat = [1.0] * len(ts)
+
+    m = book_moments(ts, mid, flat, flat, flat)
+
+    # Every kept return is exactly +1 bp, so the stdev is ~0; the 2x jump
+    # would swamp it if the gap-spanning pair were included.
+    assert m["rv_1s_bp"] < 1e-6
 
 
 def test_fit_params_inversion():

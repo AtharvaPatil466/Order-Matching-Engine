@@ -121,14 +121,59 @@ with 300 ms staleness cannot produce that fast quartile; competing makers can.
 This converts "a single maker absorbs the entire race" from assertion into a
 measured gap, and gives step 4 a calibration target.
 
-**3b. Separate consumption from cancellation — NOT DONE, and 3a is not usable
-for step 4 without it.** At ~1,000 episodes/hour the current measure captures
-top-of-book depth *volatility*, conflating depth consumed by an aggressive
-trade with depth withdrawn by cancellation. Only the former is race-relevant.
-Separating them requires joining episodes to the trade tape on
-`exchange_ts_ns` — the same join the (ratio, k) bound needs, so one piece of
-work serves both. Until it exists, treat 3a as scaffolding and the recovery
-quantiles as an upper bound on true post-trade replenishment time.
+**3b. Separate consumption from cancellation — DONE 2026-07-23.**
+`calibration/trade_book_join.py`, results in
+`results/calibration/trade_book_join.json`. Applies two corrections rather than
+assuming them away: aggTrade sweep de-fragmentation (consecutive
+`agg_trade_id`s sharing timestamp and aggressor side regrouped into one taker
+order, repairing the numerator bias) and aggressor attribution via
+`is_buyer_maker`.
+
+**Only 32.0% of depletion episodes are consumption-driven**; the other
+two-thirds are cancellations. So 3a was indeed conflating two phenomena — but
+separating them barely moves the half-life. Recovery to 50% of baseline:
+consumption p25 0.20 s / median 0.82 s / p90 6.63 s; cancellation p25 0.31 s /
+median 0.82 s / p90 7.24 s. Identical medians. **Replenishment speed does not
+much depend on why depth vanished**, which is a null worth reporting and
+weakens the premise that the separation mattered for step 4's calibration
+target.
+
+**The ratio measurement is the payoff.** Taker size over *contemporaneous* top
+depth on the consumed side, with the placebo quantifying dilution:
+
+| conditioning | p50 | p90 | p99 | n |
+|---|---|---|---|---|
+| unconditional | 0.0072 | 0.393 | 18.0 | 2,269,256 |
+| race proxy (trade ≤0.2 s after a top-of-book move) | 0.0283 | 4.24 | 290 | 390,540 |
+| placebo (same window, no move) | 0.0057 | 0.208 | 2.18 | 1,849,504 |
+
+The conditioning genuinely enriches: race-proxy p50 is 5x the placebo, p90 20x,
+p99 133x. The dilution is bounded, not merely disclaimed.
+
+**This inverts which calibrated arm is realistic.** The naive
+ratio-of-medians estimate (0.003 / 6.182 = 0.0005) was wrong by ~14x; measured
+per-trade against contemporaneous depth it is 0.0072 unconditional and 0.0283
+under the race proxy. The sim's robustness arm sits at 0.024 — inside that
+range. The sim's MAIN arm sits at 1.0, i.e. 35-140x larger than anything
+observed. Note the denominator objection does not bite for the sim as built:
+its single maker supplies the entire top of book, so `hft_qty/quote_qty` and
+"taker size / aggregate top depth" are the same object. Which means the
+incidence regime relevant to real BTC is plausibly the one where the maker
+GAINS and noise traders bear the transfer — the opposite of the paper's
+headline framing. Step 5 must therefore sweep ratios centred near 0.01-0.03,
+not near 1.0.
+
+**Two problems recorded, not papered over.**
+
+- *Hour attrition.* Only 86 of 173 complete book hours have a matching trade
+  file, so the join runs on half the available book. Trade coverage was
+  believed to be ~97.5%; investigate whether the shortfall is a day-range
+  mismatch (book spans 63 days, trades may not) before trusting hour counts.
+- *Episode definitions drift between 3a and 3b.* 3a advances past a recovered
+  episode (`i = start + k + 1`) while 3b advances one index (`last = st`), so
+  3b counts 251,906 episodes against 3a's 171,052 and reports median recovery
+  0.82 s against 3a's 0.31 s. Same constants, different dedup. The two must be
+  reconciled onto one definition before either number is quoted in the paper.
 
 ### Original scoping notes
 

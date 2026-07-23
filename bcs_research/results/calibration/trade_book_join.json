@@ -1,0 +1,53 @@
+{
+  "consumption_coverage_threshold": 0.5,
+  "consumption_fraction": 0.3201591069684724,
+  "hours_used": 86,
+  "n_episodes": 251906,
+  "recovery_s_all": {
+    "n": 244322,
+    "p25": 0.306,
+    "p50": 0.816,
+    "p75": 2.552,
+    "p90": 7.038
+  },
+  "recovery_s_cancellation": {
+    "n": 165912,
+    "p25": 0.306,
+    "p50": 0.816,
+    "p75": 2.652,
+    "p90": 7.244
+  },
+  "recovery_s_consumption": {
+    "n": 78410,
+    "p25": 0.204,
+    "p50": 0.816,
+    "p75": 2.454,
+    "p90": 6.63
+  },
+  "sweep_defragmentation": "consecutive agg_trade_ids sharing timestamp+side regrouped",
+  "taker_size_over_top_depth": {
+    "note": "100 ms book / 1 ms trade resolution against a microsecond phenomenon: race_proxy is a diluted bound, not a measurement; placebo_no_move quantifies the dilution",
+    "placebo_no_move": {
+      "n": 1849504,
+      "p10": 0.0002443494196701283,
+      "p50": 0.0056657223796034,
+      "p90": 0.2078437129885511,
+      "p99": 2.176266548476247
+    },
+    "race_proxy": {
+      "n": 390540,
+      "p10": 0.0005107252298263534,
+      "p50": 0.028245518739815317,
+      "p90": 4.23886389113955,
+      "p99": 290.00000000000006
+    },
+    "race_window_s": 0.2,
+    "unconditional": {
+      "n": 2269256,
+      "p10": 0.00026792207295135305,
+      "p50": 0.0071877807726864335,
+      "p90": 0.39262981826582366,
+      "p99": 18.0
+    }
+  }
+}

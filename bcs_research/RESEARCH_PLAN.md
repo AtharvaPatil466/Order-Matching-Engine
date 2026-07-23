@@ -54,15 +54,45 @@ generators (`seed*1000+i`, `seed*2000+j`). Tick count is fixed by
 a given seed however order flow diverges. Per-seed values are already stored
 in each cell's `treatment_rows`, so this is a re-analysis of data on disk.
 
-## 2. Two framing corrections (an afternoon)
+## 2. Two framing corrections — DONE 2026-07-23
 
-- **Lead with the conservation identity; let TLA+ support it.** The identity is
-  unconditional, the model check is bounded (three orders, two prices). §1.2
-  already hedges, so this is reordering, not retraction. Referees will attack
-  the bound — get there first.
-- **`Auction.tla`: parse the TLC artifacts or drop the state count.** A
-  specific number standing on an unparsed artifact is the first thing a
-  referee reaches for.
+- **Lead with the conservation identity; let TLA+ support it.** Done. The
+  abstract now opens on the closed decomposition, states the residual check as
+  the unconditional guarantee, and demotes the model check to support with its
+  two limits (bounded scope; spec not source) stated in the same sentence
+  rather than deferred to §1.2.
+- **`Auction.tla` state count.** No action needed — the paper had *already*
+  taken the honest option. §1.2 and §3.1 both explicitly decline to report a
+  count "we cannot verify." Confirmed that the count is genuinely
+  unrecoverable: `spec/states/` holds only a `.DS_Store`, the
+  `Auction_TTrace_*.bin` files are counterexample traces from the deliberate
+  `AuctionBroken.cfg` non-vacuity runs rather than state-count records, and
+  `docs/Verification.md` records no exhaustive-run count for `Auction.tla`
+  either. Recovering one would require re-running TLC.
+
+**Unplanned finding — the paper was understating its own verification.**
+`docs/Verification.md` records the headline `MatchingEngine.tla` run (which
+*includes* the matching/cross action) as `MatchingEngine4.cfg`, `MaxOrders=4`:
+368,192,427 states generated, **171,187,419 distinct**, BFS depth 11, empty
+queue (complete exploration), zero violations, 2026-07-12. §1.2 was instead
+citing the *fast* `MatchingEngine.cfg` (`MaxOrders=3`, 1.26e6 distinct) as the
+verification bound — two orders of magnitude low — and asserted that "the
+matching-inclusive model is necessarily smaller because adding execution forces
+tighter bounds," which the 368M-state matching-inclusive run contradicts
+outright. Both §1.2 and the §3.6 spec table now cite MaxOrders=4 with the
+MaxOrders=3 default identified as the routine check, and the false parenthetical
+is gone. This was exactly the class of claim step 2 existed to catch.
+
+**Open, needs adjudication — conservation residual figures do not reconcile.**
+The paper quotes a treatment residual of 2.78e-12 and baseline −5.39e-12 (§4.1,
+restated §1.3 and §6). The stored `results/experiments/exp1_primary.json` has
+treatment 5.82e-12 and baseline −1.14e-11. The abstract separately quoted
+1.6e-13, inconsistent with all of the above; that figure has been dropped, since
+an abstract does not need the digits and the claim ("indistinguishable from
+floating-point noise") is unaffected. The body figures are left as-is pending a
+decision on which run is authoritative — these are machine-zero residuals whose
+exact digits vary run to run, so this is a reproducibility-hygiene issue rather
+than a substantive one, but a referee re-running the harness would hit it.
 
 ## 3. Depth-depletion and replenishment measurement on the BTC tape
 

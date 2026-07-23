@@ -380,6 +380,8 @@ Two quantitative departures are worth recording. Total rent, exactly flat in $k$
 
 **Rent per unit of volume is the comparison that matters.** Raw rent rises from \$34.70 to \$84,375, but that is overwhelmingly a notional effect: quotes are 41× deeper and flow is 2.8× heavier. Normalising by traded notional, HFT rent is 0.125 bp of volume at the operating point and 4.42 bp calibrated. Aquilina, Budish, and O'Neill (2022) measure the real latency-arbitrage tax at approximately 0.4 bp of volume, which our two arms bracket: the pre-registered operating point understates it roughly threefold, and the calibrated environment overstates it roughly elevenfold. We read the calibrated figure as an upper bound rather than an estimate, for a structural reason given in §5.3 — a single latency-disadvantaged maker has no competitor to replenish a cleared quote, so it absorbs the entire race. That the two bracket the measured value is nonetheless the strongest external-validity evidence in this paper, and it is evidence about magnitude, which nothing in §§4.1–4.5 could supply.
 
+![HFT rent per unit of traded notional: the operating point and calibrated arms bracket the measured latency tax](../results/figures/fig6d_rent_bp_bracket.png)
+
 **The incidence of the transfer is not pinned by the data.** The main arm sets `hft_qty` = `quote_qty`, preserving the operating point's ratio of 1.0 so a snipe clears the top quote (§3.7). Holding `hft_qty` at 50 instead — a snipe taking 2.4% of the book — changes not the size of the effect but its direction. Rent falls to 1,443 [1,230, 1,656] at $k=3$, total rent *rises* in $k$ (1,179 at $k=1$ to 8,623 at $k=21$) rather than staying flat, per-HFT rent flattens near \$340–440 for $k\geq5$ instead of decaying as $1/k$, and — most consequentially — the market maker's PnL delta is *positive* for $k\leq5$ (+1,327 at $k=1$), turning negative only at $k\geq8$ (−5,213 at $k=21$). With small snipes the loss falls on noise traders (−2,506 to −3,410 throughout) while the maker's widening lets it profit from the extra flow. The claim "rent is extracted from the market maker," which §4.1 states at the operating point, is therefore conditional on the snipe-to-quote size ratio, a design parameter no public feed identifies (§3.7). We regard the main arm as the like-for-like calibration of the published design, since it holds that ratio fixed at the value §§4.1–4.4 were run at, but the sensitivity is real and we do not claim the incidence result is calibrated.
 
 | $k$ | Per-HFT rent (\$) | Total rent (\$) | Fill rate | Liquidity gaps |
@@ -392,6 +394,10 @@ Two quantitative departures are worth recording. Total rent, exactly flat in $k$
 | 8 | 10,184 [10,113, 10,256] | 81,469 [80,903, 82,049] | 0.0532 [0.0530, 0.0534] | 106.51 [104.52, 108.33] |
 | 13 | 6,054 [6,011, 6,094] | 78,696 [78,144, 79,224] | 0.0328 [0.0327, 0.0329] | 151.08 [148.62, 153.44] |
 | 21 | 3,536 [3,510, 3,562] | 74,261 [73,720, 74,808] | 0.0203 [0.0202, 0.0203] | 217.78 [214.99, 220.55] |
+
+![Per-HFT rent at calibrated parameters, with the C/k fit overlay](../results/figures/fig6a_rent_per_hft_calibrated.png)
+
+![Liquidity gaps versus HFT count for both snipe-size arms](../results/figures/fig6b_fragility_calibrated.png)
 
 Experiment 2 replicates cleanly. Rent rises monotonically with maker latency across the whole grid, scaling as latency$^{0.70}$ ($R^2 = 0.9897$); note that the rent at zero maker latency is large and positive, because the maker is disadvantaged by the race-noise term even when its observation lag is nil.
 
@@ -420,6 +426,8 @@ Experiment 4 replicates the remedy but adds one wrinkle absent at the operating 
 | continuous | 84,375 [83,814, 84,975] | — | 52.73 |
 
 Batching at a period comparable to the quote-refresh cycle evidently strands the book between clears once flow is heavy enough: the maker's quotes are consumed within a batch and cannot be replaced until the next one. The effect is invisible at the sparser operating point, and it is a practical caution that the BCS remedy's benefit is not monotone in frequency — an auction run too often inherits the continuous market's fragility without yet conferring the batch's protection. The policy-relevant window in our calibrated setting is intervals of roughly 10–100 ticks (1–10 s at our time-scale convention), where rent elimination exceeds 98% and gaps sit at or below the continuous baseline.
+
+![Rent elimination against liquidity gaps across batch clearing intervals; the dotted line is the continuous arm's gap rate](../results/figures/fig6c_batch_nonmonotone.png)
 
 ## 5. Discussion
 

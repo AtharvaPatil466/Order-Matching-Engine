@@ -150,6 +150,24 @@ A self-contained quantitative research layer that runs against the live matching
 | `PaperTrader` | Signal-driven IOC order submission with position and P&L tracking |
 | `ResearchDashboard` / `ResearchSerializer` | Result visualization and persistence |
 
+### BCS Latency-Arms-Race Study (`bcs_research/`)
+
+A separate Python research layer that drives the verified C++ engine through a pybind11 bridge (`bcs_engine`) to test the Budish–Cramton–Shim theory of the HFT arms race experimentally. Because the matching core is TLA+-verified, emergent arms-race dynamics are attributable to agent incentives rather than to matcher error.
+
+| Component | Purpose |
+|-----------|---------|
+| `agents/` | `BCSMarketMaker` (adverse-selection-aware, latency-disadvantaged), `HFTAgent` (snipes stale quotes), `NoiseTrader` (optional lognormal heavy-tailed sizes) |
+| `simulation/scheduler.py` | `LatencyScheduler` — per-agent observation and submission latency |
+| `metrics/` | Welfare decomposition (closed zero-sum identity), liquidity-gap detector, Kyle's lambda |
+| `experiments/` | Exps 1–4: welfare transfer, latency sweep, HFT-count sweep, batch-auction remedy — plus `run_calibrated.py` |
+| `calibration/` | Gap-safe moment extraction from live BTCUSDT-perp order flow and method-of-moments inversion with fill-rate correction |
+| `analysis/` | Figure generation and the Hawkes endogeneity diagnostic |
+| `paper/bcs_paper_draft.md` | The write-up (47 pp.) |
+
+Each experiment is reported twice: at a pre-registered operating point chosen for mechanism clarity, and re-run at environment parameters fitted to 27 days of Binance BTCUSDT-perpetual order flow (37.0M trades, 4.16M book snapshots). Every qualitative finding survives calibration. The calibration also supplies the study's only external check on magnitude: normalised by traded notional, HFT rent is 0.125 bp at the operating point and 4.42 bp calibrated, bracketing the ≈0.4 bp latency-arbitrage tax Aquilina, Budish and O'Neill (2022) measure on real exchange message data.
+
+Two results are stated as conditional rather than calibrated. The calibrated rent is an upper bound, because a single latency-disadvantaged maker has no competitor to replenish a cleared quote and so absorbs the entire race. And the *incidence* of the transfer turns on a snipe-to-quote size ratio no public feed identifies: at the operating point's ratio the maker bears the loss, while at a ratio of 0.024 the maker's PnL delta is positive for small HFT counts and noise traders bear it instead.
+
 ---
 
 ## 6. Reliability & High Availability
@@ -287,6 +305,7 @@ The system is architecturally complete. The remaining items are AWS validation s
 - **Journal Async I/O (io_uring)**: ✅ done — validated on x86 Linux (AWS c6in.metal). The async ack (onCommit fires on the completion-reaper thread, not on submit) cut Path C P99 **32.8%** (5,312 → 3,568 ns) at the cost of +167 ns P50. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern kernel; the seam stays behind `#ifdef __linux__` with an `fdatasync`/`F_FULLFSYNC` fallback elsewhere.
 - **Kernel Bypass Networking (DPDK / F-Stack)**: ⏳ implemented locally, pending AWS validation. `DpdkGateway` integrates F-Stack (DPDK userspace TCP over the AWS ENA PMD) on a secondary ENI behind `#ifdef OB_HAVE_DPDK`, feeding `OuchSession::feed()` unchanged (see §3). The integration is complete and builds locally with the path `#ifdef`'d out; `scripts/dpdk_aws.sh` provisions the receiver (hugepages, DPDK + F-Stack install, vfio-pci bind, F-Stack config). It runs on **commodity AWS ENA** hardware — no Solarflare/Onload — needing only a secondary ENI, hugepages, and the DPDK/F-Stack toolchain; with the kernel-TCP wire-to-wire baseline now measured (see below), the two-instance c6in.metal run — **Session 2**, the DPDK-vs-kernel-TCP comparison — is the next step.
 - **`Replication.tla` Verification**: ✅ done — see Verification section above. The original "not yet verified" footnote is obsolete.
+- **BCS Study — Market-Maker Enrichment**: ⏳ open. The environment calibration (§5) is complete and the full experimental grid has been re-run at fitted parameters, but the model still has a single market maker. That is why the calibrated rent is reported as an upper bound rather than an estimate, and adding competing makers with heterogeneous latencies is the single change that would most improve the study's external validity. A second open item is the Hawkes diagnostic's real-data leg, which needs a depth-depletion gap definition for books that never empty.
 - **Wire-to-Wire Latency Validation**: 🟡 partially complete — baseline measured, DPDK comparison pending. The `WireLatencySender`/`WireLatencyReceiver` harness (`SO_TIMESTAMPING` hardware timestamps with `CLOCK_MONOTONIC` software fallback, round-trip/2 one-way estimate — see §3) is validated on AWS: a two-instance run (two `c6in.metal`, same AZ, kernel TCP, 10,000 OUCH orders, software timestamps on `CLOCK_MONOTONIC`) measured **P50 RTT 48.2 µs / P99 RTT 55.3 µs**, i.e. a **P50 one-way estimate of 24.1 µs**. The remaining step is the DPDK-vs-kernel-TCP comparison (**Session 2**) via `scripts/wire_latency_aws.sh`.
 
 ---

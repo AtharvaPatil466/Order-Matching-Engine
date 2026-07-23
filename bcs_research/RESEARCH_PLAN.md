@@ -1,0 +1,126 @@
+# BCS Study — Research Plan
+
+Sequenced work to move the paper from a calibrated bracketing exercise to a
+quantitative result. Ordering is load-bearing: each step is a precondition for
+the one below it, and §5 is the item the rest exists to make interpretable.
+
+Status as of 2026-07-23: steps 1–5 all open. Environment calibration and the
+calibrated re-run of Exps 1–4 are complete (paper §3.7, §4.6).
+
+---
+
+## 1. Long-interval rent re-analysis (likely zero compute)
+
+**Concession to resolve.** §4.4 concedes that long-interval batch rent is
+"either unmeasurably small or measurably absent" because per-seed dispersion
+swamps the point estimate on the 50,000-tick operating-point grid.
+
+**Approach.** Do not pair against the no-HFT baseline — its rent is zero by
+construction. Pair *across clearing intervals*: same fundamental path, same
+agent seeds, difference each batch cell against the **continuous** arm, which
+is the only long-grid cell with a usable interval. Fundamental volatility is
+the dominant variance term and is common to both arms, so it differences out.
+
+**Anchor on the long grid (`exp4_batch_long.json`), not the calibrated
+3,000-tick grid.** The calibrated grid's cells are already tight and have no
+measurement problem; the open concession lives on the long grid.
+
+**Precondition — verified 2026-07-23.** `agents/fundamental_value.py:30` gives
+`FundamentalValueProcess` a private `np.random.default_rng(seed)`, drawn
+unconditionally per tick in `step()` (line 36). Agents hold separate
+generators (`seed*1000+i`, `seed*2000+j`). Tick count is fixed by
+`duration_us/dt_us`, so the fundamental path is bit-identical across arms for
+a given seed however order flow diverges. Per-seed values are already stored
+in each cell's `treatment_rows`, so this is a re-analysis of data on disk.
+
+## 2. Two framing corrections (an afternoon)
+
+- **Lead with the conservation identity; let TLA+ support it.** The identity is
+  unconditional, the model check is bounded (three orders, two prices). §1.2
+  already hedges, so this is reordering, not retraction. Referees will attack
+  the bound — get there first.
+- **`Auction.tla`: parse the TLC artifacts or drop the state count.** A
+  specific number standing on an unparsed artifact is the first thing a
+  referee reaches for.
+
+## 3. Depth-depletion and replenishment measurement on the BTC tape
+
+**Why it comes before the multi-maker model.** Competing makers cannot be
+designed without knowing what real replenishment looks like. The same
+depth-depletion definition also unblocks the Hawkes real-data leg (§5.3), so
+one piece of tooling closes two open items.
+
+**Definition.** A depletion event is top-k depth falling below a percentile
+floor; measure the depth-recovery profile and its half-life. Replenishment,
+not maker headcount, is the mechanically load-bearing quantity — and maker
+count `N` is not observable anyway, since Binance's depth stream publishes
+quantity per level with no order counts.
+
+**Deliverable is a bounded region, not a ratio.** Two known mis-specifications
+prevent a point estimate of snipe-to-quote ratio:
+
+- *Denominator.* The sim's `quote_qty` is one maker's entire exposed quote;
+  real top-of-book depth is an aggregate. At N makers the sim-equivalent ratio
+  is `0.003 / (6.182/N)`; N ≈ 50 lands exactly on the small-snipe arm's 0.024,
+  while N = 1 gives 0.0005. Opposite qualitative regimes.
+- *Numerator.* Median trade size is retail flow. Race orders sweep, and live
+  nearer the p99 of 2.01 BTC. Worse, Binance aggregates fills per taker order
+  *per price level*, so multi-level sweeps fragment into one record per level —
+  the tape systematically under-measures exactly the orders that matter.
+
+Neither replenishment nor `N` recovers the exposure of the *particular* maker
+being sniped, so the ratio stays a swept parameter. That is acceptable because
+§5 sweeps it: the job here is to bound where real BTC plausibly sits on that
+surface, with the proxy and its dilution stated.
+
+**Resolution limit.** Book snapshots are 100 ms; the race is microseconds.
+Any "aggressive trade shortly after a top-of-book move" filter is
+dilution-limited by roughly three orders of magnitude — report as a bound, not
+a measurement. Bound the dilution by conditioning identically on windows
+following *non-informative* events (trades that did not move the top) and
+differencing. This reuses the §4.5 placebo arm, but note its validation was
+established on simulated gaps and does **not** transfer automatically to real
+data; re-establish it before leaning on it.
+
+## 4. Competing makers with heterogeneous latencies
+
+Parameterized from (3). This is the binding constraint on external validity: a
+single latency-disadvantaged maker has no competitor to replenish a cleared
+quote, so it absorbs the entire race, which is why §4.6 reports the calibrated
+4.42 bp as an upper bound.
+
+**Do not overclaim the payoff.** This removes the single-maker absorption bias.
+It does not make the rent an estimate: the race structure (`hft_latency_us`,
+`hft_race_noise_us`) remains a swept design parameter, since measuring races
+needs failed-order message data of the kind Aquilina, Budish and O'Neill (2022)
+obtained from a regulator (§3.7). The result is a calibrated environment with
+competitive liquidity supply and a *designed* race.
+
+## 5. The (ratio, k) incidence surface — the finding
+
+Sweep snipe-to-quote ratio against HFT count and map where the incidence of
+the transfer flips. §4.6 shows incidence is ratio-dependent at fixed k (at
+0.024 the maker gains for k ≤ 5 and loses by k ≥ 8; at 0.0005 with many HFTs
+nothing has been run). Two ratio points and one k-sweep do not locate a
+boundary in a two-dimensional space.
+
+**Must follow (4).** The maker's gain at small snipe sizes is plausibly itself
+a single-maker artifact — it is the sole liquidity supplier monetizing flow its
+own widening created. Mapping the surface before (4) would produce a boundary
+that is an artifact of the thing (4) exists to remove.
+
+**Cost.** ~6 ratios × 8 k values × 100 seeds ≈ 5k runs. The calibrated k-sweep
+did 800 runs in ~7 minutes, so the surface is roughly an hour. (4) is the
+expensive item, not this.
+
+**Why it is the point.** "Rent is extracted from the market maker" restates
+BCS. "Who bears the latency tax depends on snipe-to-depth ratio and competition
+count, and here is the regime boundary" is in neither BCS nor Aquilina, Budish
+and O'Neill, and follows from apparatus that already exists.
+
+---
+
+## Target
+
+arXiv q-fin.TR plus a microstructure workshop. A field journal would want (4)
+and (5) landed first.

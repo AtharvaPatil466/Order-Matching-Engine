@@ -16,10 +16,25 @@ def mark_price(result):
     return result.snapshots[-1]["v"] if result.snapshots else 0.0
 
 
+def _as_ids(x):
+    """Accept a single participant id or a collection of them.
+
+    Step 4 adds competing makers, so `mm_id` may now be several ids. A scalar
+    takes the identical code path, which keeps every pre-existing result — and
+    the zero-sum residual that audits them — bit-identical.
+    """
+    if x is None:
+        return ()
+    if isinstance(x, (list, tuple, set, frozenset)):
+        return tuple(x)
+    return (x,)
+
+
 def decompose_welfare(result, mm_id, nt_ids, hft_ids, mark=None):
     if mark is None:
         mark = mark_price(result)
     agents = {a.participant_id: a for a in result.agents}
+    mm_ids = _as_ids(mm_id)
 
     def pnl(pid):
         a = agents.get(pid)
@@ -31,7 +46,8 @@ def decompose_welfare(result, mm_id, nt_ids, hft_ids, mark=None):
         fn = getattr(a, "realized_pnl", None)
         return float(fn()) if fn is not None else pnl(pid)
 
-    mm_pnl = pnl(mm_id)
+    mm_pnl = float(sum(pnl(i) for i in mm_ids))
+    n_makers = sum(1 for i in mm_ids if i in agents)
     nt_pnl = float(sum(pnl(i) for i in nt_ids))
     hft_pnl = float(sum(pnl(j) for j in hft_ids))
     hft_realized = float(sum(realized(j) for j in hft_ids))
@@ -41,6 +57,8 @@ def decompose_welfare(result, mm_id, nt_ids, hft_ids, mark=None):
     return {
         "mark_price": mark,
         "mm_pnl": mm_pnl,
+        "mm_pnl_per_agent": mm_pnl / n_makers if n_makers else 0.0,
+        "n_makers": n_makers,
         "noise_trader_pnl": nt_pnl,
         "hft_pnl": hft_pnl,
         "hft_rent": hft_pnl,                       # rent extracted by the arms race

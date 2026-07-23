@@ -46,8 +46,10 @@ def compute_metrics(result, mm_id, nt_ids, kyle_horizon_ticks=5):
         mark = snaps[-1]["v"] if snaps else 0.0
 
     agents = {a.participant_id: a for a in result.agents}
-    mm = agents.get(mm_id)
-    mm_pnl = float(mm.pnl(mark)) if mm else 0.0
+    # `mm_id` may be one maker or several (step 4 adds competing makers). A
+    # scalar takes the identical path, so existing results are unchanged.
+    mm_ids = mm_id if isinstance(mm_id, (list, tuple, set, frozenset)) else (mm_id,)
+    mm_pnl = float(sum(agents[i].pnl(mark) for i in mm_ids if i in agents))
     nt_pnl = float(sum(agents[i].pnl(mark) for i in nt_ids if i in agents))
 
     mids = [s["mid"] for s in snaps if s["mid"] > 0]
@@ -96,7 +98,8 @@ def compute_metrics(result, mm_id, nt_ids, kyle_horizon_ticks=5):
         "volume_weighted_avg_spread_rel": vw_rel,
         "mm_pnl_dollars": mm_pnl,
         "mm_pnl_per_sec": mm_pnl / duration_s if duration_s else 0.0,
-        "mm_inventory_final": int(mm.inventory) if mm else 0,
+        "mm_inventory_final": int(sum(agents[i].inventory for i in mm_ids
+                                      if i in agents)),
         "noise_trader_pnl_dollars": nt_pnl,
         "noise_trader_pnl_per_sec": nt_pnl / duration_s if duration_s else 0.0,
         "price_reversals": reversals,

@@ -9,7 +9,7 @@ calibrated re-run of Exps 1–4 are complete (paper §3.7, §4.6).
 
 ---
 
-## 1. Long-interval rent re-analysis (likely zero compute)
+## 1. Long-interval rent re-analysis — DONE 2026-07-23, negative result
 
 **Concession to resolve.** §4.4 concedes that long-interval batch rent is
 "either unmeasurably small or measurably absent" because per-seed dispersion
@@ -24,6 +24,27 @@ the dominant variance term and is common to both arms, so it differences out.
 **Anchor on the long grid (`exp4_batch_long.json`), not the calibrated
 3,000-tick grid.** The calibrated grid's cells are already tight and have no
 measurement problem; the open concession lives on the long grid.
+
+**Outcome — the approach does not work, and cannot.** Differencing interval-500
+rent against continuous seed-by-seed cut the standard error from 1055 to 1028,
+a 2.6% improvement. It cannot do better for any anchor arm, because
+`mean(c) + mean(x - c) == mean(x)` identically — the decomposition reassembles
+into the original statistic, leaving the point estimate (−260.3) and its
+variance unchanged. The premise failed: the dispersion is arm-specific, not
+common-mode. Continuous rent is tightly determined (s.e. 64.5 about a mean of
+578.1) while interval-500 rent is not (1055.3), so subtracting a near-constant
+removes nothing. Variance comes from which clearings catch fundamental moves,
+not from the path.
+
+**What it did yield.** Pairing is powerless on levels but informative on
+*contrasts*. Rent is significantly below continuous at intervals 5, 10 and 25
+(−748 [−1356, −161], −830 [−1617, −43], −772 [−1472, −82]; all exclude zero,
+while the unpaired levels are each indistinguishable from zero), and at
+interval 1 is statistically indistinguishable from continuous (−6.2
+[−72.1, 58.7], seed correlation 0.86) — clearing every tick does not attenuate
+the race. Both folded into §4.4, along with the failed reduction, since a
+concession that survives an honest attempt to remove it is stronger than one
+merely asserted.
 
 **Precondition — verified 2026-07-23.** `agents/fundamental_value.py:30` gives
 `FundamentalValueProcess` a private `np.random.default_rng(seed)`, drawn

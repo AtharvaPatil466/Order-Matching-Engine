@@ -1,0 +1,149 @@
+{
+  "bootstrap_draws": 10000,
+  "bootstrap_seed": 0,
+  "cells": [
+    {
+      "batch_interval": 1,
+      "level": {
+        "lower": 453.63890815001486,
+        "mean": 571.891329999966,
+        "n": 100,
+        "se": 63.19547926955987,
+        "upper": 698.5984166249549
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -72.0947645499996,
+        "mean": -6.162274000014711,
+        "n": 100,
+        "se": 33.695897026322754,
+        "upper": 58.685891124971675
+      },
+      "reconstruction": 571.8913299999662,
+      "seed_correlation_with_continuous": 0.8609449114036802
+    },
+    {
+      "batch_interval": 5,
+      "level": {
+        "lower": -770.5644373245419,
+        "mean": -170.40073199959323,
+        "n": 100,
+        "se": 307.0622689453591,
+        "upper": 436.72433917506584
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -1356.2214061244897,
+        "mean": -748.4543359995741,
+        "n": 100,
+        "se": 304.1598982704602,
+        "upper": -161.37032657474458
+      },
+      "reconstruction": -170.4007319995933,
+      "seed_correlation_with_continuous": 0.14981772339396504
+    },
+    {
+      "batch_interval": 10,
+      "level": {
+        "lower": -1031.7561126248365,
+        "mean": -252.41784100006396,
+        "n": 100,
+        "se": 410.94106758712707,
+        "upper": 568.4468508250538
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -1617.340910775061,
+        "mean": -830.4714450000448,
+        "n": 100,
+        "se": 404.4424839245111,
+        "upper": -43.006171775111596
+      },
+      "reconstruction": -252.41784100006396,
+      "seed_correlation_with_continuous": 0.17843326767689294
+    },
+    {
+      "batch_interval": 25,
+      "level": {
+        "lower": -913.8820048746529,
+        "mean": -194.0081930003358,
+        "n": 100,
+        "se": 369.47922652892055,
+        "upper": 519.0502760747027
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -1472.3810125005118,
+        "mean": -772.0617970003165,
+        "n": 100,
+        "se": 356.50327153901947,
+        "upper": -82.24936409981306
+      },
+      "reconstruction": -194.0081930003356,
+      "seed_correlation_with_continuous": 0.2849211237238808
+    },
+    {
+      "batch_interval": 50,
+      "level": {
+        "lower": -282.1672137492095,
+        "mean": 289.67814000047207,
+        "n": 100,
+        "se": 296.034369129423,
+        "upper": 871.75627025054
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -807.4335659490869,
+        "mean": -288.3754639995087,
+        "n": 100,
+        "se": 270.38628572912137,
+        "upper": 245.3365781249168
+      },
+      "reconstruction": 289.6781400004721,
+      "seed_correlation_with_continuous": 0.4893372367552269
+    },
+    {
+      "batch_interval": 100,
+      "level": {
+        "lower": -344.32867374992185,
+        "mean": 425.671910000274,
+        "n": 100,
+        "se": 423.95773404761394,
+        "upper": 1282.463528500298
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -858.6330088737247,
+        "mean": -152.3816939997068,
+        "n": 100,
+        "se": 388.5071045932099,
+        "upper": 644.4112797265658
+      },
+      "reconstruction": 425.671910000274,
+      "seed_correlation_with_continuous": 0.6026756840896084
+    },
+    {
+      "batch_interval": 500,
+      "level": {
+        "lower": -2212.25188125772,
+        "mean": -260.2761500028076,
+        "n": 100,
+        "se": 1055.2830652623682,
+        "upper": 1865.8925457479472
+      },
+      "paired_delta_vs_continuous": {
+        "lower": -2768.0710445020827,
+        "mean": -838.3297540027885,
+        "n": 100,
+        "se": 1027.6161176381831,
+        "upper": 1214.2871694859195
+      },
+      "reconstruction": -260.27615000280764,
+      "seed_correlation_with_continuous": 0.453850994373509
+    }
+  ],
+  "continuous": {
+    "lower": 452.8496331500376,
+    "mean": 578.0536039999809,
+    "n": 100,
+    "se": 64.5051744221098,
+    "upper": 706.4094557750282
+  },
+  "n_seeds": 100,
+  "source": "exp4_batch_long.json",
+  "ticks": 50000
+}

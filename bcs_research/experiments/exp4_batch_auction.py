@@ -151,7 +151,8 @@ def _print_summary(report: dict) -> None:
 
 
 def main(n_seeds: int = 100, intervals: list | None = None,  # was 20 (P3-13)
-         cfg: dict | None = None, boot_seed: int = 0) -> dict:
+         cfg: dict | None = None, boot_seed: int = 0,
+         out_name: str = "exp4_batch_auction.json") -> dict:
     cfg = {**CFG, **(cfg or {})}
     intervals = (intervals or BATCH_INTERVALS) + [CONTINUOUS]
     cells = [run_cell(iv, cfg, n_seeds, boot_seed) for iv in intervals]
@@ -164,7 +165,7 @@ def main(n_seeds: int = 100, intervals: list | None = None,  # was 20 (P3-13)
 
     out_dir = _ROOT / "results" / "experiments"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "exp4_batch_auction.json").write_text(
+    (out_dir / out_name).write_text(
         json.dumps(report, indent=2, sort_keys=True)
     )
     _print_summary(report)

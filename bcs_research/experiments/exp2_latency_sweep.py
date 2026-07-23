@@ -108,7 +108,8 @@ def _print_summary(report: dict) -> None:
 
 
 def main(n_seeds: int = 100, grid: list | None = None,  # was 20 (P3-13)
-         cfg: dict | None = None, boot_seed: int = 0) -> dict:
+         cfg: dict | None = None, boot_seed: int = 0,
+         out_name: str = "exp2_latency_sweep.json") -> dict:
     cfg = {**CFG, **(cfg or {}), "hft_latency_us": 0}
     grid = grid or MM_LATENCY_GRID_US
     cells = [run_cell(L, cfg, n_seeds, boot_seed) for L in grid]
@@ -122,7 +123,7 @@ def main(n_seeds: int = 100, grid: list | None = None,  # was 20 (P3-13)
 
     out_dir = _ROOT / "results" / "experiments"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "exp2_latency_sweep.json").write_text(
+    (out_dir / out_name).write_text(
         json.dumps(report, indent=2, sort_keys=True)
     )
     _print_summary(report)

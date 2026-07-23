@@ -79,7 +79,8 @@ def _run(seed, cfg, with_hft):
                         spread_cap_mult=cfg["spread_cap_mult"],
                         min_quote_qty=cfg["min_quote_qty"])
     noise = [NoiseTrader(100 + i, lambda_per_tick=cfg["lambda_per_tick"],
-                         qty=cfg["noise_qty"], seed=seed * 1000 + i)
+                         qty=cfg["noise_qty"], seed=seed * 1000 + i,
+                         size_sigma_ln=cfg.get("size_sigma_ln"))
              for i in range(cfg["n_noise"])]
     hfts = []
     if with_hft:
@@ -123,7 +124,7 @@ def _agg(rows):
     return {k: float(statistics.fmean([r[k] for r in rows])) for k in keys}
 
 
-def main(n_seeds=100, cfg=None):  # was 10 (P3-13): n>=100 for narrower CIs
+def main(n_seeds=100, cfg=None, out_name="exp1_primary.json"):  # was 10 (P3-13): n>=100 for narrower CIs
     cfg = {**CFG, **(cfg or {})}
     base = _agg([_run(s, cfg, with_hft=False) for s in range(1, n_seeds + 1)])
     treat = _agg([_run(s, cfg, with_hft=True) for s in range(1, n_seeds + 1)])
@@ -141,7 +142,7 @@ def main(n_seeds=100, cfg=None):  # was 10 (P3-13): n>=100 for narrower CIs
 
     out_dir = _ROOT / "results" / "experiments"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "exp1_primary.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+    (out_dir / out_name).write_text(json.dumps(report, indent=2, sort_keys=True))
 
     print(f"Experiment 1 (primary) — {n_seeds} seeds, n_hft={cfg['n_hft']}, "
           f"sens={cfg['adverse_sensitivity']}, decay={cfg['spread_decay']}")

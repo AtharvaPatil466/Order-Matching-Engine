@@ -41,6 +41,7 @@ from hft_agent import HFTAgent                         # noqa: E402
 from scheduler import LatencyScheduler                 # noqa: E402
 from baseline_metrics import compute_metrics           # noqa: E402
 from flash_crash_detector import count_crashes         # noqa: E402
+from liquidity_gap_detector import count_liquidity_gaps  # noqa: E402
 
 SYMBOL = 1
 MM_ID = 1
@@ -77,7 +78,8 @@ def _run(seed, cfg, sensitivity, decay, with_hft):
                         adverse_sensitivity=sensitivity, spread_decay=decay,
                         spread_cap_mult=cfg["spread_cap_mult"])
     noise = [NoiseTrader(100 + i, lambda_per_tick=cfg["lambda_per_tick"],
-                         qty=cfg["noise_qty"], seed=seed * 1000 + i)
+                         qty=cfg["noise_qty"], seed=seed * 1000 + i,
+                         size_sigma_ln=cfg.get("size_sigma_ln"))
              for i in range(cfg["n_noise"])]
     hfts = []
     if with_hft:
@@ -89,6 +91,7 @@ def _run(seed, cfg, sensitivity, decay, with_hft):
     result = sched.run([mm] + noise + hfts, fund, cfg["duration_us"])
     m = compute_metrics(result, MM_ID, [a.participant_id for a in noise])
     crashes = count_crashes(result.snapshots, cfg["dt_us"], cfg["sigma"], BASE_SPREAD_TICKS)
+    gaps = count_liquidity_gaps(result.snapshots, cfg["dt_us"], cfg["sigma"])
     mark = None
     for s in reversed(result.snapshots):
         if s["best_bid"] > 0 and s["best_ask"] > 0:
@@ -99,19 +102,37 @@ def _run(seed, cfg, sensitivity, decay, with_hft):
     return {
         "spread_mult": m["time_weighted_avg_spread_ticks"] / BASE_SPREAD_TICKS,
         "crashes": crashes,
+        "liquidity_gaps": gaps,
         "hft_pnl": hft_pnl,
         "mm_max_half_spread_mult": mm.max_half_spread_seen / cfg["base_half_spread"],
+        # Pickoff RATE is what adverse_sensitivity is implicitly tuned against:
+        # widening is applied per adverse fill EVENT, so tripling order flow
+        # triples the kicks per tick at unchanged sensitivity.
+        "pickoffs_per_tick": mm.pickoffs / (cfg["duration_us"] // cfg["dt_us"]),
     }
 
 
-def main(n_seeds=5):
-    sensitivities = [0.05, 0.1, 0.2]
-    decays = [0.02, 0.05, 0.1, 0.2]
+SENSITIVITIES = [0.05, 0.1, 0.2]
+DECAYS = [0.02, 0.05, 0.1, 0.2]
+
+
+def main(n_seeds=5, cfg=None, sensitivities=None, decays=None,
+         out_name="adverse_selection_calibration.json"):
+    """Sweep (sensitivity, decay) and report the no-HFT / with-HFT spread split.
+
+    `cfg` overrides the operating point (used to re-calibrate under calibrated
+    BTC order flow, where the pickoff RATE is ~4x higher and the operating-point
+    sensitivity drives the no-HFT spread to the cap). `out_name` keeps each
+    regime's grid in its own file.
+    """
+    cfg = {**CFG, **(cfg or {})}
+    sensitivities = sensitivities or SENSITIVITIES
+    decays = decays or DECAYS
     rows = []
     for sens in sensitivities:
         for dec in decays:
-            no = [_run(s, CFG, sens, dec, False) for s in range(1, n_seeds + 1)]
-            yes = [_run(s, CFG, sens, dec, True) for s in range(1, n_seeds + 1)]
+            no = [_run(s, cfg, sens, dec, False) for s in range(1, n_seeds + 1)]
+            yes = [_run(s, cfg, sens, dec, True) for s in range(1, n_seeds + 1)]
             row = {
                 "adverse_sensitivity": sens,
                 "spread_decay": dec,
@@ -119,6 +140,10 @@ def main(n_seeds=5):
                 "spread_mult_HFT": statistics.fmean([r["spread_mult"] for r in yes]),
                 "crashes_noHFT": statistics.fmean([r["crashes"] for r in no]),
                 "crashes_HFT": statistics.fmean([r["crashes"] for r in yes]),
+                "gaps_noHFT": statistics.fmean([r["liquidity_gaps"] for r in no]),
+                "gaps_HFT": statistics.fmean([r["liquidity_gaps"] for r in yes]),
+                "pickoffs_per_tick_noHFT": statistics.fmean(
+                    [r["pickoffs_per_tick"] for r in no]),
                 "hft_pnl": statistics.fmean([r["hft_pnl"] for r in yes]),
             }
             row["divergence"] = row["spread_mult_HFT"] - row["spread_mult_noHFT"]
@@ -126,19 +151,19 @@ def main(n_seeds=5):
 
     out_dir = _ROOT / "results" / "experiments"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "adverse_selection_calibration.json").write_text(
-        json.dumps({"config": CFG, "n_seeds": n_seeds, "grid": rows},
+    (out_dir / out_name).write_text(
+        json.dumps({"config": cfg, "n_seeds": n_seeds, "grid": rows},
                    indent=2, sort_keys=True))
 
     print(f"Adverse-selection calibration — {n_seeds} seeds/cell, base spread "
-          f"{BASE_SPREAD_TICKS} ticks")
-    print(f"{'sens':>6}{'decay':>7}{'noHFT x':>9}{'HFT x':>8}{'diverg':>8}"
-          f"{'crash_no':>9}{'crash_HFT':>10}{'hft_pnl':>10}")
+          f"{BASE_SPREAD_TICKS} ticks -> {out_name}")
+    print(f"{'sens':>8}{'decay':>7}{'noHFT x':>9}{'HFT x':>8}{'diverg':>8}"
+          f"{'P/tick':>8}{'gap_no':>8}{'gap_HFT':>9}{'hft_pnl':>11}")
     for r in rows:
-        print(f"{r['adverse_sensitivity']:>6.2f}{r['spread_decay']:>7.2f}"
+        print(f"{r['adverse_sensitivity']:>8.4f}{r['spread_decay']:>7.2f}"
               f"{r['spread_mult_noHFT']:>9.2f}{r['spread_mult_HFT']:>8.2f}"
-              f"{r['divergence']:>8.2f}{r['crashes_noHFT']:>9.1f}"
-              f"{r['crashes_HFT']:>10.1f}{r['hft_pnl']:>10.2f}")
+              f"{r['divergence']:>8.2f}{r['pickoffs_per_tick_noHFT']:>8.2f}"
+              f"{r['gaps_noHFT']:>8.1f}{r['gaps_HFT']:>9.1f}{r['hft_pnl']:>11.2f}")
     return rows
 
 

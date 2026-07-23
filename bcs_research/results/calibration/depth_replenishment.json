@@ -1,9 +1,9 @@
 {
-  "censored_fraction": 0.005781867502280009,
-  "complete_hours_used": 172,
+  "censored_fraction": 0.005810290514525726,
+  "complete_hours_used": 173,
   "coverage_note": "complete hours only; partial hours are never mixed in",
-  "episodes_per_hour": 994.4883720930233,
-  "n_episodes": 171052,
+  "episodes_per_hour": 990.8670520231213,
+  "n_episodes": 171420,
   "params": {
     "baseline_window_snapshots": 300,
     "cadence_s": 0.102,
@@ -14,14 +14,14 @@
   },
   "partial_hours_skipped": 677,
   "recovery_s": {
-    "mean": 1.2687754951710593,
+    "mean": 1.2724660016334153,
     "median": 0.306,
     "p25": 0.102,
     "p75": 0.918,
-    "p90": 2.552
+    "p90": 2.652
   },
   "trough_over_baseline": {
-    "median": 0.04928070458307566,
-    "p10": 0.0012701800191514557
+    "median": 0.04932363411283913,
+    "p10": 0.0012744210944249294
   }
 }

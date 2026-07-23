@@ -45,9 +45,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from depth_replenishment import (                          # noqa: E402
-    AF_DATA, BASELINE_WINDOW, CADENCE_S, DEPLETION_FRACTION,
-    MAX_RECOVERY_S, MIN_BASELINE_BTC, RECOVERY_FRACTION,
-    _trailing_median, complete_hours,
+    AF_DATA, complete_hours, iter_episodes,
 )
 
 TRADES_DIR = AF_DATA.parent / "trades"
@@ -80,48 +78,34 @@ def taker_orders(ts_ns, size, is_buyer_maker, agg_id):
             np.bincount(grp, weights=bm.astype(float)) > 0)
 
 
-def _episode_starts(depth, base):
-    usable = ~np.isnan(base) & (base >= MIN_BASELINE_BTC)
-    return np.flatnonzero(usable & (depth < DEPLETION_FRACTION * base))
-
-
-def _recovery_s(depth, ts_ns, start, base):
-    """Seconds until depth regains RECOVERY_FRACTION of baseline; None if censored."""
-    stop = min(start + int(MAX_RECOVERY_S / CADENCE_S), len(depth))
-    rec = np.flatnonzero(depth[start:stop] >= RECOVERY_FRACTION * base[start])
-    if not rec.size:
-        return None
-    return float((ts_ns[start + int(rec[0])] - ts_ns[start]) / 1e9)
-
-
 def classify_hour(book, trades) -> list:
-    """Attribute each depletion episode on each side to consumption or cancellation."""
+    """Attribute each depletion episode on each side to consumption or cancellation.
+
+    Episodes come from `depth_replenishment.iter_episodes`, the single canonical
+    definition, so this module and 3a cannot drift apart on what counts as one.
+    """
     ts, bid_sz, ask_sz = book["ts"], book["bid_sz"], book["ask_sz"]
     t_ts, t_sz, t_bm = trades["ts"], trades["size"], trades["buyer_maker"]
 
     rows = []
     for side, depth, hits_side in (("bid", bid_sz, t_bm), ("ask", ask_sz, ~t_bm)):
-        base = _trailing_median(depth, BASELINE_WINDOW)
-        starts = _episode_starts(depth, base)
         s_ts, s_sz = t_ts[hits_side], t_sz[hits_side]
-        last = -1
-        for st in starts:
-            if st <= last or st == 0:
+        for ep in iter_episodes(depth, ts):
+            st = ep["start"]
+            if st == 0:
                 continue
-            drop = depth[st - 1] - depth[st]
+            drop = float(depth[st - 1] - depth[st])
             if drop <= 0:
                 continue
             lo, hi = np.searchsorted(s_ts, [ts[st - 1], ts[st]])
             consumed = float(s_sz[lo:hi].sum())
-            rec = _recovery_s(depth, ts, st, base)
             rows.append({
                 "side": side,
                 "consumption": bool(consumed >= CONSUMPTION_COVERAGE * drop),
                 "consumed_btc": consumed,
-                "drop_btc": float(drop),
-                "recovery_s": rec,
+                "drop_btc": drop,
+                "recovery_s": None if ep["censored"] else ep["recovery_s"],
             })
-            last = st
     return rows
 
 

@@ -1,28 +1,28 @@
 {
   "consumption_coverage_threshold": 0.5,
-  "consumption_fraction": 0.3201591069684724,
+  "consumption_fraction": 0.1749971082293367,
   "hours_used": 86,
-  "n_episodes": 251906,
+  "n_episodes": 77807,
   "recovery_s_all": {
-    "n": 244322,
-    "p25": 0.306,
-    "p50": 0.816,
-    "p75": 2.552,
-    "p90": 7.038
+    "n": 77337,
+    "p25": 0.102,
+    "p50": 0.306,
+    "p75": 1.02,
+    "p90": 2.652
   },
   "recovery_s_cancellation": {
-    "n": 165912,
-    "p25": 0.306,
-    "p50": 0.816,
-    "p75": 2.652,
-    "p90": 7.244
+    "n": 63841,
+    "p25": 0.102,
+    "p50": 0.408,
+    "p75": 1.02,
+    "p90": 2.652
   },
   "recovery_s_consumption": {
-    "n": 78410,
-    "p25": 0.204,
-    "p50": 0.816,
-    "p75": 2.454,
-    "p90": 6.63
+    "n": 13496,
+    "p25": 0.102,
+    "p50": 0.306,
+    "p75": 0.816,
+    "p90": 2.652
   },
   "sweep_defragmentation": "consecutive agg_trade_ids sharing timestamp+side regrouped",
   "taker_size_over_top_depth": {

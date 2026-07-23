@@ -78,39 +78,56 @@ def _trailing_median(x: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
-def episodes_for_side(depth: np.ndarray, ts_ns: np.ndarray) -> list[dict]:
-    """Depletion episodes and their recovery times for one side of the book."""
+def iter_episodes(depth: np.ndarray, ts_ns: np.ndarray):
+    """Canonical depletion episodes for one side of the book.
+
+    THE single definition of an episode. Any consumer that re-implements this
+    loop will silently disagree with the others, which is exactly what happened
+    between this module and `trade_book_join` before they were reconciled: one
+    advanced past the recovery, the other advanced a single index, so a
+    sustained depletion counted as one event in one place and as one event per
+    snapshot-below-threshold in the other (251,906 episodes against 171,052,
+    and a median recovery of 0.82 s against 0.31 s, from identical data and
+    identical thresholds).
+
+    Yields one record per depletion-and-recovery cycle, advancing past the
+    recovery so a sustained depletion is a single event.
+    """
     base = _trailing_median(depth, BASELINE_WINDOW)
     usable = ~np.isnan(base) & (base >= MIN_BASELINE_BTC)
     open_at = usable & (depth < DEPLETION_FRACTION * base)
     max_steps = int(MAX_RECOVERY_S / CADENCE_S)
 
-    out, i, n = [], 0, len(depth)
-    idx = np.flatnonzero(open_at)
-    for start in idx:
+    i, n = 0, len(depth)
+    for start in np.flatnonzero(open_at):
         if start < i:            # still inside the previous episode
             continue
-        target = RECOVERY_FRACTION * base[start]
         stop = min(start + max_steps, n)
-        rec = np.flatnonzero(depth[start:stop] >= target)
+        rec = np.flatnonzero(depth[start:stop] >= RECOVERY_FRACTION * base[start])
         if rec.size:
             k = int(rec[0])
-            out.append({
+            yield {
+                "start": int(start),
                 "recovery_s": float((ts_ns[start + k] - ts_ns[start]) / 1e9),
                 "censored": False,
                 "baseline_btc": float(base[start]),
                 "trough_btc": float(depth[start:start + k + 1].min()),
-            })
+            }
             i = start + k + 1
         else:
-            out.append({
+            yield {
+                "start": int(start),
                 "recovery_s": MAX_RECOVERY_S,
                 "censored": True,
                 "baseline_btc": float(base[start]),
                 "trough_btc": float(depth[start:stop].min()),
-            })
+            }
             i = stop
-    return out
+
+
+def episodes_for_side(depth: np.ndarray, ts_ns: np.ndarray) -> list[dict]:
+    """Depletion episodes and their recovery times for one side of the book."""
+    return list(iter_episodes(depth, ts_ns))
 
 
 def scan_file(path: Path) -> list[dict]:

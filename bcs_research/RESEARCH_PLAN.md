@@ -163,17 +163,37 @@ GAINS and noise traders bear the transfer — the opposite of the paper's
 headline framing. Step 5 must therefore sweep ratios centred near 0.01-0.03,
 not near 1.0.
 
-**Two problems recorded, not papered over.**
+**3c. Both problems resolved — 2026-07-23.**
 
-- *Hour attrition.* Only 86 of 173 complete book hours have a matching trade
-  file, so the join runs on half the available book. Trade coverage was
-  believed to be ~97.5%; investigate whether the shortfall is a day-range
-  mismatch (book spans 63 days, trades may not) before trusting hour counts.
-- *Episode definitions drift between 3a and 3b.* 3a advances past a recovered
-  episode (`i = start + k + 1`) while 3b advances one index (`last = st`), so
-  3b counts 251,906 episodes against 3a's 171,052 and reports median recovery
-  0.82 s against 3a's 0.31 s. Same constants, different dedup. The two must be
-  reconciled onto one definition before either number is quoted in the paper.
+*Hour attrition: explained, benign.* 32 of the 63 book days have no trades
+directory at all — a 2026-05-17 to 2026-06-17 era when the book collector ran
+but the trade poller did not (the `aggTrade` WebSocket was region-gated for the
+host IP; the REST poller came later). 87 of the 173 complete book hours fall in
+that window. Conversely 88 days have trades but no book, the earlier trade-only
+era. 86 hours is therefore the correct denominator for any book-and-trade join,
+not evidence of a defect.
+
+*Episode-definition drift: fixed at the root.* The two modules had each
+implemented the depletion loop, and they disagreed — 3a advanced past the
+recovery, 3b advanced a single index, so a sustained depletion counted as one
+event in 3a and as one event per snapshot-below-threshold in 3b. Rather than
+align two copies, `depth_replenishment.iter_episodes` is now the single
+canonical generator and `trade_book_join` consumes it, so the two cannot drift
+again. Recovery quantiles now agree exactly: p25 0.10 s, median 0.31 s, p90
+2.65 s in both.
+
+**Corrected numbers — the figures in the previous commit were computed under
+the buggy dedup and should not be used.** Consumption-driven share falls from
+32.0% to **17.5%**: roughly one depletion in six is trade-driven, the rest are
+cancellations. Median recovery falls from 0.82 s to 0.31 s. Consumption-driven
+episodes now recover slightly *faster* than cancellation-driven ones (median
+0.31 s against 0.41 s), which is the sensible direction — depth taken by a
+trade is replaced, depth withdrawn by choice is not — and reverses the "no
+difference" null reported before, though the gap is one snapshot and should not
+be leaned on.
+
+The ratio measurements are unaffected: they key off trades and contemporaneous
+depth, not episode boundaries, so all three conditionings are unchanged.
 
 ### Original scoping notes
 

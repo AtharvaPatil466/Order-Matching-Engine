@@ -1,0 +1,27 @@
+{
+  "censored_fraction": 0.005781867502280009,
+  "complete_hours_used": 172,
+  "coverage_note": "complete hours only; partial hours are never mixed in",
+  "episodes_per_hour": 994.4883720930233,
+  "n_episodes": 171052,
+  "params": {
+    "baseline_window_snapshots": 300,
+    "cadence_s": 0.102,
+    "depletion_fraction": 0.25,
+    "max_recovery_s": 30.0,
+    "min_baseline_btc": 0.05,
+    "recovery_fraction": 0.5
+  },
+  "partial_hours_skipped": 677,
+  "recovery_s": {
+    "mean": 1.2687754951710593,
+    "median": 0.306,
+    "p25": 0.102,
+    "p75": 0.918,
+    "p90": 2.552
+  },
+  "trough_over_baseline": {
+    "median": 0.04928070458307566,
+    "p10": 0.0012701800191514557
+  }
+}

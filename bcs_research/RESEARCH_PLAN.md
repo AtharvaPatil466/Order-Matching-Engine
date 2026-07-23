@@ -94,7 +94,43 @@ decision on which run is authoritative — these are machine-zero residuals whos
 exact digits vary run to run, so this is a reproducibility-hygiene issue rather
 than a substantive one, but a referee re-running the harness would hit it.
 
-## 3. Depth-depletion and replenishment measurement on the BTC tape
+## 3. Depth-depletion and replenishment measurement — IN PROGRESS
+
+**3a. Depletion episodes and recovery — DONE 2026-07-23.**
+`calibration/depth_replenishment.py`, results in
+`results/calibration/depth_replenishment.json`.
+
+Coverage was the binding constraint, not sample size. Snapshot cadence is a
+clean 100 ms whenever the collector is up (median inter-snapshot gap 0.102 s),
+but hourly coverage is bimodal: an hour file holds either ~35,290 rows or a few
+hundred (median hour ~3,200), for ~34% overall book coverage. Since an episode
+spans seconds and cannot be measured across a hole, the scan uses complete
+hours only — 172 of 849, about 7.2 days of contiguous 10 Hz book. Partial hours
+are counted and reported, never mixed in.
+
+Result: 171,052 episodes (994.5/h), 0.6% censored at 30 s. Recovery to 50% of
+a 30 s trailing-median baseline: p25 0.10 s, median 0.31 s, p75 0.92 s, p90
+2.55 s. Median trough is 4.9% of baseline, so these are genuine collapses.
+
+**The number step 4 needs.** The sim's single maker carries
+`mm_latency_us=3000`, i.e. 300 ms of quote staleness at the 1 tick = 100 ms
+convention. Real aggregate half-recovery is a median of 310 ms — effectively
+identical — but p25 sits at the 0.10 s single-snapshot floor, so at least a
+quarter of real episodes replenish faster than the data resolves. A lone maker
+with 300 ms staleness cannot produce that fast quartile; competing makers can.
+This converts "a single maker absorbs the entire race" from assertion into a
+measured gap, and gives step 4 a calibration target.
+
+**3b. Separate consumption from cancellation — NOT DONE, and 3a is not usable
+for step 4 without it.** At ~1,000 episodes/hour the current measure captures
+top-of-book depth *volatility*, conflating depth consumed by an aggressive
+trade with depth withdrawn by cancellation. Only the former is race-relevant.
+Separating them requires joining episodes to the trade tape on
+`exchange_ts_ns` — the same join the (ratio, k) bound needs, so one piece of
+work serves both. Until it exists, treat 3a as scaffolding and the recovery
+quantiles as an upper bound on true post-trade replenishment time.
+
+### Original scoping notes
 
 **Why it comes before the multi-maker model.** Competing makers cannot be
 designed without knowing what real replenishment looks like. The same

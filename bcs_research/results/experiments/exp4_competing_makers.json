@@ -1,0 +1,114 @@
+{
+  "config": {
+    "adverse_sensitivity": 0.015,
+    "base_half_spread": 50,
+    "dt_us": 1000,
+    "duration_us": 3000000,
+    "hft_cost_bps": 0.0,
+    "hft_latency_us": 0,
+    "hft_qty": 2061,
+    "hft_race_noise_us": 100,
+    "lambda_per_tick": 0.4265786518731485,
+    "min_quote_qty": 1,
+    "mm_inventory_skew": 0.2,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "n_noise": 8,
+    "noise_qty": 1,
+    "quote_qty": 2061,
+    "sigma": 20.567342137215924,
+    "size_sigma_ln": 2.7972073448963837,
+    "spread_cap_mult": 10.0,
+    "spread_decay": 0.1
+  },
+  "counts": [
+    {
+      "hft_rent": 84375.21684600026,
+      "hft_rent_bp": 4.420716507747448,
+      "hft_snipes": 7897.2,
+      "latencies_us": [
+        3000
+      ],
+      "liquidity_gaps_base": 19.9,
+      "liquidity_gaps_treat": 52.73,
+      "maker_pnl_by_latency": {
+        "3000": -84111.43926799997
+      },
+      "mm_pnl_total": -84111.43926799997,
+      "n_makers": 1,
+      "nt_pnl": -263.7775779999495,
+      "traded_notional": 190863215.721094,
+      "zero_sum_residual": 3.2887328416109087e-10
+    },
+    {
+      "hft_rent": 22644.653806000228,
+      "hft_rent_bp": 0.8009204600944533,
+      "hft_snipes": 7510.86,
+      "latencies_us": [
+        1000,
+        5000
+      ],
+      "liquidity_gaps_base": 25.34,
+      "liquidity_gaps_treat": 38.0,
+      "maker_pnl_by_latency": {
+        "1000": -4303.286796000061,
+        "5000": -18267.456053000024
+      },
+      "mm_pnl_total": -22570.742849000086,
+      "n_makers": 2,
+      "nt_pnl": -73.91095700006787,
+      "traded_notional": 282732867.172974,
+      "zero_sum_residual": 7.021299097687006e-11
+    },
+    {
+      "hft_rent": 9575.022747999961,
+      "hft_rent_bp": 0.32350250978209755,
+      "hft_snipes": 6945.12,
+      "latencies_us": [
+        1000,
+        3000,
+        5000
+      ],
+      "liquidity_gaps_base": 11.62,
+      "liquidity_gaps_treat": 16.29,
+      "maker_pnl_by_latency": {
+        "1000": -1365.3688819999404,
+        "3000": -4821.659485000006,
+        "5000": -3174.157590999941
+      },
+      "mm_pnl_total": -9361.185957999885,
+      "n_makers": 3,
+      "nt_pnl": -213.83678999998818,
+      "traded_notional": 295979859.768304,
+      "zero_sum_residual": 8.543793228454888e-11
+    },
+    {
+      "hft_rent": 2499.31960600006,
+      "hft_rent_bp": 0.08851793209817263,
+      "hft_snipes": 6500.97,
+      "latencies_us": [
+        1000,
+        2000,
+        3000,
+        4000,
+        5000
+      ],
+      "liquidity_gaps_base": 2.46,
+      "liquidity_gaps_treat": 2.71,
+      "maker_pnl_by_latency": {
+        "1000": 2014.117647000056,
+        "2000": 553.833420999987,
+        "3000": -555.7768960000453,
+        "4000": -1905.05019299998,
+        "5000": -2392.8214499999813
+      },
+      "mm_pnl_total": -2285.697470999964,
+      "n_makers": 5,
+      "nt_pnl": -213.62213499997972,
+      "traded_notional": 282351784.18177897,
+      "zero_sum_residual": 1.1656538845272734e-10
+    }
+  ],
+  "n_seeds": 100,
+  "snipe_quote_ratio": 1.0
+}

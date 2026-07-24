@@ -4,8 +4,10 @@ Sequenced work to move the paper from a calibrated bracketing exercise to a
 quantitative result. Ordering is load-bearing: each step is a precondition for
 the one below it, and §5 is the item the rest exists to make interpretable.
 
-Status as of 2026-07-23: steps 1–5 all open. Environment calibration and the
-calibrated re-run of Exps 1–4 are complete (paper §3.7, §4.6).
+Status as of 2026-07-24: steps 1–3 DONE; step 4 accounting infrastructure landed
+(`df1d71d`), the competing-maker experiment itself still to build; step 5 not
+started. Environment calibration and the calibrated re-run of Exps 1–4 are
+complete (paper §3.7, §4.6).
 
 ---
 
@@ -83,18 +85,19 @@ outright. Both §1.2 and the §3.6 spec table now cite MaxOrders=4 with the
 MaxOrders=3 default identified as the routine check, and the false parenthetical
 is gone. This was exactly the class of claim step 2 existed to catch.
 
-**Open, needs adjudication — conservation residual figures do not reconcile.**
-The paper quotes a treatment residual of 2.78e-12 and baseline −5.39e-12 (§4.1,
-restated §1.3 and §6). The stored `results/experiments/exp1_primary.json` has
-treatment 5.82e-12 and baseline −1.14e-11. The abstract separately quoted
-1.6e-13, inconsistent with all of the above; that figure has been dropped, since
-an abstract does not need the digits and the claim ("indistinguishable from
-floating-point noise") is unaffected. The body figures are left as-is pending a
-decision on which run is authoritative — these are machine-zero residuals whose
-exact digits vary run to run, so this is a reproducibility-hygiene issue rather
-than a substantive one, but a referee re-running the harness would hit it.
+**Resolved 2026-07-24 — the stale artifact was the discrepancy, not the paper.**
+The apparent mismatch traced to `results/experiments/exp1_primary.json` being a
+pre-P3-13 n=10 file (treatment 5.82e-12, baseline −1.14e-11), discovered during
+step-4 backward-compat verification. Regenerated at n=100 (`df1d71d`) the
+baseline residual is −5.3925e-12, matching the paper's −5.39e-12 to every quoted
+digit; the treatment residual is 3.60e-12 against the paper's 2.78e-12. Both are
+machine zero — order 1e-12 cancellation noise from summing three
+near-equal-and-opposite PnLs — so their low bits are not reproducible across any
+change to summation order, and neither is distinguishable from floating-point
+zero, which is exactly the claim the paper makes. The dropped abstract figure
+(1.6e-13) stays dropped. No substantive discrepancy remains.
 
-## 3. Depth-depletion and replenishment measurement — IN PROGRESS
+## 3. Depth-depletion and replenishment measurement — DONE 2026-07-23
 
 **3a. Depletion episodes and recovery — DONE 2026-07-23.**
 `calibration/depth_replenishment.py`, results in

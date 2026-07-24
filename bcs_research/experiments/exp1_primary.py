@@ -65,19 +65,43 @@ CFG = dict(
 )
 
 
-def _run(seed, cfg, with_hft):
+def _mm_latencies(cfg):
+    """One latency per competing maker (step 4).
+
+    Absent `mm_latencies_us` this is a single maker at `mm_latency_us` — the
+    pre-registered path, left untouched so every stored single-maker result
+    reproduces byte-for-byte.
+    """
+    lat = cfg.get("mm_latencies_us")
+    return [int(x) for x in lat] if lat else [int(cfg["mm_latency_us"])]
+
+
+def _split_qty(total, n):
+    """Split aggregate quote size across n makers; remainder to the first.
+
+    Holds total top-of-book depth constant as makers are added, so a maker-count
+    sweep varies competition and latency spread, not the depth an HFT snipes.
+    """
+    base = total // n
+    return [base + (total - base * n if i == 0 else 0) for i in range(n)]
+
+
+def _run(seed, cfg, with_hft, per_maker=False):
     v0 = 100 * be.PRICE_PRECISION
     h = be.EngineHarness()
     h.add_symbol(SYMBOL)
     h.start()
     fund = FundamentalValueProcess(v0=v0, sigma=cfg["sigma"], dt_us=cfg["dt_us"], seed=seed)
-    mm = BCSMarketMaker(MM_ID, base_half_spread=cfg["base_half_spread"],
-                        quote_qty=cfg["quote_qty"], latency_us=cfg["mm_latency_us"],
-                        inventory_skew=cfg["mm_inventory_skew"],
-                        adverse_sensitivity=cfg["adverse_sensitivity"],
-                        spread_decay=cfg["spread_decay"],
-                        spread_cap_mult=cfg["spread_cap_mult"],
-                        min_quote_qty=cfg["min_quote_qty"])
+    lats = _mm_latencies(cfg)
+    qtys = _split_qty(cfg["quote_qty"], len(lats))
+    makers = [BCSMarketMaker(MM_ID + i, base_half_spread=cfg["base_half_spread"],
+                             quote_qty=qtys[i], latency_us=lats[i],
+                             inventory_skew=cfg["mm_inventory_skew"],
+                             adverse_sensitivity=cfg["adverse_sensitivity"],
+                             spread_decay=cfg["spread_decay"],
+                             spread_cap_mult=cfg["spread_cap_mult"],
+                             min_quote_qty=cfg["min_quote_qty"])
+              for i in range(len(lats))]
     noise = [NoiseTrader(100 + i, lambda_per_tick=cfg["lambda_per_tick"],
                          qty=cfg["noise_qty"], seed=seed * 1000 + i,
                          size_sigma_ln=cfg.get("size_sigma_ln"))
@@ -89,16 +113,18 @@ def _run(seed, cfg, with_hft):
                          transaction_cost_bps=cfg["hft_cost_bps"],
                          qty=cfg["hft_qty"], seed=seed * 2000 + j)
                 for j in range(cfg["n_hft"])]
+    mm_ids = [m.participant_id for m in makers]
     nt_ids = [a.participant_id for a in noise]
     hft_ids = [a.participant_id for a in hfts]
     sched = LatencyScheduler(h, SYMBOL, cfg["dt_us"])
-    result = sched.run([mm] + noise + hfts, fund, cfg["duration_us"])
+    result = sched.run(makers + noise + hfts, fund, cfg["duration_us"])
 
-    m = compute_metrics(result, MM_ID, nt_ids)
-    welfare = decompose_welfare(result, MM_ID, nt_ids, hft_ids, mark=mark_price(result))
+    mark = mark_price(result)
+    m = compute_metrics(result, mm_ids, nt_ids)
+    welfare = decompose_welfare(result, mm_ids, nt_ids, hft_ids, mark=mark)
     gaps = count_liquidity_gaps(result.snapshots, cfg["dt_us"], cfg["sigma"])
     h.stop()
-    return {
+    out = {
         # welfare (primary)
         "mm_pnl": welfare["mm_pnl"],
         "nt_pnl": welfare["noise_trader_pnl"],
@@ -112,11 +138,22 @@ def _run(seed, cfg, with_hft):
         "kyle_lambda": m["kyle_lambda"],
         "spread_ticks": m["time_weighted_avg_spread_ticks"],
         "n_trades": m["n_trades"],
-        "mm_max_half_spread": mm.max_half_spread_seen,
-        "mm_min_qty": mm.min_quote_qty_seen,
+        "mm_max_half_spread": max(mk.max_half_spread_seen for mk in makers),
+        "mm_min_qty": min(mk.min_quote_qty_seen for mk in makers),
         "hft_snipes": sum(a.snipes for a in hfts),
         "hft_fills": sum(a.fills for a in hfts),
     }
+    if per_maker:
+        agents = {a.participant_id: a for a in result.agents}
+        out["maker_pnls"] = [float(agents[i].pnl(mark)) if i in agents else 0.0
+                             for i in mm_ids]
+        out["maker_latencies"] = [float(x) for x in lats]
+        out["n_makers"] = welfare["n_makers"]
+        # Denominator §4.6 uses for rent-in-bp: traded notional summed as
+        # tick_volume * mid over every snapshot (not trade-tape volume).
+        out["total_notional"] = float(
+            sum(s["tick_volume"] * s["mid"] for s in result.snapshots)) / be.PRICE_PRECISION
+    return out
 
 
 def _agg(rows):

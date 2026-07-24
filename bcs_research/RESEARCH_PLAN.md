@@ -237,12 +237,34 @@ differencing. This reuses the §4.5 placebo arm, but note its validation was
 established on simulated gaps and does **not** transfer automatically to real
 data; re-establish it before leaning on it.
 
-## 4. Competing makers with heterogeneous latencies
+## 4. Competing makers with heterogeneous latencies — DONE 2026-07-24
 
 Parameterized from (3). This is the binding constraint on external validity: a
 single latency-disadvantaged maker has no competitor to replenish a cleared
 quote, so it absorbs the entire race, which is why §4.6 reports the calibrated
 4.42 bp as an upper bound.
+
+**Result.** `experiments/exp4_competing_makers.py`, harness generalized in
+`exp1_primary._run` (single-maker path verified byte-identical), 100 seeds at the
+calibrated main arm (ratio 1.0). N makers, aggregate quote split to hold depth
+fixed, latencies anchored on 3a (1 tick = 100 ms = p25, 3 ticks = median, 5 ticks
+slowest):
+
+| N | latencies (ticks) | rent bp | gaps |
+|---|---|---|---|
+| 1 | 3 | 4.421 | 52.73 |
+| 2 | 1, 5 | 0.801 | 38.00 |
+| 3 | 1, 3, 5 | 0.324 | 16.29 |
+| 5 | 1..5 | 0.089 | 2.71 |
+
+N=1 nests the published 4.421 bp to the digit; competition drives the rent down
+through the 0.4 bp measured tax (straddled at N=2–3) to 0.089 bp at N=5, gaps
+collapsing 52.7→2.7, residual machine-zero throughout. Per-maker PnL at N=5 is
+monotone in latency (fast +2014 … slow −2393): a fast competitor replenishes the
+touch before the slow quote is sniped. The single-maker absorption bias is thus
+measured and removed. Committed `30c3479` (harness+test), `2b7ccb7` (n=100
+artifact); folded into §4.6. Still a designed race, not an estimated one — see
+below.
 
 **Do not overclaim the payoff.** This removes the single-maker absorption bias.
 It does not make the rent an estimate: the race structure (`hft_latency_us`,

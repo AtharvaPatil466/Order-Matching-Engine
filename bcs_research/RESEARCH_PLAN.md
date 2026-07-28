@@ -4,10 +4,11 @@ Sequenced work to move the paper from a calibrated bracketing exercise to a
 quantitative result. Ordering is load-bearing: each step is a precondition for
 the one below it, and §5 is the item the rest exists to make interpretable.
 
-Status as of 2026-07-24: steps 1–3 DONE; step 4 accounting infrastructure landed
-(`df1d71d`), the competing-maker experiment itself still to build; step 5 not
-started. Environment calibration and the calibrated re-run of Exps 1–4 are
-complete (paper §3.7, §4.6).
+Status as of 2026-07-28: steps 1–5 DONE. Steps 1–3 as recorded below; step 4
+(competing makers) landed `30c3479`/`2b7ccb7`, folded into §4.6; step 5 (the
+incidence surface — the finding) landed `cbe1d85`/`2e168b8`/`2ceea84` as §4.7.
+Environment calibration and the calibrated re-run of Exps 1–4 are complete
+(paper §3.7, §4.6).
 
 ---
 
@@ -273,13 +274,44 @@ needs failed-order message data of the kind Aquilina, Budish and O'Neill (2022)
 obtained from a regulator (§3.7). The result is a calibrated environment with
 competitive liquidity supply and a *designed* race.
 
-## 5. The (ratio, k) incidence surface — the finding
+## 5. The (ratio, k) incidence surface — DONE 2026-07-27, the finding
 
 Sweep snipe-to-quote ratio against HFT count and map where the incidence of
 the transfer flips. §4.6 shows incidence is ratio-dependent at fixed k (at
 0.024 the maker gains for k ≤ 5 and loses by k ≥ 8; at 0.0005 with many HFTs
 nothing has been run). Two ratio points and one k-sweep do not locate a
 boundary in a two-dimensional space.
+
+**Result.** `experiments/exp6_incidence_surface.py`,
+`results/experiments/exp6_incidence_surface.json`, written up as §4.7. Seven
+snipe quantities × nine HFT counts, n=100, 6,400 engine runs, maker count held
+at one. The grid nests the published cells: the ratio-1.0 column reproduces
+`exp3_hft_count_calibrated.json` to the digit and the ratio-0.0243 row
+reproduces §4.6's robustness arm to the digit; zero-sum residual is machine zero
+in all 63 cells. The boundary — critical k at which the maker's PnL delta flips
+sign, 95% bootstrap:
+
+| ratio | flip k | maker Δ at k=21 |
+|---|---|---|
+| 0.0049 | none on grid | +2,154 (still gains) |
+| 0.0097 | none on grid | +1,425 (still gains) |
+| 0.0243 | 7 | −5,213 |
+| 0.0485 | 3 | −17,203 |
+| 0.1213 | 2 | −39,006 |
+| 0.3396 | below 1 | −61,978 |
+| 1.0000 | below 1 | −72,332 |
+
+**The finding.** The tape-measured ratio band (0.0072 unconditional p50 →
+0.0283 race proxy, step 3b) lies inside the maker-gains region at *every* HFT
+count swept, so in the regime real BTC supports the BCS prediction that the
+latency tax falls on liquidity providers **inverts** — the maker's widening
+earns more from noise flow than snipers take, and noise traders bear the
+transfer. Two negatives fall out: the noise-trader toll is near-invariant
+(−1,699…−3,410 across all cells against a maker swing of +2,154…−84,023), and the
+surface does not collapse to a ratio×k product rule — it is genuinely
+two-dimensional. Figure `results/figures/fig7_incidence_boundary.png`. Committed
+`cbe1d85` (surface+§4.7), `2e168b8` (headline reframing + §4.7 title), `2ceea84`
+(fig7 + PDF).
 
 **Must follow (4).** The maker's gain at small snipe sizes is plausibly itself
 a single-maker artifact — it is the sole liquidity supplier monetizing flow its

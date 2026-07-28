@@ -194,9 +194,88 @@ def fig_bp_bracket() -> Path:
     return _save(fig, "fig6d_rent_bp_bracket.png")
 
 
+# Tape-measured snipe-to-depth ratio (step 3b, 86 complete book-and-trade hours
+# of BTCUSDT-perp): unconditional median through race-proxy median.
+TAPE_RATIO_P50 = 0.0072
+TAPE_RATIO_RACE_PROXY = 0.0283
+SURFACE_MAX_K = 21
+
+
+def _critical_k(row: dict):
+    """(critical k, censoring) for one ratio row of the incidence surface.
+
+    Only three of the seven ratios flip inside the grid. The other four are
+    censored and must not be drawn as if measured: at the two smallest ratios the
+    maker gains at every k tested (critical k > 21), and at the two largest it
+    already loses at k=1 (critical k < 1). Returns censoring as 'above'/'below'
+    so the caller can render a bound rather than a point.
+    """
+    b = row.get("boundary")
+    if b:
+        return b["k_first_not_gains"], None
+    first = min(row["cells"], key=lambda c: c["n_hfts"])["delta_ci"]["mm_pnl"]
+    return ((SURFACE_MAX_K, "above") if first["lower"] > 0 else (1, "below"))
+
+
+def fig_incidence_boundary() -> Path:
+    """The (ratio, k) incidence boundary with the tape-measured band overlaid."""
+    d = _load("exp6_incidence_surface.json")
+    rows = sorted(d["rows"], key=lambda r: r["snipe_quote_ratio"])
+    pts = [(r["snipe_quote_ratio"], *_critical_k(r)) for r in rows]
+
+    fig, ax = plt.subplots(figsize=(6.6, 4.4))
+    xlim, ylim = (0.003, 1.5), (0.6, 30.0)
+
+    # Regime shading, built from the boundary as a monotone step in ratio.
+    xs = [x for x, _, _ in pts]
+    mids = [xlim[0]] + [(xs[i] * xs[i + 1]) ** 0.5 for i in range(len(xs) - 1)] + [xlim[1]]
+    edges = mids
+    for i, (x, k, cens) in enumerate(pts):
+        top = ylim[1] if cens == "above" else k
+        ax.fill_between([edges[i], edges[i + 1]], ylim[0], top,
+                        color=CB[2], alpha=0.13, lw=0)
+        ax.fill_between([edges[i], edges[i + 1]], top, ylim[1],
+                        color=CB[3], alpha=0.13, lw=0)
+
+    meas = [(x, k) for x, k, c in pts if c is None]
+    ax.plot([x for x, _ in meas], [k for _, k in meas], "o-", color=CB[0],
+            lw=2.0, ms=6, zorder=5, label="critical k (measured)")
+    for x, k, c in pts:
+        if c is None:
+            continue
+        dy = 6.0 if c == "above" else -0.28
+        ax.annotate("", xy=(x, k + dy), xytext=(x, k),
+                    arrowprops=dict(arrowstyle="-|>", color=CB[0], lw=1.6))
+        ax.plot([x], [k], "o", mfc="white", mec=CB[0], mew=1.6, ms=6, zorder=5)
+    ax.plot([], [], "o", mfc="white", mec=CB[0], mew=1.6, ms=6,
+            label="censored (no flip on grid)")
+
+    ax.axvspan(TAPE_RATIO_P50, TAPE_RATIO_RACE_PROXY, color=CB[1], alpha=0.30,
+               lw=0, zorder=1, label="BTC tape (p50 unconditional \u2192 race proxy)")
+    ax.axhline(SURFACE_MAX_K, ls="--", color="0.35", lw=1.2,
+               label=f"k = {SURFACE_MAX_K} (max HFT count swept)")
+
+    ax.text(0.0075, 3.4, "maker gains\n(noise traders pay)", fontsize=9,
+            color=CB[2], weight="bold", ha="center", va="center")
+    ax.text(0.42, 12.0, "maker pays", fontsize=9, color=CB[3],
+            weight="bold", ha="center", va="center")
+
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlim(*xlim); ax.set_ylim(*ylim)
+    ax.set_yticks([1, 2, 3, 5, 8, 13, 21]); ax.set_yticklabels([1, 2, 3, 5, 8, 13, 21])
+    ax.set_xlabel("Snipe-to-quote size ratio (log scale)")
+    ax.set_ylabel("Critical HFT count k at which incidence flips")
+    ax.set_title("Incidence boundary: the tape-measured ratio lies in the\n"
+                 "maker-gains regime at every HFT count tested", fontsize=10)
+    ax.legend(fontsize=7.5, loc="lower left", framealpha=0.95)
+    ax.grid(alpha=0.25, which="both")
+    return _save(fig, "fig7_incidence_boundary.png")
+
+
 def main() -> list:
     paths = [fig_rent_per_hft(), fig_fragility(),
-             fig_batch_nonmonotone(), fig_bp_bracket()]
+             fig_batch_nonmonotone(), fig_bp_bracket(),
+             fig_incidence_boundary()]
     for p in paths:
         print(f"wrote {p.relative_to(_ROOT)}")
     return paths

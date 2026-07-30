@@ -3,7 +3,7 @@
 
 Reads the *_calibrated.json results and writes to results/figures/:
 
-  fig6a_rent_per_hft_calibrated.png  Per-HFT rent vs k with the C/k overlay —
+  fig6a_rent_per_hft_calibrated.png  Per-HFT rent vs k with 95% bootstrap CIs —
                                      the §4.3 hyperbolic collapse, replicated
                                      at calibrated order flow.
   fig6b_fragility_calibrated.png     Liquidity gaps vs k for both hft_qty arms.
@@ -79,20 +79,12 @@ def _k_series(report: dict, metric: str, min_k: int = 0):
 def fig_rent_per_hft() -> Path:
     r = _load("exp3_hft_count_calibrated.json")
     x, m, yerr = _k_series(r, "hft_rent_per_hft", min_k=1)
-    # One-parameter C/k fit, C by least squares on 1/k (as in §4.3).
-    inv = 1.0 / x
-    C = float(np.sum(inv * m) / np.sum(inv * inv))
-    r2 = 1 - np.sum((m - C * inv) ** 2) / np.sum((m - m.mean()) ** 2)
-
     fig, ax = plt.subplots(figsize=FIGSIZE)
     ax.errorbar(x, m / 1000, yerr=yerr / 1000, fmt="o", color=CB[0],
                 capsize=3, label="per-HFT rent (95% CI)")
-    grid = np.linspace(x.min(), x.max(), 200)
-    ax.plot(grid, (C / grid) / 1000, "-", color=CB[1],
-            label=f"$C/k$ fit, $C={C/1000:.1f}$k, $R^2={r2:.5f}$")
     ax.set_xlabel("number of competing HFTs")
     ax.set_ylabel("per-HFT rent (\\$ thousands)")
-    ax.set_title("Calibrated: per-HFT rent collapses as $1/k$")
+    ax.set_title("Calibrated: per-HFT rent erodes as competitors enter")
     ax.grid(False)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

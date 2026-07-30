@@ -8,7 +8,7 @@ Reads results/experiments/exp3_hft_count.json and writes to results/figures/:
                                 is FLAT, not rising: a fixed prize set by the
                                 latency opportunity is split into ever-finer
                                 slices, and no HFT can profitably exit.
-  fig3a_rent_per_hft.png        Per-HFT rent vs n_hfts with the A/k fit overlay.
+  fig3a_rent_per_hft.png        Per-HFT rent vs n_hfts with 95% bootstrap CIs.
   fig3b_welfare_and_fragility.png  Total welfare loss (flat) + liquidity gaps
                                 (rising) — the social cost shows up as fragility.
   fig3c_fill_rate.png           HFT fill rate vs n_hfts (race dissipation, ~1/k).
@@ -94,11 +94,6 @@ def fig_3a(report: dict) -> Path:
     x, rph, rph_err = _series(cells, "treatment_ci", "hft_rent_per_hft")
     ax.errorbar(x, rph, yerr=rph_err, fmt="o", color=CB[0], capsize=3,
                 label="rent per HFT (95% CI)")
-    # A/k overlay: A = mean total rent (the fixed prize being split).
-    tot = np.array([c["treatment_ci"]["hft_rent"]["mean"] for c in cells])
-    A = float(tot.mean())
-    xs = np.linspace(x.min(), x.max(), 100)
-    ax.plot(xs, A / xs, "--", color=CB[3], label=f"${A:.0f}/k fit")
     _style(ax)
     ax.set_ylabel("rent per HFT ($)")
     ax.set_title("Exp 3a - individual HFT rent erodes with competition")

@@ -4,9 +4,9 @@
 // is no cancel traffic. Real venues are cancel-dominated churn. This benchmark
 // drives the core matching path with the venue-shaped event mix:
 //
-//   • 65% CANCEL   — cancel a randomly selected resting order (no-op if the book
+//   • 44% CANCEL   — cancel a randomly selected resting order (no-op if the book
 //                    pool is empty)
-//   • 25% NEW      — passive limit that rests, priced away from the mid so it is
+//   • 46% NEW      — passive limit that rests, priced away from the mid so it is
 //                    never immediately aggressive
 //   •  8% IOC      — aggressive immediate-or-cancel that crosses and may sweep
 //                    multiple levels; unfilled remainder is cancelled (does not rest)
@@ -22,10 +22,16 @@
 // (P50/P90/P99/P99.9/P99.99/max). Only the engine operation is timed — RNG draws
 // and resting-pool bookkeeping happen outside the timed region.
 //
-// The event mix is net-draining (cancel > new), so the book runs THIN and a
-// share of cancels/IOCs find little or no liquidity. That is faithful to the
-// requested mix; the realized fill / no-op / mean-depth numbers are reported so
-// the regime is explicit rather than hidden.
+// The mix is net-BUILDING (cancel < new) by construction. An earlier revision
+// used the venue tape's 65/25 directly; because you cannot cancel more orders
+// than you create, the book drained to empty within a few hundred events and
+// the run measured an empty book — mean depth 0.6, ~2 of 3 cancels no-op'ing,
+// realized mix collapsed to 42.6/42.6. Latencies gathered in that regime say
+// nothing about a venue: an empty book has no price levels to miss on and no
+// resting orders to look up. Cancel is now held just below new so depth builds
+// and the price map is actually exercised. Realized mix, no-op counts, IOC fill
+// rate and mean depth are all reported — if depth ever collapses toward 0 the
+// numbers below are meaningless and the mix is the first thing to check.
 //
 // instructions/order: NOT measurable on macOS/Apple Silicon (no perf, no HW
 // counters). Run the printed perf command on the x86 CI box for that metric.
@@ -48,9 +54,23 @@ using bench::BenchLatencyRecorder;
 
 namespace {
 
-// Event mix (cumulative thresholds on a U[0,1) draw): 65% / 25% / 8% / 2%.
-constexpr double kCancelCum = 0.65;
-constexpr double kNewCum    = 0.90;  // 0.65..0.90 -> 25% new
+// Event mix (cumulative thresholds on a U[0,1) draw): 44% / 46% / 8% / 2%.
+//
+// A real venue's tape is ~65% cancel / 25% new, but that ratio cannot be
+// replayed directly: you cannot cancel more orders than you create. At 65/25
+// the resting pool drained within a few hundred events and never refilled —
+// ~2 of every 3 cancels no-op'd against an empty book, the realized mix
+// collapsed to 42.6/42.6, and mean depth sat at 0.6 orders. The run measured
+// an empty book wearing venue-shaped labels.
+//
+// So cancel is held just below new. IOC fills also retire resting orders
+// (~1 per IOC at these Pareto sizes); the balance is closed by cancels that
+// land on ids an IOC already consumed, which pop the tracking pool without
+// retiring a live order. Net: the book fills and keeps growing across the run.
+// Do NOT "restore" 65/25 — it re-empties the book. Check the reported mean
+// resting depth after any change here.
+constexpr double kCancelCum = 0.44;
+constexpr double kNewCum    = 0.90;  // 0.44..0.90 -> 46% new
 constexpr double kIocCum    = 0.98;  // 0.90..0.98 -> 8% IOC; remainder -> 2% modify
 
 constexpr Price     kStartMid    = 100000;  // mid in ticks
@@ -110,7 +130,7 @@ int main(int argc, char* argv[]) {
     BenchLatencyRecorder recCancel, recNew, recIoc, recModify, recAll;
     uint64_t nCancel = 0, nNew = 0, nIoc = 0, nModify = 0;
     uint64_t noopCancel = 0, noopModify = 0, iocFilled = 0;
-    uint64_t depthSum = 0, depthSamples = 0;
+    uint64_t depthSum = 0, poolSum = 0, depthSamples = 0;
 
     OrderId  nextId = 1;
     Price    mid = kStartMid;
@@ -119,7 +139,10 @@ int main(int argc, char* argv[]) {
         const bool warm = i >= warmup;
         mid += walk(rng);
         if (mid < kMidFloor) mid = kMidFloor;
-        if (warm) { depthSum += resting.size(); ++depthSamples; }
+        // True live depth is the pool the book actually holds. `resting` is only
+        // our tracking superset — it never shrinks when an IOC consumes an order,
+        // so reporting its size would overstate depth. Both are printed below.
+        if (warm) { depthSum += book.poolInUse(); poolSum += resting.size(); ++depthSamples; }
 
         const double r = u01(rng);
 
@@ -205,7 +228,9 @@ int main(int argc, char* argv[]) {
     std::printf("Configuration:\n");
     std::printf("  Events:            %zu (warmup %zu, seed %llu)\n",
                 events, warmup, (unsigned long long)seed);
-    std::printf("  Target mix:        65%% cancel / 25%% new / 8%% IOC / 2%% modify\n");
+    std::printf("  Target mix:        44%% cancel / 46%% new / 8%% IOC / 2%% modify\n");
+    std::printf("                     (cancel held below new so the book sustains;\n");
+    std::printf("                      a venue tape reads ~65/25 but cannot be replayed)\n");
     std::printf("  Order sizes:       Pareto(alpha=%.2f), clamp %llu\n",
                 kParetoAlpha, (unsigned long long)kMaxQty);
     std::printf("  Mid random walk:   +/-%d ticks/event from %lld\n",
@@ -222,8 +247,9 @@ int main(int argc, char* argv[]) {
                 nIoc ? 100.0 * (double)iocFilled / (double)nIoc : 0.0);
     std::printf("  Modify:  %8llu (%.1f%%)   [no-op empty-book: %llu]\n",
                 (unsigned long long)nModify, pct(nModify), (unsigned long long)noopModify);
-    std::printf("  Mean resting depth: %.1f orders\n",
-                depthSamples ? (double)depthSum / (double)depthSamples : 0.0);
+    std::printf("  Mean resting depth: %.1f orders (tracked-id pool: %.1f)\n",
+                depthSamples ? (double)depthSum / (double)depthSamples : 0.0,
+                depthSamples ? (double)poolSum  / (double)depthSamples : 0.0);
 
     std::printf("\n── Latency: CANCEL ──\n");   recCancel.printTable("cancel");
     std::printf("\n── Latency: NEW ──\n");      recNew.printTable("new");

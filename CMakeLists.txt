@@ -38,16 +38,31 @@ endif()
 if(CMAKE_BUILD_TYPE MATCHES "Release")
     message(STATUS "Enabling HFT Optimizations: -O3 -march=native -mtune=native")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -Wall -Wextra -Werror")
-    # -Wcharacter-conversion only exists in newer Clang (Apple clang has it;
-    # clang-18 in the chaos Docker image does not, and rejects the unknown
-    # flag as an error under -Werror — this silently killed the chaos image
-    # build for weeks). Demote it only where the compiler knows the warning;
-    # where it doesn't, the warning can't fire so no demotion is needed.
+    # Warnings that depend on the HOST (compiler version or CPU) rather than on
+    # our code must not be fatal: -march=native means the same source produces
+    # different diagnostics on different machines, so -Werror turns any of these
+    # into a build that fails only on some runners.
+    #   character-conversion         only exists in newer Clang (Apple clang has
+    #                                it; clang-18 in the chaos image does not,
+    #                                and rejects the unknown flag as an error
+    #                                under -Werror — this silently killed the
+    #                                chaos image build for weeks).
+    #   invalid-feature-combination  -march=native on an AVX10.1-capable runner
+    #                                expands to +avx10.1-256, which Clang warns
+    #                                it will promote to -512. GitHub's runner
+    #                                pool is heterogeneous, so this failed the
+    #                                chaos build only on the days it happened to
+    #                                land on newer Intel silicon.
+    # Each is demoted only where the compiler knows the warning; where it
+    # doesn't, the warning can't fire so no demotion is needed.
     include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-Wno-error=character-conversion" HAS_WNO_ERROR_CHARACTER_CONVERSION)
-    if(HAS_WNO_ERROR_CHARACTER_CONVERSION)
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wno-error=character-conversion")
-    endif()
+    foreach(_host_warn character-conversion invalid-feature-combination)
+        string(MAKE_C_IDENTIFIER "HAS_WNO_ERROR_${_host_warn}" _host_warn_var)
+        check_cxx_compiler_flag("-Wno-error=${_host_warn}" ${_host_warn_var})
+        if(${_host_warn_var})
+            set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wno-error=${_host_warn}")
+        endif()
+    endforeach()
     
     if(ENABLE_LTO)
         # Link Time Optimization (LTO)

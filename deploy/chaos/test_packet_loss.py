@@ -24,10 +24,24 @@ replies this test observes through, not just the replication link.
 So a sample can be lost because the *instrument* got dropped while
 the replication link is perfectly healthy. Those samples are counted
 as `unreachable` and excluded from the flap statistic; only a
-successful reply reporting peerAlive != true is a real flap.
-Counting instrument loss as protocol failure is what made this test
-fail intermittently in CI. The observation floor below stops that
-exclusion from turning into a vacuous pass when a node is truly down.
+successful reply reporting peerAlive != true is a real flap. In
+practice the admin channel has held up (run 30751470960 saw 0
+unreachable of 16), so this is a guard against a miscount, not a
+correction for one we have observed.
+
+MEASURED, and worth acting on: at 30% loss the flap rate is ~37%
+(6/16, run 30751470960) and was 60% (3/5) in the 2026-08-02 failure.
+The ~2.7% above is the design estimate; the gap between it and 37% is
+exactly the heartbeat-tuning signal described below, and it has not
+been chased down. The suite is green because 37% is a minority of
+samples and this test's contract is "not sustained degradation" — do
+not read that green as the protocol matching its design margin.
+
+Sampling is ~1.3/s, not the 10/s the 100ms sleep suggests: each
+iteration makes four sequential admin round-trips. That is why the
+window is seconds long rather than milliseconds — the flap ceiling is
+a fraction of the sample count, so too few samples made the effective
+ceiling both tighter than intended and statistically meaningless.
 """
 from __future__ import annotations
 

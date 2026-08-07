@@ -149,6 +149,13 @@ def _run(seed, cfg, with_hft, per_maker=False):
                              for i in mm_ids]
         out["maker_latencies"] = [float(x) for x in lats]
         out["n_makers"] = welfare["n_makers"]
+        # The two legs of §4.7's mechanism, summed across makers. `mm_pnl` is a
+        # mark-to-market figure while these are realized edge at fill time, so
+        # they do not sum to it; the gap is inventory carry and is reported as an
+        # explicit residual rather than absorbed into either leg
+        # (exp7c_leg_decomposition.py).
+        out["mm_noise_edge"] = float(sum(mk.noise_edge for mk in makers))
+        out["mm_adverse_edge"] = float(sum(mk.adverse_edge for mk in makers))
         # Denominator §4.6 uses for rent-in-bp: traded notional summed as
         # tick_volume * mid over every snapshot (not trade-tape volume).
         out["total_notional"] = float(

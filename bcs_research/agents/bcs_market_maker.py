@@ -57,6 +57,10 @@ class BCSMarketMaker:
         self.inventory = 0
         self.cash = 0.0
         self.fills = 0
+        # Realized edge vs the fundamental, split by the adverse test in
+        # `on_fill`: the revenue and sniping legs of §4.7's mechanism.
+        self.noise_edge = 0.0
+        self.adverse_edge = 0.0
         self.pickoffs = 0
         self.max_half_spread_seen = float(base_half_spread)
         self.min_quote_qty_seen = int(quote_qty)
@@ -138,6 +142,21 @@ class BCSMarketMaker:
             adverse = (trade.price - true_v) > self.adverse_threshold_ticks
         else:
             adverse = (true_v - trade.price) > self.adverse_threshold_ticks
+        # Instrumentation only — nothing below branches on these two fields, so
+        # adding them cannot move a result (pinned by the exp7 nesting probe).
+        # Edge against the fundamental at fill time, signed so positive means the
+        # maker captured value, partitioned by the SAME `adverse` test that
+        # drives the widening. The shared discriminator is the point: §4.7's
+        # inversion is a race between what the maker earns from non-adverse
+        # (noise) flow and what it loses to adverse (picked-off) flow, so
+        # measuring the legs with the mechanism's own test reports the mechanism
+        # rather than re-describing the PnL.
+        edge = ((true_v - trade.price) if is_buyer else (trade.price - true_v)) \
+            * trade.quantity / be.PRICE_PRECISION
+        if adverse:
+            self.adverse_edge += edge
+        else:
+            self.noise_edge += edge
         if not adverse:
             return
         self.pickoffs += 1

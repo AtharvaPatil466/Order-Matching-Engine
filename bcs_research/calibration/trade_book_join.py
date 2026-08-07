@@ -162,7 +162,7 @@ def _load_hour(book_path: Path):
     return book, {"ts": ts[k], "size": sz[k], "buyer_maker": bm[k]}
 
 
-def _q(x, qs=(10, 50, 90, 99)):
+def _q(x, qs=(10, 25, 50, 75, 90, 99)):
     a = np.asarray(x, dtype=float)
     if a.size == 0:
         return {f"p{q}": 0.0 for q in qs} | {"n": 0}

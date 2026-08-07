@@ -17,11 +17,18 @@ from scheduler import Action
 
 class NoiseTrader:
     def __init__(self, participant_id, lambda_per_tick=0.15, qty=10,
-                 latency_us=0, seed=0, size_sigma_ln=None):
+                 latency_us=0, seed=0, size_sigma_ln=None,
+                 base_half_spread=None, spread_elasticity=0.0):
         self.participant_id = int(participant_id)
         self.lambda_per_tick = float(lambda_per_tick)
         self.qty = int(qty)
         self.latency_us = int(latency_us)
+        # Spread-elastic demand (paper §4.9). alpha = 0 is the pre-registered
+        # inelastic path and short-circuits before the book is read, so the RNG
+        # stream stays bit-identical and every stored result reproduces.
+        self.spread_elasticity = float(spread_elasticity or 0.0)
+        self.base_half_spread = (None if base_half_spread is None
+                                 else float(base_half_spread))
         # Heavy-tailed sizes for calibrated runs (paper §3.7): lognormal with
         # median `qty`, shape fitted to real p50/p99 (calibration/fit.py).
         # None (default) keeps the constant-size path AND the RNG stream
@@ -43,8 +50,32 @@ class NoiseTrader:
         self._oid += 1
         return self._oid
 
+    def _effective_lambda(self, market):
+        """Crossing probability, optionally decreasing in the quoted spread.
+
+            lambda_eff = lambda_per_tick * (base_half_spread / half) ** alpha
+
+        `half` is read off the BOOK rather than from the maker's internal state:
+        demand responds to the spread it is actually quoted, and a taker cannot
+        see a maker's target. With one maker the two coincide, since HFTs take
+        with IOC orders and never rest at the touch.
+
+        alpha = 0 returns before the book is read, so the inelastic path keeps
+        its exact float value and its RNG stream. A one-sided or crossed book
+        has no well-defined spread; those ticks fall back to the base rate
+        rather than being dropped, which would confound elasticity with the
+        liquidity gaps the maker's thinning already produces.
+        """
+        if not self.spread_elasticity or self.base_half_spread is None:
+            return self.lambda_per_tick
+        bid, ask = market.best_bid(), market.best_ask()
+        if bid <= 0 or ask <= 0 or ask <= bid:
+            return self.lambda_per_tick
+        half = (ask - bid) / 2.0
+        return self.lambda_per_tick * (self.base_half_spread / half) ** self.spread_elasticity
+
     def act(self, t, market, fundamental):
-        if self._rng.random() > self.lambda_per_tick:
+        if self._rng.random() > self._effective_lambda(market):
             return []
         buy = self._rng.random() < 0.5
         best_bid, best_ask = market.best_bid(), market.best_ask()

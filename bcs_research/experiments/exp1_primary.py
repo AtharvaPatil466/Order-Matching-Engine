@@ -104,7 +104,9 @@ def _run(seed, cfg, with_hft, per_maker=False):
               for i in range(len(lats))]
     noise = [NoiseTrader(100 + i, lambda_per_tick=cfg["lambda_per_tick"],
                          qty=cfg["noise_qty"], seed=seed * 1000 + i,
-                         size_sigma_ln=cfg.get("size_sigma_ln"))
+                         size_sigma_ln=cfg.get("size_sigma_ln"),
+                         base_half_spread=cfg["base_half_spread"],
+                         spread_elasticity=cfg.get("spread_elasticity", 0.0))
              for i in range(cfg["n_noise"])]
     hfts = []
     if with_hft:

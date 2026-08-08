@@ -102,6 +102,20 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 > 
 > These are **per-order processing latencies** on the matching thread. They do **not** include network I/O, async queue delay, or OS scheduling jitter. See [BENCHMARKS.md](./BENCHMARKS.md) for full methodology and caveats.
 
+### Two benchmarks, two workload regimes
+
+Two benchmarks characterize the engine, and they are complementary rather than competing:
+
+| Benchmark | Workload | P50 | P99 | Ratio |
+| :--- | :--- | ---: | ---: | ---: |
+| **HonestBenchmark** | 50K orders, seed=42, ~100% fill — dense resting book, predictable clustering | **237 ns** (PGO) | 910 ns | 3.8× |
+| **RealisticFlowBenchmark** | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify, mean resting depth 2,418 | **208 ns** combined | 750 ns | 3.6× |
+
+`HonestBenchmark` is the controlled reproducible baseline — the floor on matching latency under favourable conditions, and the flow every three-path figure below is measured on. `RealisticFlowBenchmark` models venue-shaped flow against a sustaining resting book, with no empty-book cancels (0 of 217,256); its cancel P50 falls below ARM timer resolution (~42 ns), and x86 TSC resolves it. It was rewritten from a prior version whose cancel fraction exceeded its new-order fraction, draining the resting pool to empty and measuring an empty book at venue-shaped labels.
+
+> [!NOTE]
+> Neither benchmark represents a **cancel-heavy sparse-book regime** (cancel-to-trade ratios north of 20:1, price levels churn, book depth near zero). That regime stresses `FlatPriceMap` traversal over sparse slots, cancel-path hash lookups on recently-consumed IDs, and object pool churn. It is the planned next workload addition. See [BENCHMARKS.md](./BENCHMARKS.md).
+
 ### Three-Path Latency (identical order flow, x86 AWS c6in.metal)
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |

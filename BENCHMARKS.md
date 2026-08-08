@@ -20,6 +20,34 @@
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
 | **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |
 
+## The two benchmarks
+
+Two benchmarks characterize the engine under different workload regimes. They
+are complementary, not competing: one establishes a floor under favourable
+conditions, the other measures a sustained venue-shaped book.
+
+**`HonestBenchmark`** (seed=42, 50K orders, ~100% fill rate) is the controlled
+reproducible baseline. It measures the best-case hot path — a dense resting
+book, predictable price clustering, near-certain fill on every new order.
+**P50 237 ns (PGO), P99 910 ns, ratio 3.8×.** This is the floor on matching
+latency under favourable conditions, and it is the flow every figure in the
+Results section below is measured on.
+
+**`RealisticFlowBenchmark`** (500K events, 44% cancel / 46% new / 8% IOC / 2%
+modify, mean resting depth 2,418 orders) models venue-shaped order flow with a
+sustaining resting book. No empty-book cancels (0 of 217,256). **P50 208 ns
+combined, P99 750 ns, ratio 3.6×.** The cancel P50 is below ARM timer
+resolution (~42 ns); x86 TSC resolves it. This benchmark was rewritten from a
+prior version that had a structural defect — the cancel fraction exceeded the
+new-order fraction, draining the resting pool to empty and measuring an empty
+book at venue-shaped labels.
+
+Neither benchmark represents a cancel-heavy sparse-book regime (cancel-to-trade
+ratios north of 20:1, price levels churn, book depth near zero). That regime
+stresses `FlatPriceMap` traversal over sparse slots, cancel-path hash lookups on
+recently-consumed IDs, and object pool churn. It is the planned next workload
+addition.
+
 ## Methodology
 
 All three paths process the **identical** deterministic order stream:
@@ -59,8 +87,27 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 > 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO)
 > Release build.
 
-`perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8 branch-misses/order ·
-152 L1-dcache-misses/order · 12,638 instructions/order.
+`perf` (Path A, 50K orders seed=42):
+
+| Counter | Per-order mean |
+|---|---:|
+| IPC | 1.34 |
+| Branch-misses / order | 17.8 |
+| L1-dcache-misses / order | 152 |
+| Instructions / order | 12,638 |
+
+These figures are measured across the full benchmark harness — including loop
+overhead, timer calls, and the order-flow generator — and reflect per-order
+means across all 50,000 orders. They are not P50 measurements. The apparent
+contradiction with the 261 ns P50 resolves as follows: the P50 captures the
+common case of a single-level match with predictable cache state, while the
+per-order mean instruction count and miss rate include the tail of multi-level
+sweep events. Those events are infrequent but expensive — each touching
+additional `FlatPriceMap` slots and `IntrusiveList` nodes — and pull the mean
+above what the P50 alone implies. The statement that "the P50 is structurally
+bound by L1 misses and branch mispredicts" refers to the miss and mispredict
+patterns observed across the distribution, not to the P50 order specifically.
+
 The 261 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
 branch mispredicts + Spectre eIBRS), not instruction-bound. This cycle's
 branchless price-cross shaved 10 ns P50 / 62 ns P99 (see Optimization History

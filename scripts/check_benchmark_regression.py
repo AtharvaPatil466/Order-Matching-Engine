@@ -62,6 +62,20 @@ DEFAULT_GATES = {
 # iterations x orders, so checking count catches a divergence in either.
 WORKLOAD_KEYS = ("seed", "iterations", "mode", "count")
 
+# Each benchmark process calibrates the timestamp counter against wall time over
+# a single 100 ms sleep, and the resulting ratio multiplies every latency it
+# reports. Head and base are separate processes, so they carry two independent
+# calibrations: a 3% error in one is indistinguishable from a 3% code regression
+# and is enough on its own to move p50 a third of the way to its limit. min-of-N
+# cannot cancel it, because it is a per-process systematic multiplier rather
+# than per-sample noise.
+#
+# Both sides run on one runner within seconds of each other, so their
+# calibrations should agree closely. 1% is loose enough not to flake on a
+# frequency-scaling shared runner, and tight enough that a drift large enough to
+# masquerade as a code change is refused instead of reported as one.
+TSC_TOLERANCE = 0.01
+
 
 def read_metric(paths: list[str], metric: str) -> float:
     """Return the minimum `latency_ns.<metric>` across `paths`.
@@ -125,6 +139,39 @@ def read_workload(paths: list[str], side: str) -> dict:
     return dict(zip(WORKLOAD_KEYS, next(iter(seen))))
 
 
+def read_tsc_ratio(paths: list[str], side: str) -> float:
+    """Return the mean `tsc_ns_ratio` across `paths`.
+
+    A missing, null, or non-finite calibration is refused outright rather than
+    skipped. The field scales every latency in its file, so a run that did not
+    record it did not write a complete result — treating that as "no check to
+    make" is the same silent pass as letting a NaN through the latency guard.
+    """
+    ratios = []
+    for path in paths:
+        try:
+            with open(path) as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"{path}: cannot read benchmark JSON ({exc})")
+        if data.get("tsc_ns_ratio") is None:
+            raise ValueError(f"{path}: tsc_ns_ratio is missing or null. The "
+                             "benchmark did not write a complete result, so "
+                             "every latency in this file is unverifiable.")
+        try:
+            ratio = float(data["tsc_ns_ratio"])
+        except (TypeError, ValueError):
+            raise ValueError(f"{path}: tsc_ns_ratio is not numeric "
+                             f"({data['tsc_ns_ratio']!r}).")
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError(f"{path}: tsc_ns_ratio is {ratio}; expected a "
+                             "finite value > 0.")
+        ratios.append(ratio)
+    if not ratios:
+        raise SystemExit(f"no benchmark runs supplied for {side}")
+    return sum(ratios) / len(ratios)
+
+
 def compare(base_paths: list[str], head_paths: list[str],
             gates: dict[str, float] | None = None) -> int:
     """Print a per-metric comparison. Return 0 if all pass, 1 if any regressed."""
@@ -138,6 +185,14 @@ def compare(base_paths: list[str], head_paths: list[str],
     if base_params != head_params:
         raise ValueError(f"Workload mismatch: base ran {base_params}, "
                          f"head ran {head_params}. Comparison is meaningless.")
+
+    # ...and that both sides converted cycles to nanoseconds with the same
+    # constant, since that constant multiplies every number compared below.
+    base_ratio = read_tsc_ratio(base_paths, "base")
+    head_ratio = read_tsc_ratio(head_paths, "head")
+    if abs(head_ratio - base_ratio) / base_ratio > TSC_TOLERANCE:
+        raise ValueError(f"TSC calibration drift too large: base={base_ratio}, "
+                         f"head={head_ratio}. Rerun.")
 
     regressed = []
     for metric, threshold_pct in gates.items():
@@ -161,12 +216,16 @@ def selftest() -> int:
     import os
     import tempfile
 
-    def write(p99: float, p50: float = 100.0, **workload) -> str:
-        """A benchmark JSON. Defaults describe one consistent workload; pass any
-        of WORKLOAD_KEYS as a kwarg to make this run disagree with the others."""
+    def write(p99: float, p50: float = 100.0, drop: tuple = (), **fields) -> str:
+        """A benchmark JSON. Defaults describe one consistent, calibrated run;
+        pass any top-level field as a kwarg to make this run disagree with the
+        others, or name it in `drop` to omit it entirely."""
         fd, path = tempfile.mkstemp(suffix=".json")
-        doc = {"seed": 42, "iterations": 20, "mode": "full", "count": 100000}
-        doc.update(workload)
+        doc = {"seed": 42, "iterations": 20, "mode": "full", "count": 100000,
+               "tsc_ns_ratio": 0.3125}
+        doc.update(fields)
+        for key in drop:
+            doc.pop(key, None)
         doc["latency_ns"] = {"p50": p50, "p99": p99}
         with os.fdopen(fd, "w") as handle:
             json.dump(doc, handle)
@@ -238,7 +297,34 @@ def selftest() -> int:
         else:
             raise AssertionError(f"inconsistent {side} runs should have raised")
 
-    # A matching workload still compares normally; the new check must not have
+    # The TSC calibration scales every latency in its file, so an absent or
+    # unusable one is refused rather than skipped — a run that did not record it
+    # did not write a complete result, and "no field, no check" is the same
+    # silent pass as the NaN bypass above.
+    for broken, label in ((dict(drop=("tsc_ns_ratio",)), "missing"),
+                          (dict(tsc_ns_ratio=None), "null"),
+                          (dict(tsc_ns_ratio=nan), "NaN"),
+                          (dict(tsc_ns_ratio=inf), "inf"),
+                          (dict(tsc_ns_ratio=0.0), "zero"),
+                          (dict(tsc_ns_ratio="fast"), "non-numeric")):
+        try:
+            compare([base], [write(100.0, **broken)], only99)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{label} tsc_ns_ratio should have raised")
+
+    # Two sides calibrated to measurably different clocks are not comparable;
+    # a drift inside the tolerance still is.
+    assert compare([base], [write(100.0, tsc_ns_ratio=0.3125 * 1.005)], only99) == 0
+    try:
+        compare([base], [write(100.0, tsc_ns_ratio=0.3125 * 1.02)], only99)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("2% TSC drift should have raised")
+
+    # A matching workload still compares normally; the new checks must not have
     # made every comparison fail.
     assert compare([base], [write(109.0)], only99) == 0
 

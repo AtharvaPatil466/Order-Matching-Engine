@@ -18,6 +18,32 @@
 # The gate is BLOCKING. If it cannot make a comparison it fails. Do not add
 # continue-on-error, and do not make a missing measurement pass — a gate that
 # cannot fail is the bug this workflow was rewritten to fix.
+#
+# Override path
+# -------------
+# One failure mode is nobody's fault: the merge base itself does not build. It
+# predates the benchmark target, carries a transient Release -Werror break that
+# was fixed in a later commit, or hits a -march=native combination the runner
+# rejects. The job prints
+#
+#     BASE_BUILD_FAILED: merge base SHA=<sha> failed to configure or build
+#
+# and exits non-zero. Grep for that string to tell it apart from an ordinary
+# head build failure, which otherwise looks identical in the log.
+#
+# There is deliberately no in-workflow bypass — no label, no skip input, no
+# continue-on-error. Every bypass this gate has had became its permanent state.
+# The override is external and leaves a record:
+#
+#   1. Rebase the PR onto a newer base. This is the right fix nearly always:
+#      it moves the merge base to a commit that builds, and costs one push.
+#   2. Failing that, an admin merges via branch-protection bypass
+#      (Settings > Branches > "Do not allow bypassing" unchecked), stating the
+#      BASE_BUILD_FAILED SHA in the PR description.
+#
+# Do not resolve this by making the base build non-fatal. A base that cannot be
+# built produces no baseline, and a comparison against no baseline is the exact
+# no-op described above.
 
 name: Benchmark Regression Gate
 
@@ -129,14 +155,18 @@ jobs:
 
       - name: Benchmark PR head and merge base
         if: steps.changes.outputs.relevant == 'true'
+        env:
+          # Passed via env rather than inline ${{ }}: keeps a value produced
+          # outside this step out of the shell text itself.
+          BASE_SHA: ${{ steps.changes.outputs.base_sha }}
         run: |
           set -euo pipefail
 
           mkdir -p results
 
-          # $1 = source tree, $2 = label. Identical flags and identical order
-          # flow on both sides; the only difference is the code under test.
-          bench() {
+          # $1 = source tree. Identical flags on both sides; the only difference
+          # is the code under test.
+          configure() {
             cmake -S "$1" -B "$1/build" \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_CXX_COMPILER=g++-13 \
@@ -144,20 +174,53 @@ jobs:
               -DBUILD_BENCHMARKS=ON \
               -DBUILD_TOOLS=OFF \
               -DENABLE_LTO=OFF
-            cmake --build "$1/build" --target DeterministicBenchmark -j"$(nproc)"
-            # Five runs; the comparator takes the minimum of each side to shed
-            # co-tenant scheduler noise. Each run is well under a second.
-            for run in 1 2 3 4 5; do
-              "$1/build/benchmarks/DeterministicBenchmark" \
-                --seed 42 --iterations 20 --orders 5000 \
-                --output "results/$2-${run}.json"
-            done
           }
 
-          # Head first, so a PR that does not build fails before spending time
-          # on the base tree.
-          bench "${GITHUB_WORKSPACE}" head
-          bench /tmp/base base
+          # $1 = source tree, $2 = label, $3 = run index. Well under a second.
+          run_once() {
+            "$1/build/benchmarks/DeterministicBenchmark" \
+              --seed 42 --iterations 20 --orders 5000 \
+              --output "results/$2-$3.json"
+          }
+
+          # Head builds EVERY benchmark target, not just the one this gate
+          # measures. No other workflow compiles Ubuntu Release — ci.yml is
+          # macOS Release plus Ubuntu Debug/ASan/UBSan and Ubuntu TSan Debug —
+          # so a g++-13 -O3-only diagnostic (-Wmaybe-uninitialized,
+          # -Warray-bounds, neither of which Apple clang emits) in any of the
+          # other nine benchmarks would otherwise merge green under -Werror and
+          # break the first person to run a full Release build on Linux.
+          #
+          # Head also goes first, so a PR that does not compile fails before the
+          # job spends anything on the base tree.
+          configure "${GITHUB_WORKSPACE}"
+          cmake --build "${GITHUB_WORKSPACE}/build" -j"$(nproc)"
+
+          # The base tree only needs the one binary this gate runs. Building its
+          # other targets would double the compile budget to re-warn about code
+          # that is already merged and is not what this PR is being judged on.
+          if ! { configure /tmp/base \
+                 && cmake --build /tmp/base/build \
+                      --target DeterministicBenchmark -j"$(nproc)"; }; then
+            echo "BASE_BUILD_FAILED: merge base SHA=${BASE_SHA} failed to configure or build"
+            echo "The PR head built successfully. This is the historical tree at"
+            echo "the merge base failing on its own — the PR is not the cause."
+            echo "See 'Override path' in this workflow file's header comment."
+            exit 1
+          fi
+
+          # Interleaved, not all-of-head-then-all-of-base. min-of-N sheds
+          # independent noise spikes but not drift correlated with position in
+          # the sequence: thermal throttling, turbo decay, or a co-tenant
+          # workload arriving mid-job. Running one side to completion first
+          # turns any such trend into a systematic bias between the sides —
+          # masking a real regression, or failing byte-identical code, depending
+          # which way it leans. Pairing each head run with a base run cancels
+          # the linear component.
+          for run in 1 2 3 4 5; do
+            run_once "${GITHUB_WORKSPACE}" head "${run}"
+            run_once /tmp/base base "${run}"
+          done
 
           # Both sides must have produced exactly five files. The binary now
           # exits non-zero if it cannot write its JSON, but assert the count

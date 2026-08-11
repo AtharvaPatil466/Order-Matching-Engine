@@ -83,6 +83,18 @@ jobs:
     # are <1s each; the budget is almost entirely compilation.
     timeout-minutes: 45
 
+    env:
+      # min-of-N sample count, used by the run loop and by the completeness
+      # assertion after it. This number is COUPLED to DEFAULT_GATES in
+      # scripts/check_benchmark_regression.py: those thresholds were measured as
+      # the worst false delta between disjoint min-of-5 groups of one unchanged
+      # binary (p50 +0.0%, p99 +18.5%, hence limits of 10% and 25%). Lowering
+      # this raises that noise floor — at min-of-3 the p99 floor plausibly
+      # exceeds its own 25% limit and the gate starts failing byte-identical
+      # builds, which is precisely how the previous gate ended up switched off.
+      # Change this and the thresholds together, after re-measuring, or neither.
+      BENCH_RUNS: 5
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -217,26 +229,26 @@ jobs:
           # masking a real regression, or failing byte-identical code, depending
           # which way it leans. Pairing each head run with a base run cancels
           # the linear component.
-          for run in 1 2 3 4 5; do
+          for run in $(seq 1 "${BENCH_RUNS}"); do
             run_once "${GITHUB_WORKSPACE}" head "${run}"
             run_once /tmp/base base "${run}"
           done
 
-          # Both sides must have produced exactly five files. The binary now
-          # exits non-zero if it cannot write its JSON, but assert the count
+          # Both sides must have produced exactly BENCH_RUNS files. The binary
+          # now exits non-zero if it cannot write its JSON, but assert the count
           # anyway: a partial run that dropped two files on one side would
           # otherwise silently shrink the set that side's minimum is taken over,
           # biasing it slower with no warning anywhere in the log.
           for side in head base; do
             found=$(find results -maxdepth 1 -name "${side}-*.json" | wc -l)
-            if [ "${found}" -ne 5 ]; then
-              echo "Expected 5 ${side} result files, found ${found}."
+            if [ "${found}" -ne "${BENCH_RUNS}" ]; then
+              echo "Expected ${BENCH_RUNS} ${side} result files, found ${found}."
               echo "A benchmark run failed to write its JSON; the comparison" \
                    "would be taken over an incomplete sample set."
               exit 1
             fi
           done
-          echo "Result files: 5 head, 5 base."
+          echo "Result files: ${BENCH_RUNS} head, ${BENCH_RUNS} base."
 
       - name: Compare head against merge base
         if: steps.changes.outputs.relevant == 'true'

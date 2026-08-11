@@ -42,6 +42,14 @@ import sys
 # Do NOT tighten p99 toward p50's threshold without re-measuring. A gate that
 # fails on unchanged code gets switched off, which is how the previous version of
 # this gate ended up a no-op.
+#
+# CROSS-REFERENCE: these numbers are only valid for min-of-5. The sample count
+# lives in .github/workflows/benchmark-gate.yml as the job-level env var
+# BENCH_RUNS, which feeds both the run loop and the completeness assertion after
+# it. The two files have no way to check each other, so the coupling is stated
+# in both: reducing BENCH_RUNS raises the noise floor these thresholds were
+# measured against, and at min-of-3 the p99 floor plausibly exceeds its own 25%
+# limit. Re-measure before changing either, and change both together.
 DEFAULT_GATES = {
     "p50": 10.0,
     "p99": 25.0,
@@ -77,19 +85,35 @@ WORKLOAD_KEYS = ("seed", "iterations", "mode", "count")
 TSC_TOLERANCE = 0.01
 
 
-def read_metric(paths: list[str], metric: str) -> float:
-    """Return the minimum `latency_ns.<metric>` across `paths`.
+def load_runs(paths: list[str], side: str) -> list[tuple[str, dict]]:
+    """Parse every benchmark JSON on one side exactly once.
 
-    Any unreadable, malformed, or nonsensical input raises — a comparison that
-    cannot be made must fail the build, never silently pass.
+    compare() needs three different things out of these files — the workload
+    identity, the TSC calibration, and one minimum per gated metric. Asking each
+    question separately meant re-opening and re-parsing all ten files once per
+    question, and left the answers free to come from different reads of a file
+    that changed in between.
     """
-    values = []
+    runs = []
     for path in paths:
         try:
             with open(path) as handle:
-                data = json.load(handle)
+                runs.append((path, json.load(handle)))
         except (OSError, json.JSONDecodeError) as exc:
             raise SystemExit(f"{path}: cannot read benchmark JSON ({exc})")
+    if not runs:
+        raise SystemExit(f"no benchmark runs supplied for {side}")
+    return runs
+
+
+def min_metric(runs: list[tuple[str, dict]], metric: str) -> float:
+    """Return the minimum `latency_ns.<metric>` across already-parsed `runs`.
+
+    Any malformed or nonsensical value raises — a comparison that cannot be made
+    must fail the build, never silently pass.
+    """
+    values = []
+    for path, data in runs:
         try:
             value = float(data["latency_ns"][metric])
         except (KeyError, TypeError, ValueError) as exc:
@@ -103,13 +127,17 @@ def read_metric(paths: list[str], metric: str) -> float:
             raise SystemExit(f"{path}: latency_ns.{metric} is {value}; "
                              "expected a finite value > 0")
         values.append(value)
-    if not values:
-        raise SystemExit(f"no benchmark runs supplied for {metric}")
     return min(values)
 
 
-def read_workload(paths: list[str], side: str) -> dict:
-    """Return the workload parameters shared by every run in `paths`.
+def read_metric(paths: list[str], metric: str) -> float:
+    """Minimum `latency_ns.<metric>` across `paths`, for callers holding paths
+    rather than already-parsed runs."""
+    return min_metric(load_runs(paths, metric), metric)
+
+
+def workload_of(runs: list[tuple[str, dict]], side: str) -> dict:
+    """Return the workload parameters shared by every run on one side.
 
     Every run on one side must describe the same workload; runs that disagree
     are not repeats of one measurement and cannot be reduced to one minimum.
@@ -117,20 +145,13 @@ def read_workload(paths: list[str], side: str) -> dict:
     workload is the thing this check exists to refuse.
     """
     seen: dict[tuple, list[str]] = {}
-    for path in paths:
-        try:
-            with open(path) as handle:
-                data = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SystemExit(f"{path}: cannot read benchmark JSON ({exc})")
+    for path, data in runs:
         try:
             params = tuple(data[key] for key in WORKLOAD_KEYS)
         except (KeyError, TypeError) as exc:
             raise SystemExit(f"{path}: missing workload key {exc}; "
                              f"expected all of {', '.join(WORKLOAD_KEYS)}")
         seen.setdefault(params, []).append(path)
-    if not seen:
-        raise SystemExit(f"no benchmark runs supplied for {side}")
     if len(seen) > 1:
         detail = "; ".join(f"{dict(zip(WORKLOAD_KEYS, params))} in {', '.join(files)}"
                            for params, files in seen.items())
@@ -139,8 +160,8 @@ def read_workload(paths: list[str], side: str) -> dict:
     return dict(zip(WORKLOAD_KEYS, next(iter(seen))))
 
 
-def read_tsc_ratio(paths: list[str], side: str) -> float:
-    """Return the mean `tsc_ns_ratio` across `paths`.
+def tsc_ratio_of(runs: list[tuple[str, dict]], side: str) -> float:
+    """Return the mean `tsc_ns_ratio` across already-parsed `runs`.
 
     A missing, null, or non-finite calibration is refused outright rather than
     skipped. The field scales every latency in its file, so a run that did not
@@ -148,12 +169,7 @@ def read_tsc_ratio(paths: list[str], side: str) -> float:
     make" is the same silent pass as letting a NaN through the latency guard.
     """
     ratios = []
-    for path in paths:
-        try:
-            with open(path) as handle:
-                data = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SystemExit(f"{path}: cannot read benchmark JSON ({exc})")
+    for path, data in runs:
         if data.get("tsc_ns_ratio") is None:
             raise ValueError(f"{path}: tsc_ns_ratio is missing or null. The "
                              "benchmark did not write a complete result, so "
@@ -167,8 +183,6 @@ def read_tsc_ratio(paths: list[str], side: str) -> float:
             raise ValueError(f"{path}: tsc_ns_ratio is {ratio}; expected a "
                              "finite value > 0.")
         ratios.append(ratio)
-    if not ratios:
-        raise SystemExit(f"no benchmark runs supplied for {side}")
     return sum(ratios) / len(ratios)
 
 
@@ -177,27 +191,32 @@ def compare(base_paths: list[str], head_paths: list[str],
     """Print a per-metric comparison. Return 0 if all pass, 1 if any regressed."""
     gates = DEFAULT_GATES if gates is None else gates
 
+    # Parse each file once, up front. Every question below is answered from
+    # these two lists rather than by re-reading the files per question.
+    base_runs = load_runs(base_paths, "base")
+    head_runs = load_runs(head_paths, "head")
+
     # Establish that both sides ran the same benchmark before comparing any
     # numbers from them. A delta between two different workloads is not a
     # regression signal in either direction.
-    base_params = read_workload(base_paths, "base")
-    head_params = read_workload(head_paths, "head")
+    base_params = workload_of(base_runs, "base")
+    head_params = workload_of(head_runs, "head")
     if base_params != head_params:
         raise ValueError(f"Workload mismatch: base ran {base_params}, "
                          f"head ran {head_params}. Comparison is meaningless.")
 
     # ...and that both sides converted cycles to nanoseconds with the same
     # constant, since that constant multiplies every number compared below.
-    base_ratio = read_tsc_ratio(base_paths, "base")
-    head_ratio = read_tsc_ratio(head_paths, "head")
+    base_ratio = tsc_ratio_of(base_runs, "base")
+    head_ratio = tsc_ratio_of(head_runs, "head")
     if abs(head_ratio - base_ratio) / base_ratio > TSC_TOLERANCE:
         raise ValueError(f"TSC calibration drift too large: base={base_ratio}, "
                          f"head={head_ratio}. Rerun.")
 
     regressed = []
     for metric, threshold_pct in gates.items():
-        base = read_metric(base_paths, metric)
-        head = read_metric(head_paths, metric)
+        base = min_metric(base_runs, metric)
+        head = min_metric(head_runs, metric)
         delta_pct = ((head - base) / base) * 100.0
         verdict = "REGRESSED" if delta_pct > threshold_pct else "ok"
         print(f"{metric:>6}: base {base:9.1f} ns -> head {head:9.1f} ns "
@@ -213,24 +232,40 @@ def compare(base_paths: list[str], head_paths: list[str],
 
 
 def selftest() -> int:
+    """Run the built-in assertions. Every file this creates lives inside one
+    TemporaryDirectory and is removed on the way out, including when an
+    assertion fails — mkstemp left a dozen orphans in $TMPDIR per invocation,
+    which is invisible on a throwaway runner and cumulative for anyone
+    iterating on the comparator locally."""
     import os
     import tempfile
 
-    def write(p99: float, p50: float = 100.0, drop: tuple = (), **fields) -> str:
-        """A benchmark JSON. Defaults describe one consistent, calibrated run;
-        pass any top-level field as a kwarg to make this run disagree with the
-        others, or name it in `drop` to omit it entirely."""
-        fd, path = tempfile.mkstemp(suffix=".json")
-        doc = {"seed": 42, "iterations": 20, "mode": "full", "count": 100000,
-               "tsc_ns_ratio": 0.3125}
-        doc.update(fields)
-        for key in drop:
-            doc.pop(key, None)
-        doc["latency_ns"] = {"p50": p50, "p99": p99}
-        with os.fdopen(fd, "w") as handle:
-            json.dump(doc, handle)
-        return path
+    with tempfile.TemporaryDirectory(prefix="benchgate-selftest-") as tmpdir:
+        written: list[str] = []
 
+        def write(p99: float, p50: float = 100.0, drop: tuple = (),
+                  **fields) -> str:
+            """A benchmark JSON. Defaults describe one consistent, calibrated
+            run; pass any top-level field as a kwarg to make this run disagree
+            with the others, or name it in `drop` to omit it entirely."""
+            path = os.path.join(tmpdir, f"run-{len(written)}.json")
+            written.append(path)
+            doc = {"seed": 42, "iterations": 20, "mode": "full",
+                   "count": 100000, "tsc_ns_ratio": 0.3125}
+            doc.update(fields)
+            for key in drop:
+                doc.pop(key, None)
+            doc["latency_ns"] = {"p50": p50, "p99": p99}
+            with open(path, "w") as handle:
+                json.dump(doc, handle)
+            return path
+
+        return _assertions(write)
+
+
+def _assertions(write) -> int:
+    """The selftest body. Split out so the temp-directory scope above stays a
+    single `with`; `write` creates every file inside it."""
     base = write(100.0)
     only99 = {"p99": 10.0}
 

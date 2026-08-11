@@ -1,10 +1,23 @@
 # Benchmark Regression Gate — GitHub Actions
 #
-# Roadmap Phase 5, Week 19: CI Benchmark Gating
+# Builds and benchmarks BOTH the PR head and the PR's merge base on the SAME
+# runner in the SAME job, then fails if head is slower by more than the
+# per-metric threshold in scripts/check_benchmark_regression.py (P50 +10%,
+# P99 +25% — see that file for how those numbers were measured).
 #
-# Runs the deterministic benchmark on every PR and compares
-# P99 latency against a stored baseline. Fails if regression
-# exceeds 10%.
+# There is deliberately no stored baseline.json. The previous version of this
+# gate compared against `benchmarks/baseline.json`, a file that was never
+# committed and that nothing wrote — the missing-baseline branch just printed
+# "No baseline found" and passed, so the gate had never once compared anything.
+# A committed baseline would not have fixed it either: Release builds use
+# -march=native and GitHub's runner pool is heterogeneous, so a stored number is
+# measured on different silicon than the run it gates. Building both sides on one
+# runner removes the baseline file, the staleness, and the cross-machine variance
+# in one move.
+#
+# The gate is BLOCKING. If it cannot make a comparison it fails. Do not add
+# continue-on-error, and do not make a missing measurement pass — a gate that
+# cannot fail is the bug this workflow was rewritten to fix.
 
 name: Benchmark Regression Gate
 
@@ -16,6 +29,8 @@ on:
       - 'include/**'
       - 'benchmarks/**'
       - 'CMakeLists.txt'
+      - 'scripts/check_benchmark_regression.py'
+      - '.github/workflows/benchmark-gate.yml'
 
 concurrency:
   group: benchmark-${{ github.head_ref }}
@@ -24,84 +39,96 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # This job configures and builds CMake and C++ from the PR head — code the
+    # PR author controls executes here at configure time. It must not hold a
+    # writable token while doing that.
+    permissions:
+      contents: read
+    # Two Release builds of the benchmark target. The benchmark runs themselves
+    # are <1s each; the budget is almost entirely compilation.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the merge base is resolvable for the A/B build.
+          # fetch-depth: 0 populates every origin/* ref up front, so no later
+          # step needs the network — which is what lets the token be dropped
+          # from .git/config instead of left where a PR-authored CMakeLists.txt
+          # could read it at configure time.
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++-13
 
-      - name: Configure
+      - name: Verify the comparator itself
+        # The gate's own logic is the thing most likely to rot into a no-op
+        # again, so its assertions run before it is trusted to judge anything.
+        run: python3 scripts/check_benchmark_regression.py --selftest
+
+      - name: Benchmark PR head and merge base
         run: |
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER=g++-13 \
-            -DBUILD_TESTS=OFF \
-            -DBUILD_BENCHMARKS=ON \
-            -DBUILD_TOOLS=OFF \
-            -DENABLE_LTO=OFF
+          set -euo pipefail
 
-      - name: Build
-        run: cmake --build build -j$(nproc)
+          # No git fetch here: checkout ran with fetch-depth: 0, so
+          # origin/${GITHUB_BASE_REF} is already local. Keep it that way — the
+          # checkout step drops the token, so a fetch at this point would fail on
+          # a private repo rather than fall back to anything.
+          BASE_SHA=$(git merge-base HEAD "origin/${GITHUB_BASE_REF}")
+          echo "PR head:    $(git rev-parse HEAD)"
+          echo "merge base: ${BASE_SHA}"
+          git worktree add /tmp/base "${BASE_SHA}"
 
-      - name: Run Deterministic Benchmark
+          mkdir -p results
+
+          # $1 = source tree, $2 = label. Identical flags and identical order
+          # flow on both sides; the only difference is the code under test.
+          bench() {
+            cmake -S "$1" -B "$1/build" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_COMPILER=g++-13 \
+              -DBUILD_TESTS=OFF \
+              -DBUILD_BENCHMARKS=ON \
+              -DBUILD_TOOLS=OFF \
+              -DENABLE_LTO=OFF
+            cmake --build "$1/build" --target DeterministicBenchmark -j"$(nproc)"
+            # Five runs; the comparator takes the minimum of each side to shed
+            # co-tenant scheduler noise. Each run is well under a second.
+            for run in 1 2 3 4 5; do
+              "$1/build/benchmarks/DeterministicBenchmark" \
+                --seed 42 --iterations 20 --orders 5000 \
+                --output "results/$2-${run}.json"
+            done
+          }
+
+          # Head first, so a PR that does not build fails before spending time
+          # on the base tree.
+          bench "${GITHUB_WORKSPACE}" head
+          bench /tmp/base base
+
+      - name: Compare head against merge base
+        # Thresholds are per-metric and live in the script (p50 +10%, p99 +25%),
+        # derived from a measured noise floor. Do NOT add --threshold here: it
+        # overrides every metric with one value, which would either flake p99 or
+        # blunt p50.
         run: |
-          build/benchmarks/DeterministicBenchmark \
-            --seed 42 --iterations 20 --orders 5000 \
-            --output build/benchmark_current.json
+          python3 scripts/check_benchmark_regression.py \
+            --base results/base-*.json \
+            --head results/head-*.json
 
-      - name: Check for regression
-        run: |
-          # Extract P99 from current run
-          CURRENT_P99=$(python3 -c "
-          import json
-          with open('build/benchmark_current.json') as f:
-              data = json.load(f)
-          print(data['latency_ns']['p99'])
-          ")
-          
-          echo "Current P99: ${CURRENT_P99} ns"
-          
-          # Check against baseline (if exists)
-          if [ -f benchmarks/baseline.json ]; then
-            BASELINE_P99=$(python3 -c "
-          import json
-          with open('benchmarks/baseline.json') as f:
-              data = json.load(f)
-          print(data['latency_ns']['p99'])
-          ")
-            echo "Baseline P99: ${BASELINE_P99} ns"
-            
-            # Check for >10% regression
-            python3 -c "
-          import sys
-          current = float('${CURRENT_P99}')
-          baseline = float('${BASELINE_P99}')
-          regression_pct = ((current - baseline) / baseline) * 100
-          print(f'Regression: {regression_pct:.1f}%')
-          if regression_pct > 10.0:
-              print(f'❌ FAILED: P99 regression of {regression_pct:.1f}% exceeds 10% threshold')
-              sys.exit(1)
-          else:
-              print(f'✅ PASSED: P99 within acceptable range ({regression_pct:.1f}%)')
-          "
-          else
-            echo "No baseline found. Saving current run as baseline."
-          fi
-
-      - name: Save benchmark results
+      - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: build/benchmark_current.json
+          path: results/
 
       - name: Run Sustained Load Test (smoke)
         run: |
+          cmake --build build --target SustainedLoadTest -j"$(nproc)"
           build/benchmarks/SustainedLoadTest \
             --duration 5 --rate 100000 --threads 2 --symbols 4 \
             --p99-threshold 50000

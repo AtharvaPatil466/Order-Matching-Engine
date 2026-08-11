@@ -1,0 +1,19 @@
+# Code owners for the benchmark regression gate.
+#
+# The comparator and the workflow around it decide whether a performance
+# regression blocks a merge. A PR that edits either is editing the thing that
+# judges it — raising a threshold, deleting a guard, or turning an assertion
+# into a no-op all pass their own selftest, because the PR ships the assertions
+# too.
+#
+# Requiring review here is the anchor a PR cannot move. It is specifically what
+# covers the first PR on a branch whose merge base has no comparator to check
+# against; see the "Verify the comparator itself" step in benchmark-gate.yml,
+# which runs the merge base's copy whenever one exists for the same reason.
+#
+# Enforcement requires "Require review from Code Owners" on the branch
+# protection rule for main. Without that setting this file is advisory only.
+
+/scripts/check_benchmark_regression.py   @AtharvaPatil466
+/.github/workflows/benchmark-gate.yml    @AtharvaPatil466
+/.github/CODEOWNERS                      @AtharvaPatil466

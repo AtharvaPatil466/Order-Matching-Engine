@@ -47,6 +47,21 @@ DEFAULT_GATES = {
     "p99": 25.0,
 }
 
+# The workload identity of a run. Both sides must agree on all four, or the
+# comparison is between two different benchmarks and means nothing.
+#
+# This is not hypothetical bookkeeping. DeterministicBenchmark's argument parser
+# is an if/else-if chain with no terminal else: an unknown or renamed flag is
+# skipped in silence and the binary still exits 0. The base side is built from an
+# arbitrary historical merge base, so if that commit predates a flag this PR
+# renames, the base binary quietly runs its built-in defaults (iterations=100,
+# orders=10000) against head's requested workload, and the gate compares a
+# 1,000,000-sample p99 against a 100,000-sample p99 at a different tail depth.
+#
+# `count` is the load-bearing one: `orders` is not in the JSON, but count is
+# iterations x orders, so checking count catches a divergence in either.
+WORKLOAD_KEYS = ("seed", "iterations", "mode", "count")
+
 
 def read_metric(paths: list[str], metric: str) -> float:
     """Return the minimum `latency_ns.<metric>` across `paths`.
@@ -79,10 +94,51 @@ def read_metric(paths: list[str], metric: str) -> float:
     return min(values)
 
 
+def read_workload(paths: list[str], side: str) -> dict:
+    """Return the workload parameters shared by every run in `paths`.
+
+    Every run on one side must describe the same workload; runs that disagree
+    are not repeats of one measurement and cannot be reduced to one minimum.
+    A missing key raises rather than being treated as "unknown" — an unverified
+    workload is the thing this check exists to refuse.
+    """
+    seen: dict[tuple, list[str]] = {}
+    for path in paths:
+        try:
+            with open(path) as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"{path}: cannot read benchmark JSON ({exc})")
+        try:
+            params = tuple(data[key] for key in WORKLOAD_KEYS)
+        except (KeyError, TypeError) as exc:
+            raise SystemExit(f"{path}: missing workload key {exc}; "
+                             f"expected all of {', '.join(WORKLOAD_KEYS)}")
+        seen.setdefault(params, []).append(path)
+    if not seen:
+        raise SystemExit(f"no benchmark runs supplied for {side}")
+    if len(seen) > 1:
+        detail = "; ".join(f"{dict(zip(WORKLOAD_KEYS, params))} in {', '.join(files)}"
+                           for params, files in seen.items())
+        raise ValueError(f"Workload mismatch within {side}: {detail}. "
+                         "Comparison is meaningless.")
+    return dict(zip(WORKLOAD_KEYS, next(iter(seen))))
+
+
 def compare(base_paths: list[str], head_paths: list[str],
             gates: dict[str, float] | None = None) -> int:
     """Print a per-metric comparison. Return 0 if all pass, 1 if any regressed."""
     gates = DEFAULT_GATES if gates is None else gates
+
+    # Establish that both sides ran the same benchmark before comparing any
+    # numbers from them. A delta between two different workloads is not a
+    # regression signal in either direction.
+    base_params = read_workload(base_paths, "base")
+    head_params = read_workload(head_paths, "head")
+    if base_params != head_params:
+        raise ValueError(f"Workload mismatch: base ran {base_params}, "
+                         f"head ran {head_params}. Comparison is meaningless.")
+
     regressed = []
     for metric, threshold_pct in gates.items():
         base = read_metric(base_paths, metric)
@@ -105,10 +161,15 @@ def selftest() -> int:
     import os
     import tempfile
 
-    def write(p99: float, p50: float = 100.0) -> str:
+    def write(p99: float, p50: float = 100.0, **workload) -> str:
+        """A benchmark JSON. Defaults describe one consistent workload; pass any
+        of WORKLOAD_KEYS as a kwarg to make this run disagree with the others."""
         fd, path = tempfile.mkstemp(suffix=".json")
+        doc = {"seed": 42, "iterations": 20, "mode": "full", "count": 100000}
+        doc.update(workload)
+        doc["latency_ns"] = {"p50": p50, "p99": p99}
         with os.fdopen(fd, "w") as handle:
-            json.dump({"latency_ns": {"p50": p50, "p99": p99}}, handle)
+            json.dump(doc, handle)
         return path
 
     base = write(100.0)
@@ -153,6 +214,34 @@ def selftest() -> int:
     else:
         raise AssertionError("all-NaN head should have raised SystemExit")
 
+    # Two sides that ran different workloads are not comparable, in any of the
+    # four ways they can diverge. This is what catches a base tree whose binary
+    # silently ignored a flag it did not recognise and ran its own defaults.
+    for divergence in ({"seed": 7}, {"iterations": 100},
+                       {"mode": "warm"}, {"count": 1000000}):
+        try:
+            compare([base], [write(100.0, **divergence)], only99)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"head diverging by {divergence} should have raised")
+
+    # Runs within one side must agree too — otherwise the minimum is taken
+    # across a set that is not repeats of a single measurement.
+    for side in ("base", "head"):
+        mixed = [write(100.0), write(100.0, iterations=99)]
+        args = ([base], mixed) if side == "head" else (mixed, [base])
+        try:
+            compare(*args, only99)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"inconsistent {side} runs should have raised")
+
+    # A matching workload still compares normally; the new check must not have
+    # made every comparison fail.
+    assert compare([base], [write(109.0)], only99) == 0
+
     print("selftest OK")
     return 0
 
@@ -186,7 +275,14 @@ def main() -> int:
         parser.error(f"no default threshold for {', '.join(unknown)}; pass --threshold")
     gates = {m: (args.threshold if args.threshold is not None else DEFAULT_GATES[m])
              for m in metrics}
-    return compare(args.base, args.head, gates)
+    try:
+        return compare(args.base, args.head, gates)
+    except ValueError as exc:
+        # Fail the build with the reason on one line rather than a traceback: a
+        # workload mismatch is an operator-actionable error, not a crash. Still
+        # a non-zero exit — an unmakeable comparison never passes.
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -24,13 +24,22 @@ name: Benchmark Regression Gate
 on:
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'src/**'
-      - 'include/**'
-      - 'benchmarks/**'
-      - 'CMakeLists.txt'
-      - 'scripts/check_benchmark_regression.py'
-      - '.github/workflows/benchmark-gate.yml'
+    # Deliberately NO paths: filter. This gate is a required status check, and
+    # GitHub does not synthesize a success for a path-filtered workflow that
+    # never triggers — the check would sit at "Expected — Waiting for status to
+    # be reported" forever and block the PR just as hard as a failure would. A
+    # doc-only PR being unmergeable is the same footgun as a gate that cannot
+    # fail, pointed the other way.
+    #
+    # The companion-job workaround does not fit here either: paths: filters the
+    # whole workflow, so a skip job in this file would be skipped with it, and
+    # splitting it into a second file with paths-ignore: is not the exact
+    # complement — a PR touching both src/ and docs/ would match both files and
+    # report two checks named "benchmark", one of them trivially green.
+    #
+    # So the job always runs, always reports, and decides for itself whether
+    # there is anything to benchmark (see "Detect relevant changes"). The cost
+    # on an irrelevant PR is one runner spin-up and a git diff.
 
 concurrency:
   group: benchmark-${{ github.head_ref }}
@@ -59,17 +68,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake g++-13
-
-      - name: Verify the comparator itself
-        # The gate's own logic is the thing most likely to rot into a no-op
-        # again, so its assertions run before it is trusted to judge anything.
-        run: python3 scripts/check_benchmark_regression.py --selftest
-
-      - name: Benchmark PR head and merge base
+      # Resolves the merge base, materializes it at /tmp/base, and decides
+      # whether this PR touches anything the benchmark can speak to. Everything
+      # after this is conditional on that answer; this step itself always runs,
+      # which is what keeps the "benchmark" check reporting on every PR.
+      - name: Detect relevant changes and materialize the merge base
+        id: changes
         run: |
           set -euo pipefail
 
@@ -80,7 +84,53 @@ jobs:
           BASE_SHA=$(git merge-base HEAD "origin/${GITHUB_BASE_REF}")
           echo "PR head:    $(git rev-parse HEAD)"
           echo "merge base: ${BASE_SHA}"
-          git worktree add /tmp/base "${BASE_SHA}"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+          # The paths that can move a latency number, or that change how it is
+          # judged. Kept here rather than in an `on: paths:` filter so that a
+          # non-match still produces a green check instead of no check at all.
+          if git diff --name-only "${BASE_SHA}" HEAD | grep -qE \
+               '^(src/|include/|benchmarks/|CMakeLists\.txt$|scripts/check_benchmark_regression\.py$|\.github/workflows/benchmark-gate\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "Benchmark-relevant paths changed; running the full A/B."
+            git worktree add /tmp/base "${BASE_SHA}"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No benchmark-relevant paths changed; nothing to compare."
+          fi
+
+      - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-13
+
+      - name: Verify the comparator itself
+        if: steps.changes.outputs.relevant == 'true'
+        # The gate's own logic is the thing most likely to rot into a no-op
+        # again, so its assertions run before it is trusted to judge anything.
+        #
+        # The merge base's copy runs FIRST and is the real anchor: a PR that
+        # weakens the gate also ships the weakened assertions, so running only
+        # the PR's own selftest is self-referential and proves nothing. The
+        # merge-base copy comes from a commit this PR does not control.
+        # .github/CODEOWNERS covers the remaining case below, where the merge
+        # base has no comparator yet.
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/base/scripts/check_benchmark_regression.py ]; then
+            echo "--- merge-base selftest (anchor: assertions this PR cannot edit) ---"
+            python3 /tmp/base/scripts/check_benchmark_regression.py --selftest
+          else
+            echo "--- merge base has no comparator; CODEOWNERS review is the only anchor ---"
+          fi
+          echo "--- PR selftest (validates logic this PR adds) ---"
+          python3 scripts/check_benchmark_regression.py --selftest
+
+      - name: Benchmark PR head and merge base
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          set -euo pipefail
 
           mkdir -p results
 
@@ -109,26 +159,65 @@ jobs:
           bench "${GITHUB_WORKSPACE}" head
           bench /tmp/base base
 
+          # Both sides must have produced exactly five files. The binary now
+          # exits non-zero if it cannot write its JSON, but assert the count
+          # anyway: a partial run that dropped two files on one side would
+          # otherwise silently shrink the set that side's minimum is taken over,
+          # biasing it slower with no warning anywhere in the log.
+          for side in head base; do
+            found=$(find results -maxdepth 1 -name "${side}-*.json" | wc -l)
+            if [ "${found}" -ne 5 ]; then
+              echo "Expected 5 ${side} result files, found ${found}."
+              echo "A benchmark run failed to write its JSON; the comparison" \
+                   "would be taken over an incomplete sample set."
+              exit 1
+            fi
+          done
+          echo "Result files: 5 head, 5 base."
+
       - name: Compare head against merge base
+        if: steps.changes.outputs.relevant == 'true'
         # Thresholds are per-metric and live in the script (p50 +10%, p99 +25%),
         # derived from a measured noise floor. Do NOT add --threshold here: it
         # overrides every metric with one value, which would either flake p99 or
         # blunt p50.
+        #
+        # Both comparators run against the same results. The PR's copy applies
+        # any check this PR adds; the merge base's copy applies thresholds and
+        # guards the PR cannot edit. Either one failing fails the build.
         run: |
+          set -euo pipefail
+          echo "--- PR comparator ---"
           python3 scripts/check_benchmark_regression.py \
             --base results/base-*.json \
             --head results/head-*.json
+          if [ -f /tmp/base/scripts/check_benchmark_regression.py ]; then
+            echo "--- merge-base comparator (thresholds this PR cannot edit) ---"
+            python3 /tmp/base/scripts/check_benchmark_regression.py \
+              --base results/base-*.json \
+              --head results/head-*.json
+          fi
 
       - name: Upload benchmark results
-        if: always()
+        # always(), so a failed comparison still uploads the numbers that caused
+        # it — but only when there were runs to upload at all.
+        if: always() && steps.changes.outputs.relevant == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: results/
 
       - name: Run Sustained Load Test (smoke)
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           cmake --build build --target SustainedLoadTest -j"$(nproc)"
           build/benchmarks/SustainedLoadTest \
             --duration 5 --rate 100000 --threads 2 --symbols 4 \
             --p99-threshold 50000
+
+      - name: No benchmark-relevant changes
+        if: steps.changes.outputs.relevant != 'true'
+        # The reporting half of the no-paths-filter decision at the top of this
+        # file. This PR touched nothing that can move a latency number, so the
+        # required "benchmark" check passes here instead of never arriving.
+        run: echo "Skipped — no benchmark-relevant paths changed."

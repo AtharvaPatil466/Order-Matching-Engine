@@ -10,6 +10,11 @@ bin/
 # aws_benchmark.sh run logs
 aws-benchmark-*.log
 
+# benchmark-gate.yml A/B run output — root only, not bcs_research/results/
+# (head-*.json / base-*.json). The leading slash is load-bearing: unanchored
+# `results/` matches at any depth and silently swallows the BCS research tree.
+/results/
+
 .DS_Store
 *.o
 *.a

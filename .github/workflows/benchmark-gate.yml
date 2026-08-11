@@ -1,21 +1,71 @@
 # Benchmark Regression Gate — GitHub Actions
 #
-# Roadmap Phase 5, Week 19: CI Benchmark Gating
+# Builds and benchmarks BOTH the PR head and the PR's merge base on the SAME
+# runner in the SAME job, then fails if head is slower by more than the
+# per-metric threshold in scripts/check_benchmark_regression.py (P50 +10%,
+# P99 +25% — see that file for how those numbers were measured).
 #
-# Runs the deterministic benchmark on every PR and compares
-# P99 latency against a stored baseline. Fails if regression
-# exceeds 10%.
+# There is deliberately no stored baseline.json. The previous version of this
+# gate compared against `benchmarks/baseline.json`, a file that was never
+# committed and that nothing wrote — the missing-baseline branch just printed
+# "No baseline found" and passed, so the gate had never once compared anything.
+# A committed baseline would not have fixed it either: Release builds use
+# -march=native and GitHub's runner pool is heterogeneous, so a stored number is
+# measured on different silicon than the run it gates. Building both sides on one
+# runner removes the baseline file, the staleness, and the cross-machine variance
+# in one move.
+#
+# The gate is BLOCKING. If it cannot make a comparison it fails. Do not add
+# continue-on-error, and do not make a missing measurement pass — a gate that
+# cannot fail is the bug this workflow was rewritten to fix.
+#
+# Override path
+# -------------
+# One failure mode is nobody's fault: the merge base itself does not build. It
+# predates the benchmark target, carries a transient Release -Werror break that
+# was fixed in a later commit, or hits a -march=native combination the runner
+# rejects. The job prints
+#
+#     BASE_BUILD_FAILED: merge base SHA=<sha> failed to configure or build
+#
+# and exits non-zero. Grep for that string to tell it apart from an ordinary
+# head build failure, which otherwise looks identical in the log.
+#
+# There is deliberately no in-workflow bypass — no label, no skip input, no
+# continue-on-error. Every bypass this gate has had became its permanent state.
+# The override is external and leaves a record:
+#
+#   1. Rebase the PR onto a newer base. This is the right fix nearly always:
+#      it moves the merge base to a commit that builds, and costs one push.
+#   2. Failing that, an admin merges via branch-protection bypass
+#      (Settings > Branches > "Do not allow bypassing" unchecked), stating the
+#      BASE_BUILD_FAILED SHA in the PR description.
+#
+# Do not resolve this by making the base build non-fatal. A base that cannot be
+# built produces no baseline, and a comparison against no baseline is the exact
+# no-op described above.
 
 name: Benchmark Regression Gate
 
 on:
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'src/**'
-      - 'include/**'
-      - 'benchmarks/**'
-      - 'CMakeLists.txt'
+    # Deliberately NO paths: filter. This gate is a required status check, and
+    # GitHub does not synthesize a success for a path-filtered workflow that
+    # never triggers — the check would sit at "Expected — Waiting for status to
+    # be reported" forever and block the PR just as hard as a failure would. A
+    # doc-only PR being unmergeable is the same footgun as a gate that cannot
+    # fail, pointed the other way.
+    #
+    # The companion-job workaround does not fit here either: paths: filters the
+    # whole workflow, so a skip job in this file would be skipped with it, and
+    # splitting it into a second file with paths-ignore: is not the exact
+    # complement — a PR touching both src/ and docs/ would match both files and
+    # report two checks named "benchmark", one of them trivially green.
+    #
+    # So the job always runs, always reports, and decides for itself whether
+    # there is anything to benchmark (see "Detect relevant changes"). The cost
+    # on an irrelevant PR is one runner spin-up and a git diff.
 
 concurrency:
   group: benchmark-${{ github.head_ref }}
@@ -24,84 +74,225 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # This job configures and builds CMake and C++ from the PR head — code the
+    # PR author controls executes here at configure time. It must not hold a
+    # writable token while doing that.
+    permissions:
+      contents: read
+    # Two Release builds of the benchmark target. The benchmark runs themselves
+    # are <1s each; the budget is almost entirely compilation.
+    timeout-minutes: 45
+
+    env:
+      # min-of-N sample count, used by the run loop and by the completeness
+      # assertion after it. This number is COUPLED to DEFAULT_GATES in
+      # scripts/check_benchmark_regression.py: those thresholds were measured as
+      # the worst false delta between disjoint min-of-5 groups of one unchanged
+      # binary (p50 +0.0%, p99 +18.5%, hence limits of 10% and 25%). Lowering
+      # this raises that noise floor — at min-of-3 the p99 floor plausibly
+      # exceeds its own 25% limit and the gate starts failing byte-identical
+      # builds, which is precisely how the previous gate ended up switched off.
+      # Change this and the thresholds together, after re-measuring, or neither.
+      BENCH_RUNS: 5
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the merge base is resolvable for the A/B build.
+          # fetch-depth: 0 populates every origin/* ref up front, so no later
+          # step needs the network — which is what lets the token be dropped
+          # from .git/config instead of left where a PR-authored CMakeLists.txt
+          # could read it at configure time.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Resolves the merge base, materializes it at /tmp/base, and decides
+      # whether this PR touches anything the benchmark can speak to. Everything
+      # after this is conditional on that answer; this step itself always runs,
+      # which is what keeps the "benchmark" check reporting on every PR.
+      - name: Detect relevant changes and materialize the merge base
+        id: changes
+        run: |
+          set -euo pipefail
+
+          # No git fetch here: checkout ran with fetch-depth: 0, so
+          # origin/${GITHUB_BASE_REF} is already local. Keep it that way — the
+          # checkout step drops the token, so a fetch at this point would fail on
+          # a private repo rather than fall back to anything.
+          BASE_SHA=$(git merge-base HEAD "origin/${GITHUB_BASE_REF}")
+          echo "PR head:    $(git rev-parse HEAD)"
+          echo "merge base: ${BASE_SHA}"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+          # The paths that can move a latency number, or that change how it is
+          # judged. Kept here rather than in an `on: paths:` filter so that a
+          # non-match still produces a green check instead of no check at all.
+          if git diff --name-only "${BASE_SHA}" HEAD | grep -qE \
+               '^(src/|include/|benchmarks/|CMakeLists\.txt$|scripts/check_benchmark_regression\.py$|\.github/workflows/benchmark-gate\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "Benchmark-relevant paths changed; running the full A/B."
+            git worktree add /tmp/base "${BASE_SHA}"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No benchmark-relevant paths changed; nothing to compare."
+          fi
 
       - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++-13
 
-      - name: Configure
+      - name: Verify the comparator itself
+        if: steps.changes.outputs.relevant == 'true'
+        # The gate's own logic is the thing most likely to rot into a no-op
+        # again, so its assertions run before it is trusted to judge anything.
+        #
+        # The merge base's copy runs FIRST and is the real anchor: a PR that
+        # weakens the gate also ships the weakened assertions, so running only
+        # the PR's own selftest is self-referential and proves nothing. The
+        # merge-base copy comes from a commit this PR does not control.
+        # .github/CODEOWNERS covers the remaining case below, where the merge
+        # base has no comparator yet.
         run: |
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER=g++-13 \
-            -DBUILD_TESTS=OFF \
-            -DBUILD_BENCHMARKS=ON \
-            -DBUILD_TOOLS=OFF \
-            -DENABLE_LTO=OFF
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: Run Deterministic Benchmark
-        run: |
-          build/benchmarks/DeterministicBenchmark \
-            --seed 42 --iterations 20 --orders 5000 \
-            --output build/benchmark_current.json
-
-      - name: Check for regression
-        run: |
-          # Extract P99 from current run
-          CURRENT_P99=$(python3 -c "
-          import json
-          with open('build/benchmark_current.json') as f:
-              data = json.load(f)
-          print(data['latency_ns']['p99'])
-          ")
-          
-          echo "Current P99: ${CURRENT_P99} ns"
-          
-          # Check against baseline (if exists)
-          if [ -f benchmarks/baseline.json ]; then
-            BASELINE_P99=$(python3 -c "
-          import json
-          with open('benchmarks/baseline.json') as f:
-              data = json.load(f)
-          print(data['latency_ns']['p99'])
-          ")
-            echo "Baseline P99: ${BASELINE_P99} ns"
-            
-            # Check for >10% regression
-            python3 -c "
-          import sys
-          current = float('${CURRENT_P99}')
-          baseline = float('${BASELINE_P99}')
-          regression_pct = ((current - baseline) / baseline) * 100
-          print(f'Regression: {regression_pct:.1f}%')
-          if regression_pct > 10.0:
-              print(f'❌ FAILED: P99 regression of {regression_pct:.1f}% exceeds 10% threshold')
-              sys.exit(1)
-          else:
-              print(f'✅ PASSED: P99 within acceptable range ({regression_pct:.1f}%)')
-          "
+          set -euo pipefail
+          if [ -f /tmp/base/scripts/check_benchmark_regression.py ]; then
+            echo "--- merge-base selftest (anchor: assertions this PR cannot edit) ---"
+            python3 /tmp/base/scripts/check_benchmark_regression.py --selftest
           else
-            echo "No baseline found. Saving current run as baseline."
+            echo "--- merge base has no comparator; CODEOWNERS review is the only anchor ---"
+          fi
+          echo "--- PR selftest (validates logic this PR adds) ---"
+          python3 scripts/check_benchmark_regression.py --selftest
+
+      - name: Benchmark PR head and merge base
+        if: steps.changes.outputs.relevant == 'true'
+        env:
+          # Passed via env rather than inline ${{ }}: keeps a value produced
+          # outside this step out of the shell text itself.
+          BASE_SHA: ${{ steps.changes.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p results
+
+          # $1 = source tree. Identical flags on both sides; the only difference
+          # is the code under test.
+          configure() {
+            cmake -S "$1" -B "$1/build" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_COMPILER=g++-13 \
+              -DBUILD_TESTS=OFF \
+              -DBUILD_BENCHMARKS=ON \
+              -DBUILD_TOOLS=OFF \
+              -DENABLE_LTO=OFF
+          }
+
+          # $1 = source tree, $2 = label, $3 = run index. Well under a second.
+          run_once() {
+            "$1/build/benchmarks/DeterministicBenchmark" \
+              --seed 42 --iterations 20 --orders 5000 \
+              --output "results/$2-$3.json"
+          }
+
+          # Head builds EVERY benchmark target, not just the one this gate
+          # measures. No other workflow compiles Ubuntu Release — ci.yml is
+          # macOS Release plus Ubuntu Debug/ASan/UBSan and Ubuntu TSan Debug —
+          # so a g++-13 -O3-only diagnostic (-Wmaybe-uninitialized,
+          # -Warray-bounds, neither of which Apple clang emits) in any of the
+          # other nine benchmarks would otherwise merge green under -Werror and
+          # break the first person to run a full Release build on Linux.
+          #
+          # Head also goes first, so a PR that does not compile fails before the
+          # job spends anything on the base tree.
+          configure "${GITHUB_WORKSPACE}"
+          cmake --build "${GITHUB_WORKSPACE}/build" -j"$(nproc)"
+
+          # The base tree only needs the one binary this gate runs. Building its
+          # other targets would double the compile budget to re-warn about code
+          # that is already merged and is not what this PR is being judged on.
+          if ! { configure /tmp/base \
+                 && cmake --build /tmp/base/build \
+                      --target DeterministicBenchmark -j"$(nproc)"; }; then
+            echo "BASE_BUILD_FAILED: merge base SHA=${BASE_SHA} failed to configure or build"
+            echo "The PR head built successfully. This is the historical tree at"
+            echo "the merge base failing on its own — the PR is not the cause."
+            echo "See 'Override path' in this workflow file's header comment."
+            exit 1
           fi
 
-      - name: Save benchmark results
-        if: always()
+          # Interleaved, not all-of-head-then-all-of-base. min-of-N sheds
+          # independent noise spikes but not drift correlated with position in
+          # the sequence: thermal throttling, turbo decay, or a co-tenant
+          # workload arriving mid-job. Running one side to completion first
+          # turns any such trend into a systematic bias between the sides —
+          # masking a real regression, or failing byte-identical code, depending
+          # which way it leans. Pairing each head run with a base run cancels
+          # the linear component.
+          for run in $(seq 1 "${BENCH_RUNS}"); do
+            run_once "${GITHUB_WORKSPACE}" head "${run}"
+            run_once /tmp/base base "${run}"
+          done
+
+          # Both sides must have produced exactly BENCH_RUNS files. The binary
+          # now exits non-zero if it cannot write its JSON, but assert the count
+          # anyway: a partial run that dropped two files on one side would
+          # otherwise silently shrink the set that side's minimum is taken over,
+          # biasing it slower with no warning anywhere in the log.
+          for side in head base; do
+            found=$(find results -maxdepth 1 -name "${side}-*.json" | wc -l)
+            if [ "${found}" -ne "${BENCH_RUNS}" ]; then
+              echo "Expected ${BENCH_RUNS} ${side} result files, found ${found}."
+              echo "A benchmark run failed to write its JSON; the comparison" \
+                   "would be taken over an incomplete sample set."
+              exit 1
+            fi
+          done
+          echo "Result files: ${BENCH_RUNS} head, ${BENCH_RUNS} base."
+
+      - name: Compare head against merge base
+        if: steps.changes.outputs.relevant == 'true'
+        # Thresholds are per-metric and live in the script (p50 +10%, p99 +25%),
+        # derived from a measured noise floor. Do NOT add --threshold here: it
+        # overrides every metric with one value, which would either flake p99 or
+        # blunt p50.
+        #
+        # Both comparators run against the same results. The PR's copy applies
+        # any check this PR adds; the merge base's copy applies thresholds and
+        # guards the PR cannot edit. Either one failing fails the build.
+        run: |
+          set -euo pipefail
+          echo "--- PR comparator ---"
+          python3 scripts/check_benchmark_regression.py \
+            --base results/base-*.json \
+            --head results/head-*.json
+          if [ -f /tmp/base/scripts/check_benchmark_regression.py ]; then
+            echo "--- merge-base comparator (thresholds this PR cannot edit) ---"
+            python3 /tmp/base/scripts/check_benchmark_regression.py \
+              --base results/base-*.json \
+              --head results/head-*.json
+          fi
+
+      - name: Upload benchmark results
+        # always(), so a failed comparison still uploads the numbers that caused
+        # it — but only when there were runs to upload at all.
+        if: always() && steps.changes.outputs.relevant == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: build/benchmark_current.json
+          path: results/
 
       - name: Run Sustained Load Test (smoke)
+        if: steps.changes.outputs.relevant == 'true'
         run: |
+          cmake --build build --target SustainedLoadTest -j"$(nproc)"
           build/benchmarks/SustainedLoadTest \
             --duration 5 --rate 100000 --threads 2 --symbols 4 \
             --p99-threshold 50000
+
+      - name: No benchmark-relevant changes
+        if: steps.changes.outputs.relevant != 'true'
+        # The reporting half of the no-paths-filter decision at the top of this
+        # file. This PR touched nothing that can move a latency number, so the
+        # required "benchmark" check passes here instead of never arriving.
+        run: echo "Skipped — no benchmark-relevant paths changed."

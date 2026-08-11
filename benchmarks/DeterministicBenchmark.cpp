@@ -142,11 +142,21 @@ std::vector<OrderSpec> generateWorkload(uint64_t seed, size_t count) {
 
 // ─── Write JSON output ──────────────────────────────────────────────────
 
-void writeJsonReport(const std::string& path,
+// Returns false if the report could not be written. The caller must propagate
+// that into the exit code: a benchmark that prints its results to stdout and
+// silently fails to write its JSON looks identical to a successful run, and the
+// CI gate then compares whatever partial set of files it happens to find. An
+// ofstream that fails to open sets failbit and turns every subsequent
+// operator<< into a no-op without raising, so the check has to be explicit.
+bool writeJsonReport(const std::string& path,
                      const LatencyDistribution& dist,
                      uint64_t seed, int iterations,
                      double tscNsRatio, const std::string& mode) {
     std::ofstream out(path);
+    if (!out) {
+        std::perror(("Failed to open: " + path).c_str());
+        return false;
+    }
     out << "{\n";
     out << "  \"benchmark\": \"DeterministicBenchmark\",\n";
     out << "  \"seed\": " << seed << ",\n";
@@ -166,6 +176,15 @@ void writeJsonReport(const std::string& path,
     out << "    \"stddev\": " << dist.stddev << "\n";
     out << "  }\n";
     out << "}\n";
+
+    // Close explicitly and re-check: a full disk or a short write surfaces at
+    // flush time, long after the stream was opened successfully.
+    out.close();
+    if (!out) {
+        std::perror(("Failed to write: " + path).c_str());
+        return false;
+    }
+    return true;
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────
@@ -265,9 +284,13 @@ int main(int argc, char* argv[]) {
     std::printf("Max:     %.0f ns\n", dist.maxNs);
     std::printf("Stddev:  %.0f ns\n", dist.stddev);
     
-    // Write JSON
-    writeJsonReport(outputPath, dist, seed, iterations, tscNsRatio, mode);
+    // Write JSON. A failure here is fatal: the CI gate's entire input is this
+    // file, so reporting success without producing it is how a partial run
+    // silently shrinks the sample set one side is reduced over.
+    if (!writeJsonReport(outputPath, dist, seed, iterations, tscNsRatio, mode)) {
+        return 1;
+    }
     std::printf("\nResults written to: %s\n", outputPath.c_str());
-    
+
     return 0;
 }

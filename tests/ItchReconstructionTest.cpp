@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -353,42 +354,184 @@ void test_ModifyDownEmitsCancelMessage() {
     } END
 }
 
+void test_UntriggeredStopIsInvisible() {
+    TEST(UntriggeredStopIsInvisible) {
+        Fixture f;
+        f.engine.submitOrder(1, 100, 1, Side::Sell, 1005, 100, OrderType::Limit);
+        const uint64_t addsAfterVisible = f.pub->addsEmitted();
+
+        // A resting stop lives in stopOrders_, not in bids_/asks_. It is not
+        // displayed liquidity until it triggers, so it must appear on neither
+        // the feed nor the snapshot — the two must agree that it is absent.
+        f.engine.submitOrder(1, 101, 2, Side::Buy, 990, 50, OrderType::Stop,
+                             /*stopPrice=*/1005);
+        CHECK(f.pub->addsEmitted() == addsAfterVisible);
+        CHECK(!f.reco.knows(101));
+        f.check();
+
+        // Cancelling an untriggered stop is equally invisible.
+        f.engine.cancelOrder(1, 101);
+        CHECK(!f.reco.knows(101));
+        f.check();
+    } END
+}
+
+void test_TriggeredStopEntersFeedOnRest() {
+    TEST(TriggeredStopEntersFeedOnRest) {
+        Fixture f;
+        // Resting ask at 1005 to trade against.
+        f.engine.submitOrder(1, 100, 1, Side::Sell, 1005, 100, OrderType::Limit);
+
+        // Buy stop: triggers at 1005, then becomes a limit at 990 — below the
+        // best ask, so it rests rather than filling. That rest is the moment
+        // it becomes displayed liquidity and must hit the feed.
+        f.engine.submitOrder(1, 101, 2, Side::Buy, 990, 50, OrderType::Stop,
+                             /*stopPrice=*/1005);
+        const uint64_t addsBeforeTrigger = f.pub->addsEmitted();
+        CHECK(!f.reco.knows(101));
+
+        // Trade at 1005 triggers it.
+        f.engine.submitOrder(1, 102, 3, Side::Buy, 1005, 30, OrderType::Limit);
+
+        CHECK(f.pub->addsEmitted() == addsBeforeTrigger + 1);
+        CHECK(f.reco.knows(101));
+        CHECK(f.reco.depth(Side::Buy).at(990) == 50);
+        f.check();
+
+        // A triggered MIT becomes a market order and is never allowed to
+        // rest, so it must never reach the feed at all.
+        const uint64_t addsBeforeMit = f.pub->addsEmitted();
+        f.engine.submitOrder(1, 103, 4, Side::Sell, 0, 20, OrderType::MIT,
+                             /*stopPrice=*/1005);
+        f.engine.submitOrder(1, 104, 5, Side::Buy, 1005, 10, OrderType::Limit);
+        CHECK(!f.reco.knows(103));
+        CHECK(f.pub->addsEmitted() == addsBeforeMit);
+        f.check();
+    } END
+}
+
+void test_AuctionUncrossReconstructs() {
+    TEST(AuctionUncrossReconstructs) {
+        Fixture f;
+        f.book->setTradingState(TradingState::PreOpen);
+
+        // Auction accumulation: orders rest without matching, so every one of
+        // them is displayed and must appear on the feed.
+        f.engine.submitOrder(1, 100, 1, Side::Buy,  1000, 100, OrderType::Limit);
+        f.engine.submitOrder(1, 101, 2, Side::Buy,   999,  60, OrderType::Limit);
+        f.engine.submitOrder(1, 200, 3, Side::Sell, 1000,  80, OrderType::Limit);
+        f.engine.submitOrder(1, 201, 4, Side::Sell, 1001,  40, OrderType::Limit);
+        CHECK(f.pub->addsEmitted() == 4);
+        f.check();
+
+        // A market order in an auction is PARKED, not booked — it has no
+        // price to rest at until the uncross discovers one. It must be
+        // invisible on both feed and snapshot while parked.
+        f.engine.submitOrder(1, 202, 5, Side::Sell, 0, 25, OrderType::Market);
+        CHECK(!f.reco.knows(202));
+        f.check();
+
+        // Uncross: parked markets are inserted at the clearing price, trades
+        // execute, filled orders leave the book. The feed must land on the
+        // same book the engine ends with.
+        f.book->uncross();
+        f.check();
+
+        // And the post-auction book stays consistent under continuous trading.
+        f.book->setTradingState(TradingState::Continuous);
+        f.engine.submitOrder(1, 300, 6, Side::Buy, 1001, 30, OrderType::Limit);
+        f.check();
+        f.engine.cancelOrder(1, 101);
+        f.check();
+    } END
+}
+
 void test_RandomisedFlowStaysInSync() {
     TEST(RandomisedFlowStaysInSync) {
         Fixture f;
         // Fixed seed: this must be reproducible when it fails.
         std::mt19937 rng(20260813u);
-        std::uniform_int_distribution<int> actionDist(0, 9);
+        std::uniform_int_distribution<int> actionDist(0, 11);
         std::uniform_int_distribution<int> priceDist(995, 1005);
         std::uniform_int_distribution<int> qtyDist(10, 120);
 
         std::vector<OrderId> resting;
         OrderId nextId = 1000;
+        bool inAuction = false;
 
-        for (int step = 0; step < 400; ++step) {
+        // Coverage tracking. A soak that passes because it never reached the
+        // paths it claims to cover is worse than no test — it reads as
+        // evidence while asserting nothing. These are checked at the end.
+        std::vector<OrderId> stopIds;
+        std::set<OrderId> stopsThatReachedTheFeed;
+        int auctionCycles = 0;
+
+        for (int step = 0; step < 600; ++step) {
             const int action = actionDist(rng);
             const auto price = static_cast<Price>(priceDist(rng));
             const auto qty   = static_cast<Quantity>(qtyDist(rng));
             const Side side  = (step % 2 == 0) ? Side::Buy : Side::Sell;
             const OrderId id = nextId++;
 
-            if (action <= 4) {
+            // Periodically cycle through an auction. Orders accumulate without
+            // matching, parked market orders sit outside the book entirely,
+            // then the uncross inserts and executes them in one burst — a very
+            // different event shape from continuous trading, over a book that
+            // already holds icebergs, hidden orders and triggered stops.
+            if (step % 97 == 0 && step > 0) {
+                f.book->setTradingState(TradingState::PreOpen);
+                inAuction = true;
+            } else if (inAuction && step % 97 == 11) {
+                f.engine.submitOrder(1, nextId++, 9, side, 0, qty, OrderType::Market);
+                f.check();
+                f.book->uncross();
+                f.book->setTradingState(TradingState::Continuous);
+                inAuction = false;
+                ++auctionCycles;
+                f.check();
+            }
+
+            if (action <= 3) {
                 f.engine.submitOrder(1, id, 1, side, price, qty, OrderType::Limit);
                 resting.push_back(id);
-            } else if (action <= 6) {
+            } else if (action <= 5) {
                 f.engine.submitOrder(1, id, 2, side, price, qty, OrderType::Iceberg,
                                      0, /*displayQty=*/qty / 4 + 1);
                 resting.push_back(id);
-            } else if (action == 7) {
+            } else if (action == 6) {
                 f.engine.submitOrder(1, id, 3, side, price, qty, OrderType::Hidden);
                 resting.push_back(id);
-            } else if (action == 8 && !resting.empty()) {
+            } else if (action == 7) {
+                // Stop: invisible until the market trades through stopPrice,
+                // then rests as a limit (and shows up) or fills outright.
+                const auto stopPx = static_cast<Price>(priceDist(rng));
+                f.engine.submitOrder(1, id, 4, side, price, qty, OrderType::Stop,
+                                     /*stopPrice=*/stopPx);
+                resting.push_back(id);
+                stopIds.push_back(id);
+            } else if (action == 8) {
+                // StopLimit: triggers to a limit at stopLimitPrice, which may
+                // differ from the trigger level.
+                const auto stopPx = static_cast<Price>(priceDist(rng));
+                f.engine.submitOrder(1, id, 5, side, price, qty, OrderType::StopLimit,
+                                     /*stopPrice=*/stopPx, /*displayQty=*/0,
+                                     TimeInForce::GTC, /*expiryTime=*/0,
+                                     /*stopLimitPrice=*/price);
+                resting.push_back(id);
+                stopIds.push_back(id);
+            } else if (action == 9 && !resting.empty()) {
                 const size_t idx = rng() % resting.size();
                 f.engine.modifyOrder(1, resting[idx], qty / 2 + 1);
             } else if (!resting.empty()) {
                 const size_t idx = rng() % resting.size();
                 f.engine.cancelOrder(1, resting[idx]);
                 resting.erase(resting.begin() + static_cast<long>(idx));
+            }
+
+            // A stop that has reached the feed is one that triggered and
+            // rested — the transition from invisible to displayed.
+            for (OrderId s : stopIds) {
+                if (f.reco.knows(s)) stopsThatReachedTheFeed.insert(s);
             }
 
             // The invariant holds after EVERY event, not just at the end —
@@ -401,6 +544,19 @@ void test_RandomisedFlowStaysInSync() {
                                          ", id " + std::to_string(id) + "): " + e.what());
             }
         }
+
+        // Coverage gates. Without these the soak could stop reaching stops or
+        // auctions entirely — through a distribution change, a price-range
+        // change, or an engine change that stops triggering — and still report
+        // success, which would be a false all-clear on exactly the paths this
+        // test was extended to cover.
+        CHECK(auctionCycles >= 3);
+        CHECK(!stopIds.empty());
+        CHECK(!stopsThatReachedTheFeed.empty() &&
+              "no stop ever triggered and rested — the stop path went unexercised");
+        std::cout << "[" << auctionCycles << " auctions, "
+                  << stopsThatReachedTheFeed.size() << "/" << stopIds.size()
+                  << " stops triggered onto the feed] ";
     } END
 }
 
@@ -411,6 +567,9 @@ int main() {
     test_HiddenOrderNeverReachesFeed();
     test_IcebergPublishesSliceAndSurvivesRefresh();
     test_ModifyDownEmitsCancelMessage();
+    test_UntriggeredStopIsInvisible();
+    test_TriggeredStopEntersFeedOnRest();
+    test_AuctionUncrossReconstructs();
     test_RandomisedFlowStaysInSync();
 
     std::cout << "\n" << tests_passed << " passed, "

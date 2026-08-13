@@ -66,10 +66,16 @@ AdminServer::AdminServer(MatchingEngine& engine, uint16_t port)
     }
     if (chaosInjectEnabled_) {
         if (chaosToken_.empty()) {
-            std::cerr << "[AdminServer] WARNING: OB_CHAOS_INJECT=1 with NO OB_CHAOS_TOKEN.\n"
-                      << "             /chaos/order is callable by ANY client that can\n"
-                      << "             reach the admin port. Set OB_CHAOS_TOKEN to a strong\n"
-                      << "             secret in any environment beyond local development.\n";
+            // Fail closed, same rationale as the admin token: an unauthenticated
+            // order-injection endpoint is the single most dangerous thing this
+            // process can expose, so a missing secret disables the endpoint
+            // rather than opening it with a warning nobody reads.
+            chaosInjectEnabled_ = false;
+            std::cerr << "[AdminServer] OB_CHAOS_INJECT=1 but OB_CHAOS_TOKEN is unset —\n"
+                      << "             /chaos/order stays DISABLED. An open injection\n"
+                      << "             endpoint would let any client that can reach the\n"
+                      << "             admin port submit orders. Set OB_CHAOS_TOKEN to a\n"
+                      << "             strong secret to enable it.\n";
         } else {
             std::cout << "[AdminServer] OB_CHAOS_INJECT=1 — /chaos/order endpoint ENABLED\n"
                       << "             (token auth required via X-Chaos-Token header)\n";
@@ -83,7 +89,27 @@ AdminServer::~AdminServer() {
 
 void AdminServer::start() {
     if (running_) return;
-    
+
+    // Fail closed. The admin port is bound to INADDR_ANY and serves the full
+    // book, participant risk state and (when chaos injection is enabled)
+    // order submission. Starting it with no token because none was
+    // configured is the failure mode this guard exists to prevent — an
+    // operator who genuinely wants an open port says so via
+    // setAuthDisabled(true).
+    if (adminToken_.empty() && !authDisabled_) {
+        std::cerr << "[AdminServer] REFUSING TO START: no admin token configured.\n"
+                  << "              The admin port exposes /book, /otr, /risk and\n"
+                  << "              (with OB_CHAOS_INJECT) order injection.\n"
+                  << "              Set a token via setAdminToken()/OB_ADMIN_TOKEN, or\n"
+                  << "              call setAuthDisabled(true) to run it open on purpose.\n";
+        return;
+    }
+    if (authDisabled_) {
+        std::cerr << "[AdminServer] WARNING: authentication explicitly disabled — every\n"
+                  << "              admin endpoint is callable by any client that can\n"
+                  << "              reach port " << port_ << ".\n";
+    }
+
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         std::cerr << "[AdminServer] Failed to create socket\n";

@@ -633,7 +633,7 @@ void test_RandomisedFlowStaysInSync() {
         Fixture f;
         // Fixed seed: this must be reproducible when it fails.
         std::mt19937 rng(20260813u);
-        std::uniform_int_distribution<int> actionDist(0, 12);
+        std::uniform_int_distribution<int> actionDist(0, 16);
         std::uniform_int_distribution<int> priceDist(995, 1005);
         std::uniform_int_distribution<int> qtyDist(10, 120);
 
@@ -646,6 +646,12 @@ void test_RandomisedFlowStaysInSync() {
         // evidence while asserting nothing. These are checked at the end.
         std::vector<OrderId> stopIds;
         std::set<OrderId> stopsThatReachedTheFeed;
+        // MOC/LOC rest nowhere until the closing cross releases them, so one
+        // of them reaching the feed is proof releaseOnCloseOrders() ran.
+        std::vector<OrderId> onCloseIds;
+        std::set<OrderId> onCloseThatReachedTheFeed;
+        std::vector<OrderId> peggedIds;
+        std::set<OrderId> peggedThatReachedTheFeed;
         int auctionCycles = 0;
         int replaces = 0;
 
@@ -662,7 +668,13 @@ void test_RandomisedFlowStaysInSync() {
             // different event shape from continuous trading, over a book that
             // already holds icebergs, hidden orders and triggered stops.
             if (step % 97 == 0 && step > 0) {
-                f.book->setTradingState(TradingState::PreOpen);
+                // Alternate opening and closing auctions. Only AuctionClose
+                // runs releaseOnCloseOrders(), which parks MOC into the
+                // auction-market list and moves LOC into the book — an add
+                // path no other action reaches.
+                f.book->setTradingState((auctionCycles % 2 == 0)
+                                            ? TradingState::AuctionClose
+                                            : TradingState::PreOpen);
                 inAuction = true;
             } else if (inAuction && step % 97 == 11) {
                 f.engine.submitOrder(1, nextId++, 9, side, 0, qty, OrderType::Market);
@@ -702,6 +714,38 @@ void test_RandomisedFlowStaysInSync() {
                                      /*stopLimitPrice=*/price);
                 resting.push_back(id);
                 stopIds.push_back(id);
+            } else if (action == 13) {
+                // Pegged: repriced in place after every trade, which is the
+                // "price field vs. book linkage" hazard that produced the
+                // parked-order corruption.
+                f.engine.submitOrder(1, id, 6, side, price, qty, OrderType::Pegged,
+                                     /*stopPrice=*/0, /*displayQty=*/0,
+                                     TimeInForce::GTC, /*expiryTime=*/0,
+                                     /*stopLimitPrice=*/0,
+                                     (step % 3 == 0) ? PegType::MidPeg : PegType::PrimaryPeg,
+                                     /*pegOffset=*/0);
+                resting.push_back(id);
+                peggedIds.push_back(id);
+            } else if (action == 14) {
+                // TrailingStop: parked, and mutated on every trade.
+                f.engine.submitOrder(1, id, 7, side, price, qty, OrderType::TrailingStop,
+                                     /*stopPrice=*/static_cast<Price>(priceDist(rng)),
+                                     /*displayQty=*/0, TimeInForce::GTC,
+                                     /*expiryTime=*/0, /*stopLimitPrice=*/0,
+                                     PegType::None, /*pegOffset=*/0,
+                                     /*trailAmount=*/2);
+                resting.push_back(id);
+            } else if (action == 15) {
+                // MOC: parked until the closing cross releases it.
+                f.engine.submitOrder(1, id, 8, side, price, qty, OrderType::MOC);
+                resting.push_back(id);
+                onCloseIds.push_back(id);
+            } else if (action == 16) {
+                // LOC: parked, then moved INTO the book at the close — an add
+                // path nothing else in this soak exercises.
+                f.engine.submitOrder(1, id, 8, side, price, qty, OrderType::LOC);
+                resting.push_back(id);
+                onCloseIds.push_back(id);
             } else if (action == 9 && !resting.empty()) {
                 const size_t idx = rng() % resting.size();
                 f.engine.modifyOrder(1, resting[idx], qty / 2 + 1);
@@ -721,6 +765,12 @@ void test_RandomisedFlowStaysInSync() {
             // rested — the transition from invisible to displayed.
             for (OrderId s : stopIds) {
                 if (f.reco.knows(s)) stopsThatReachedTheFeed.insert(s);
+            }
+            for (OrderId s : onCloseIds) {
+                if (f.reco.knows(s)) onCloseThatReachedTheFeed.insert(s);
+            }
+            for (OrderId s : peggedIds) {
+                if (f.reco.knows(s)) peggedThatReachedTheFeed.insert(s);
             }
 
             // The invariant holds after EVERY event, not just at the end —
@@ -744,10 +794,17 @@ void test_RandomisedFlowStaysInSync() {
         CHECK(!stopsThatReachedTheFeed.empty() &&
               "no stop ever triggered and rested — the stop path went unexercised");
         CHECK(replaces >= 5 && "cancelReplace path went unexercised");
+        CHECK(!peggedThatReachedTheFeed.empty() &&
+              "no pegged order ever rested — the peg reprice path went unexercised");
+        CHECK(!onCloseThatReachedTheFeed.empty() &&
+              "no MOC/LOC ever reached the book — releaseOnCloseOrders went unexercised");
         std::cout << "[" << auctionCycles << " auctions, "
                   << stopsThatReachedTheFeed.size() << "/" << stopIds.size()
                   << " stops triggered onto the feed, "
-                  << replaces << " replaces] ";
+                  << replaces << " replaces, "
+                  << peggedThatReachedTheFeed.size() << " pegged, "
+                  << onCloseThatReachedTheFeed.size() << "/" << onCloseIds.size()
+                  << " on-close released] ";
     } END
 }
 

@@ -276,6 +276,15 @@ add_test(NAME ItchPublisherTest COMMAND ItchPublisherTest)
 set_tests_properties(ItchPublisherTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
+# Gap recovery: publish over MoldUDP64, drop datagrams, recover the holes from
+# the packet journal, and assert the replayed book still equals the engine's.
+add_executable(GapRecoveryReconstructionTest GapRecoveryReconstructionTest.cpp)
+target_link_libraries(GapRecoveryReconstructionTest PRIVATE OrderMatcher)
+enable_assertions(GapRecoveryReconstructionTest)
+add_test(NAME GapRecoveryReconstructionTest COMMAND GapRecoveryReconstructionTest)
+set_tests_properties(GapRecoveryReconstructionTest PROPERTIES TIMEOUT 60
+                     LABELS "project;protocol;recovery")
+
 # L2 incremental feed fidelity: apply only onMarketData updates and assert the
 # reconstructed depth equals the engine's. Covers the blind spot the L3 test
 # cannot reach, since that one compares against getSnapshot() directly.

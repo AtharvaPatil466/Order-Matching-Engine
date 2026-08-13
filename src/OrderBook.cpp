@@ -99,6 +99,10 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
 void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Price price) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
+    // Early-out before the O(level) walk below. The walk used to run even with
+    // no listener attached, only to discard the result at the dispatch check —
+    // pure waste on the benchmark configuration, which runs listener-free.
+    if (!hasTradeListener_) return;
 
     MarketDataUpdate update{};
     update.action = action;
@@ -833,6 +837,23 @@ void OrderBook::match(Order* incoming) {
     std::array<OrderId, kMaxFillsPerOrder> toErase;
     int eraseCount = 0;
 
+    // Price levels this sweep consumed from. The L2 incremental feed has to
+    // republish them: fills change displayed depth, and nothing in the match
+    // path used to say so, leaving every incremental subscriber holding
+    // pre-trade quantities forever. Published once per level after the sweep
+    // rather than once per fill — notifyMarketData recomputes the whole level,
+    // so per-fill would be O(depth) work repeated for each order consumed.
+    // Bounded by kMaxFillsPerOrder: a level needs at least one fill to appear.
+    std::array<Price, kMaxFillsPerOrder> touchedPrices;
+    int touchedCount = 0;
+    const Side oppositeSide = isBuy ? Side::Sell : Side::Buy;
+    auto publishTouchedLevels = [&]() {
+        for (int i = 0; i < touchedCount; ++i)
+            notifyMarketData(MarketDataUpdate::Action::Modify, oppositeSide,
+                             touchedPrices[i]);
+        touchedCount = 0;
+    };
+
     // Flush the batched work: dispatch onTrade, emit trade-fill audit logs, then
     // apply the deferred lookup erases. Order among fills is preserved exactly
     // (== original per-fill order: logTradeFill then onTrade). Called when the
@@ -872,7 +893,11 @@ void OrderBook::match(Order* incoming) {
         // this iteration's fill. A fill fully-filling a resting order also
         // consumes one toErase slot, but eraseCount <= fillCount always, so
         // guarding fillCount covers both buffers.
-        if (fillCount == kMaxFillsPerOrder) [[unlikely]] flushFills();
+        if (fillCount == kMaxFillsPerOrder) [[unlikely]] {
+            flushFills();
+            // Keeps touchedCount within the same bound as fillCount.
+            publishTouchedLevels();
+        }
 
         if (opposite.empty()) [[unlikely]] break;
 
@@ -893,6 +918,13 @@ void OrderBook::match(Order* incoming) {
 
         OrderList* level = opposite.bestLevel();
         Order* bookOrder = level->front();
+
+        // Past every break: this level is about to change, by a fill or an STP
+        // removal. Recorded after the cross-check so a non-crossing order —
+        // the common case — publishes nothing. The sweep walks levels in price
+        // order, so comparing against the last entry is enough to dedupe.
+        if (touchedCount == 0 || touchedPrices[touchedCount - 1] != bestPrice)
+            touchedPrices[touchedCount++] = bestPrice;
 
         if (!stpClear && checkSMP(*incoming, *bookOrder)) [[unlikely]] {
             // Phase 4: mode-aware STP — action depends on participant config
@@ -1045,6 +1077,10 @@ void OrderBook::match(Order* incoming) {
 
     // Dispatch any fills still buffered (and apply their deferred erases).
     flushFills();
+    // Then the depth changes those fills caused. After flushFills so the wire
+    // order is executions-then-depth, and after the loop so each level is
+    // published once at its final state rather than once per order consumed.
+    publishTouchedLevels();
 }
 
 // ─── Match (Pro-Rata) ────────────────────────────────────────────────────────
@@ -1235,6 +1271,14 @@ void OrderBook::matchProRata(Order* incoming) {
         if (level.empty()) {
             opposite.eraseBest();
         }
+
+        // Republish the level this allocation consumed from, for the same
+        // reason as the price-time path: fills change displayed depth and
+        // nothing else reports it. Once per level, after the removals, so the
+        // published state is final. Safe inline here — pro-rata dispatches
+        // onTrade per fill rather than batching, so executions already went out.
+        notifyMarketData(MarketDataUpdate::Action::Modify,
+                         isBuy ? Side::Sell : Side::Buy, bestPrice);
     }
 }
 
@@ -1668,10 +1712,20 @@ void OrderBook::updatePeggedOrders() {
         }
 
         if (newPrice != order->price && newPrice > 0) {
+            // A peg moving is a depth change at two levels, and it happens
+            // without any client action — nothing else would tell a subscriber.
+            // Unpublished, every incremental consumer kept showing the order at
+            // a price it had left, indefinitely.
+            const Price oldPrice = order->price;
             removeFromBook(order);
             order->price = newPrice;
             order->timestamp = nowNs();
-            addToBook(order);
+            const bool rested = addToBook(order);
+            if (!order->isHidden) {
+                notifyMarketData(MarketDataUpdate::Action::Delete, order->side, oldPrice);
+                if (rested)
+                    notifyMarketData(MarketDataUpdate::Action::Add, order->side, newPrice);
+            }
         }
 
         ++i;
@@ -1806,6 +1860,12 @@ void OrderBook::uncross() {
         resliceIceberg(buyer);
         resliceIceberg(seller);
 
+        // Both sides' levels changed. Published per fill rather than batched:
+        // an auction runs once per session, so the repeated level walk costs
+        // nothing that matters, and it keeps this path obviously correct.
+        const Price buyerPrice = buyer->price;
+        const Price sellerPrice = seller->price;
+
         if (buyer->remainingQty == 0) {
             buyer->status = OrderStatus::Filled;
             notifyOrderUpdate(buyer->id, OrderStatus::Filled, buyer->initialQty, 0, bestUncrossPrice);
@@ -1825,6 +1885,10 @@ void OrderBook::uncross() {
             orderPool_.deallocate(seller);
             if (askLevel->empty()) asks_.eraseBest();
         }
+
+        // Publish after the teardown so each level reports its settled state.
+        notifyMarketData(MarketDataUpdate::Action::Modify, Side::Buy, buyerPrice);
+        notifyMarketData(MarketDataUpdate::Action::Modify, Side::Sell, sellerPrice);
     }
 
     // Step 3: cancel any parked market orders that did not fully fill.

@@ -276,6 +276,16 @@ add_test(NAME ItchPublisherTest COMMAND ItchPublisherTest)
 set_tests_properties(ItchPublisherTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
+# L2 incremental feed fidelity: apply only onMarketData updates and assert the
+# reconstructed depth equals the engine's. Covers the blind spot the L3 test
+# cannot reach, since that one compares against getSnapshot() directly.
+add_executable(MarketDataL2ReconstructionTest MarketDataL2ReconstructionTest.cpp)
+target_link_libraries(MarketDataL2ReconstructionTest PRIVATE OrderMatcher)
+enable_assertions(MarketDataL2ReconstructionTest)
+add_test(NAME MarketDataL2ReconstructionTest COMMAND MarketDataL2ReconstructionTest)
+set_tests_properties(MarketDataL2ReconstructionTest PROPERTIES TIMEOUT 60
+                     LABELS "project;protocol")
+
 # ITCH 5.0 feed fidelity: replay the wire stream into an independent book and
 # assert it equals the engine's displayed depth (hidden excluded, iceberg
 # sliced). Pins the L3 feed against the L2 snapshot so they cannot drift.

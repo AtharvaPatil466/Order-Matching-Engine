@@ -88,6 +88,9 @@ int main() {
 
     uint16_t port = pickPort();
     AdminServer admin(engine, port);
+    // This test exercises endpoint bodies, not auth — opt out explicitly,
+    // since start() now refuses to listen without a token by default.
+    admin.setAuthDisabled(true);
     admin.start();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 

@@ -288,11 +288,24 @@ int main(int argc, char* argv[]) {
     AdminServer admin(engine, adminPort);
     admin.setReplicationCoordinator(coord.get());  // null is fine — standalone
     const std::string adminToken = flagOrEnv(argc, argv, "--admin-token", "OB_ADMIN_TOKEN");
+    const std::string adminNoAuth = flagOrEnv(argc, argv, "--admin-no-auth", "OB_ADMIN_NO_AUTH");
+    const bool adminAuthDisabled = (adminNoAuth == "1" || adminNoAuth == "true");
+
     if (!adminToken.empty()) {
         admin.setAdminToken(adminToken);
         std::cout << "[Admin] Token auth enabled on all endpoints (except /health)\n";
+    } else if (adminAuthDisabled) {
+        admin.setAuthDisabled(true);
+        std::cout << "[Admin] Auth explicitly disabled via --admin-no-auth\n";
     } else {
-        std::cout << "[Admin] WARNING: No OB_ADMIN_TOKEN set — admin port unauthenticated\n";
+        // Refuse to boot rather than serve the book and risk state openly
+        // because a token was omitted. Opting out is available, but has to
+        // be deliberate.
+        std::cerr << "[Admin] FATAL: no admin token configured.\n"
+                  << "        Set --admin-token / OB_ADMIN_TOKEN, or pass\n"
+                  << "        --admin-no-auth (OB_ADMIN_NO_AUTH=1) to run the admin\n"
+                  << "        port unauthenticated on purpose.\n";
+        return 1;
     }
     admin.start();
 

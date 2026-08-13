@@ -29,10 +29,24 @@ public:
         coord_ = coord;
     }
 
-    // When set, all endpoints except /health require an
-    // "Authorization: Bearer <token>" header. Default empty = no auth
-    // (backward compatible). Call before start().
+    // All endpoints except /health and /readyz require an
+    // "Authorization: Bearer <token>" header. Call before start().
+    //
+    // Authentication is REQUIRED by default: start() refuses to listen
+    // unless either a token is set here or setAuthDisabled(true) is called
+    // explicitly. The admin surface exposes the full order book (/book),
+    // participant risk state, and — when OB_CHAOS_INJECT is on — order
+    // injection, on a socket bound to INADDR_ANY. An empty-token default
+    // meant a deployment that simply forgot to configure a token served all
+    // of that to anyone with network reach, silently. Forgetting is now a
+    // startup failure rather than an open port.
     void setAdminToken(const std::string& token) { adminToken_ = token; }
+
+    // Explicit opt-out from the auth requirement, for local development and
+    // tests. Deliberately verbose and deliberately not the default: running
+    // the admin port unauthenticated has to be a decision someone made, not
+    // a config they omitted.
+    void setAuthDisabled(bool disabled) { authDisabled_ = disabled; }
 
     // Readiness gate — false until the caller signals the engine is
     // ready to serve traffic. Flipped via setReady(true) after warm-up
@@ -91,9 +105,12 @@ private:
     // (logged as a security warning at startup).
     std::string chaosToken_;
 
-    // Bearer token for all non-/health admin endpoints.
-    // Empty = no auth required (default, backward compatible).
+    // Bearer token for all non-/health admin endpoints. Empty is only a
+    // legal configuration alongside authDisabled_ — see setAdminToken().
     std::string adminToken_;
+
+    // Explicit "I know this port is unauthenticated" acknowledgement.
+    bool authDisabled_{false};
 
     // Readiness flag — starts false. Set via setReady(true) once the
     // engine has completed start-up (journal replay, warm-up, etc.).

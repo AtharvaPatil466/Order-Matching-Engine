@@ -179,6 +179,41 @@ int main() {
     }
 
     admin.stop();
+
+    // ── 9. Fail closed: no token and no explicit opt-out → never binds ──
+    // The regression this guards: an operator who forgets to configure a
+    // token used to get a fully open admin port serving /book, /otr and
+    // /risk to anyone with network reach. Omitting the token must now be a
+    // startup failure, not a silent exposure.
+    {
+        const uint16_t openPort = pickPort();
+        AdminServer unconfigured(engine, openPort);
+        unconfigured.start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        auto r = httpGet(openPort, "/health");
+        assert(r.empty() &&
+               "AdminServer must not listen without a token or explicit opt-out");
+        std::puts("no token, no opt-out: port closed");
+        unconfigured.stop();  // no-op; never started
+    }
+
+    // ── 10. Explicit opt-out still works, for local dev and tests ───────
+    {
+        const uint16_t openPort = pickPort();
+        AdminServer opted(engine, openPort);
+        opted.setAuthDisabled(true);
+        opted.start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        auto r = httpGet(openPort, "/metrics");
+        assert(!r.empty() && "explicit opt-out must still serve");
+        assert(r.find("HTTP/1.1 200") != std::string::npos &&
+               "with auth explicitly disabled, /metrics must return 200");
+        std::puts("explicit opt-out: /metrics 200 OK");
+        opted.stop();
+    }
+
     engine.stopAsync();
 
     std::puts("AdminAuthTest: all assertions passed");

@@ -8,14 +8,28 @@
 // string, production wires to UDP multicast or the SHM fan-out.
 //
 // Mapping (per ITCH 5.0):
-//   onOrderUpdate(Accepted, remaining>0)  → 'A' AddOrder
+//   onBookVisible(Rest), id unknown       → 'A' AddOrder
+//   onBookVisible(Rest), id already live  → 'D' then 'A' (iceberg slice refresh:
+//                                            the new slice is a new arrival at
+//                                            the back of the queue)
+//   onBookVisible(Reduce)                 → 'X' OrderCancel (shares removed)
 //   onTrade                               → 'E' Executed (per live side)
 //   onOrderUpdate(Filled, remaining=0)    → 'D' Delete (order off the book)
 //   onOrderUpdate(Cancelled)              → 'D' Delete
 //   onOrderUpdate(Rejected)               → nothing (rejects are private)
 //   onOrderUpdate(PartiallyFilled)        → nothing ('E' was the public event)
+//
+// Adds are driven by onBookVisible, NOT onOrderUpdate(Accepted). Accepted is
+// the private owner ack: it fires for hidden orders, reports an iceberg's true
+// size rather than its slice, and fires before matching — so a feed built on it
+// broadcasts the full incoming size of an order that may never rest. Publishing
+// from the displayed-book channel instead means hidden and reserve quantity
+// never reach the wire at all.
+//
 // Live order IDs are tracked internally so 'D' only follows a prior 'A', and
-// 'E' only fires for sides we publicly announced.
+// 'E' only fires for sides we publicly announced. That same rule is what keeps
+// hidden orders off the feed end-to-end: they are never 'A'-announced, so their
+// executions and deletes find no tracked id and are dropped.
 //
 // Threading (P3-1): synchronous by default — engine calls serialize the frame
 // and invoke the sink inline on the matching thread. enableAsyncPublishing()
@@ -30,7 +44,6 @@
 #include "EventListener.h"
 #include "ItchProtocol.h"
 #include "MpscQueue.h"
-#include "Order.h"
 #include "OrderBook.h"
 #include "Types.h"
 
@@ -180,6 +193,7 @@ public:
 
     uint64_t addsEmitted()              const { return addsEmitted_.load(std::memory_order_relaxed); }
     uint64_t executedEmitted()          const { return executedEmitted_.load(std::memory_order_relaxed); }
+    uint64_t cancelsEmitted()           const { return cancelsEmitted_.load(std::memory_order_relaxed); }
     uint64_t deletesEmitted()           const { return deletesEmitted_.load(std::memory_order_relaxed); }
     uint64_t tradingActionsEmitted()    const { return tradingActionsEmitted_.load(std::memory_order_relaxed); }
     uint64_t directoriesEmitted()       const { return directoriesEmitted_.load(std::memory_order_relaxed); }
@@ -191,30 +205,27 @@ public:
 
     // ── EventListener overrides ─────────────────────────────────────────
 
+    void onBookVisible(const BookVisibleUpdate& u) override {
+        if (!send_) return;
+        RawEvent e;
+        e.kind    = (u.action == BookVisibleUpdate::Action::Rest)
+                        ? RawEvent::Kind::Add
+                        : RawEvent::Kind::Cancel;
+        e.orderId = u.orderId;
+        e.side    = u.side;
+        e.shares  = u.quantity;
+        e.price   = u.price;
+        e.ts      = now();
+        dispatch(e);
+    }
+
     void onOrderUpdate(const OrderUpdate& u) override {
         if (!send_) return;
         switch (u.status) {
-        case OrderStatus::Accepted: {
-            // Public 'A' fires only when the order actually rests on
-            // the book. An IOC that fully filled comes through as
-            // Accepted with remaining=0 — no 'A' for that case.
-            if (u.remainingQty == 0) break;
-            // OrderUpdate doesn't carry side/price — fetch from the book
-            // HERE, on the matching thread, while the order is still
-            // resting. The worker thread must not touch the book (it may
-            // have moved on), so we snapshot side/price into the event.
-            const Order* o = book_.getOrder(u.orderId);
-            if (!o) break;
-            RawEvent e;
-            e.kind    = RawEvent::Kind::Add;
-            e.orderId = u.orderId;
-            e.side    = o->side;
-            e.shares  = u.remainingQty;
-            e.price   = o->price;
-            e.ts      = now();
-            dispatch(e);
+        case OrderStatus::Accepted:
+            // Not a public event — see the header comment. The 'A' comes from
+            // onBookVisible(Rest), which knows the displayed size.
             break;
-        }
         case OrderStatus::Cancelled:
         case OrderStatus::Filled: {
             RawEvent e;
@@ -286,7 +297,7 @@ private:
     // value. Per-kind fields are documented inline.
     struct RawEvent {
         enum class Kind : uint8_t {
-            Add, Executed, Delete,
+            Add, Executed, Cancel, Delete,
             SystemEvent, StockDirectory, TradingAction, CrossTrade
         };
         Kind     kind{Kind::Add};
@@ -297,9 +308,9 @@ private:
         char     c1{' '};            // StockDir financialStatus
         char     reason4[4]{' ', ' ', ' ', ' '};  // TradingAction reason
         uint32_t u32{0};             // StockDir roundLotSize
-        OrderId  orderId{0};         // Add / Executed / Delete order ref
-        Quantity shares{0};          // Add leaves / Executed trade qty /
-                                     // CrossTrade shares
+        OrderId  orderId{0};         // Add / Executed / Cancel / Delete order ref
+        Quantity shares{0};          // Add displayed qty / Executed trade qty /
+                                     // Cancel shares removed / CrossTrade shares
         Price    price{0};           // Add price / CrossTrade cross price
         uint64_t tradeOrMatch{0};    // Executed tradeId / CrossTrade matchNumber
         uint64_t ts{0};              // timestamp captured at event time
@@ -334,6 +345,11 @@ private:
     void serializeAndSend(const RawEvent& e) {
         switch (e.kind) {
         case RawEvent::Kind::Add: {
+            // An id we have already announced means an iceberg slice refresh.
+            // The replenished slice joins the back of the queue, which on the
+            // wire is a delete of the exhausted slice then a fresh add — the
+            // standard encoding for an order that lost its time priority.
+            if (liveOrders_.count(e.orderId)) emitOrderDelete(e.orderId, e.ts);
             liveOrders_[e.orderId] = LiveOrder{e.side, e.shares, e.price};
             uint8_t buf[ITCH_SIZE_ADD_ORDER];
             size_t n = encodeAddOrder(buf, locateOf(), nextTracking(), e.ts,
@@ -365,6 +381,23 @@ private:
                 emitOrderDelete(e.orderId, it->second.pendingDeleteTs);
                 liveOrders_.erase(it);
             }
+            break;
+        }
+        case RawEvent::Kind::Cancel: {
+            // Displayed size shrank with no trade behind it. Untracked ids are
+            // dropped for the same reason as Executed — we never announced it.
+            auto it = liveOrders_.find(e.orderId);
+            if (it == liveOrders_.end()) break;
+            Quantity removed = (e.shares > it->second.shares) ? it->second.shares
+                                                              : e.shares;
+            if (removed == 0) break;
+            it->second.shares -= removed;
+            uint8_t buf[ITCH_SIZE_ORDER_CANCEL];
+            size_t n = encodeOrderCancel(buf, locateOf(), nextTracking(), e.ts,
+                                         static_cast<uint64_t>(e.orderId), removed);
+            emit(buf, n);
+            cancelsEmitted_.fetch_add(1, std::memory_order_relaxed);
+            messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
         case RawEvent::Kind::Delete: {
@@ -478,6 +511,7 @@ private:
     // read them while the worker thread writes.
     std::atomic<uint64_t>                        addsEmitted_{0};
     std::atomic<uint64_t>                        executedEmitted_{0};
+    std::atomic<uint64_t>                        cancelsEmitted_{0};
     std::atomic<uint64_t>                        deletesEmitted_{0};
     std::atomic<uint64_t>                        tradingActionsEmitted_{0};
     std::atomic<uint64_t>                        directoriesEmitted_{0};

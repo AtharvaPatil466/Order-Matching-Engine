@@ -183,10 +183,13 @@ void test_FeedEmitsAddOnAcceptedOrder() {
 
 void test_FeedJournalsEveryPublishedFrame() {
     TEST(FeedJournalsEveryPublishedFrame) {
-        // The journal must mirror what goes on the wire. After a
-        // resting buy plus a counterparty sell that partially fills,
-        // we expect: 'A' (buy) + 'A' (sell) + 'E'×2 + 'D' (sell
-        // fully filled). 5 frames total in the journal.
+        // The journal must mirror what goes on the wire. After a resting buy
+        // plus a counterparty sell that fully fills on entry, we expect:
+        // 'A' (buy) + 'E' (buy). 2 frames total in the journal.
+        //
+        // The sell never rests, so it is never displayed and produces no
+        // wire events at all — the trade reaches the market through the
+        // resting buy's 'E'.
         ItchUdpSubscriber sub;
         CHECK(sub.start("127.0.0.1", 0));
 
@@ -202,12 +205,12 @@ void test_FeedJournalsEveryPublishedFrame() {
         engine.submitOrder(9, 1, 1, Side::Buy, 1000, 50, OrderType::Limit);
         engine.submitOrder(9, 2, 2, Side::Sell, 1000, 20, OrderType::Limit);
 
-        // 5 expected frames: A(1), A(2), E(2-buy-side), E(1-sell-side), D(2)
-        CHECK(waitFor([&] { return feed.framesJournaled() >= 5; }));
-        CHECK(feed.journal().size() == 5);
-        CHECK(feed.addsEmitted() == 2);
-        CHECK(feed.executedEmitted() == 2);
-        CHECK(feed.deletesEmitted() == 1);
+        // 2 expected frames: A(1), E(1)
+        CHECK(waitFor([&] { return feed.framesJournaled() >= 2; }));
+        CHECK(feed.journal().size() == 2);
+        CHECK(feed.addsEmitted() == 1);
+        CHECK(feed.executedEmitted() == 1);
+        CHECK(feed.deletesEmitted() == 0);
 
         feed.stop(); sub.stop();
     } END

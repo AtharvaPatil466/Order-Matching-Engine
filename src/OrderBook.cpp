@@ -127,6 +127,29 @@ void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Pri
 #endif
 }
 
+void OrderBook::notifyBookVisible(BookVisibleUpdate::Action action, OrderId orderId,
+                                  Side side, Price price, Quantity quantity) {
+#ifndef OB_LEAN_MODE
+    if (replayMode_) return;
+
+    BookVisibleUpdate update{};
+    update.action = action;
+    update.orderId = orderId;
+    update.side = side;
+    update.price = price;
+    update.quantity = quantity;
+    update.timestamp = nowNs();
+    update.sequenceNumber = nextSequenceNumber_++;
+
+    // Public market-data channel: same dispatch shape as notifyMarketData
+    // (user listener only). engineListener_ is the internal contingent-order
+    // observer and has no interest in the displayed-book projection.
+    if (hasTradeListener_) listener_->onBookVisible(update);
+#else
+    (void)action; (void)orderId; (void)side; (void)price; (void)quantity;
+#endif
+}
+
 // ─── Book helpers ────────────────────────────────────────────────────────────
 
 bool OrderBook::canAddToBook(const Order* order) const {
@@ -162,6 +185,13 @@ bool OrderBook::addToBook(Order* order) {
         return false;
     }
     stpNoteAdded(order);  // now resting: bump this participant's STP occupancy
+    // Public display event. Fired HERE rather than beside the callers'
+    // Accepted notify because this is the single choke point all eleven add
+    // paths funnel through, and it is the first moment the display quantity
+    // is final (the iceberg slice is sized just before the call).
+    if (!order->isHidden)
+        notifyBookVisible(BookVisibleUpdate::Action::Rest, order->id, order->side,
+                          order->price, displayQuantity(*order));
     return true;
 }
 
@@ -979,6 +1009,21 @@ void OrderBook::match(Order* incoming) {
             bookOrder->status = OrderStatus::PartiallyFilled;
             level->remove(bookOrder);
             level->push_back(bookOrder);
+            if (!bookOrder->isHidden) {
+                // Drain the buffered fills BEFORE publishing the replenished
+                // slice. Two ways this goes wrong otherwise: a subscriber that
+                // sees the refresh ahead of the executions that emptied the
+                // previous slice decrements the NEW slice by the OLD slice's
+                // fills; and deferring the event to the end of the sweep would
+                // publish a slice size that later fills in this same sweep have
+                // already reduced. Flushing here fixes both — and costs nothing
+                // in the common case, since a refresh only happens when a slice
+                // empties.
+                flushFills();
+                notifyBookVisible(BookVisibleUpdate::Action::Rest, bookOrder->id,
+                                  bookOrder->side, bookOrder->price,
+                                  displayQuantity(*bookOrder));
+            }
         } else {
             bookOrder->status = OrderStatus::PartiallyFilled;
         }
@@ -1154,6 +1199,13 @@ void OrderBook::matchProRata(Order* incoming) {
                 // IcebergPriority_ProRata_KeepsPriorityOnRefresh.
                 bookOrder->visibleQty = std::min(bookOrder->remainingQty, bookOrder->displayQty);
                 bookOrder->status = OrderStatus::PartiallyFilled;
+                // Safe to fire inline here: unlike match(), pro-rata dispatches
+                // onTrade per fill rather than batching, so the executions that
+                // emptied the previous slice have already gone out.
+                if (!bookOrder->isHidden)
+                    notifyBookVisible(BookVisibleUpdate::Action::Rest, bookOrder->id,
+                                      bookOrder->side, bookOrder->price,
+                                      displayQuantity(*bookOrder));
             } else {
                 bookOrder->status = OrderStatus::PartiallyFilled;
             }
@@ -1258,9 +1310,25 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty) {
     if (!order) return false;
 
     if (newQty < order->remainingQty) {
+        const Quantity displayBefore = displayQuantity(*order);
         order->remainingQty = newQty;
-        if (!order->isHidden)
+        // Preserve the iceberg invariant visibleQty <= remainingQty (the same
+        // clamp the match loop applies). Without it a modify-down below the
+        // current slice leaves the order displaying more than it can deliver.
+        if (order->type == OrderType::Iceberg)
+            order->visibleQty = std::min(order->visibleQty, order->remainingQty);
+        const Quantity displayAfter = displayQuantity(*order);
+
+        if (!order->isHidden) {
             notifyMarketData(MarketDataUpdate::Action::Modify, order->side, order->price);
+            // Only the displayed shrink is public. A modify-down that consumes
+            // an iceberg's reserve without touching its slice changes nothing
+            // the market can see, so it emits nothing.
+            if (displayAfter < displayBefore)
+                notifyBookVisible(BookVisibleUpdate::Action::Reduce, order->id,
+                                  order->side, order->price,
+                                  displayBefore - displayAfter);
+        }
         return true;
     }
 

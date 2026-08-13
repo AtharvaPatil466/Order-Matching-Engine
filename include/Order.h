@@ -100,4 +100,17 @@ static_assert(offsetof(Order, displayQty) <= 64,
 // the ObjectPool capacity math was sized against.
 static_assert(sizeof(Order) == 192, "Order size changed; check pool sizing");
 
+// Publicly displayed size of a resting order: an iceberg shows only its
+// current slice, everything else shows its full leaves. Hidden orders are
+// filtered by the caller — they display nothing at all, which is a
+// suppress-the-event decision rather than a quantity of zero.
+//
+// This is the single definition of "what the market can see" for one order.
+// The L2 aggregation in OrderBook::notifyMarketData and the order-level
+// BookVisibleUpdate feed must agree on it, or the two market-data feeds
+// describe different books.
+inline Quantity displayQuantity(const Order& o) {
+    return (o.type == OrderType::Iceberg) ? o.visibleQty : o.remainingQty;
+}
+
 } // namespace OrderMatcher

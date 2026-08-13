@@ -276,6 +276,16 @@ add_test(NAME ItchPublisherTest COMMAND ItchPublisherTest)
 set_tests_properties(ItchPublisherTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
+# ITCH 5.0 feed fidelity: replay the wire stream into an independent book and
+# assert it equals the engine's displayed depth (hidden excluded, iceberg
+# sliced). Pins the L3 feed against the L2 snapshot so they cannot drift.
+add_executable(ItchReconstructionTest ItchReconstructionTest.cpp)
+target_link_libraries(ItchReconstructionTest PRIVATE OrderMatcher)
+enable_assertions(ItchReconstructionTest)
+add_test(NAME ItchReconstructionTest COMMAND ItchReconstructionTest)
+set_tests_properties(ItchReconstructionTest PROPERTIES TIMEOUT 60
+                     LABELS "project;protocol")
+
 # ITCH 5.0 exact wire byte-layout / field-offset tests (C / X / P)
 add_executable(ItchByteLayoutTest ItchByteLayoutTest.cpp)
 target_link_libraries(ItchByteLayoutTest PRIVATE OrderMatcher)

@@ -10,7 +10,7 @@
 //
 // MultiplexListener composes N listeners behind a single EventListener
 // interface. Install one of THESE on the book; register child
-// listeners with add()/remove(). All three callbacks fan out in
+// listeners with add()/remove(). Every callback fans out in
 // registration order.
 //
 // Caveats:
@@ -57,6 +57,12 @@ public:
 
     void onMarketData(const MarketDataUpdate& u) override {
         for (auto* l : listeners_) l->onMarketData(u);
+    }
+
+    // Adds ('A') arrive on this channel, not onOrderUpdate — a fan-out that
+    // forgets it silently produces a feed with no order additions at all.
+    void onBookVisible(const BookVisibleUpdate& u) override {
+        for (auto* l : listeners_) l->onBookVisible(u);
     }
 
 private:

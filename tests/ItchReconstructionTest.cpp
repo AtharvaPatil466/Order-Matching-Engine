@@ -21,12 +21,12 @@
 //   5. cancelReplace: shrink in place, grow with loss of priority, reprice
 //      into crossing liquidity, and the iceberg/hidden variants
 //   6. Stops are invisible while parked and enter the feed when they rest
-//   7. Cancelling a parked order must not disturb its price level
+//   7. Cancelling a parked order must not disturb its price level, and
+//      neither must the bulk paths (killSwitch, expireOrders)
 //   8. Auction accumulation and uncross, including icebergs
 //   9. Randomised soak: mixed order types, replay must match at every step
 
 #include "ItchBookReplay.h"
-#include "ItchProtocol.h"
 #include "ItchPublisher.h"
 #include "MatchingEngine.h"
 #include "OrderBook.h"
@@ -70,12 +70,6 @@ static int tests_failed = 0;
     } while (0)
 
 namespace {
-
-// ─── Subscriber-side book reconstruction ────────────────────────────────────
-//
-// Deliberately dumb and independent of the engine: a flat id → order map fed
-// only by the wire bytes. If it needed engine internals to stay in sync, it
-// would not be testing what a real subscriber can actually do.
 
 // ─── Engine-side reference ──────────────────────────────────────────────────
 
@@ -424,6 +418,65 @@ void test_CancellingParkedOrderLeavesItsPriceLevelIntact() {
     } END
 }
 
+void test_BulkRemovalWithParkedOrdersKeepsBookIntact() {
+    TEST(BulkRemovalWithParkedOrdersKeepsBookIntact) {
+        // killSwitch and expireOrders remove orders in bulk rather than one
+        // client cancel at a time. Both route through cancelOrderImpl, so they
+        // inherit its tracking-list cleanup and the removeFromBook guard — but
+        // that is a property worth pinning, not assuming: a bulk path that
+        // deallocated an order while leaving it in stopOrders_ would leave a
+        // dangling pointer for the next trigger to follow.
+        Fixture f;
+
+        // Participant 1: ordinary displayed liquidity that must survive.
+        f.engine.submitOrder(1, 100, 1, Side::Sell, 1001, 40, OrderType::Limit);
+        f.engine.submitOrder(1, 101, 1, Side::Sell, 1002, 25, OrderType::Limit);
+
+        // Participant 2: a displayed order plus three parked ones whose prices
+        // collide with participant 1's levels — the collision that made the
+        // single-cancel path wipe a whole level.
+        f.engine.submitOrder(1, 200, 2, Side::Sell, 1001, 60, OrderType::Limit);
+        f.engine.submitOrder(1, 201, 2, Side::Sell, 1001, 70, OrderType::StopLimit,
+                             /*stopPrice=*/990, /*displayQty=*/0,
+                             TimeInForce::GTC, /*expiryTime=*/0,
+                             /*stopLimitPrice=*/1001);
+        f.engine.submitOrder(1, 202, 2, Side::Sell, 1002, 50, OrderType::Pegged,
+                             /*stopPrice=*/0, /*displayQty=*/0,
+                             TimeInForce::GTC, /*expiryTime=*/0,
+                             /*stopLimitPrice=*/0, PegType::PrimaryPeg, 0);
+        f.engine.submitOrder(1, 203, 2, Side::Sell, 1002, 30, OrderType::MOC);
+        // No exact depth asserted here: a PrimaryPeg sell tracks the best ask,
+        // so 202 lands at 1001 rather than the price it was submitted with.
+        // The invariant that matters is that both feeds agree either way.
+        f.check();
+
+        // Kill participant 2 across the board.
+        CHECK(f.engine.killSwitch(2) > 0);
+        f.check();
+
+        // Participant 1 must be untouched and still tradable — the orphaning
+        // failure mode left orders visible in lookups but unmatchable, which a
+        // depth assertion alone would not catch.
+        CHECK(f.reco.depth(Side::Sell).at(1001) == 40);
+        f.engine.submitOrder(1, 300, 3, Side::Buy, 1002, 65, OrderType::Limit);
+        CHECK(f.reco.depth(Side::Sell).count(1001) == 0 &&
+              "participant 1's resting orders must still fill");
+        f.check();
+
+        // Expiry is the other bulk path. A parked GTD order expiring beside a
+        // live level exercises the same collision.
+        f.engine.submitOrder(1, 400, 4, Side::Buy, 990, 55, OrderType::Limit);
+        f.engine.submitOrder(1, 401, 4, Side::Buy, 990, 45, OrderType::Stop,
+                             /*stopPrice=*/1010, /*displayQty=*/0,
+                             TimeInForce::GTD, /*expiryTime=*/1);
+        f.check();
+        f.book->expireOrders(/*currentTime=*/1000);
+        CHECK(f.reco.depth(Side::Buy).at(990) == 55 &&
+              "expiring a parked order must not disturb the level it names");
+        f.check();
+    } END
+}
+
 void test_TriggeredStopEntersFeedOnRest() {
     TEST(TriggeredStopEntersFeedOnRest) {
         Fixture f;
@@ -706,6 +759,7 @@ int main() {
     test_CancelReplaceReconstructs();
     test_UntriggeredStopIsInvisible();
     test_CancellingParkedOrderLeavesItsPriceLevelIntact();
+    test_BulkRemovalWithParkedOrdersKeepsBookIntact();
     test_TriggeredStopEntersFeedOnRest();
     test_AuctionUncrossReconstructs();
     test_RandomisedFlowStaysInSync();

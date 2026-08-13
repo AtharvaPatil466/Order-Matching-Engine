@@ -81,6 +81,40 @@ struct MarketDataUpdate {
     uint64_t sequenceNumber;
 };
 
+// Market Data: order-level view of the DISPLAYED book (L3 / MBO).
+//
+// The public counterpart to OrderUpdate. OrderUpdate is the private
+// owner-facing channel — it fires for hidden orders and carries true size,
+// because the submitting participant is entitled to both. BookVisibleUpdate
+// is what the rest of the market is allowed to see: hidden orders never
+// produce one, and an iceberg reports only its current display slice.
+//
+// Removal from the book is NOT represented here. It already arrives as
+// OrderUpdate{Cancelled|Filled}, and a subscriber that only ever learned
+// about publicly-displayed orders will not recognise the id of a hidden one —
+// so the delete filters itself.
+struct BookVisibleUpdate {
+    enum class Action : uint8_t {
+        // The order is now displayed at this price with this size, at the
+        // BACK of the queue. Covers both a first rest and an iceberg slice
+        // refresh; a subscriber that already knows the id should treat it as
+        // delete-then-add, which is how the refreshed slice's loss of time
+        // priority is conveyed on the wire.
+        Rest,
+        // Displayed size shrank with no trade behind it (a modify-down).
+        // `quantity` is the amount REMOVED, not the new resting size —
+        // matching ITCH 'X' Order Cancel semantics.
+        Reduce,
+    };
+    Action   action;
+    OrderId  orderId;
+    Side     side;
+    Price    price;
+    Quantity quantity;
+    uint64_t timestamp;
+    uint64_t sequenceNumber;
+};
+
 // Auction indicative / imbalance snapshot (NASDAQ NOII analogue).
 // Computed non-destructively over the resting book plus any parked
 // auction market orders, so it can be published continuously during
@@ -504,6 +538,11 @@ private:
     void notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity filledQty, Quantity remainingQty,
                            Price lastFillPrice = 0, RejectReason reason = RejectReason::None);
     void notifyMarketData(MarketDataUpdate::Action action, Side side, Price price);
+    // Callers MUST have already filtered hidden orders — this does not
+    // re-check isHidden, because Reduce needs the caller's before/after
+    // display sizes anyway and a single filter point is easier to audit.
+    void notifyBookVisible(BookVisibleUpdate::Action action, OrderId orderId,
+                           Side side, Price price, Quantity quantity);
 
     void removeFromBook(Order* order);
     bool addToBook(Order* order);  // returns false if depth limit exceeded

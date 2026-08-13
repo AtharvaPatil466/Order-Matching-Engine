@@ -1,6 +1,6 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **46,500+ lines of C++20** | 84 headers | 14 source files | 77 test files | 426 CTest targets
+> **C++20 Order Matching Engine** | 90 headers | 14 source files | 88 test files | 448 CTest targets
 >
 > A C++20 low-latency matching engine drawing on institutional exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
 
@@ -14,13 +14,12 @@ This is a C++20 low-latency order matching engine with institutional-grade archi
 
 | Metric | Count |
 |--------|-------|
-| Total C++ LOC | ~46,500 |
-| Header files (`include/`) | 84 |
+| Header files (`include/`) | 90 |
 | Source files (`src/`) | 14 |
-| Test files | 77 |
-| Individual test cases | 426 CTest targets |
-| TLA+ specifications | 12 (1.26M states — matching + book layers) |
-| Documentation files | 6 (plus architecture/benchmark docs) |
+| Test files | 88 |
+| Individual test cases | 448 CTest targets |
+| TLA+ specifications | 12 (454M+ states — matching + replication layers) |
+| Documentation files | 8 in `docs/` (plus architecture/benchmark docs) |
 
 ---
 
@@ -162,7 +161,7 @@ A separate Python research layer that drives the verified C++ engine through a p
 | `experiments/` | Exps 1–4: welfare transfer, latency sweep, HFT-count sweep, batch-auction remedy — plus `run_calibrated.py` |
 | `calibration/` | Gap-safe moment extraction from live BTCUSDT-perp order flow and method-of-moments inversion with fill-rate correction |
 | `analysis/` | Figure generation and the Hawkes endogeneity diagnostic |
-| `paper/bcs_paper_draft.md` | The write-up (47 pp.) |
+| `paper/bcs_paper_draft.md` | The write-up (31 pp., 17.4k words — published on SSRN #6994722) |
 
 Each experiment is reported twice: at a pre-registered operating point chosen for mechanism clarity, and re-run at environment parameters fitted to 27 days of Binance BTCUSDT-perpetual order flow (37.0M trades, 4.16M book snapshots). Every qualitative finding survives calibration. The calibration also supplies the study's only external check on magnitude: normalised by traded notional, HFT rent is 0.125 bp at the operating point and 4.42 bp calibrated, bracketing the ≈0.4 bp latency-arbitrage tax Aquilina, Budish and O'Neill (2022) measure on real exchange message data.
 
@@ -264,9 +263,9 @@ Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reorder
 
 ## 9. Verification & Testing
 
-### Test Suite — 77 Executables, 426 CTest Targets
+### Test Suite — 88 Executables, 448 CTest Targets
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 77 test executables and 426 CTest targets. Key mechanisms:
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 88 test executables and 448 CTest targets. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.
@@ -275,7 +274,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ### Formal Verification (TLA+)
 
 **12 TLA+ specifications**, model-checked with TLC:
-- **`MatchingEngine.tla`**: 1.26M distinct states verified, zero violations — now including the matching/cross layer (`Match` action) with `MatchingConservation` and `FIFOExecution`, alongside `NoNegativeQuantity`, `FIFO_Preservation`, `GTD_Expiry_Correctness`.
+- **`MatchingEngine.tla`**: 454M+ distinct states verified, zero violations — now including the matching/cross layer (`Match` action) with `MatchingConservation` and `FIFOExecution`, alongside `NoNegativeQuantity`, `FIFO_Preservation`, `GTD_Expiry_Correctness`.
 - **`Replication.tla`**: Realistic lease-propagation model (no god-mode `~primaryAlive` guard on `BackupPromote`; promotion requires both heartbeat-miss AND local-lease-expiry). 1373 → 4192 states verified at `MaxEntries=6 → 10`, zero violations. A bug-injected variant (lease check stripped) reproduces split brain in 188 states, confirming the verification is genuine.
 - **`MpscQueue.tla`**: Lock-free ring buffer linearizability.
 - **`SnapshotLocked.tla`**: Mutex torn-snapshot prevention.
@@ -285,9 +284,9 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ## 10. File Structure
 
 ```
-include/              84 header files — core logic and networking
-src/                  13 source files — thin compilation units
-tests/                77 test files, 426 CTest targets
+include/              90 header files — core logic and networking
+src/                  14 source files — thin compilation units
+tests/                88 test files, 448 CTest targets
 benchmarks/           9 benchmark binaries
 fuzz/                 9 files — coverage-guided fuzzing harnesses
 spec/                 TLA+ formal specifications (12 specs)
@@ -311,4 +310,4 @@ The system is architecturally complete. The remaining items are AWS validation s
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · ~46,500 LOC · 77 test executables · 426 CTest targets · 19 multi-container chaos scenarios · 1.26M TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · 88 test executables · 448 CTest targets · 19 multi-container chaos scenarios · 454M+ TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*

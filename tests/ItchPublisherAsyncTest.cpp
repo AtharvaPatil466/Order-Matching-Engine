@@ -122,20 +122,23 @@ void test_FullStreamMatchesSyncCounts() {
         pub.enableAsyncPublishing();
         book->setEventListener(&pub);
 
-        // Resting buy 50, then a sell 20 that partially fills it:
-        //   A(1) A(2) E(buy) E(sell) D(2)  → 5 frames.
+        // Resting buy 50, then a sell 20 that fully fills on entry:
+        //   A(1) E(1)  → 2 frames.
+        // The sell never rests, so it is never displayed and contributes
+        // nothing to the feed; the trade reaches the market through the
+        // resting buy's 'E'.
         engine.submitOrder(9, 1, 1, Side::Buy, 1000, 50, OrderType::Limit);
         engine.submitOrder(9, 2, 2, Side::Sell, 1000, 20, OrderType::Limit);
 
-        CHECK(waitFor([&] { return frames.load() >= 5; }));
+        CHECK(waitFor([&] { return frames.load() >= 2; }));
 
         // Let the worker settle, then assert exact counts.
         CHECK(waitFor([&] {
-            return pub.addsEmitted() == 2 && pub.executedEmitted() == 2 &&
-                   pub.deletesEmitted() == 1;
+            return pub.addsEmitted() == 1 && pub.executedEmitted() == 1 &&
+                   pub.deletesEmitted() == 0;
         }));
-        CHECK(frames.load() == 5);
-        CHECK(pub.eventsProcessed() >= 5);
+        CHECK(frames.load() == 2);
+        CHECK(pub.eventsProcessed() >= 2);
         CHECK(pub.droppedEvents() == 0);
 
         pub.stopAsyncPublishing();

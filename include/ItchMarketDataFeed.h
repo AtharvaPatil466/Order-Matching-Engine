@@ -120,6 +120,11 @@ public:
     void onMarketData(const MarketDataUpdate& u) override {
         itch_.onMarketData(u);
     }
+    // Adds ('A') arrive on this channel, not onOrderUpdate — forgetting to
+    // forward it silently produces a feed with no order additions at all.
+    void onBookVisible(const BookVisibleUpdate& u) override {
+        itch_.onBookVisible(u);
+    }
 
 private:
     void dispatchFrame(std::string_view bytes) {

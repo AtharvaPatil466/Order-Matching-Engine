@@ -6,6 +6,7 @@ namespace OrderMatcher {
 struct Trade;
 struct OrderUpdate;
 struct MarketDataUpdate;
+struct BookVisibleUpdate;
 
 // Virtual interface replacing std::function callbacks.
 // Zero-cost dispatch via vtable — no heap allocation, no type erasure overhead.
@@ -27,6 +28,16 @@ public:
 
     // Called on every book change (add, modify, delete price level)
     virtual void onMarketData(const MarketDataUpdate& /*update*/) {}
+
+    // Called when the PUBLICLY DISPLAYED book changes at order granularity.
+    //
+    // Distinct from onOrderUpdate, which is the private owner-facing channel:
+    // that one fires for hidden orders and reports true size, because the
+    // order's owner is entitled to both. This one is the public projection —
+    // hidden orders never appear on it, and icebergs report only their current
+    // slice. An order-level market-data feed (ITCH) must be driven from HERE,
+    // not from onOrderUpdate, or it rebroadcasts private state to the world.
+    virtual void onBookVisible(const BookVisibleUpdate& /*update*/) {}
 };
 
 // Null listener singleton — avoids nullptr checks on hot path.

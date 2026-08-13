@@ -11,7 +11,7 @@
 //     5. System Event layout
 //
 //   Publisher layer
-//     6. Accepted with remaining>0 emits 'A'; IOC fully-filled emits nothing
+//     6. A resting order emits 'A'; an order that never displays emits nothing
 //     7. Resting order trade emits 'E' (the maker side)
 //     8. Aggressor that fully filled on entry emits NO 'E' (was never on book)
 //     9. Cancel emits 'D'
@@ -174,14 +174,23 @@ void test_PublisherEmitsAddOnResting() {
     } END
 }
 
-void test_PublisherEmitsAddExecuteDeleteForTransientIOC() {
-    TEST(PublisherEmitsAddExecuteDeleteForTransientIOC) {
-        // Per real Nasdaq ITCH 5.0: an IOC that fully fills on entry
-        // produces A → E → D on the wire. The order does pass through
-        // Accepted state inside the engine (notifyOrderUpdate fires
-        // before matching), so subscribers see the transient lifecycle
-        // even though the order never visibly rested. This matches the
-        // real venue's behavior — the publisher faithfully reproduces it.
+void test_PublisherSuppressesNeverDisplayedIOC() {
+    TEST(PublisherSuppressesNeverDisplayedIOC) {
+        // An IOC that fully fills on entry never rests, so it is never
+        // displayed and produces NOTHING on the order-level feed.
+        //
+        // This test previously asserted the opposite (A → E → D for the
+        // transient aggressor), because the publisher drove 'A' off
+        // onOrderUpdate(Accepted) — which fires before matching, for every
+        // order, including hidden ones. That was the same defect that leaked
+        // hidden orders and iceberg reserve size onto the public feed, so the
+        // transient lifecycle went away with it. Publishing 'A' for an order
+        // that never joined the displayed book also advertised its full
+        // incoming size, which is exactly what a venue must not reveal.
+        //
+        // The trade itself is still reported to the market through the
+        // resting maker's 'E'. What is gone is the fiction that the
+        // aggressor was ever on the book.
         MatchingEngine engine;
         engine.addSymbol(7);
         engine.start();
@@ -203,16 +212,19 @@ void test_PublisherEmitsAddExecuteDeleteForTransientIOC() {
                                      OrderType::IOC);
         CHECK(r.isAccepted());
 
-        // Aggressor 201 transits the book: A on accept, E on fill, D on
-        // fully-filled removal.
-        CHECK(pub.addsEmitted() == 1
-              && "aggressor's Accepted state must emit 'A'");
-        CHECK(pub.executedEmitted() == 1
-              && "aggressor side of the trade must emit 'E' (its 'A' set it live)");
-        CHECK(pub.deletesEmitted() == 1
-              && "fully-filled aggressor must emit 'D'");
-        // The maker (200) was placed before the publisher attached, so
-        // the publisher has no record of it — no 'E' for that side.
+        // Aggressor 201 never rested, so it was never announced — and an
+        // order the feed never announced generates no 'E' or 'D' either.
+        CHECK(pub.addsEmitted() == 0
+              && "an order that never displayed must not emit 'A'");
+        CHECK(pub.executedEmitted() == 0
+              && "no 'E' for an order the feed never announced");
+        CHECK(pub.deletesEmitted() == 0
+              && "no 'D' for an order the feed never announced");
+        // The maker (200) was placed before the publisher attached, so the
+        // publisher has no record of it either — hence total silence here.
+        // With the maker announced, its 'E' would carry the trade; see
+        // test_PublisherEmitsExecutedOnMakerFill.
+        CHECK(sent.empty());
     } END
 }
 
@@ -235,28 +247,25 @@ void test_PublisherEmitsExecutedOnMakerFill() {
         CHECK(pub.addsEmitted() == 1);
         sent.clear();
 
-        // Aggressive buy of 20 — matches the resting sell. Both
-        // sides are tracked by the publisher (maker 300 from the
-        // earlier 'A'; aggressor 301 from its Accepted-before-match
-        // 'A'), so 'E' fires for each side. The aggressor then
-        // emits 'D' because it fully filled.
+        // Aggressive buy of 20 — matches the resting sell and fully fills on
+        // entry, so it never displays. Only the maker (300), announced by its
+        // earlier 'A', is on the feed: one 'E' against it, and no 'D' because
+        // it still has 30 leaves. That single 'E' is how the market learns
+        // the trade happened.
         auto agg = engine.submitOrder(7, 301, 2, Side::Buy, 1000, 20,
                                        OrderType::Limit);
         CHECK(agg.isAccepted());
 
-        CHECK(pub.executedEmitted() == 2
-              && "both maker (300) and aggressor (301) tracked — 'E' for each");
-        CHECK(pub.deletesEmitted() == 1
-              && "aggressor 301 fully filled — emits 'D'; maker still has 30 leaves");
-        // Wire stream after the buy: 'A' for 301, then 'E' for the
-        // buy side (301), then 'E' for the sell side (300), then 'D'
-        // for 301 (now fully filled).
-        CHECK(sent.size() ==
-              ITCH_SIZE_ADD_ORDER + 2 * ITCH_SIZE_ORDER_EXECUTED +
-              ITCH_SIZE_ORDER_DELETE);
+        CHECK(pub.executedEmitted() == 1
+              && "only the displayed maker (300) emits 'E'");
+        CHECK(pub.deletesEmitted() == 0
+              && "maker still has 30 leaves; aggressor was never announced");
+        // Wire stream after the buy is exactly one 'E' for the maker.
+        CHECK(sent.size() == ITCH_SIZE_ORDER_EXECUTED);
         const auto* p = reinterpret_cast<const uint8_t*>(sent.data());
-        CHECK(p[0] == ITCH_MT_ADD_ORDER);
-        CHECK(p[ITCH_SIZE_ADD_ORDER] == ITCH_MT_ORDER_EXECUTED);
+        CHECK(p[0] == ITCH_MT_ORDER_EXECUTED);
+        CHECK(readU64BE(p + 11) == 300ULL);
+        CHECK(readU32BE(p + 19) == 20);
     } END
 }
 
@@ -305,30 +314,25 @@ void test_PublisherEmitsExecutedThenDeleteOnFullFill() {
         CHECK(pub.addsEmitted() == 1);
         sent.clear();
 
-        // Aggressive buy of exactly 25 — fully consumes the maker.
-        // Both maker (500) and aggressor (501) are tracked, so each
-        // emits 'E'. Each then fully fills → each emits 'D'.
+        // Aggressive buy of exactly 25 — fully consumes the maker and fully
+        // fills itself, so the aggressor never displays. Only the maker
+        // (500) is on the feed: 'E' for its fill, then 'D' as it leaves the
+        // book with zero leaves.
         engine.submitOrder(7, 501, 2, Side::Buy, 1000, 25, OrderType::Limit);
 
-        CHECK(pub.executedEmitted() == 2
-              && "both sides emit 'E'");
-        CHECK(pub.deletesEmitted() == 2
-              && "both fully-filled orders emit 'D'");
+        CHECK(pub.executedEmitted() == 1
+              && "only the displayed maker emits 'E'");
+        CHECK(pub.deletesEmitted() == 1
+              && "only the displayed maker emits 'D'");
         CHECK(pub.liveOrderCount() == 0);
 
-        // Wire stream after the aggressor:
-        //   'A' (501 accepted)
-        //   'E' (501 fill, buy side)
-        //   'E' (500 fill, sell side)
-        //   'D' (501 filled)
-        //   'D' (500 filled)
-        // The exact ordering between same-trade 'E's, and between 'D's,
-        // depends on the order onTrade iterates the trade's two sides
-        // and the order Filled status updates fire — we don't pin those
-        // micro-orderings here, only the total counts/sizes.
-        CHECK(sent.size() ==
-              ITCH_SIZE_ADD_ORDER + 2 * ITCH_SIZE_ORDER_EXECUTED +
-              2 * ITCH_SIZE_ORDER_DELETE);
+        // Wire stream after the aggressor: 'E' (500 fill) then 'D' (500
+        // off the book). The E→D order IS pinned — a subscriber that sees
+        // the delete first would drop the execution and lose the trade.
+        CHECK(sent.size() == ITCH_SIZE_ORDER_EXECUTED + ITCH_SIZE_ORDER_DELETE);
+        const auto* p = reinterpret_cast<const uint8_t*>(sent.data());
+        CHECK(p[0] == ITCH_MT_ORDER_EXECUTED);
+        CHECK(p[ITCH_SIZE_ORDER_EXECUTED] == ITCH_MT_ORDER_DELETE);
     } END
 }
 
@@ -505,16 +509,18 @@ void test_MultiplexListenerFansOut() {
         itchSent.clear();
         engine.submitOrder(7, 601, 2, Side::Sell, 1000, 20, OrderType::Limit);
 
-        // OUCH only knows about its own order (id=600), so it emits
-        // 'E' for one side. ITCH knows about both sides (it 'A'-d
-        // both 600 and 601 via the listener path), so it emits 'E'
-        // for two sides plus 'D' for the fully-filled aggressor 601.
+        // OUCH only knows about its own order (id=600), so it emits 'E' for
+        // one side. ITCH announced only 600 — the aggressor 601 fully filled
+        // on entry and never displayed — so it emits one 'E' against 600 and
+        // no 'D' (600 still has 30 leaves). The point of the test is that
+        // both listeners are reached through the mux, including on the
+        // onBookVisible channel that carries the 'A'.
         CHECK(ouch.fillsEmitted() == 1
               && "OUCH session sees only its own order on one side");
-        CHECK(itch.executedEmitted() == 2
-              && "ITCH publishes 'E' for both sides through the mux");
-        CHECK(itch.deletesEmitted() == 1
-              && "fully-filled aggressor 601 generates 'D' on the ITCH feed");
+        CHECK(itch.executedEmitted() == 1
+              && "ITCH publishes 'E' for the displayed maker through the mux");
+        CHECK(itch.deletesEmitted() == 0
+              && "maker 600 retains 30 leaves; aggressor was never announced");
     } END
 }
 
@@ -528,7 +534,7 @@ int main() {
     test_SystemEventLayout();
 
     test_PublisherEmitsAddOnResting();
-    test_PublisherEmitsAddExecuteDeleteForTransientIOC();
+    test_PublisherSuppressesNeverDisplayedIOC();
     test_PublisherEmitsExecutedOnMakerFill();
     test_PublisherEmitsDeleteOnCancel();
     test_PublisherEmitsExecutedThenDeleteOnFullFill();

@@ -18,7 +18,12 @@
 //   2. Hidden orders never appear on the feed at all
 //   3. Iceberg advertises only its slice, and survives a slice refresh
 //   4. Modify-down emits 'X' so the replay does not keep the stale size
-//   5. Randomised soak: mixed order types, replay must match at every step
+//   5. cancelReplace: shrink in place, grow with loss of priority, reprice
+//      into crossing liquidity, and the iceberg/hidden variants
+//   6. Stops are invisible while parked and enter the feed when they rest
+//   7. Cancelling a parked order must not disturb its price level
+//   8. Auction accumulation and uncross, including icebergs
+//   9. Randomised soak: mixed order types, replay must match at every step
 
 #include "ItchProtocol.h"
 #include "ItchPublisher.h"
@@ -26,6 +31,7 @@
 #include "OrderBook.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -127,6 +133,16 @@ public:
     bool   knows(OrderId id) const { return orders_.count(id) != 0; }
     size_t liveCount()       const { return orders_.size(); }
 
+    // Per-order detail at one level, for diagnosing a depth mismatch.
+    std::string describeLevel(Side side, Price price) const {
+        std::string s;
+        for (const auto& [id, o] : orders_) {
+            if (o.side != side || o.price != price) continue;
+            s += " #" + std::to_string(id) + "x" + std::to_string(o.shares);
+        }
+        return s.empty() ? std::string(" (none)") : s;
+    }
+
 private:
     void apply(const uint8_t* p) {
         const uint8_t type = p[0];
@@ -202,9 +218,33 @@ void assertSideMatches(const Reconstructor& reco, const OrderBook& book, Side si
     const auto replayed = reco.depth(side);
     const auto actual   = snapshotDepth(book, side);
     if (replayed == actual) return;
+
+    // Name the first divergent level and show both sides order-by-order —
+    // an aggregate diff alone rarely identifies which order went wrong.
+    std::string detail;
+    for (const auto& [price, qty] : replayed) {
+        auto it = actual.find(price);
+        if (it != actual.end() && it->second == qty) continue;
+        detail = "\n      first divergent level: " + std::to_string(price) +
+                 " (feed " + std::to_string(qty) + ", engine " +
+                 (it == actual.end() ? "absent" : std::to_string(it->second)) + ")" +
+                 "\n      feed orders there: " + reco.describeLevel(side, price) +
+                 "\n      engine orders there:";
+        const Price divergent = price;
+        book.forEachOrder([&](const Order& o) {
+            if (o.side != side || o.price != divergent) return;
+            detail += " #" + std::to_string(o.id) + "x" +
+                      std::to_string(displayQuantity(o)) +
+                      "[type=" + std::to_string(static_cast<int>(o.type)) +
+                      (o.inBook ? ",inBook" : ",PARKED") +
+                      (o.isHidden ? ",hidden" : "") + "]";
+        });
+        break;
+    }
+
     throw std::runtime_error(std::string("book mismatch on ") + label +
                              "\n      replayed from feed: " + describe(replayed) +
-                             "\n      engine snapshot:    " + describe(actual));
+                             "\n      engine snapshot:    " + describe(actual) + detail);
 }
 
 void assertBooksMatch(const Reconstructor& reco, const OrderBook& book) {
@@ -354,6 +394,86 @@ void test_ModifyDownEmitsCancelMessage() {
     } END
 }
 
+void test_CancelReplaceReconstructs() {
+    TEST(CancelReplaceReconstructs) {
+        Fixture f;
+        f.engine.submitOrder(1, 100, 1, Side::Buy, 1000, 90, OrderType::Limit);
+        CHECK(f.reco.depth(Side::Buy).at(1000) == 90);
+
+        // (a) Same price, quantity DOWN. The order keeps its place in the
+        // queue and simply shrinks — the same shape as a modify-down, and it
+        // must reach the feed as one.
+        CHECK(f.engine.cancelReplace(1, 100, 1000, 40));
+        CHECK(f.reco.depth(Side::Buy).at(1000) == 40);
+        f.check();
+
+        // (b) Same price, quantity UP. This forfeits time priority, so the
+        // wire form is delete-then-add rather than an in-place grow.
+        CHECK(f.engine.cancelReplace(1, 100, 1000, 75));
+        CHECK(f.reco.depth(Side::Buy).at(1000) == 75);
+        f.check();
+
+        // (c) Price change with no crossing liquidity: the order moves.
+        CHECK(f.engine.cancelReplace(1, 100, 998, 75));
+        CHECK(f.reco.depth(Side::Buy).count(1000) == 0);
+        CHECK(f.reco.depth(Side::Buy).at(998) == 75);
+        f.check();
+
+        // (d) Price change INTO crossing liquidity, partially filling. The
+        // replaced order matches before it rests, so the feed has to get both
+        // the executions and the final resting size right.
+        f.engine.submitOrder(1, 200, 2, Side::Sell, 1002, 30, OrderType::Limit);
+        f.check();
+        CHECK(f.engine.cancelReplace(1, 100, 1002, 75));
+        f.check();
+
+        // (e) Price change that fully consumes the replaced order.
+        f.engine.submitOrder(1, 300, 3, Side::Buy, 1010, 200, OrderType::Limit);
+        f.engine.submitOrder(1, 301, 4, Side::Sell, 1020, 50, OrderType::Limit);
+        f.check();
+        CHECK(f.engine.cancelReplace(1, 301, 1005, 50));
+        f.check();
+
+        // (e2) A replaced order that crosses is acting as an AGGRESSOR: it is
+        // off the book for the duration of the match. Its fills must therefore
+        // be reported the way any aggressor's are — through the resting
+        // maker's 'E' only. Emitting a second 'E' against the replaced order
+        // would report the same trade twice, and would do so using its stale
+        // pre-replace size, understating the quantity.
+        {
+            Fixture g;
+            g.engine.submitOrder(1, 600, 1, Side::Sell, 1002, 200, OrderType::Limit);
+            g.engine.submitOrder(1, 601, 2, Side::Buy,  1000,  50, OrderType::Limit);
+            g.check();
+
+            const uint64_t execsBefore = g.pub->executedEmitted();
+            CHECK(g.engine.cancelReplace(1, 601, 1002, 200));
+            g.check();
+
+            CHECK(g.pub->executedEmitted() == execsBefore + 1 &&
+                  "a crossing replace must report the trade once, via the maker");
+        }
+
+        // (f) Replacing an ICEBERG must keep publishing the slice, never the
+        // reserve, and must not leave visibleQty above remainingQty.
+        f.engine.submitOrder(1, 400, 5, Side::Sell, 1030, 500, OrderType::Iceberg,
+                             /*stopPrice=*/0, /*displayQty=*/100);
+        CHECK(f.reco.depth(Side::Sell).at(1030) == 100);
+        f.check();
+        CHECK(f.engine.cancelReplace(1, 400, 1030, 60));
+        f.check();
+        CHECK(f.engine.cancelReplace(1, 400, 1031, 200));
+        f.check();
+
+        // (g) Replacing a HIDDEN order stays entirely off the feed.
+        f.engine.submitOrder(1, 500, 6, Side::Buy, 995, 80, OrderType::Hidden);
+        CHECK(!f.reco.knows(500));
+        CHECK(f.engine.cancelReplace(1, 500, 996, 40));
+        CHECK(!f.reco.knows(500));
+        f.check();
+    } END
+}
+
 void test_UntriggeredStopIsInvisible() {
     TEST(UntriggeredStopIsInvisible) {
         Fixture f;
@@ -373,6 +493,46 @@ void test_UntriggeredStopIsInvisible() {
         f.engine.cancelOrder(1, 101);
         CHECK(!f.reco.knows(101));
         f.check();
+    } END
+}
+
+void test_CancellingParkedOrderLeavesItsPriceLevelIntact() {
+    TEST(CancellingParkedOrderLeavesItsPriceLevelIntact) {
+        // A parked order carries a price but was never linked into the book,
+        // so its next/prev are null. Removing it from the intrusive list at
+        // that price used to null out BOTH head and tail — silently orphaning
+        // every genuine order resting there. They stayed allocated and
+        // reachable via getOrder(), but vanished from the book with no fill,
+        // no cancel and no notification to their owner.
+        Fixture f;
+
+        // Three real orders resting at 1001, plus a parked stop whose limit
+        // price collides with them. The collision is ordinary flow.
+        f.engine.submitOrder(1, 100, 1, Side::Sell, 1001, 40, OrderType::Limit);
+        f.engine.submitOrder(1, 101, 2, Side::Sell, 1001, 60, OrderType::Limit);
+        f.engine.submitOrder(1, 102, 3, Side::Sell, 1002, 25, OrderType::Limit);
+        f.engine.submitOrder(1, 200, 4, Side::Sell, 1001, 70, OrderType::StopLimit,
+                             /*stopPrice=*/990, /*displayQty=*/0,
+                             TimeInForce::GTC, /*expiryTime=*/0,
+                             /*stopLimitPrice=*/1001);
+        CHECK(f.reco.depth(Side::Sell).at(1001) == 100);
+        f.check();
+
+        // Cancelling the parked stop must not disturb the level.
+        f.engine.cancelOrder(1, 200);
+        CHECK(f.reco.depth(Side::Sell).at(1001) == 100);
+        f.check();
+
+        // The survivors must still be tradable — the orphaning failure mode
+        // left them present in lookups but permanently unmatchable, which a
+        // depth check alone would not catch.
+        f.engine.submitOrder(1, 300, 5, Side::Buy, 1001, 100, OrderType::Limit);
+        CHECK(f.reco.depth(Side::Sell).count(1001) == 0 &&
+              "both resting orders at 1001 must have filled");
+        f.check();
+
+        // And the untouched neighbouring level is unaffected.
+        CHECK(f.reco.depth(Side::Sell).at(1002) == 25);
     } END
 }
 
@@ -437,6 +597,28 @@ void test_AuctionUncrossReconstructs() {
         f.book->uncross();
         f.check();
 
+        // An ICEBERG in an auction. The uncross fills against the order's full
+        // remaining size, not its slice, so the displayed quantity has to be
+        // re-derived afterwards — otherwise the snapshot keeps reporting a
+        // slice larger than what is left.
+        {
+            Fixture g;
+            g.book->setTradingState(TradingState::PreOpen);
+            g.engine.submitOrder(1, 400, 1, Side::Sell, 1000, 500, OrderType::Iceberg,
+                                 /*stopPrice=*/0, /*displayQty=*/100);
+            g.engine.submitOrder(1, 401, 2, Side::Buy, 1000, 200, OrderType::Limit);
+            CHECK(g.reco.depth(Side::Sell).at(1000) == 100);
+            g.check();
+
+            // Uncross fills 200 of the iceberg — twice its displayed slice.
+            g.book->uncross();
+            g.check();
+
+            g.book->setTradingState(TradingState::Continuous);
+            g.engine.submitOrder(1, 402, 3, Side::Buy, 1000, 50, OrderType::Limit);
+            g.check();
+        }
+
         // And the post-auction book stays consistent under continuous trading.
         f.book->setTradingState(TradingState::Continuous);
         f.engine.submitOrder(1, 300, 6, Side::Buy, 1001, 30, OrderType::Limit);
@@ -451,7 +633,7 @@ void test_RandomisedFlowStaysInSync() {
         Fixture f;
         // Fixed seed: this must be reproducible when it fails.
         std::mt19937 rng(20260813u);
-        std::uniform_int_distribution<int> actionDist(0, 11);
+        std::uniform_int_distribution<int> actionDist(0, 12);
         std::uniform_int_distribution<int> priceDist(995, 1005);
         std::uniform_int_distribution<int> qtyDist(10, 120);
 
@@ -465,6 +647,7 @@ void test_RandomisedFlowStaysInSync() {
         std::vector<OrderId> stopIds;
         std::set<OrderId> stopsThatReachedTheFeed;
         int auctionCycles = 0;
+        int replaces = 0;
 
         for (int step = 0; step < 600; ++step) {
             const int action = actionDist(rng);
@@ -522,6 +705,12 @@ void test_RandomisedFlowStaysInSync() {
             } else if (action == 9 && !resting.empty()) {
                 const size_t idx = rng() % resting.size();
                 f.engine.modifyOrder(1, resting[idx], qty / 2 + 1);
+            } else if (action == 10 && !resting.empty()) {
+                // Reprice and resize. Hits shrink-in-place, grow-with-loss-of-
+                // priority, and the crossing-aggressor path, over a book that
+                // already holds icebergs, hidden orders and triggered stops.
+                const size_t idx = rng() % resting.size();
+                if (f.engine.cancelReplace(1, resting[idx], price, qty)) ++replaces;
             } else if (!resting.empty()) {
                 const size_t idx = rng() % resting.size();
                 f.engine.cancelOrder(1, resting[idx]);
@@ -554,9 +743,11 @@ void test_RandomisedFlowStaysInSync() {
         CHECK(!stopIds.empty());
         CHECK(!stopsThatReachedTheFeed.empty() &&
               "no stop ever triggered and rested — the stop path went unexercised");
+        CHECK(replaces >= 5 && "cancelReplace path went unexercised");
         std::cout << "[" << auctionCycles << " auctions, "
                   << stopsThatReachedTheFeed.size() << "/" << stopIds.size()
-                  << " stops triggered onto the feed] ";
+                  << " stops triggered onto the feed, "
+                  << replaces << " replaces] ";
     } END
 }
 
@@ -567,7 +758,9 @@ int main() {
     test_HiddenOrderNeverReachesFeed();
     test_IcebergPublishesSliceAndSurvivesRefresh();
     test_ModifyDownEmitsCancelMessage();
+    test_CancelReplaceReconstructs();
     test_UntriggeredStopIsInvisible();
+    test_CancellingParkedOrderLeavesItsPriceLevelIntact();
     test_TriggeredStopEntersFeedOnRest();
     test_AuctionUncrossReconstructs();
     test_RandomisedFlowStaysInSync();

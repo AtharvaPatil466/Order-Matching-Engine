@@ -89,10 +89,12 @@ struct MarketDataUpdate {
 // is what the rest of the market is allowed to see: hidden orders never
 // produce one, and an iceberg reports only its current display slice.
 //
-// Removal from the book is NOT represented here. It already arrives as
+// Most removals are NOT represented here: they arrive as
 // OrderUpdate{Cancelled|Filled}, and a subscriber that only ever learned
 // about publicly-displayed orders will not recognise the id of a hidden one —
-// so the delete filters itself.
+// so those deletes filter themselves. Remove exists for the one case with no
+// such notification: an order lifted off the book mid-operation, which is
+// still very much alive and must not be reported as cancelled to its owner.
 struct BookVisibleUpdate {
     enum class Action : uint8_t {
         // The order is now displayed at this price with this size, at the
@@ -105,6 +107,13 @@ struct BookVisibleUpdate {
         // `quantity` is the amount REMOVED, not the new resting size —
         // matching ITCH 'X' Order Cancel semantics.
         Reduce,
+        // The order has left the displayed book but is NOT cancelled — it is
+        // being repriced and will re-Rest. Emitted so the order stops being
+        // tracked before it matches: a replaced order crossing the spread is
+        // an aggressor, and reporting its fills against the stale pre-replace
+        // entry would publish the trade twice, the second time at the wrong
+        // size. `quantity` is unused.
+        Remove,
     };
     Action   action;
     OrderId  orderId;

@@ -196,7 +196,21 @@ bool OrderBook::addToBook(Order* order) {
 }
 
 void OrderBook::removeFromBook(Order* order) {
-    stpNoteRemoved(order);  // leaving the book: drop STP occupancy (no-op if parked)
+    // A parked order — Stop / StopLimit / MIT / TrailingStop / Pegged / MOC /
+    // LOC, or an auction market order before the uncross — carries a price but
+    // was never linked into bids_/asks_, so its next and prev are both null.
+    // IntrusiveList::remove reads those pointers to splice: with both null it
+    // sets head = null AND tail = null, wiping every genuine order resting at
+    // that price. Those orders stay allocated and in orderLookup_ but become
+    // unreachable from the book — they can never fill or be cancelled, and
+    // their owners are never told. The level is then deactivated as "empty".
+    //
+    // Cancelling a parked stop whose limit price happens to collide with an
+    // active level is enough to trigger it, which is ordinary flow rather than
+    // an edge case. stpNoteRemoved already guards on this flag; the book
+    // removal has to as well.
+    if (!order->inBook) return;
+    stpNoteRemoved(order);  // leaving the book: drop STP occupancy
     auto& book = (order->side == Side::Buy) ? bids_ : asks_;
     book.remove(order->price, order);
 }
@@ -1285,9 +1299,13 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
         locActiveIds_.erase_value(order->id);
     }
 
+    // Capture before removeFromBook clears the flag. A parked order was never
+    // displayed at this price, so cancelling it changes no visible level and
+    // must not publish a Delete for one.
+    const bool wasDisplayed = order->inBook && !order->isHidden;
     removeFromBook(order);
 
-    if (!order->isHidden)
+    if (wasDisplayed)
         notifyMarketData(MarketDataUpdate::Action::Delete, order->side, order->price);
 
     Quantity filledQty = order->initialQty - order->remainingQty;
@@ -1366,8 +1384,16 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
 
     if (priceChanged) {
         removeFromBook(order);
-        if (!order->isHidden)
+        if (!order->isHidden) {
             notifyMarketData(MarketDataUpdate::Action::Delete, order->side, oldPrice);
+            // Stop displaying it BEFORE the match below. While repriced the
+            // order is off the book and acts as an aggressor, so its fills
+            // must surface through the resting maker's execution only — as
+            // any aggressor's do. Publishing them against the stale entry
+            // reported the trade a second time, at the pre-replace size.
+            notifyBookVisible(BookVisibleUpdate::Action::Remove, order->id,
+                              order->side, oldPrice, 0);
+        }
 
         order->price = newPrice;
         order->remainingQty = newQty;
@@ -1405,14 +1431,30 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
         }
     } else {
         // Same price
+        const Quantity displayBefore = displayQuantity(*order);
         if (newQty < order->remainingQty) {
+            // Shrink in place: the order keeps its queue position, so this is
+            // a reduction rather than a re-add. Same shape as modifyOrder —
+            // and it needs the same order-level event, or the displayed feed
+            // keeps the old size forever while the L2 feed sees the modify.
             order->remainingQty = newQty;
+            if (order->type == OrderType::Iceberg)
+                order->visibleQty = std::min(order->visibleQty, order->remainingQty);
+            const Quantity displayAfter = displayQuantity(*order);
+            if (!order->isHidden && displayAfter < displayBefore)
+                notifyBookVisible(BookVisibleUpdate::Action::Reduce, order->id,
+                                  order->side, order->price,
+                                  displayBefore - displayAfter);
         } else {
             // Quantity increase loses time priority
             removeFromBook(order);
             order->remainingQty = newQty;
+            // Re-slice an iceberg against its new size, the same way the
+            // initial rest and the refresh path do.
+            if (order->type == OrderType::Iceberg)
+                order->visibleQty = std::min(order->remainingQty, order->displayQty);
             order->timestamp = nowNs();
-            addToBook(order);
+            addToBook(order);  // re-announces: back of the queue, new size
         }
         if (!order->isHidden)
             notifyMarketData(MarketDataUpdate::Action::Modify, order->side, order->price);
@@ -1678,6 +1720,22 @@ void OrderBook::uncross() {
     const Price bestUncrossPrice = res.indicativePrice;
     Quantity remainingVolume = res.pairedVolume;
 
+    // An auction fills against an order's FULL remaining size, not its
+    // displayed slice, so an iceberg's slice has to be re-derived after every
+    // fill. Two things break without this: visibleQty can end up larger than
+    // remainingQty (so the L2 snapshot advertises depth that no longer
+    // exists), and the order-level feed — which only ever saw the slice —
+    // cannot follow a fill that exceeded it. Re-announcing the order resyncs
+    // subscribers to the exact post-fill slice regardless of what the
+    // execution message could express.
+    auto resliceIceberg = [&](Order* o) {
+        if (o->type != OrderType::Iceberg || o->remainingQty == 0) return;
+        o->visibleQty = std::min(o->remainingQty, o->displayQty);
+        if (!o->isHidden)
+            notifyBookVisible(BookVisibleUpdate::Action::Rest, o->id, o->side,
+                              o->price, displayQuantity(*o));
+    };
+
     // Insert parked market orders into the book at the discovered price so
     // the execution loop treats them like limit orders queued there.
     // auctionMarketOrders_ is retained to cancel any unfilled remainder.
@@ -1741,6 +1799,12 @@ void OrderBook::uncross() {
         t.symbolId = symbolId_;
         tradeHistory_.push(t);
         if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
+
+        // After the execution, before either side is torn down — both
+        // pointers are still valid here, and a fully-filled order is skipped
+        // by the lambda's own guard.
+        resliceIceberg(buyer);
+        resliceIceberg(seller);
 
         if (buyer->remainingQty == 0) {
             buyer->status = OrderStatus::Filled;

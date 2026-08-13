@@ -386,7 +386,7 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 | x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
 | ~~`Replication.tla` TLC run~~ | ✅ **Realistic lease-propagation model verified at MaxEntries=10, 0 violations.** Bug-injected variant reproduces split brain — confirms verification is genuine | — |
 | io_uring async journal writes | Implemented behind `#ifdef __linux__` (`fdatasync`/`F_FULLFSYNC` fallback elsewhere); pending x86 validation | Linux + `liburing` — **no special NIC** |
-| DPDK kernel bypass | Architecture ready — the genuine hardware-blocked item | Linux + **dedicated NIC/ENI** (e.g. Solarflare/Onload) |
+| DPDK kernel bypass | **Written, never executed** — no run, no measurement, no demonstrated benefit. Not hardware-blocked: it targets commodity AWS ENA | Linux + a secondary ENI + hugepages + the DPDK/F-Stack toolchain |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
 | Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified | Volume-maximization algorithm: max-qty uncross implemented |

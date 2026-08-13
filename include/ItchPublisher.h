@@ -208,9 +208,14 @@ public:
     void onBookVisible(const BookVisibleUpdate& u) override {
         if (!send_) return;
         RawEvent e;
-        e.kind    = (u.action == BookVisibleUpdate::Action::Rest)
-                        ? RawEvent::Kind::Add
-                        : RawEvent::Kind::Cancel;
+        switch (u.action) {
+        case BookVisibleUpdate::Action::Rest:   e.kind = RawEvent::Kind::Add;    break;
+        case BookVisibleUpdate::Action::Reduce: e.kind = RawEvent::Kind::Cancel; break;
+        // Off the book but not cancelled. 'D' is the right wire form either
+        // way — a subscriber cannot act on an order that is no longer there,
+        // and the re-Rest that follows arrives as a fresh 'A'.
+        case BookVisibleUpdate::Action::Remove: e.kind = RawEvent::Kind::Delete; break;
+        }
         e.orderId = u.orderId;
         e.side    = u.side;
         e.shares  = u.quantity;

@@ -26,6 +26,35 @@ namespace {
 void addLimit(OrderBook& b, OrderId id, ParticipantId p, Side s, Price px, Quantity q) {
     b.addOrder(id, p, s, px, q, OrderType::Limit);
 }
+
+// The two OCO cases below are the only ones in this file that run the engine
+// ASYNC, and so the only ones whose outcome depends on a worker thread. A bare
+// assert there yields a line number and nothing else, which is close to
+// useless for a failure that shows up once in hundreds of runs under CI load.
+//
+// This prints the book state the assertion disagreed with, so a single
+// reproduction is enough to tell "the OCO cancel never happened" apart from
+// "it happened but something else removed the order first".
+void expectOrder(const OrderBook& book, OrderId id, bool shouldExist,
+                 const char* what) {
+    const Order* o = book.getOrder(id);
+    const bool exists = (o != nullptr);
+    if (exists == shouldExist) return;
+
+    std::cout << "\n    FAIL: " << what << "\n"
+              << "      order " << id << ": expected "
+              << (shouldExist ? "PRESENT" : "ABSENT") << ", found "
+              << (exists ? "PRESENT" : "ABSENT") << "\n"
+              << "      book now:";
+    book.forEachOrder([](const Order& r) {
+        std::cout << " #" << r.id << " " << (r.side == Side::Buy ? "B" : "S")
+                  << " px=" << r.price << " leaves=" << r.remainingQty
+                  << (r.inBook ? "" : " (parked)");
+    });
+    std::cout << "\n      best bid=" << book.getBestBid()
+              << " best ask=" << book.getBestAsk() << std::endl;
+    assert(false && "OCO post-condition violated — see dump above");
+}
 } // namespace
 
 // 1. Buy MIT triggers when price touches the level from above.
@@ -101,8 +130,8 @@ void test_oco_cancels_sibling_on_fill() {
     engine.waitForDrain();
 
     const OrderBook* book = engine.getOrderBook(1);
-    assert(book->getOrder(2) == nullptr);                  // low leg filled
-    assert(book->getOrder(1) == nullptr);                  // high leg OCO-cancelled
+    expectOrder(*book, 2, false, "low leg (id 2) should have filled");
+    expectOrder(*book, 1, false, "high leg (id 1) should have been OCO-cancelled");
     engine.stopAsync();
     PASS();
 }
@@ -123,13 +152,13 @@ void test_oco_user_cancel_leaves_sibling() {
     engine.cancelOrder(1, 2);                              // user cancels the stop leg
     engine.waitForDrain();
     const OrderBook* book = engine.getOrderBook(1);
-    assert(book->getOrder(2) == nullptr);                  // cancelled
-    assert(book->getOrder(1) != nullptr);                  // sibling survives (group dissolved)
+    expectOrder(*book, 2, false, "stop leg (id 2) should be user-cancelled");
+    expectOrder(*book, 1, true, "sibling (id 1) should survive the dissolved group");
 
     // Filling the survivor must not try to cancel a ghost sibling.
     engine.processOrder(1, 3, 2, Side::Buy, 105, 10, OrderType::Limit);
     engine.waitForDrain();
-    assert(book->getOrder(1) == nullptr);                  // filled normally
+    expectOrder(*book, 1, false, "survivor (id 1) should have filled normally");
     engine.stopAsync();
     PASS();
 }

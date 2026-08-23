@@ -206,7 +206,7 @@ The `ReplicationCoordinator` is instantiated in `src/main.cpp` when `OB_NODE_ROL
 
 ### 4.3 Formal Verification
 Concurrency is notoriously difficult to test. We rely on **12 TLA+ Specifications**:
-- `MatchingEngine.tla`: 454M states verified — NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness.
+- `MatchingEngine.tla`: 171,187,419 distinct states verified at `MatchingEngine4.cfg` (MaxOrders=4) — NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness, MatchingConservation, FIFOExecution.
 - `Replication.tla`: Realistic lease-propagation model. `BackupPromote` requires heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Verified at `MaxEntries=10` / `LeaseTimeout=7`, zero violations. A bug-injected variant (lease check stripped from `BackupPromote`) reproduces split brain in 188 states, confirming the verification is genuine.
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
 - `EngineConsumer.tla`: Verifies worker thread shutdown safety.

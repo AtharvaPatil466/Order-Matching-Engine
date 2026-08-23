@@ -14,7 +14,8 @@ name: TLA+ Model Checking
 #   - Snapshot         : lockless snapshot (properties that hold)
 #   - SnapshotLocked   : locked snapshot (strong-consistency properties)
 #
-# MatchingEngine.tla (~12 min, 454M states) and Replication.tla are checked
+# MatchingEngine.tla (MatchingEngine4.cfg: ~17 min, 171M distinct states) and
+# Replication.tla are checked
 # out-of-band rather than on every push, to keep CI fast.
 #
 # A dedicated step also runs the Auction NON-VACUITY variant

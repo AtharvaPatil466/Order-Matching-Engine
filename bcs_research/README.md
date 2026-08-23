@@ -12,7 +12,7 @@ The original plan was written in pure Python and assumed a Python simulator
 existed. It does not. Those components exist **as C++** (`include/*.h`,
 `src/`), and there is no Python binding to the engine. More importantly, the
 plan's headline differentiator — running on the **TLA+-verified** matching
-engine (`MatchingEngine.tla`: 454M states, 0 violations) — only holds if the
+engine (`MatchingEngine.tla`: 171,187,419 distinct states, 0 violations) — only holds if the
 experiments drive the *real C++ engine*, not a Python re-implementation of it.
 
 So this extension uses a **pybind11 bridge**: Python BCS agents and the

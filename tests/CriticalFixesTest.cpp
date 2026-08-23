@@ -339,3 +339,91 @@ TEST(AuditFixes, FOK_IcebergVisibleVsHidden_PrecheckMatchesFill) {
         EXPECT_EQ(ice->remainingQty, 50u) << "admitted FOK must fully fill 50";
     }
 }
+
+// ─── C3: Iceberg with displayQty == 0 must be rejected, not livelock ─────────
+//
+// Pre-fix: the order rested with visibleQty == 0, so match() computed
+// available == 0 -> fillQty == 0 and the refresh branch re-sliced
+// min(remainingQty, 0) == 0 forever — `while (incoming->remainingQty > 0)`
+// never terminated and the matching thread livelocked on one malformed order.
+TEST(CriticalFixes, IcebergWithZeroDisplayQtyIsRejected) {
+    OrderBook book(1); relaxBook(book);
+
+    auto r = book.addOrder(/*id=*/1, /*pid=*/1, Side::Sell, PX, /*qty=*/100,
+                           OrderType::Iceberg, /*stopPrice=*/0, /*displayQty=*/0);
+
+    ASSERT_TRUE(std::holds_alternative<RejectReason>(r))
+        << "iceberg with displayQty == 0 must be rejected at admission";
+    EXPECT_EQ(std::get<RejectReason>(r), RejectReason::InvalidQuantity);
+    EXPECT_EQ(book.getOrder(1), nullptr) << "rejected iceberg must not rest";
+
+    // The livelock trigger: a crossing order against that iceberg. With the
+    // reject in place there is nothing to cross, so this returns.
+    auto buy = book.addOrder(/*id=*/2, /*pid=*/2, Side::Buy, PX, 50, OrderType::Limit);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(buy));
+    EXPECT_EQ(book.getOrder(2)->remainingQty, 50u) << "no counterparty: must rest unfilled";
+}
+
+// displayQty > qty is nonsensical rather than fatal; it is clamped to the order
+// size so the stored field keeps the displayQty <= initialQty invariant.
+TEST(CriticalFixes, IcebergDisplayQtyClampedToOrderQty) {
+    OrderBook book(1); relaxBook(book);
+
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, 1, Side::Sell, PX, /*qty=*/40, OrderType::Iceberg,
+                      /*stopPrice=*/0, /*displayQty=*/500)));
+
+    const Order* ice = book.getOrder(1);
+    ASSERT_NE(ice, nullptr);
+    EXPECT_EQ(ice->displayQty, 40u) << "displayQty must be clamped to the order size";
+    EXPECT_EQ(ice->visibleQty, 40u);
+    EXPECT_LE(ice->visibleQty, ice->remainingQty);
+}
+
+// ─── C2: touchedPrices must not overflow on a fill-free STP sweep ────────────
+//
+// Pre-fix: every level visited appended to a stack std::array<Price, 256>, but
+// the only flush guard was `fillCount == kMaxFillsPerOrder`. STP=CancelResting
+// removes the resting order and `continue`s without producing a fill, so
+// fillCount stays 0 while touchedCount grows with the number of levels swept.
+// 257 distinct price levels -> a write to touchedPrices[256], past the end,
+// on the matching thread — reachable from public order semantics, no auth.
+// Detected as a stack-buffer-overflow under the ASan lane; here the behavioural
+// assertion is that all 257 levels are swept and the sweep terminates cleanly.
+TEST(CriticalFixes, TouchedPricesDoesNotOverflowOnLongStpSweep) {
+    static constexpr int kLevels = 257;  // kMaxFillsPerOrder (256) + 1
+    OrderBook book(1); relaxBook(book);
+
+    const ParticipantId P = 1;
+    book.setSTPMode(P, STPMode::CancelResting);
+
+    UpdateCountingListener listener;
+    book.setEventListener(&listener);
+
+    // One share per level, 257 consecutive ticks, all owned by P.
+    for (int i = 0; i < kLevels; ++i) {
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(/*id=*/100 + i, P, Side::Sell, PX + i, /*qty=*/1,
+                          OrderType::Limit)))
+            << "setup: sell level " << i << " must rest";
+    }
+    ASSERT_EQ(book.getAskLevelsCount(), static_cast<size_t>(kLevels));
+
+    // One marketable buy from the same participant sweeps every level. Each hit
+    // is an STP CancelResting: no fill, so the fillCount guard never fires.
+    auto r = book.addOrder(/*id=*/9999, P, Side::Buy, PX + kLevels, /*qty=*/kLevels,
+                           OrderType::Limit);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(r));
+
+    EXPECT_EQ(book.getAskLevelsCount(), 0u) << "every resting level must be STP-cancelled";
+    int cancelled = 0;
+    for (int i = 0; i < kLevels; ++i)
+        cancelled += listener.cancelledFor(100 + i);
+    EXPECT_EQ(cancelled, kLevels) << "each resting order must be cancelled exactly once";
+
+    const Order* buy = book.getOrder(9999);
+    ASSERT_NE(buy, nullptr) << "the incoming buy filled nothing and must rest";
+    EXPECT_EQ(buy->remainingQty, static_cast<Quantity>(kLevels));
+
+    book.setEventListener(nullptr);
+}

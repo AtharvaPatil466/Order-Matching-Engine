@@ -52,6 +52,33 @@ is the deeper run reported here.
 **Fingerprint collision probability**: ~0.18% (calculated, optimistic; 0.13% from
 actual fingerprints) — acceptable for this state space size
 
+### Which count comes from which `MaxOrders`
+
+The state count is a function of the `MaxOrders` bound, so a bare "N states
+verified" claim is ambiguous. Every count this repository publishes maps to
+exactly one config:
+
+| Config | `MaxOrders` | States generated | Distinct | Runtime | Role |
+|--------|------------:|-----------------:|---------:|--------:|------|
+| `spec/MatchingEngine.cfg`  | 3 | — | 1,260,000 (1.26M) | seconds | Fast exhaustive check; runs on every spec change |
+| `spec/MatchingEngine4.cfg` | 4 | **368,192,427** | **171,187,419** | 17m 21s | **Authoritative** — the deepest exhaustively-checkable bound, reported above and cited in README / BENCHMARKS / PerformanceWhitepaper |
+| (attempted)                | 5 | — | >228M distinct with >200M still queued after ~20 min | no convergence | Intractable on commodity hardware |
+
+**`MaxOrders=4` is the figure to cite.** MaxOrders counts orders *placed over
+the whole behaviour*, not orders resting simultaneously: 4 admits up to 3
+resting on one side at a single price plus a 4th that crosses them — the
+smallest bound that exercises FIFO time-priority against a multi-order queue.
+MaxOrders=3 cannot construct that interleaving, which is why the 1.26M figure
+is a regression gate rather than the headline.
+
+A superseded figure — 454,022,166 generated / 181,004,838 distinct, 12m 35s —
+circulated in earlier revisions of README.md, BENCHMARKS.md,
+PerformanceWhitepaper.md, Project_Overview.md, Architecture.md and
+PRODUCTION_ROADMAP.md. It came from the pre-matching-layer version of the spec
+(no `Match` action, so neither `MatchingConservation` nor `FIFOExecution` was
+checked) and does not describe the spec in this tree. It has been removed
+everywhere; if it reappears, it is stale.
+
 ## What This Proves
 
 The spec models a simplified order book **with matching** at:

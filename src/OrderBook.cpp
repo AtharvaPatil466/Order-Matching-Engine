@@ -367,6 +367,26 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         return RejectReason::InvalidQuantity;
     }
 
+    // An Iceberg with displayQty == 0 rests with visibleQty == 0. match() then
+    // computes available == 0 -> fillQty == 0, emits a zero-quantity trade, and
+    // the refresh branch re-slices min(remainingQty, 0) == 0 — so
+    // `while (incoming->remainingQty > 0)` never terminates and the matching
+    // thread livelocks on a single malformed order. Reject at admission.
+    // displayQty > qty is merely nonsensical rather than fatal (every use site
+    // already takes min(remainingQty, displayQty)); clamp it so the stored
+    // field satisfies displayQty <= initialQty like every other path assumes.
+    if (type == OrderType::Iceberg) [[unlikely]] {
+        if (displayQty == 0) {
+#ifndef OB_LEAN_MODE
+            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
+#endif
+            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
+                              RejectReason::InvalidQuantity);
+            return RejectReason::InvalidQuantity;
+        }
+        if (displayQty > qty) displayQty = qty;
+    }
+
     if (type != OrderType::Market && type != OrderType::MOC && price <= 0
                  && type != OrderType::Stop && type != OrderType::StopLimit
                  && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
@@ -893,9 +913,18 @@ void OrderBook::match(Order* incoming) {
         // this iteration's fill. A fill fully-filling a resting order also
         // consumes one toErase slot, but eraseCount <= fillCount always, so
         // guarding fillCount covers both buffers.
-        if (fillCount == kMaxFillsPerOrder) [[unlikely]] {
+        //
+        // touchedCount needs its OWN guard: a level is recorded before the STP
+        // block, and CancelResting / DecreaseResting `continue` without ever
+        // producing a fill. A participant resting >=256 orders across distinct
+        // price levels and then crossing itself under STP=CancelResting drives
+        // touchedCount past 256 while fillCount stays 0 — a stack write past
+        // the end of touchedPrices on the matching thread, from public order
+        // semantics alone. Only one append happens per iteration, so checking
+        // == here keeps every write in [0, 255].
+        if (fillCount == kMaxFillsPerOrder ||
+            touchedCount == kMaxFillsPerOrder) [[unlikely]] {
             flushFills();
-            // Keeps touchedCount within the same bound as fillCount.
             publishTouchedLevels();
         }
 

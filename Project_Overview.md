@@ -18,7 +18,7 @@ This is a C++20 low-latency order matching engine with institutional-grade archi
 | Source files (`src/`) | 14 |
 | Test files | 88 |
 | Individual test cases | 448 CTest targets |
-| TLA+ specifications | 12 (454M+ states — matching + replication layers) |
+| TLA+ specifications | 12 (171M distinct states — matching + replication layers) |
 | Documentation files | 8 in `docs/` (plus architecture/benchmark docs) |
 
 ---
@@ -274,7 +274,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ### Formal Verification (TLA+)
 
 **12 TLA+ specifications**, model-checked with TLC:
-- **`MatchingEngine.tla`**: 454M+ distinct states verified, zero violations — now including the matching/cross layer (`Match` action) with `MatchingConservation` and `FIFOExecution`, alongside `NoNegativeQuantity`, `FIFO_Preservation`, `GTD_Expiry_Correctness`.
+- **`MatchingEngine.tla`**: 171,187,419 distinct states verified at `MatchingEngine4.cfg` (MaxOrders=4), zero violations — now including the matching/cross layer (`Match` action) with `MatchingConservation` and `FIFOExecution`, alongside `NoNegativeQuantity`, `FIFO_Preservation`, `GTD_Expiry_Correctness`.
 - **`Replication.tla`**: Realistic lease-propagation model (no god-mode `~primaryAlive` guard on `BackupPromote`; promotion requires both heartbeat-miss AND local-lease-expiry). 1373 → 4192 states verified at `MaxEntries=6 → 10`, zero violations. A bug-injected variant (lease check stripped) reproduces split brain in 188 states, confirming the verification is genuine.
 - **`MpscQueue.tla`**: Lock-free ring buffer linearizability.
 - **`SnapshotLocked.tla`**: Mutex torn-snapshot prevention.
@@ -310,4 +310,4 @@ The system is architecturally complete. The remaining items are AWS validation s
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · 88 test executables · 448 CTest targets · 19 multi-container chaos scenarios · 454M+ TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · 88 test executables · 448 CTest targets · 19 multi-container chaos scenarios · 171M distinct TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*

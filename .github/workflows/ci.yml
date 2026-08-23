@@ -78,3 +78,32 @@ jobs:
         with:
           name: e2e-benchmark-smoke-${{ matrix.name }}
           path: e2e_benchmark_smoke.txt
+
+  fault-injection:
+    name: Ubuntu Fault Injection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_FAULT_INJECTION=ON
+          -DBUILD_TESTS=ON
+          -DBUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        # Full suite with fault-injection points compiled in (OB_ENABLE_FAULT_INJECTION).
+        # Without this lane, the hostile-queue regressions are vacuous passes:
+        # QueueChaosTest main() returns 0 with a printed notice when the macro is
+        # undefined, and MpscQueue's shouldFail() hooks compile to constexpr-false.
+        # QueueChaosTest arms queue.push.spurious_fail / queue.pop.spurious_empty
+        # and asserts no lost/duplicated orders under 50-95% injected push failures.
+        # Exclusions documented:
+        #   BenchmarkRegressionTest — perf-only; FI adds per-push/pop overhead,
+        #                             so its thresholds are meaningless here
+        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest'

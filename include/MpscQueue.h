@@ -14,7 +14,7 @@ namespace OrderMatcher {
 // Lock-free Multi-Producer Single-Consumer (MPSC) bounded queue.
 //
 // Design: Array-based ring buffer with per-slot state flags.
-//   - Producers: atomically claim a write slot via fetch_add on writePos_
+//   - Producers: atomically claim a write slot by CAS on writePos_
 //   - Each slot has an atomic flag: 0=empty, 1=written
 //   - Producer writes data, then sets flag to 1 (release)
 //   - Consumer reads from readPos_, checks flag (acquire), advances when ready
@@ -42,7 +42,7 @@ public:
             slots_[i].sequence.store(i, std::memory_order_relaxed);
         }
         writePos_.store(0, std::memory_order_relaxed);
-        readPos_ = 0;
+        readPos_.store(0, std::memory_order_relaxed);
     }
 
     ~MpscQueue() {
@@ -97,22 +97,24 @@ public:
         if (FaultInjector::instance().shouldFail("queue.pop.spurious_empty")) {
             return false;
         }
-        Slot& slot = slots_[readPos_ & mask_];
+        // Sole writer: read our own position once, relaxed, and reuse it.
+        const size_t rp = readPos_.load(std::memory_order_relaxed);
+        Slot& slot = slots_[rp & mask_];
         size_t seq = slot.sequence.load(std::memory_order_acquire);
-        intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(readPos_ + 1);
+        intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(rp + 1);
 
         if (diff < 0) {
             return false; // Queue empty
         }
 
         item = slot.data;
-        slot.sequence.store(readPos_ + mask_ + 1, std::memory_order_release);
-        readPos_++;
+        slot.sequence.store(rp + mask_ + 1, std::memory_order_release);
+        readPos_.store(rp + 1, std::memory_order_release);
         return true;
     }
 
     bool empty() const {
-        size_t rp = readPos_;
+        size_t rp = readPos_.load(std::memory_order_acquire);
         Slot& slot = slots_[rp & mask_];
         size_t seq = slot.sequence.load(std::memory_order_acquire);
         return static_cast<intptr_t>(seq) - static_cast<intptr_t>(rp + 1) < 0;
@@ -125,7 +127,10 @@ public:
     // Useful for backpressure decisions, not for correctness.
     size_t approxSize() const {
         size_t wp = writePos_.load(std::memory_order_relaxed);
-        size_t rp = readPos_;  // only consumer reads this, but approximate is fine
+        // Acquire, not a plain read: producers call this via enqueueSafe while
+        // the consumer is advancing readPos_ in pop(). A stale value here is
+        // fine (the result is documented approximate) — a data race is not.
+        size_t rp = readPos_.load(std::memory_order_acquire);
         return wp >= rp ? (wp - rp) : 0;
     }
 
@@ -149,10 +154,20 @@ private:
     alignas(MPSC_CACHE_LINE) std::atomic<size_t> writePos_;
     char pad1_[MPSC_CACHE_LINE - sizeof(std::atomic<size_t>)];
 
-    // readPos_ is only accessed by consumer, no need for atomic
-    // but keep it on its own cache line to avoid false sharing
-    alignas(MPSC_CACHE_LINE) size_t readPos_;
-    char pad2_[MPSC_CACHE_LINE - sizeof(size_t)];
+    // Written only by the consumer (pop), but READ by producers: enqueueSafe
+    // calls approxSize() on every submit once a backpressure threshold is
+    // configured. A plain size_t therefore made `readPos_++` in pop() race with
+    // those reads — a C++ data race, i.e. UB, not merely a stale value; TSan
+    // reports it. It is atomic so the concurrent access is defined. Kept on its
+    // own cache line to avoid false sharing with writePos_.
+    //
+    // Ordering: the consumer is the sole writer, so its own reads are relaxed.
+    // The store is release and the cross-thread loads are acquire, which costs
+    // one stlr per pop on ARM (free on x86) and gives observers a coherent view
+    // rather than only a non-racy one. The ring's actual correctness protocol
+    // runs through slot.sequence, not through this field.
+    alignas(MPSC_CACHE_LINE) std::atomic<size_t> readPos_;
+    char pad2_[MPSC_CACHE_LINE - sizeof(std::atomic<size_t>)];
 };
 
 } // namespace OrderMatcher

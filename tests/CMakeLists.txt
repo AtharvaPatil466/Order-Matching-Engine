@@ -238,6 +238,15 @@ enable_assertions(QueueChaosTest)
 add_test(NAME QueueChaosTest COMMAND QueueChaosTest)
 set_tests_properties(QueueChaosTest PROPERTIES TIMEOUT 60 LABELS "project;chaos")
 
+# MpscQueue concurrency regression (H5) — multi-producer enqueueSafe against a
+# draining consumer. Its real value is under TSan: pre-fix, the plain readPos_
+# raced with pop(). Labelled "concurrency" so the TSan lane can select it.
+add_executable(MpscQueueRaceTest MpscQueueRaceTest.cpp)
+target_link_libraries(MpscQueueRaceTest PRIVATE OrderMatcher)
+enable_assertions(MpscQueueRaceTest)
+add_test(NAME MpscQueueRaceTest COMMAND MpscQueueRaceTest)
+set_tests_properties(MpscQueueRaceTest PROPERTIES TIMEOUT 120 LABELS "project;concurrency")
+
 # Checkpoint chaos test — rewriteAtomically atomicity under faults.
 add_executable(CheckpointChaosTest CheckpointChaosTest.cpp)
 target_link_libraries(CheckpointChaosTest PRIVATE OrderMatcher)

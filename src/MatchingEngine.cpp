@@ -93,6 +93,80 @@ bool MatchingEngine::enqueueSafe(size_t threadIndex, const OrderRequest& req) {
     return false;
 }
 
+// C5: never-drop control-plane enqueue. See the header for why this shares the
+// order ring rather than using a side channel.
+void MatchingEngine::enqueueControl(size_t threadIndex, const OrderRequest& req) {
+    uint64_t spins = 0;
+    while (!requestQueues_[threadIndex]->push(req)) {
+        ++spins;
+        cpuRelax();
+    }
+    if (spins > 0) {
+        controlSpins_.fetch_add(1, std::memory_order_relaxed);
+        // One line per contended control enqueue: rare by construction, and the
+        // operator wants to know the ring was full when a safety control fired.
+        if (obSinkActive()) {
+            obSink().log(obEvent("control_enqueue_contended", LogSeverity::Warn)
+                .kv("thread", (long long)threadIndex)
+                .kv("request_type", (long long)static_cast<int>(req.type))
+                .kv("spins", (long long)spins));
+        }
+    }
+    // Same bookkeeping enqueueSafe does on success. submittedTotal_ in
+    // particular is what makes the subsequent waitForDrain() actually wait for
+    // this message: a dropped enqueue never bumped it, so waitForDrain returned
+    // immediately and the caller believed a sweep had run that never did.
+    threadStats_[threadIndex].submitted.fetch_add(1, std::memory_order_relaxed);
+    submittedTotal_.fetch_add(1, std::memory_order_release);
+    queueWakeups_[threadIndex].fetch_add(1, std::memory_order_release);
+    queueWakeups_[threadIndex].notify_one();
+}
+
+size_t MatchingEngine::countResting(ParticipantId pid) {
+    // Same lock discipline as cancelAllRestingOrders(): bookMutex_ guards
+    // symbolIds_/books_ against a concurrent addSymbol, and forEachOrderLocked
+    // takes each book's own shared lock so the walk is safe while a worker
+    // mutates a different book.
+    std::lock_guard<std::mutex> lock(bookMutex_);
+    size_t n = 0;
+    for (SymbolId sym : symbolIds_) {
+        auto* book = getOrderBook(sym);
+        if (!book) continue;
+        book->forEachOrderLocked([&](const Order& o) {
+            if (pid == kKillAllParticipants || o.participantId == pid) ++n;
+        });
+    }
+    return n;
+}
+
+size_t MatchingEngine::sweepAndVerify(ParticipantId pid) {
+    // Bounded reconciliation. With the apply-time kill re-check in
+    // processRequest, one pass is provably sufficient for the engine-wide
+    // switch; the retry exists so a participant kill racing an in-flight submit
+    // still converges, and so the guarantee is VERIFIED rather than asserted.
+    constexpr int kMaxSweeps = 3;
+    size_t survivors = 0;
+    for (int attempt = 0; attempt < kMaxSweeps; ++attempt) {
+        OrderRequest req{};
+        req.type = OrderRequest::Type::KillSwitch;
+        req.participantId = pid;
+        for (size_t i = 0; i < numThreads_; ++i) enqueueControl(i, req);
+        waitForDrain();
+
+        survivors = countResting(pid);
+        if (survivors == 0) return 0;
+    }
+    // Never observed in test; logged rather than swallowed so an operator sees
+    // a kill switch that did not fully converge instead of assuming it did.
+    if (obSinkActive()) {
+        obSink().log(obEvent("kill_switch_incomplete", LogSeverity::Error)
+            .kv("participant", (long long)pid)
+            .kv("survivors", (long long)survivors)
+            .kv("sweeps", (long long)kMaxSweeps));
+    }
+    return survivors;
+}
+
 namespace {
 
 // Counters cached at file scope — first access locks the registry to
@@ -264,8 +338,10 @@ void MatchingEngine::expireOrdersFromClock() {
         OrderRequest req{};
         req.type = OrderRequest::Type::ExpireCheck;
         req.expiryTime = now;
+        // C5: control plane — an expiry sweep that is silently dropped leaves
+        // expired GTD/DAY orders live and tradeable.
         for (size_t i = 0; i < numThreads_; ++i) {
-            enqueueSafe(i, req);
+            enqueueControl(i, req);
         }
     } else {
         // expireOrders() self-guards with bookMutex_ now (it iterates
@@ -285,14 +361,10 @@ void MatchingEngine::stopAsync() {
     OrderRequest shutdown{};
     shutdown.type = OrderRequest::Type::Shutdown;
 
+    // This loop is where enqueueControl came from — shutdown has always been
+    // undroppable. The kill switch and expiry sweeps now use the same helper.
     for (size_t i = 0; i < numThreads_; ++i) {
-        while (!requestQueues_[i]->push(shutdown)) {
-            cpuRelax();
-        }
-        threadStats_[i].submitted.fetch_add(1, std::memory_order_relaxed);
-        submittedTotal_.fetch_add(1, std::memory_order_release);
-        queueWakeups_[i].fetch_add(1, std::memory_order_release);
-        queueWakeups_[i].notify_one();
+        enqueueControl(i, shutdown);
     }
 
     for (auto& thread : workerThreads_) {
@@ -411,6 +483,19 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         auto* book = getOrderBook(req.symbolId);
         if (!book) {
             return;
+        }
+
+        // C5: re-check the kill switch AT APPLY TIME, not just at submit.
+        // submitOrder tests the flag and then enqueues; a producer can pass
+        // that test, be preempted, have setKillSwitch run its entire sweep, and
+        // only then enqueue — so the order rests AFTER the sweep and survives
+        // it. The worker is what mutates the book, so the worker is where the
+        // check is authoritative. This is what makes "no resting order survives
+        // an engaged kill switch" true rather than merely likely.
+        if (killSwitchActive_.load(std::memory_order_acquire)) [[unlikely]] {
+            killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+            book->emitReject(req.orderId, req.qty, RejectReason::KillSwitchActive);
+            break;
         }
 
         // Hierarchical pre-trade risk gate (no-op unless configured). Market
@@ -738,14 +823,11 @@ void MatchingEngine::setKillSwitch(bool engaged) {
 
     if (async_) {
         // Book mutations must run on the owning worker in async mode. Dispatch a
-        // cancel-all request to every worker and wait for the sweep to drain.
-        for (size_t i = 0; i < numThreads_; ++i) {
-            OrderRequest req{};
-            req.type = OrderRequest::Type::KillSwitch;
-            req.participantId = kKillAllParticipants;
-            enqueueSafe(i, req);
-        }
-        waitForDrain();
+        // cancel-all request to every worker, drain, then VERIFY by recount that
+        // nothing survived. Previously this used enqueueSafe and ignored its
+        // return, so a dropped message left every resting order live while new
+        // orders were rejected by the flag above.
+        sweepAndVerify(kKillAllParticipants);
     } else {
         cancelAllRestingOrders();
     }
@@ -1348,13 +1430,8 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
 
 uint64_t MatchingEngine::killSwitch(ParticipantId participantId) {
     if (async_) {
-        for (size_t i = 0; i < numThreads_; ++i) {
-            OrderRequest req{};
-            req.type = OrderRequest::Type::KillSwitch;
-            req.participantId = participantId;
-            enqueueSafe(i, req);
-        }
-        waitForDrain();
+        // C5: undroppable, and verified complete by recount before returning.
+        sweepAndVerify(participantId);
         return 0;
     }
 

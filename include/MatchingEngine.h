@@ -320,6 +320,10 @@ public:
     void setBackpressureCallback(BackpressureCallback cb) { backpressureCb_ = std::move(cb); }
     void setMaxPushRetries(uint32_t retries) { maxPushRetries_ = retries; }
     uint64_t getDroppedCount() const { return droppedCount_.load(std::memory_order_relaxed); }
+    // Control-plane enqueues that had to wait for ring space. Never indicates a
+    // drop — control messages cannot be dropped — but a persistently rising
+    // value means the ring is undersized for the offered load.
+    uint64_t getControlSpinCount() const { return controlSpins_.load(std::memory_order_relaxed); }
 
     // End-to-end latency tracking (ingress → processing complete)
     const LatencyTracker& getE2ELatency(size_t threadIndex) const { return e2eLatency_[threadIndex]; }
@@ -479,6 +483,8 @@ private:
     BackpressureCallback backpressureCb_;
     uint32_t maxPushRetries_{1000};
     std::atomic<uint64_t> droppedCount_{0};
+    // Times a control-plane enqueue had to spin on a full ring (C5 telemetry).
+    std::atomic<uint64_t> controlSpins_{0};
 
     // Per-thread end-to-end latency trackers
     std::unique_ptr<LatencyTracker[]> e2eLatency_;
@@ -508,6 +514,31 @@ private:
 
     // Internal helper: push to specific thread's queue with backpressure
     bool enqueueSafe(size_t threadIndex, const OrderRequest& req);
+
+    // C5: control-plane enqueue that CANNOT be dropped. enqueueSafe gives up
+    // after maxPushRetries_ and returns false; the three safety-control call
+    // sites ignored that, so under load a kill switch could reject new orders
+    // while every resting order stayed live — the worst partial state a safety
+    // control can reach. This spins until the push lands, which is safe because
+    // the consumer only stops draining at Shutdown, so a full ring is always
+    // transient. stopAsync() has always done exactly this; the control plane
+    // now shares one implementation with it.
+    //
+    // Deliberately the SAME ring as order flow, not a side channel: a sweep
+    // must be processed after every order already in flight. On a separate
+    // queue it could overtake them, they would land after the sweep, and they
+    // would survive it — reintroducing the bug this fixes.
+    void enqueueControl(size_t threadIndex, const OrderRequest& req);
+
+    // Resting orders for `pid` across every book, or all orders when pid is
+    // kKillAllParticipants. Takes each book's shared lock, so it is safe to
+    // call from the control thread while workers run. Control-plane only.
+    size_t countResting(ParticipantId pid);
+
+    // Enqueue a KillSwitch sweep on every worker, drain, then verify by
+    // recount that nothing survived; re-sweeps if it did. Returns survivors
+    // still resting after the bounded reconciliation (0 on success).
+    size_t sweepAndVerify(ParticipantId pid);
     size_t getThreadIndex(SymbolId symbolId) const;
 
     // ─── OCO contingent-order plumbing ───────────────────────────────

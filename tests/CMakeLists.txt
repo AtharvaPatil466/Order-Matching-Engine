@@ -247,6 +247,16 @@ enable_assertions(MpscQueueRaceTest)
 add_test(NAME MpscQueueRaceTest COMMAND MpscQueueRaceTest)
 set_tests_properties(MpscQueueRaceTest PROPERTIES TIMEOUT 120 LABELS "project;concurrency")
 
+# Kill-switch completeness (C5) — the safety control must be complete, not
+# best-effort: after setKillSwitch returns, zero resting orders may survive.
+# Exercises the async path with a small ring and maxPushRetries=1, the only
+# regime where the dropped-control-message bug manifests.
+add_executable(KillSwitchCompletenessTest KillSwitchCompletenessTest.cpp)
+target_link_libraries(KillSwitchCompletenessTest PRIVATE OrderMatcher)
+enable_assertions(KillSwitchCompletenessTest)
+add_test(NAME KillSwitchCompletenessTest COMMAND KillSwitchCompletenessTest)
+set_tests_properties(KillSwitchCompletenessTest PROPERTIES TIMEOUT 120 LABELS "project;risk;concurrency")
+
 # Checkpoint chaos test — rewriteAtomically atomicity under faults.
 add_executable(CheckpointChaosTest CheckpointChaosTest.cpp)
 target_link_libraries(CheckpointChaosTest PRIVATE OrderMatcher)

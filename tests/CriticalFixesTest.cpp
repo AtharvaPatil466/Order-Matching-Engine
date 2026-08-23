@@ -388,12 +388,14 @@ TEST(CriticalFixes, IcebergDisplayQtyClampedToOrderQty) {
 // the only flush guard was `fillCount == kMaxFillsPerOrder`. STP=CancelResting
 // removes the resting order and `continue`s without producing a fill, so
 // fillCount stays 0 while touchedCount grows with the number of levels swept.
-// 257 distinct price levels -> a write to touchedPrices[256], past the end,
+// >256 distinct price levels -> a write to touchedPrices[256], past the end,
 // on the matching thread — reachable from public order semantics, no auth.
 // Detected as a stack-buffer-overflow under the ASan lane; here the behavioural
 // assertion is that all 257 levels are swept and the sweep terminates cleanly.
 TEST(CriticalFixes, TouchedPricesDoesNotOverflowOnLongStpSweep) {
-    static constexpr int kLevels = 257;  // kMaxFillsPerOrder (256) + 1
+    // 300 > kMaxFillsPerOrder (256), so the sweep must flush and wrap the
+    // touchedPrices buffer mid-sweep rather than run off the end of it.
+    static constexpr int kLevels = 300;
     OrderBook book(1); relaxBook(book);
 
     const ParticipantId P = 1;

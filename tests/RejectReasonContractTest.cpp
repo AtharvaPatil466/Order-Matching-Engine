@@ -48,6 +48,13 @@ TEST(RejectReasonContract, InvalidQuantity) {
     EXPECT_EQ(expectReject(r), RejectReason::InvalidQuantity);
 }
 
+TEST(RejectReasonContract, InvalidDisplayQty) {
+    OrderBook book(0);
+    auto r = book.addOrder(1, 1, Side::Buy, 1000000, /*qty=*/100,
+                           OrderType::Iceberg, /*stopPrice=*/0, /*displayQty=*/0);
+    EXPECT_EQ(expectReject(r), RejectReason::InvalidDisplayQty);
+}
+
 TEST(RejectReasonContract, InvalidPrice) {
     OrderBook book(0);
     auto r = book.addOrder(1, 1, Side::Buy, /*price=*/0, 100,
@@ -206,6 +213,7 @@ TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
         RejectReason::UnsupportedFixVersion,
         RejectReason::MissingRequiredField,
         RejectReason::PoolCapacityExceeded,
+        RejectReason::InvalidDisplayQty,
     };
 
     for (RejectReason r : kAll) {

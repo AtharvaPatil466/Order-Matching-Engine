@@ -354,7 +354,9 @@ TEST(CriticalFixes, IcebergWithZeroDisplayQtyIsRejected) {
 
     ASSERT_TRUE(std::holds_alternative<RejectReason>(r))
         << "iceberg with displayQty == 0 must be rejected at admission";
-    EXPECT_EQ(std::get<RejectReason>(r), RejectReason::InvalidQuantity);
+    EXPECT_EQ(std::get<RejectReason>(r), RejectReason::InvalidDisplayQty)
+        << "must be its own reason, not the generic InvalidQuantity — the "
+           "order quantity is fine, the display slice is not";
     EXPECT_EQ(book.getOrder(1), nullptr) << "rejected iceberg must not rest";
 
     // The livelock trigger: a crossing order against that iceberg. With the

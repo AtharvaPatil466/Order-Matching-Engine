@@ -99,6 +99,7 @@ public:
         case RejectReason::SymbolNotFound:        return "symbol";
         case RejectReason::InvalidPrice:          return "price";
         case RejectReason::InvalidQuantity:       return "qty";
+        case RejectReason::InvalidDisplayQty:     return "display qty";
         case RejectReason::OrderNotFound:         return "not found";
         case RejectReason::QueueBackpressure:     return "backpressure";
         case RejectReason::RateLimitExceeded:     return "rate limit";

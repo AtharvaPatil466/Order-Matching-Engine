@@ -95,6 +95,7 @@ inline int ordRejReasonCode(RejectReason r) {
     case RejectReason::PostOnlyWouldCross:          return 11;
     case RejectReason::OrderTypeNotAllowedInState:  return 11;
     case RejectReason::InvalidQuantity:             return 13;  // Incorrect quantity
+    case RejectReason::InvalidDisplayQty:           return 13;  // Incorrect quantity (display)
     case RejectReason::InvalidPrice:                return 18;  // Invalid price
     case RejectReason::MissingRequiredField:        return 1;   // Required tag missing
                                                                 // (FIX session-level reject code,

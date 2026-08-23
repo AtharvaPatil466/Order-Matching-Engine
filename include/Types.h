@@ -93,7 +93,14 @@ enum class RejectReason : uint8_t {
     // (a hard "no slots left" failure): this is the CONTROLLED-degradation shed
     // — new orders are rejected at ≥95% utilization so the book keeps serving
     // cancels/matches for resting orders instead of hitting true exhaustion.
-    PoolCapacityExceeded
+    PoolCapacityExceeded,
+
+    // Iceberg submitted with displayQty == 0. Appended rather than filed next
+    // to InvalidQuantity on purpose: the raw uint8_t goes on the wire (SBE
+    // field 9, GatewayProtocol.h ExecutionReport.rejectReason), so inserting
+    // mid-enum would silently renumber every later reason for live clients and
+    // for any recorded capture. New reasons go at the end, always.
+    InvalidDisplayQty
 };
 
 // Trading state controls how new orders are admitted into the book and

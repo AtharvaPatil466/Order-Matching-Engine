@@ -381,8 +381,8 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
 #endif
             notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
-                              RejectReason::InvalidQuantity);
-            return RejectReason::InvalidQuantity;
+                              RejectReason::InvalidDisplayQty);
+            return RejectReason::InvalidDisplayQty;
         }
         if (displayQty > qty) displayQty = qty;
     }

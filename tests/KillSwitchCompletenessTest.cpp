@@ -253,31 +253,48 @@ void kill_switch_survives_a_hostile_queue() {
     MatchingEngine engine;
     configure(engine);
 
-    // Rest the victim's orders with the queue healthy.
-    for (int i = 0; i < 300; ++i) {
-        engine.submitOrder(kSymbol, static_cast<OrderId>(i + 1), kVictim, Side::Buy,
-                           /*price=*/10000, /*qty=*/1, OrderType::Limit);
+    // Repeated rounds, not one shot. With numThreads_ == 1 a single killSwitch
+    // issues exactly ONE control push, so at p=0.98 the injection simply fails
+    // to fire about 2% of the time and the pre-fix code would pass by luck —
+    // a 2% false-negative is not a regression guard. Ten independent rounds put
+    // that at 0.02^10, i.e. never.
+    constexpr int kRounds = 10;
+    uint64_t totalFires = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        const OrderId base = static_cast<OrderId>(round * 1000 + 1);
+        for (int i = 0; i < 100; ++i) {
+            engine.submitOrder(kSymbol, base + static_cast<OrderId>(i), kVictim,
+                               Side::Buy, /*price=*/10000, /*qty=*/1, OrderType::Limit);
+        }
+        engine.waitForDrain();
+        const size_t before = restingCount(engine, kVictim);
+        assert(before > 0 && "setup did not rest any victim orders");
+
+        // Make the ring hostile and fire. The sweep must still land.
+        fi.arm("queue.push.spurious_fail", 0.98);
+        engine.killSwitch(kVictim);
+        fi.disarm("queue.push.spurious_fail");
+
+        const size_t survivors = restingCount(engine, kVictim);
+        if (survivors != 0) {
+            std::printf("FAIL: round %d — %zu of %zu victim orders survived; the "
+                        "control message was dropped by a hostile queue\n",
+                        round, survivors, before);
+            std::abort();
+        }
+        totalFires = fi.activations("queue.push.spurious_fail");
     }
-    engine.waitForDrain();
-    const size_t before = restingCount(engine, kVictim);
-    assert(before > 0 && "setup did not rest any victim orders");
 
-    // Now make the ring hostile and fire. The sweep must still land.
-    fi.arm("queue.push.spurious_fail", 0.98);
-    engine.killSwitch(kVictim);
-    fi.disarm("queue.push.spurious_fail");
-
-    const size_t survivors = restingCount(engine, kVictim);
-    if (survivors != 0) {
-        std::printf("FAIL: %zu of %zu victim orders survived — the control "
-                    "message was dropped by a hostile queue\n", survivors, before);
+    // The injection must actually have fired, or the round proved nothing.
+    if (totalFires == 0) {
+        std::puts("FAIL: queue.push.spurious_fail never fired — "
+                  "the scenario did not exercise a hostile queue");
         std::abort();
     }
 
-    std::printf("[hostile-queue] rested=%zu survivors=0 push_fail_fires=%llu "
+    std::printf("[hostile-queue] %d rounds, survivors=0, push_fail_fires=%llu "
                 "control_spins=%llu\n",
-                before,
-                static_cast<unsigned long long>(fi.activations("queue.push.spurious_fail")),
+                kRounds, static_cast<unsigned long long>(totalFires),
                 static_cast<unsigned long long>(engine.getControlSpinCount()));
     fi.reset();
     engine.stop();

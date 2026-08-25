@@ -414,7 +414,22 @@ public:
     SymbolId getSymbolId() const { return symbolId_; }
     bool isHalted() const { return tradingState_ == TradingState::Halted; }
 
-    // Event listener (replaces std::function callbacks)
+    // Event listener (replaces std::function callbacks).
+    //
+    // KNOWN HAZARD, deliberately NOT guarded here — see the Phase 0 report.
+    // There is exactly ONE public listener slot, and ItchPublisher,
+    // OuchSession::attachFillListener, MarketMaker and InformedTrader all
+    // claim it through this setter. A second claim silently replaces the
+    // first, so two protocols (or two agents) on one book means one of them
+    // goes deaf with no diagnostic. MarketMaker.h:89 and InformedTrader.h:88
+    // collide exactly this way today.
+    //
+    // An assert here does NOT work: `set(A)` then `set(B)` is the same call
+    // sequence whether the caller means "swap between phases" (legitimate,
+    // e.g. ManualTest.cpp:1055/1065/1094) or "both listen at once" (a bug).
+    // The slot cannot express the difference. Separating them needs an API
+    // change — an explicit add/clear contract, or a MultiplexListener the
+    // book owns — which is the fan-out work, not this.
     void setEventListener(EventListener* listener) {
         listener_ = listener ? listener : &nullListener();
         refreshTradeListenerFlag();

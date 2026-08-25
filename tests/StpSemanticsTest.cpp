@@ -728,3 +728,82 @@ TEST(StpProtocol, OuchCanceledBySTPCarriesTheStpReasonNotUserRequested) {
         << "the default reason must remain 'user requested'";
     EXPECT_NE(static_cast<char>(userBuf[27]), OUCH_CANCEL_REASON_STP);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 0 — order-lifecycle delivery groundwork. No protocol messages yet.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Fix 1: OuchSession no longer leaks map entries on engine-side removal ──
+//
+// tokenToOrderId_ / engineIdToToken_ / firmOf_ were erased on full fill and on
+// a client Cancel Order, but not when the ENGINE removed the order — because
+// onOrderUpdate was a no-op. Every STP / kill-switch / expiry / OCO
+// cancellation leaked one entry in each map.
+TEST(LifecycleGroundwork, OuchSessionReapsMapsOnEngineInitiatedCancel) {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+    engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
+    // Sync mode: submitOrder rejects with EngineStopped until started, and
+    // sync keeps the callbacks on this thread so the test observes exactly the
+    // dispatch context Phase 0's threading argument is about.
+    engine.start();
+
+    OuchSession sess(engine, [](std::string_view) {});
+    ASSERT_TRUE(sess.attachFillListener(1));
+
+    // Enter one order over OUCH so the session owns a token mapping.
+    uint8_t enter[OUCH_SIZE_ENTER_ORDER];
+    OuchEnterOrder o{};
+    o.orderToken = 99;
+    o.side  = Side::Buy;
+    o.shares = 100;
+    o.stock = 1;
+    o.price = 10000;
+    o.firm  = 7;
+    // OUCH TimeInForce 0 means IOC, which would cancel immediately against an
+    // empty book — and be reaped, masking what this test is checking. DAY rests.
+    o.timeInForce = OUCH_TIF_DAY;
+    const size_t n = encodeEnterOrder(enter, o);
+    ASSERT_TRUE(sess.feed(reinterpret_cast<const char*>(enter), n));
+
+    ASSERT_EQ(sess.knownOrderCount(), 1u) << "setup: the order must be tracked";
+    ASSERT_EQ(sess.staleEntriesReaped(), 0u);
+
+    // The ENGINE removes it — nothing the client asked for.
+    engine.setKillSwitch(true);
+
+    EXPECT_EQ(sess.knownOrderCount(), 0u)
+        << "pre-fix this stayed at 1 forever: one leaked entry per "
+           "engine-cancelled order, in each of three maps";
+    EXPECT_EQ(sess.staleEntriesReaped(), 1u);
+}
+
+// A fill still reaps through the existing onTrade path, and the new override
+// must not double-count or disturb it.
+TEST(LifecycleGroundwork, OuchSessionStillReapsOnFullFillWithoutDoubleCounting) {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+    engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
+    // Sync mode: submitOrder rejects with EngineStopped until started, and
+    // sync keeps the callbacks on this thread so the test observes exactly the
+    // dispatch context Phase 0's threading argument is about.
+    engine.start();
+
+    OuchSession sess(engine, [](std::string_view) {});
+    ASSERT_TRUE(sess.attachFillListener(1));
+
+    uint8_t enter[OUCH_SIZE_ENTER_ORDER];
+    OuchEnterOrder o{};
+    o.orderToken = 5; o.side = Side::Buy; o.shares = 100; o.stock = 1;
+    o.price = 10000; o.firm = 7;
+    o.timeInForce = OUCH_TIF_DAY;   // 0 would be IOC — see the test above
+    ASSERT_TRUE(sess.feed(reinterpret_cast<const char*>(enter),
+                          encodeEnterOrder(enter, o)));
+    ASSERT_EQ(sess.knownOrderCount(), 1u);
+
+    // A different participant fills it completely.
+    engine.processOrder(1, /*id=*/777, /*pid=*/2, Side::Sell, 10000, 100,
+                        OrderType::Limit);
+
+    EXPECT_EQ(sess.knownOrderCount(), 0u) << "the fill path still reaps";
+}

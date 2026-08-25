@@ -140,10 +140,52 @@ public:
         send_(std::string_view(reinterpret_cast<const char*>(buf), n));
     }
 
-    // EventListener overrides. Only onTrade is interesting for OUCH —
-    // onOrderUpdate / onMarketData stay as the base-class no-ops since
-    // OUCH 'A'/'C'/'J' are already emitted at the dispatch site, not
-    // via the listener path.
+    // EventListener overrides.
+    //
+    // onOrderUpdate does NOT emit a protocol message yet — engine-initiated
+    // cancellations (STP, kill switch, GTD/DAY expiry, OCO sibling, post-close
+    // LOC) still never reach an OUCH client, which is the delivery gap Phase 3
+    // addresses. What it does do is reap the session's own bookkeeping.
+    //
+    // The three maps were erased on full fill (emitExecutedForEngineId) and on
+    // a client Cancel Order (handleCancelOrder), but there was NO erase path
+    // for an order the ENGINE removed — because this override was a no-op. So
+    // every engine-cancelled order leaked one entry in each of
+    // tokenToOrderId_, engineIdToToken_ and firmOf_, and a long-lived session
+    // grew without bound. Beyond the leak, a stale token also made a later
+    // Cancel Order for that token look live instead of cancel-of-unknown.
+    //
+    // Threading: this adds no new exposure. onTrade already mutates all three
+    // maps from the matching thread — it writes TokenEntry::shares and
+    // performs these exact three erases on full fill — and both callbacks are
+    // dispatched from inside OrderBook under bookLock_. (The pre-existing race
+    // between that and the gateway thread reading the maps is Phase 2's
+    // problem; this neither fixes nor widens it.)
+    void onOrderUpdate(const OrderUpdate& u) override {
+        // Terminal, but NOT an execution. Reaping on Filled here would be a
+        // bug: notifyOrderUpdate(Filled) fires inside match()'s loop
+        // (OrderBook.cpp:1126) while the trade is still buffered and only
+        // dispatched later by flushFills(), so erasing now would leave
+        // emitExecutedForEngineId unable to find the token and the client's
+        // 'E' execution report would be silently swallowed — precisely what
+        // handleEnterOrder's pre-registration comment exists to prevent.
+        // Fill-driven removal is already reaped by that path, after the 'E'.
+        if (!isTerminalStatus(u.status) || isExecution(u.status)) return;
+        auto rev = engineIdToToken_.find(u.orderId);
+        if (rev == engineIdToToken_.end()) return;   // not ours, or already reaped
+        tokenToOrderId_.erase(rev->second);
+        engineIdToToken_.erase(rev);
+        firmOf_.erase(u.orderId);
+        ++staleEntriesReaped_;
+    }
+
+    // Terminal-status reaps performed by onOrderUpdate. Exposed for tests and
+    // telemetry: a steadily rising value against a flat knownOrderCount() is
+    // the healthy signal that engine-initiated removals are being cleaned up.
+    uint64_t staleEntriesReaped() const { return staleEntriesReaped_; }
+
+    // Only onTrade produces wire output for OUCH — 'A'/'C'/'J' are emitted at
+    // the dispatch site, not via the listener path.
     void onTrade(const Trade& t) override {
         // Look up by engine OrderId via the reverse map: tokens may
         // have changed identity (Order Replace), so token != orderId
@@ -277,18 +319,25 @@ private:
             ++cancelsRejected_;
             return;
         }
-        SubmitResult r = engine_.submitCancel(it->second.symbol, it->second.orderId);
+        // Copy the entry BEFORE submitCancel. The cancel dispatches
+        // notifyOrderUpdate synchronously on this thread, onOrderUpdate reaps
+        // this very entry, and `it` is left dangling — reading it afterwards
+        // is a use-after-free. handleReplaceOrder already copies for the same
+        // reason; this path did not.
+        const TokenEntry entry = it->second;
+        SubmitResult r = engine_.submitCancel(entry.symbol, entry.orderId);
         if (r.isAccepted()) {
             ++cancelsAccepted_;
             // Canceled-shares: the leaves quantity at cancel time. The
             // session tracks this precisely now — onTrade decrements
             // `shares` on every fill, so what's left here IS the
             // accurate post-fill remainder.
-            sendCanceled(c.orderToken, it->second.shares);
-            OrderId engineId = it->second.orderId;
-            tokenToOrderId_.erase(it);
-            engineIdToToken_.erase(engineId);
-            firmOf_.erase(engineId);
+            sendCanceled(c.orderToken, entry.shares);
+            // Erase by KEY, not by iterator: the reaper above has very likely
+            // already removed these, and erasing a missing key is a no-op.
+            tokenToOrderId_.erase(c.orderToken);
+            engineIdToToken_.erase(entry.orderId);
+            firmOf_.erase(entry.orderId);
         } else {
             ++cancelsRejected_;
             // Cancel-of-unknown isn't a wire-visible event in OUCH;
@@ -393,6 +442,7 @@ private:
     // Replace ack which must echo the original Firm. Tracked here
     // so OrderUpdate (which doesn't carry firm) doesn't have to.
     std::unordered_map<OrderId, ParticipantId>   firmOf_;
+    uint64_t                                    staleEntriesReaped_{0};
     uint64_t                                     framesProcessed_{0};
     uint64_t                                     ordersAccepted_{0};
     uint64_t                                     ordersRejected_{0};

@@ -806,6 +806,23 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
 // ─── Match (Price-Time FIFO) ─────────────────────────────────────────────────
 
+// C1: STP removal of a resting order, shared by all three matching paths —
+// price-time match(), matchProRata()'s pre-pass, and the auction uncross. Three
+// STP actions (CancelResting, CancelBoth, DecreaseResting-to-zero) perform the
+// identical teardown; sharing it means the status they report cannot drift
+// apart, which is the class of bug C1 was. CancelledBySTP, never Cancelled: the
+// owner did not ask for this. `lvl` must be `book`'s current best level.
+void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMap& book) {
+    victim->status = OrderStatus::CancelledBySTP;
+    notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP,
+                      victim->initialQty - victim->remainingQty, 0);
+    stpNoteRemoved(victim);
+    lvl->remove(victim);
+    orderLookup_.erase(victim->id);
+    orderPool_.deallocate(victim);
+    if (lvl->empty()) book.eraseBest();
+}
+
 // C1: terminal handling for an order that STP removed mid-match. Returns true
 // if the order was finalized and deallocated, in which case the caller must NOT
 // rest it or touch it again.
@@ -895,20 +912,8 @@ void OrderBook::match(Order* incoming) {
     //                  unlinked from their level and returned to the pool below;
     //                  matching never consults orderLookup_, so the id is dropped
     //                  in one batch instead of a hash erase per fill).
-    // C1: STP removal of a resting order. Three of the STP actions
-    // (CancelResting, CancelBoth, DecreaseResting-to-zero) performed the
-    // identical seven-step teardown inline; sharing it means the status they
-    // report cannot drift apart, which is the class of bug C1 was.
-    // CancelledBySTP, never Cancelled: the owner did not ask for this.
     auto stpCancelResting = [&](Order* victim, OrderList* lvl) {
-        victim->status = OrderStatus::CancelledBySTP;
-        notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP,
-                          victim->initialQty - victim->remainingQty, 0);
-        stpNoteRemoved(victim);
-        lvl->remove(victim);
-        orderLookup_.erase(victim->id);
-        orderPool_.deallocate(victim);
-        if (lvl->empty()) opposite.eraseBest();
+        stpCancelRestingOrder(victim, lvl, opposite);
     };
 
     std::array<FillEvent, kMaxFillsPerOrder> pendingFills;
@@ -1196,6 +1201,68 @@ void OrderBook::matchProRata(Order* incoming) {
 
         OrderList& level = *opposite.bestLevel();
 
+        // ── C1: STP pre-pass ────────────────────────────────────────────────
+        // Resolve self-trade prevention BEFORE computing allocations. The
+        // pre-fix code tested checkSMP inside the allocation loop and, on a
+        // hit, zeroed remainingQty and returned — which (a) ignored the
+        // configured mode entirely and always behaved CancelIncoming,
+        // (b) produced the C1 phantom fill, since post-match reads
+        // filledQty as initialQty - remainingQty, (c) abandoned the whole
+        // sweep including levels holding no same-participant order, and
+        // (d) fired even for a resting order due a zero pro-rata share.
+        //
+        // Doing it here also avoids invalidating the allocation walk: removing
+        // a resting order mid-scan would free the node whose ->next the loop is
+        // about to read.
+        if (!stpNoneResting(incoming->participantId)) [[unlikely]] {
+            const STPMode stpMode = getSTPMode(incoming->participantId);
+            bool levelChanged = false;
+            for (Order* o = level.front(); o; ) {
+                Order* next = o->next;   // read before any teardown frees `o`
+                if (!checkSMP(*incoming, *o)) { o = next; continue; }
+
+                const Quantity avail = (o->type == OrderType::Iceberg)
+                                       ? o->visibleQty : o->remainingQty;
+                const STPResult stp = SelfTradeProtection::check(
+                    incoming->participantId, o->participantId, stpMode,
+                    std::min(incoming->remainingQty, avail));
+
+                switch (stp.action) {
+                case STPResult::Action::NoSelfTrade:
+                case STPResult::Action::CancelIncoming:
+                    // Status only — remainingQty is left intact so the caller's
+                    // finalizeIfStpCancelled() reports what really executed.
+                    incoming->status = OrderStatus::CancelledBySTP;
+                    return;
+                case STPResult::Action::CancelBoth:
+                    incoming->status = OrderStatus::CancelledBySTP;
+                    stpCancelRestingOrder(o, &level, opposite);
+                    return;
+                case STPResult::Action::CancelResting:
+                    stpCancelRestingOrder(o, &level, opposite);
+                    levelChanged = true;
+                    break;
+                case STPResult::Action::DecreaseResting:
+                    if (stp.decreaseAmount >= o->remainingQty) {
+                        stpCancelRestingOrder(o, &level, opposite);
+                    } else {
+                        o->remainingQty -= stp.decreaseAmount;
+                        // Keep visibleQty <= remainingQty or a later fill
+                        // underflows remainingQty to UINT64_MAX.
+                        o->visibleQty = std::min(o->visibleQty, o->remainingQty);
+                    }
+                    levelChanged = true;
+                    break;
+                }
+                o = next;
+            }
+            // Quantities at this level moved: restart the outer loop so the
+            // level totals and allocations are computed from the new state.
+            // The level may also be gone entirely, in which case this picks up
+            // the next best price.
+            if (levelChanged) continue;
+        }
+
         // Calculate total quantity at this level
         Quantity totalLevelQty = 0;
         for (Order* o = level.front(); o; o = o->next) {
@@ -1214,10 +1281,7 @@ void OrderBook::matchProRata(Order* incoming) {
         Quantity allocated = 0;
 
         for (Order* o = level.front(); o && allocCount < MAX_LEVEL_ORDERS; o = o->next) {
-            if (checkSMP(*incoming, *o)) {
-                incoming->remainingQty = 0;
-                return;
-            }
+            // Self-crossing orders are already resolved by the pre-pass above.
             Quantity avail = (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
             Quantity share = (totalLevelQty > 0)
                 ? static_cast<Quantity>(static_cast<double>(avail) / totalLevelQty * toFill)
@@ -1913,14 +1977,65 @@ void OrderBook::uncross() {
 
         if (!buyer || !seller) break;
 
-        // SMP check — skip this pair in auction
+        // ── C1: mode-aware STP in the auction cross ─────────────────────────
+        // The pre-fix code ignored stpModes_ entirely and always cancelled the
+        // BUYER — an arbitrary side bias — reporting it as a client-initiated
+        // Cancelled.
+        //
+        // An auction has no aggressor: both orders were resting before the
+        // uncross, so CancelIncoming / CancelResting / DecreaseResting have no
+        // literal referent. "Incoming" maps to the LATER-ARRIVING order by
+        // timestamp: price-time is the auction's own ordering, and the newer
+        // order is the one that created the self-cross. Ties (equal timestamps)
+        // fall to the buyer, preserving the historical side for that case.
+        //
+        // Whose mode applies is unambiguous — checkSMP has already established
+        // both orders belong to the same participant, so the two lookups are
+        // the same lookup.
+        //
+        // KNOWN LIMITATION (pre-existing, widened by CancelBoth): bestUncrossPrice
+        // and remainingVolume were discovered from a book that still contained
+        // these orders. Removing them here means the printed price and volume
+        // can exceed what the post-STP book supports. A correct fix filters
+        // self-crossing pairs BEFORE price discovery; that is a larger change
+        // than making this path mode-aware.
         if (checkSMP(*buyer, *seller)) {
-            stpNoteRemoved(buyer);
-            bidLevel->remove(buyer);
-            notifyOrderUpdate(buyer->id, OrderStatus::Cancelled, 0, buyer->remainingQty);
-            orderLookup_.erase(buyer->id);
-            orderPool_.deallocate(buyer);
-            if (bidLevel->empty()) bids_.eraseBest();
+            const STPMode stpMode = getSTPMode(buyer->participantId);
+            const STPResult stp = SelfTradeProtection::check(
+                buyer->participantId, seller->participantId, stpMode,
+                std::min(buyer->remainingQty, seller->remainingQty));
+
+            const bool buyerIsNewer = (buyer->timestamp >= seller->timestamp);
+            Order*     newer     = buyerIsNewer ? buyer    : seller;
+            OrderList* newerLvl  = buyerIsNewer ? bidLevel : askLevel;
+            FlatPriceMap& newerBk = buyerIsNewer ? bids_   : asks_;
+            Order*     older     = buyerIsNewer ? seller   : buyer;
+            OrderList* olderLvl  = buyerIsNewer ? askLevel : bidLevel;
+            FlatPriceMap& olderBk = buyerIsNewer ? asks_   : bids_;
+
+            switch (stp.action) {
+            case STPResult::Action::NoSelfTrade:
+            case STPResult::Action::CancelIncoming:
+                stpCancelRestingOrder(newer, newerLvl, newerBk);
+                break;
+            case STPResult::Action::CancelResting:
+                stpCancelRestingOrder(older, olderLvl, olderBk);
+                break;
+            case STPResult::Action::CancelBoth:
+                stpCancelRestingOrder(newer, newerLvl, newerBk);
+                stpCancelRestingOrder(older, olderLvl, olderBk);
+                break;
+            case STPResult::Action::DecreaseResting:
+                if (stp.decreaseAmount >= older->remainingQty) {
+                    stpCancelRestingOrder(older, olderLvl, olderBk);
+                } else {
+                    older->remainingQty -= stp.decreaseAmount;
+                    // Keep visibleQty <= remainingQty or a later fill
+                    // underflows remainingQty to UINT64_MAX.
+                    older->visibleQty = std::min(older->visibleQty, older->remainingQty);
+                }
+                break;
+            }
             continue;
         }
 

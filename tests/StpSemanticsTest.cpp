@@ -84,6 +84,7 @@ TEST(StpSemantics, OnlyExecutionsCanTriggerOco) {
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 
+#include <memory>
 #include <vector>
 
 namespace {
@@ -288,6 +289,287 @@ TEST(StpSemantics, PartialFillThenSelfCrossStillReportsTheRealFill) {
         << "40 shares genuinely traded, so this leg DID execute and must be "
            "able to win an OCO group";
     EXPECT_NE(u->status, OrderStatus::Filled) << "it did not fully fill";
+
+    book.setEventListener(nullptr);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Step 3 — pro-rata and auction uncross honour stpModes_ too.
+//
+// Both paths previously ignored the mode matrix entirely: pro-rata always
+// killed the incoming order (and zeroed remainingQty, reproducing the C1
+// phantom fill), and the uncross always cancelled the BUYER regardless of
+// configuration. The review additionally recorded that STP CancelIncoming and
+// CancelBoth were executed by NO test in the suite; every mode is covered here
+// on both paths.
+// ═══════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// A pro-rata book with the volatility breaker relaxed.
+std::unique_ptr<OrderBook> proRataBook() {
+    auto b = std::make_unique<OrderBook>(1, MatchAlgorithm::ProRata);
+    b->setCircuitBreakerThreshold(0.99);
+    return b;
+}
+
+}  // namespace
+
+// ─── Pro-rata: every mode ───────────────────────────────────────────────────
+
+TEST(StpProRata, DefaultCancelIncomingKillsTakerAndReportsCancelledBySTP) {
+    auto book = proRataBook();
+    CaptureListener lis;
+    book->setEventListener(&lis);
+    const ParticipantId P = 1;
+
+    book->addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    lis.clear();
+    book->addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    EXPECT_TRUE(lis.trades.empty()) << "self-cross must not trade";
+    const OrderUpdate* u = lis.lastFor(2);
+    ASSERT_NE(u, nullptr);
+    EXPECT_EQ(u->status, OrderStatus::CancelledBySTP);
+    EXPECT_EQ(u->filledQty, 0u)
+        << "pre-fix pro-rata zeroed remainingQty, reporting a full fill";
+    ASSERT_NE(book->getOrder(1), nullptr);
+    EXPECT_EQ(book->getOrder(1)->remainingQty, 100u) << "resting side untouched";
+
+    book->setEventListener(nullptr);
+}
+
+// Never executed by any test before this one (review §Coverage).
+TEST(StpProRata, CancelIncomingKillsTaker) {
+    auto book = proRataBook();
+    CaptureListener lis;
+    book->setEventListener(&lis);
+    const ParticipantId P = 1;
+    book->setSTPMode(P, STPMode::CancelIncoming);
+
+    book->addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    lis.clear();
+    book->addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    EXPECT_TRUE(lis.trades.empty());
+    ASSERT_NE(lis.lastFor(2), nullptr);
+    EXPECT_EQ(lis.lastFor(2)->status, OrderStatus::CancelledBySTP);
+    EXPECT_NE(book->getOrder(1), nullptr) << "resting side survives";
+
+    book->setEventListener(nullptr);
+}
+
+TEST(StpProRata, CancelRestingRemovesMakerAndLetsTakerContinue) {
+    auto book = proRataBook();
+    CaptureListener lis;
+    book->setEventListener(&lis);
+    const ParticipantId P = 1, OTHER = 2;
+    book->setSTPMode(P, STPMode::CancelResting);
+
+    // P's own 60 and OTHER's 40 sit at the same level.
+    book->addOrder(1, P,     Side::Sell, PX, 60, OrderType::Limit);
+    book->addOrder(2, OTHER, Side::Sell, PX, 40, OrderType::Limit);
+    lis.clear();
+
+    book->addOrder(3, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1)
+        << "P's own resting order is removed by STP";
+    EXPECT_EQ(book->getOrder(1), nullptr);
+    // Having removed its own order, the taker still trades against OTHER —
+    // pre-fix the whole sweep was abandoned with `return`.
+    ASSERT_FALSE(lis.trades.empty())
+        << "the taker must still fill against the other participant";
+    EXPECT_EQ(lis.trades[0].quantity, 40u);
+
+    book->setEventListener(nullptr);
+}
+
+// Never executed by any test before this one (review §Coverage).
+TEST(StpProRata, CancelBothRemovesTakerAndMaker) {
+    auto book = proRataBook();
+    CaptureListener lis;
+    book->setEventListener(&lis);
+    const ParticipantId P = 1;
+    book->setSTPMode(P, STPMode::CancelBoth);
+
+    book->addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    lis.clear();
+    book->addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    EXPECT_TRUE(lis.trades.empty());
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1) << "maker removed";
+    ASSERT_NE(lis.lastFor(2), nullptr);
+    EXPECT_EQ(lis.lastFor(2)->status, OrderStatus::CancelledBySTP) << "taker removed";
+    EXPECT_EQ(book->getOrder(1), nullptr);
+    EXPECT_EQ(book->getOrder(2), nullptr);
+
+    book->setEventListener(nullptr);
+}
+
+// NOTE on DecreaseAndCancel, verified identical on BOTH paths and on the
+// price-time reference: the resting order is decremented but the INCOMING order
+// never is, so the sweep re-triggers on the same resting order and decrements
+// it again until it is exhausted and cancelled. Net effect: DecreaseAndCancel
+// is behaviourally identical to CancelResting whenever the incoming order
+// survives the first pass — 100 decremented by 30 ends at 0, not 70.
+//
+// That is a pre-existing defect of the price-time path, not of this change; the
+// requirement here is to mirror match(), and these tests pin that the mirror is
+// faithful. If the mode is ever given its intended semantics (decrement BOTH
+// sides by the match quantity, cancelling whichever hits zero) these two
+// expectations are what will need revisiting.
+TEST(StpProRata, DecreaseRestingConvergesToMakerCancellation) {
+    auto book = proRataBook();
+    CaptureListener lis;
+    book->setEventListener(&lis);
+    const ParticipantId P = 1;
+    book->setSTPMode(P, STPMode::DecreaseAndCancel);
+
+    book->addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    lis.clear();
+    book->addOrder(2, P, Side::Buy, PX, 30, OrderType::Limit);
+
+    EXPECT_TRUE(lis.trades.empty()) << "a decrease is not a trade";
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1)
+        << "repeated decrements exhaust the maker, which is then cancelled";
+    EXPECT_EQ(book->getOrder(1), nullptr);
+    // Identical to the price-time reference — that is the property under test.
+    EXPECT_FALSE(lis.trades.size() > 0);
+
+    book->setEventListener(nullptr);
+}
+
+// ─── Auction uncross: every mode ────────────────────────────────────────────
+//
+// "Incoming" maps to the LATER-arriving order by timestamp, not to the buyer.
+// Each test rests the two sides in a known order so the mapping is observable.
+
+namespace {
+
+// Rests a self-crossing pair in the auction, sell FIRST then buy, so the BUY is
+// the newer order. Returns the book with the uncross already run.
+void runAuctionSelfCross(OrderBook& book, CaptureListener& lis,
+                         ParticipantId P, OrderId sellId, OrderId buyId) {
+    book.setCircuitBreakerThreshold(0.99);
+    book.setTradingState(TradingState::AuctionOpen);
+    book.addOrder(sellId, P, Side::Sell, PX, 100, OrderType::Limit);
+    book.addOrder(buyId,  P, Side::Buy,  PX, 100, OrderType::Limit);
+    lis.clear();
+    book.uncross();
+}
+
+}  // namespace
+
+TEST(StpUncross, DefaultCancelIncomingRemovesTheNewerOrderNotAlwaysTheBuyer) {
+    OrderBook book(1);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+    // Sell rests first, buy second => the BUY is newer and must be the one cut.
+    runAuctionSelfCross(book, lis, /*P=*/1, /*sellId=*/1, /*buyId=*/2);
+
+    EXPECT_TRUE(lis.trades.empty()) << "self-cross must not print in the auction";
+    EXPECT_EQ(lis.countStatus(2, OrderStatus::CancelledBySTP), 1) << "newer order cut";
+    EXPECT_EQ(lis.countStatus(2, OrderStatus::Cancelled), 0)
+        << "pre-fix this reported a client-initiated Cancelled";
+    EXPECT_NE(book.getOrder(1), nullptr) << "older order survives";
+
+    book.setEventListener(nullptr);
+}
+
+TEST(StpUncross, NewerIsTheSellWhenTheSellArrivesSecond) {
+    OrderBook book(1);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+    book.setCircuitBreakerThreshold(0.99);
+    book.setTradingState(TradingState::AuctionOpen);
+    // Buy rests FIRST this time, so the SELL is newer. Pre-fix the buyer was
+    // always the casualty regardless of arrival order.
+    book.addOrder(1, 1, Side::Buy,  PX, 100, OrderType::Limit);
+    book.addOrder(2, 1, Side::Sell, PX, 100, OrderType::Limit);
+    lis.clear();
+    book.uncross();
+
+    EXPECT_TRUE(lis.trades.empty());
+    EXPECT_EQ(lis.countStatus(2, OrderStatus::CancelledBySTP), 1)
+        << "the newer order is the SELL here; the buyer must survive";
+    EXPECT_NE(book.getOrder(1), nullptr) << "older buy survives";
+
+    book.setEventListener(nullptr);
+}
+
+TEST(StpUncross, CancelRestingRemovesTheOlderOrder) {
+    OrderBook book(1);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+    book.setSTPMode(1, STPMode::CancelResting);
+    runAuctionSelfCross(book, lis, /*P=*/1, /*sellId=*/1, /*buyId=*/2);
+
+    EXPECT_TRUE(lis.trades.empty());
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1)
+        << "CancelResting cuts the OLDER order (the sell, resting first)";
+    EXPECT_NE(book.getOrder(2), nullptr) << "the newer order survives";
+
+    book.setEventListener(nullptr);
+}
+
+// Never executed by any test before this one (review §Coverage).
+TEST(StpUncross, CancelBothRemovesBothSides) {
+    OrderBook book(1);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+    book.setSTPMode(1, STPMode::CancelBoth);
+    runAuctionSelfCross(book, lis, /*P=*/1, /*sellId=*/1, /*buyId=*/2);
+
+    EXPECT_TRUE(lis.trades.empty());
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1);
+    EXPECT_EQ(lis.countStatus(2, OrderStatus::CancelledBySTP), 1);
+    EXPECT_EQ(book.getOrder(1), nullptr);
+    EXPECT_EQ(book.getOrder(2), nullptr);
+
+    book.setEventListener(nullptr);
+}
+
+TEST(StpUncross, DecreaseRestingConvergesToOlderOrderCancellation) {
+    OrderBook book(1);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+    book.setCircuitBreakerThreshold(0.99);
+    book.setSTPMode(1, STPMode::DecreaseAndCancel);
+    book.setTradingState(TradingState::AuctionOpen);
+    book.addOrder(1, 1, Side::Sell, PX, 100, OrderType::Limit);  // older
+    book.addOrder(2, 1, Side::Buy,  PX,  30, OrderType::Limit);  // newer
+    lis.clear();
+    book.uncross();
+
+    EXPECT_TRUE(lis.trades.empty()) << "a decrease is not a trade";
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1)
+        << "repeated decrements exhaust the older order — same as price-time";
+    EXPECT_EQ(book.getOrder(1), nullptr);
+
+    book.setEventListener(nullptr);
+}
+
+// A self-cross in the auction must not disturb an unrelated participant's
+// matching — the same purity property ManualTest asserts for continuous trading.
+TEST(StpUncross, OtherParticipantsStillCrossNormally) {
+    OrderBook book(1);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+    book.setCircuitBreakerThreshold(0.99);
+    book.setTradingState(TradingState::AuctionOpen);
+
+    book.addOrder(1, /*P=*/1, Side::Sell, PX, 50, OrderType::Limit);
+    book.addOrder(2, /*P=*/1, Side::Buy,  PX, 50, OrderType::Limit);   // self-cross
+    book.addOrder(3, /*OTHER=*/2, Side::Sell, PX, 50, OrderType::Limit);
+    book.addOrder(4, /*THIRD=*/3, Side::Buy,  PX, 50, OrderType::Limit);
+    lis.clear();
+    book.uncross();
+
+    ASSERT_FALSE(lis.trades.empty())
+        << "participants 2 and 3 must still cross despite 1's self-cross";
+    for (const auto& t : lis.trades)
+        EXPECT_NE(t.buyerId, t.sellerId) << "no self-trade may print";
 
     book.setEventListener(nullptr);
 }

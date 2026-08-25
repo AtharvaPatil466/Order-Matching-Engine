@@ -546,6 +546,10 @@ private:
 
     // C1: finalize an order that STP removed mid-match. True => deallocated,
     // caller must not rest or touch it. Shared by all four match() call sites.
+    // C1: remove a resting order under STP, reporting CancelledBySTP. Shared
+    // by match(), matchProRata() and uncross(). `lvl` must be book's best level.
+    void stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMap& book);
+
     bool finalizeIfStpCancelled(Order* order);
 
     void notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity filledQty, Quantity remainingQty,

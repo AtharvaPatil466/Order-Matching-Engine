@@ -126,6 +126,20 @@ public:
         return true;
     }
 
+    // C1: an engine-initiated cancellation (self-trade prevention) carries a
+    // reason distinct from the client's own Cancel Order request. NOTE: nothing
+    // calls this yet — OuchSession overrides only onTrade, so engine-initiated
+    // cancellations (STP, kill switch, expiry, OCO) never reach an OUCH client
+    // at all. Wiring onOrderUpdate is separate work; this is the encoder side
+    // of the mapping, tested, ready for it.
+    void sendCanceledBySTP(uint64_t orderToken, Quantity canceledShares) {
+        if (!send_) return;
+        uint8_t buf[OUCH_SIZE_ORDER_CANCELED];
+        size_t n = encodeOrderCanceled(buf, now(), orderToken, canceledShares,
+                                       OUCH_CANCEL_REASON_STP);
+        send_(std::string_view(reinterpret_cast<const char*>(buf), n));
+    }
+
     // EventListener overrides. Only onTrade is interesting for OUCH —
     // onOrderUpdate / onMarketData stay as the base-class no-ops since
     // OUCH 'A'/'C'/'J' are already emitted at the dispatch site, not

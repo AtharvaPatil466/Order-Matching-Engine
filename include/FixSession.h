@@ -49,6 +49,37 @@ public:
         });
     }
 
+    // C1: cancellation ExecutionReport. ExecType='4' / OrdStatus='4' (Canceled)
+    // is the mapping in BOTH FIX 4.2 and 4.4 — neither version defines an
+    // STP-specific ExecType, and this serializer's version rewrite touches only
+    // '1'/'2' -> 'F' (FIXParser.h), so '4' passes through unchanged either way.
+    // The STP distinction therefore rides in Text(58); venues that need it
+    // machine-readable use a custom tag, which is a counterparty-specific
+    // decision rather than something to invent here.
+    //
+    // cumQty is what actually executed before STP stopped the order, so a
+    // partially-filled order reports its real fill rather than 0 or full qty.
+    //
+    // Public because the EventListener fan-out that will drive it is owned by
+    // the gateway, not the session (see OuchSession's "deferred to the
+    // gateway-level wiring" note).
+    //
+    // NOTE: nothing calls this yet. FixSession is not registered as an
+    // EventListener at all, so no engine-initiated cancellation — STP, kill
+    // switch, expiry, OCO sibling — currently reaches a FIX client. Wiring the
+    // order lifecycle is separate work; this is the encoder side, tested.
+    void sendCancelled(OrderId id, Side side, Price price, Quantity orderQty,
+                       Quantity cumQty, bool bySTP) {
+        if (!send_) return;
+        auto raw = FixSerializer::buildExecutionReport(
+            id, /*execId=*/id, /*execType=*/'4', /*ordStatus=*/'4',
+            side, price, orderQty, cumQty, /*leavesQty=*/0,
+            /*lastPx=*/0, /*lastQty=*/0,
+            bySTP ? "self-trade prevention" : "cancelled",
+            currentBeginString_, outboundSeqNum_++, currentVersion_);
+        send_(raw);
+    }
+
     // Override the set of accepted FIX BeginString values. Default is
     // {"FIX.4.2"}; pass e.g. {"FIX.4.2", "FIX.4.4"} to accept multiple
     // versions during a transition. A message whose BeginString is not

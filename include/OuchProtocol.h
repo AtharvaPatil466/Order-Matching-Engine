@@ -433,10 +433,21 @@ inline size_t encodeOrderRejected(uint8_t* out, uint64_t timestampNs,
     return OUCH_SIZE_ORDER_REJECTED;
 }
 
+// OUCH 4.2 Order Canceled reason codes. Named rather than left as bare literals
+// at the call sites so the STP code cannot be confused with a user cancel.
+constexpr char OUCH_CANCEL_REASON_USER      = 'U';  // client sent Cancel Order
+constexpr char OUCH_CANCEL_REASON_IMMEDIATE = 'I';  // IOC remainder
+constexpr char OUCH_CANCEL_REASON_TIMEOUT   = 'T';  // TIF expiry
+// C1: removed by self-trade prevention — engine-initiated, and specifically NOT
+// a user cancel. 'S' (supervisory / system-initiated) is the closest code in
+// the set this codec documents; venues vary in how they signal STP, so confirm
+// this character against the counterparty's OUCH specification before going
+// live rather than assuming it is portable.
+constexpr char OUCH_CANCEL_REASON_STP       = 'S';
+
 inline size_t encodeOrderCanceled(uint8_t* out, uint64_t timestampNs,
                                   uint64_t orderToken, Quantity canceledShares,
-                                  char reason = 'U') {
-    // reason 'U' = user requested; 'I' = immediate (IOC); 'T' = timeout (TIF).
+                                  char reason = OUCH_CANCEL_REASON_USER) {
     out[0] = OUCH_MT_ORDER_CANCELED;
     writeU64BE(out + 1, timestampNs);
     writeAsciiDecimal(out + 9, 14, orderToken);

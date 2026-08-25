@@ -84,6 +84,7 @@ TEST(StpSemantics, OnlyExecutionsCanTriggerOco) {
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -572,4 +573,158 @@ TEST(StpUncross, OtherParticipantsStillCrossNormally) {
         EXPECT_NE(t.buyerId, t.sellerId) << "no self-trade may print";
 
     book.setEventListener(nullptr);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Step 4 — outbound protocol mapping for CancelledBySTP.
+//
+// Survey result: ITCH is the ONLY protocol that consumes OrderStatus.
+// FixSession is never registered as an EventListener; OuchSession is one but
+// overrides only onTrade; SbeSession and the gateway carry accept/reject at
+// entry time and no order-status stream. So no order-entry client currently
+// learns about ANY engine-initiated cancellation — STP, kill switch, expiry or
+// OCO. These tests pin the encoder-side mapping so it is correct when the
+// lifecycle is wired, and close the ITCH gap that already exists in production.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include "FixSession.h"
+#include "ItchProtocol.h"
+#include "ItchPublisher.h"
+#include "OuchProtocol.h"
+#include "OuchSession.h"
+
+#include <string>
+#include <string_view>
+
+// ─── ITCH: an STP cancellation is a full Order Delete ('D'), not 'X' ────────
+
+TEST(StpProtocol, ItchEmitsOrderDeleteForCancelledBySTP) {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(0.99);
+
+    std::vector<uint8_t> firstByteOfEachMsg;
+    ItchPublisher pub(book, [&](std::string_view m) {
+        if (!m.empty()) firstByteOfEachMsg.push_back(static_cast<uint8_t>(m[0]));
+    });
+    book.setEventListener(&pub);
+
+    const ParticipantId P = 1;
+    book.setSTPMode(P, STPMode::CancelResting);
+    // Rests and is announced with 'A'.
+    book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    ASSERT_FALSE(firstByteOfEachMsg.empty());
+    EXPECT_EQ(firstByteOfEachMsg[0], ITCH_MT_ADD_ORDER)
+        << "setup: the resting order must be announced";
+    firstByteOfEachMsg.clear();
+
+    // P self-crosses; CancelResting removes the resting order via STP.
+    book.addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    ASSERT_FALSE(firstByteOfEachMsg.empty())
+        << "an STP removal must reach the public feed";
+    bool sawDelete = false, sawPartialCancel = false, sawExecuted = false;
+    for (uint8_t t : firstByteOfEachMsg) {
+        if (t == ITCH_MT_ORDER_DELETE)  sawDelete = true;
+        if (t == ITCH_MT_ORDER_CANCEL)  sawPartialCancel = true;
+        if (t == ITCH_MT_ORDER_EXECUTED) sawExecuted = true;
+    }
+    EXPECT_TRUE(sawDelete) << "STP removes the whole order => 'D' Order Delete";
+    EXPECT_FALSE(sawPartialCancel)
+        << "'X' Order Cancel means shares reduced with the order still live — "
+           "wrong shape for an STP removal";
+    EXPECT_FALSE(sawExecuted) << "nothing traded, so no 'E' may be emitted";
+
+    book.setEventListener(nullptr);
+}
+
+// ─── FIX: ExecType='4' / OrdStatus='4', identical in 4.2 and 4.4 ────────────
+
+namespace {
+
+std::string fixFieldOf(const std::string& msg, const char* tagEq) {
+    // Fields are SOH-delimited; find "<tag>=" at a field boundary.
+    const std::string needle = std::string("\x01") + tagEq;
+    size_t p = msg.find(needle);
+    if (p == std::string::npos) {
+        if (msg.rfind(tagEq, 0) != 0) return {};
+        p = 0;
+    } else {
+        p += 1;
+    }
+    const size_t vs = p + std::strlen(tagEq);
+    const size_t ve = msg.find('\x01', vs);
+    return msg.substr(vs, ve - vs);
+}
+
+}  // namespace
+
+TEST(StpProtocol, FixCancellationIsExecType4OrdStatus4WithStpText) {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+
+    std::string sent;
+    FixSession sess(engine, [&](std::string_view m) { sent.assign(m); });
+
+    sess.sendCancelled(/*id=*/42, Side::Buy, /*price=*/1000, /*orderQty=*/100,
+                       /*cumQty=*/40, /*bySTP=*/true);
+
+    ASSERT_FALSE(sent.empty());
+    EXPECT_EQ(fixFieldOf(sent, "150="), "4") << "ExecType Canceled";
+    EXPECT_EQ(fixFieldOf(sent, "39="),  "4") << "OrdStatus Canceled";
+    // The quantity that really executed before STP stopped the order.
+    EXPECT_EQ(fixFieldOf(sent, "14="), "40") << "CumQty must be the real fill";
+    EXPECT_EQ(fixFieldOf(sent, "151="), "0") << "LeavesQty zero — order is gone";
+    EXPECT_NE(sent.find("self-trade prevention"), std::string::npos)
+        << "no standard STP ExecType exists, so the distinction rides in Text";
+}
+
+TEST(StpProtocol, FixCancelExecTypeIsIdenticalIn42And44) {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+
+    std::string v42, v44;
+    FixSession s42(engine, [&](std::string_view m) { v42.assign(m); });
+    FixSession s44(engine, [&](std::string_view m) { v44.assign(m); });
+    s44.setAcceptedVersions({"FIX.4.4"});
+
+    s42.sendCancelled(1, Side::Buy, 1000, 100, 0, true);
+    s44.sendCancelled(1, Side::Buy, 1000, 100, 0, true);
+
+    ASSERT_FALSE(v42.empty());
+    ASSERT_FALSE(v44.empty());
+    // The serializer rewrites ExecType only for '1'/'2' -> 'F' on 4.4;
+    // '4' Canceled is unchanged in both versions.
+    EXPECT_EQ(fixFieldOf(v42, "150="), "4");
+    EXPECT_EQ(fixFieldOf(v44, "150="), "4")
+        << "FIX 4.4 does not remap ExecType Canceled";
+    EXPECT_EQ(fixFieldOf(v42, "39="), fixFieldOf(v44, "39="));
+}
+
+// ─── OUCH: Order Canceled with a reason distinct from a user cancel ─────────
+
+TEST(StpProtocol, OuchCanceledBySTPCarriesTheStpReasonNotUserRequested) {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+
+    std::vector<uint8_t> sent;
+    OuchSession sess(engine, [&](std::string_view m) {
+        sent.assign(m.begin(), m.end());
+    });
+
+    sess.sendCanceledBySTP(/*orderToken=*/7, /*canceledShares=*/100);
+
+    ASSERT_EQ(sent.size(), OUCH_SIZE_ORDER_CANCELED);
+    EXPECT_EQ(sent[0], OUCH_MT_ORDER_CANCELED);
+    EXPECT_EQ(static_cast<char>(sent[27]), OUCH_CANCEL_REASON_STP);
+    EXPECT_NE(static_cast<char>(sent[27]), OUCH_CANCEL_REASON_USER)
+        << "the client did not request this cancellation";
+
+    // A client-requested cancel still reports 'U', so the two are separable on
+    // the wire. Checked against the encoder directly rather than widening
+    // OuchSession::sendCanceled's visibility just for a test.
+    uint8_t userBuf[OUCH_SIZE_ORDER_CANCELED];
+    encodeOrderCanceled(userBuf, /*ts=*/1, /*orderToken=*/8, /*shares=*/100);
+    EXPECT_EQ(static_cast<char>(userBuf[27]), OUCH_CANCEL_REASON_USER)
+        << "the default reason must remain 'user requested'";
+    EXPECT_NE(static_cast<char>(userBuf[27]), OUCH_CANCEL_REASON_STP);
 }

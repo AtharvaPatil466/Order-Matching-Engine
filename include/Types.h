@@ -46,9 +46,35 @@ enum class OrderStatus : uint8_t {
     Accepted,
     PartiallyFilled,
     Filled,
-    Cancelled,
+    Cancelled,        // Client-initiated, or an engine sweep (kill switch, expiry)
+    // C1: the order was removed by self-trade prevention, not by its owner and
+    // not by a trade. Distinct from Cancelled because the client did not ask
+    // for it, and emphatically distinct from Filled: the pre-fix code let an
+    // STP-cancelled order report Filled at full quantity, which then won its
+    // OCO group and cancelled innocent siblings.
+    //
+    // Placed here rather than appended because OrderStatus — unlike
+    // RejectReason — is never cast to an integer, serialized, journalled, or
+    // put on the wire (SBE carries its own SBE_ORDER_ACK_STATUS_* codes), so
+    // renumbering is not observable. Verified repo-wide before moving it.
+    CancelledBySTP,
     Rejected
 };
+
+// Did this status represent an actual execution? The ONLY statuses that may
+// count as a fill are Filled and PartiallyFilled. Centralised because C1 was
+// caused by a status being mistaken for an execution: anything testing "did
+// this order trade?" must call this rather than open-coding a comparison, or
+// the next status added re-opens the same hole.
+constexpr bool isExecution(OrderStatus s) {
+    return s == OrderStatus::Filled || s == OrderStatus::PartiallyFilled;
+}
+
+// Terminal statuses: the order is gone from the book and will not update again.
+constexpr bool isTerminalStatus(OrderStatus s) {
+    return s == OrderStatus::Filled || s == OrderStatus::Cancelled ||
+           s == OrderStatus::CancelledBySTP || s == OrderStatus::Rejected;
+}
 
 enum class PegType : uint8_t {
     None,

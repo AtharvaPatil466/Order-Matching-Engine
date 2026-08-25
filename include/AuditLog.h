@@ -95,9 +95,7 @@ struct AuditRecord {
         return q;
     }
     bool isTerminal() const {
-        return finalStatus == OrderStatus::Filled ||
-               finalStatus == OrderStatus::Cancelled ||
-               finalStatus == OrderStatus::Rejected;
+        return isTerminalStatus(finalStatus);
     }
 };
 

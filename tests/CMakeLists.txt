@@ -519,6 +519,15 @@ set_tests_properties(AuctionSessionTest PROPERTIES TIMEOUT 30
 
 # Advanced order types: MIT, market sweep protection, OCO via the engine
 # Critical correctness regression tests (from AUDIT_REPORT.md section 1)
+# C1 — what OrderStatus::CancelledBySTP is allowed to mean. Pins the
+# classification (not a fill, not an OCO trigger, terminal, distinct from
+# client-initiated Cancelled) independently of the matching paths that emit it.
+add_executable(StpSemanticsTest StpSemanticsTest.cpp)
+target_link_libraries(StpSemanticsTest PRIVATE OrderMatcher gtest_main)
+gtest_discover_tests(StpSemanticsTest
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project;matching;stp")
+
 add_executable(CriticalFixesTest CriticalFixesTest.cpp)
 target_link_libraries(CriticalFixesTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(CriticalFixesTest

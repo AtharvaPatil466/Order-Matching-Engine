@@ -232,6 +232,7 @@ public:
             // onBookVisible(Rest), which knows the displayed size.
             break;
         case OrderStatus::Cancelled:
+        case OrderStatus::CancelledBySTP:
         case OrderStatus::Filled: {
             RawEvent e;
             e.kind     = RawEvent::Kind::Delete;

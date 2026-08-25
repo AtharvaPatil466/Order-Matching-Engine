@@ -700,8 +700,7 @@ void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
     // Buffer executions only while OCO is active; drained by driveOco after
     // the triggering request completes. A partial fill counts — the first
     // execution of any leg wins.
-    if (ocoActive && ocoActive->load(std::memory_order_relaxed) &&
-        (u.status == OrderStatus::Filled || u.status == OrderStatus::PartiallyFilled)) {
+    if (ocoActive && ocoActive->load(std::memory_order_relaxed) && isExecution(u.status)) {
         executed.push_back(u.orderId);
     }
 }

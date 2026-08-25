@@ -23,7 +23,15 @@
 namespace OrderMatcher {
 
 enum class STPMode : uint8_t {
-    None = 0,              // No self-trade prevention
+    // No self-trade prevention: a participant crossing their own resting order
+    // trades normally, exactly as if the counterparty were anyone else. This is
+    // the DEFAULT, and OrderBook::match() honours it by skipping the STP path
+    // outright (see the stpClear computation) rather than entering it and
+    // declining. Before C1 the engine entered anyway, received NoSelfTrade,
+    // fell through an unhandled `default:` that killed the order, and reported
+    // it as a full fill — so the default configuration silently did the
+    // opposite of what this line promises.
+    None = 0,
     CancelResting = 1,     // Cancel resting order
     CancelIncoming = 2,    // Cancel incoming order
     CancelBoth = 3,        // Cancel both orders
@@ -82,7 +90,9 @@ public:
         return result;
     }
 
-    // Quick check: is this a self-trade that needs intervention?
+    // Is this a self-trade that needs intervention? Mode None needs none by
+    // definition, so it answers false — consistent with check() returning
+    // NoSelfTrade for it and with match() skipping the STP path entirely.
     static bool isSelfTrade(ParticipantId incoming,
                             ParticipantId resting,
                             STPMode mode) {

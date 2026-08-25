@@ -48,12 +48,24 @@ void testSMP() {
     TestListener listener;
     book.setEventListener(&listener);
 
+    // C1: STPMode::None is the default and means NO prevention — the self-cross
+    // trades. This previously asserted prevention, which the engine delivered by
+    // killing the order and then reporting it as a full fill.
     book.addOrder(1, 1, Side::Sell, 1000000, 100, OrderType::Limit);
     book.addOrder(2, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
-    assert(book.getOrder(1) != nullptr);
-    assert(book.getOrder(2) == nullptr);
-    assert(book.getAskLevelsCount() == 1);
+    assert(book.getOrder(1) == nullptr && "default mode trades: maker filled");
+    assert(book.getOrder(2) == nullptr && "default mode trades: taker filled");
+    assert(book.getAskLevelsCount() == 0 && "the level was consumed");
+
+    // Prevention is opt-in — with a mode set, the incoming order is stopped.
+    OrderBook guarded;
+    guarded.setSTPMode(1, STPMode::CancelIncoming);
+    guarded.addOrder(3, 1, Side::Sell, 1000000, 100, OrderType::Limit);
+    guarded.addOrder(4, 1, Side::Buy, 1000000, 100, OrderType::Limit);
+    assert(guarded.getOrder(3) != nullptr && "resting side survives STP");
+    assert(guarded.getOrder(4) == nullptr && "incoming cancelled by STP");
+    assert(guarded.getAskLevelsCount() == 1);
     std::cout << "testSMP PASSED" << std::endl;
 }
 
@@ -277,6 +289,11 @@ void testSMPPurity() {
     OrderBook book;
     TestListener listener;
     book.setEventListener(&listener);
+    // C1: prevention is opt-in now (STPMode::None, the default, trades freely),
+    // so configure it. The property under test is unchanged and is the valuable
+    // one: STP blocks the SELF cross without leaking into anyone else's
+    // matching.
+    book.setSTPMode(1, STPMode::CancelIncoming);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.addOrder(2, 1, Side::Sell, 1000000, 100, OrderType::Limit);
 

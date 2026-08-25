@@ -544,6 +544,10 @@ private:
     bool checkCircuitBreaker(Price price);
     bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
 
+    // C1: finalize an order that STP removed mid-match. True => deallocated,
+    // caller must not rest or touch it. Shared by all four match() call sites.
+    bool finalizeIfStpCancelled(Order* order);
+
     void notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity filledQty, Quantity remainingQty,
                            Price lastFillPrice = 0, RejectReason reason = RejectReason::None);
     void notifyMarketData(MarketDataUpdate::Action action, Side side, Price price);

@@ -27,10 +27,14 @@ public:
     void onOrderUpdate(const OrderUpdate& u) override { updates.push_back(u); }
     void onMarketData(const MarketDataUpdate&) override {}
 
+    // Counts terminal cancellations however they were caused. C1 split STP
+    // removal out into its own status, so an STP sweep now reports
+    // CancelledBySTP rather than Cancelled; both mean "removed, did not trade".
     int cancelledFor(OrderId id) const {
         int n = 0;
         for (const auto& u : updates)
-            if (u.orderId == id && u.status == OrderStatus::Cancelled) ++n;
+            if (u.orderId == id && (u.status == OrderStatus::Cancelled ||
+                                    u.status == OrderStatus::CancelledBySTP)) ++n;
         return n;
     }
     std::vector<OrderUpdate> updates;

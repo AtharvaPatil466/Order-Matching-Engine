@@ -765,6 +765,12 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         updatePeggedOrders();
 
     // --- Post-match: handle remaining quantity ---
+    // C1: an order STP zeroed has remainingQty == 0 WITHOUT having traded for
+    // it. This test must come first, because the remainingQty == 0 branch below
+    // reports Filled at full initialQty — the phantom fill that won OCO groups
+    // and cancelled innocent siblings for an order that traded nothing.
+    if (finalizeIfStpCancelled(order)) return orderId;
+
     if (order->remainingQty > 0) [[likely]] {
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
             Quantity filled = order->initialQty - order->remainingQty;
@@ -799,6 +805,33 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 }
 
 // ─── Match (Price-Time FIFO) ─────────────────────────────────────────────────
+
+// C1: terminal handling for an order that STP removed mid-match. Returns true
+// if the order was finalized and deallocated, in which case the caller must NOT
+// rest it or touch it again.
+//
+// This exists because match() has FOUR call sites — addOrder, cancelReplace,
+// the triggered-stop sweep and the trailing-stop sweep — each with its own
+// copy of the post-match "rest it or report it filled" logic. Fixing only
+// addOrder's copy (the one the C1 report names) left the other three resting
+// an order that STP had just killed. Sharing the check is what makes the
+// guarantee hold on every path rather than on the one that was reported.
+bool OrderBook::finalizeIfStpCancelled(Order* order) {
+    if (order->status != OrderStatus::CancelledBySTP) [[likely]] return false;
+
+    const Quantity filled = order->initialQty - order->remainingQty;
+    // Fills against OTHER participants before the self-cross are real: they
+    // must still count as an execution so the client sees the quantity and an
+    // OCO leg that genuinely traded can still win. Only a zero-fill STP
+    // termination reports CancelledBySTP.
+    const OrderStatus st = (filled > 0) ? OrderStatus::PartiallyFilled
+                                        : OrderStatus::CancelledBySTP;
+    order->status = st;
+    notifyOrderUpdate(order->id, st, filled, 0);
+    orderLookup_.erase(order->id);
+    orderPool_.deallocate(order);
+    return true;
+}
 
 void OrderBook::match(Order* incoming) {
     // P1-1 HOIST: incoming->side never changes across the whole match, so the
@@ -852,6 +885,22 @@ void OrderBook::match(Order* incoming) {
     //                  unlinked from their level and returned to the pool below;
     //                  matching never consults orderLookup_, so the id is dropped
     //                  in one batch instead of a hash erase per fill).
+    // C1: STP removal of a resting order. Three of the STP actions
+    // (CancelResting, CancelBoth, DecreaseResting-to-zero) performed the
+    // identical seven-step teardown inline; sharing it means the status they
+    // report cannot drift apart, which is the class of bug C1 was.
+    // CancelledBySTP, never Cancelled: the owner did not ask for this.
+    auto stpCancelResting = [&](Order* victim, OrderList* lvl) {
+        victim->status = OrderStatus::CancelledBySTP;
+        notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP,
+                          victim->initialQty - victim->remainingQty, 0);
+        stpNoteRemoved(victim);
+        lvl->remove(victim);
+        orderLookup_.erase(victim->id);
+        orderPool_.deallocate(victim);
+        if (lvl->empty()) opposite.eraseBest();
+    };
+
     std::array<FillEvent, kMaxFillsPerOrder> pendingFills;
     int fillCount = 0;
     std::array<OrderId, kMaxFillsPerOrder> toErase;
@@ -964,42 +1013,45 @@ void OrderBook::match(Order* incoming) {
                     (bookOrder->type == OrderType::Iceberg)
                     ? bookOrder->visibleQty : bookOrder->remainingQty));
 
+            // NO `default:` — deliberately. The missing NoSelfTrade case fell
+            // through to a default that silently zeroed the incoming order, and
+            // that silence IS C1. With every action named, adding an
+            // STPResult::Action is a -Wswitch -Werror compile error instead of
+            // a new silent phantom fill.
             switch (stp.action) {
+            case STPResult::Action::NoSelfTrade:
+                // Same participant, STPMode::None. Reached only via checkSMP,
+                // which already established same-participant, so this is a real
+                // self-cross by someone who configured no prevention mode.
+                // Behaviour is unchanged from the pre-fix default: the incoming
+                // order is killed. What changes is that it is now LABELLED as an
+                // STP cancellation instead of reported as a full fill.
+                // See the note below on why remainingQty is NOT zeroed.
+                incoming->status = OrderStatus::CancelledBySTP;
+                break;
             case STPResult::Action::CancelIncoming:
-                incoming->remainingQty = 0;
+                // NOTE: remainingQty is deliberately left ALONE. The pre-fix
+                // code zeroed it to mean "stop matching", but remainingQty == 0
+                // already means "fully filled", and post-match computes
+                // filledQty as initialQty - remainingQty. Zeroing therefore
+                // reported the ENTIRE order quantity as executed — that is
+                // where C1's `filledQty == initialQty` came from, and it also
+                // erased how much a partially-filled order had really traded.
+                // The `break` after this switch exits the match loop on its
+                // own, so the status alone is sufficient to stop and to tell
+                // post-match not to rest the order.
+                incoming->status = OrderStatus::CancelledBySTP;
                 break;
             case STPResult::Action::CancelResting:
-                // Remove the resting order and continue matching
-                bookOrder->status = OrderStatus::Cancelled;
-                notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
-                    bookOrder->initialQty - bookOrder->remainingQty, 0);
-                stpNoteRemoved(bookOrder);
-                level->remove(bookOrder);
-                orderLookup_.erase(bookOrder->id);
-                orderPool_.deallocate(bookOrder);
-                if (level->empty()) opposite.eraseBest();
+                stpCancelResting(bookOrder, level);
                 continue;  // try next resting order
             case STPResult::Action::CancelBoth:
-                incoming->remainingQty = 0;
-                bookOrder->status = OrderStatus::Cancelled;
-                notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
-                    bookOrder->initialQty - bookOrder->remainingQty, 0);
-                stpNoteRemoved(bookOrder);
-                level->remove(bookOrder);
-                orderLookup_.erase(bookOrder->id);
-                orderPool_.deallocate(bookOrder);
-                if (level->empty()) opposite.eraseBest();
+                incoming->status = OrderStatus::CancelledBySTP;  // qty untouched, see above
+                stpCancelResting(bookOrder, level);
                 break;
             case STPResult::Action::DecreaseResting:
                 if (stp.decreaseAmount >= bookOrder->remainingQty) {
-                    bookOrder->status = OrderStatus::Cancelled;
-                    notifyOrderUpdate(bookOrder->id, OrderStatus::Cancelled,
-                        bookOrder->initialQty - bookOrder->remainingQty, 0);
-                    stpNoteRemoved(bookOrder);
-                    level->remove(bookOrder);
-                    orderLookup_.erase(bookOrder->id);
-                    orderPool_.deallocate(bookOrder);
-                    if (level->empty()) opposite.eraseBest();
+                    stpCancelResting(bookOrder, level);
                 } else {
                     bookOrder->remainingQty -= stp.decreaseAmount;
                     // Preserve the iceberg invariant visibleQty <= remainingQty
@@ -1009,9 +1061,6 @@ void OrderBook::match(Order* incoming) {
                         std::min(bookOrder->visibleQty, bookOrder->remainingQty);
                 }
                 continue;  // try next resting order
-            default:
-                incoming->remainingQty = 0;
-                break;
             }
             break;
         }
@@ -1486,6 +1535,9 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
                 match(order);
         }
 
+        // A repriced order acts as an aggressor, so it can self-cross too.
+        if (finalizeIfStpCancelled(order)) return true;
+
         if (order->remainingQty > 0) {
             if (!addToBook(order)) {
                 Quantity filled = order->initialQty - order->remainingQty;
@@ -1641,6 +1693,11 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
             stopOrders_.erase_swap(i);
             match(order);
 
+            // A triggered stop becomes an aggressor and can self-cross.
+            // erase_swap already moved the last element here, so `continue`
+            // without incrementing i, exactly as the tail of this block does.
+            if (finalizeIfStpCancelled(order)) continue;
+
             if (order->remainingQty > 0) {
                 // A triggered MIT is a market order — its unfilled remainder
                 // must not rest; cancel it (also the addToBook-failure path).
@@ -1693,6 +1750,8 @@ void OrderBook::updateTrailingStops(Price lastTradePrice) {
             order->price = order->stopPrice;
             trailingStopOrders_.erase_swap(i);
             match(order);
+
+            if (finalizeIfStpCancelled(order)) continue;
 
             if (order->remainingQty > 0) {
                 if (!addToBook(order)) {

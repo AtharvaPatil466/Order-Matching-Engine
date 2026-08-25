@@ -1439,6 +1439,20 @@ void OrderBook::cancelOrder(OrderId orderId) {
     cancelOrderImpl(orderId);
 }
 
+OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    OrderExposure e;
+    if (auto* p = orderLookup_.find(orderId); p && *p) {
+        const Order* o = *p;
+        e.participantId = o->participantId;
+        e.side          = o->side;
+        e.remainingQty  = o->remainingQty;
+        e.found         = true;
+    }
+    cancelOrderImpl(orderId);
+    return e;
+}
+
 namespace {
 const char* tradingStateName(TradingState s) {
     switch (s) {

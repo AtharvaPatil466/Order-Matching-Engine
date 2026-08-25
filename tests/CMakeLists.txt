@@ -247,6 +247,15 @@ enable_assertions(MpscQueueRaceTest)
 add_test(NAME MpscQueueRaceTest COMMAND MpscQueueRaceTest)
 set_tests_properties(MpscQueueRaceTest PROPERTIES TIMEOUT 120 LABELS "project;concurrency")
 
+# H1 — cancels racing gracefulShutdown() must not touch freed pool memory.
+# Only meaningful under ASan/TSan; in Release it is a smoke test.
+add_executable(ShutdownCancelRaceTest ShutdownCancelRaceTest.cpp)
+target_link_libraries(ShutdownCancelRaceTest PRIVATE OrderMatcher)
+enable_assertions(ShutdownCancelRaceTest)
+add_test(NAME ShutdownCancelRaceTest COMMAND ShutdownCancelRaceTest)
+set_tests_properties(ShutdownCancelRaceTest PROPERTIES TIMEOUT 120
+                     LABELS "project;lifecycle;concurrency")
+
 # Kill-switch completeness (C5) — the safety control must be complete, not
 # best-effort: after setKillSwitch returns, zero resting orders may survive.
 # Exercises the async path with a small ring and maxPushRetries=1, the only

@@ -644,6 +644,10 @@ private:
     // Reserve/release working-order exposure for the position limit.
     void reservePosition(ParticipantId pid, Side side, Quantity restingQty);
     void releasePosition(const Order* order);
+    // H1 overload: takes the exposure BY VALUE, read under bookLock_ by
+    // OrderBook::cancelOrderReleasing(), so no Order* is dereferenced outside
+    // the lock. Prefer this at every cancel/sweep site.
+    void releasePosition(const OrderBook::OrderExposure& e);
     // Per-fill accrual: last-trade price, taker position, OTR trade counts.
     void onRiskFill(const Trade& t);
     // Cancel every resting order across all books (sync path of the kill switch).

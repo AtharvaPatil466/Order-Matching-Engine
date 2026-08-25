@@ -549,10 +549,15 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             return;
         }
         // P2-9: release working exposure before the order leaves the book.
+        // H1: read the exposure inside cancelOrderReleasing's own critical
+        // section. The previous form dereferenced an UNLOCKED getOrder()
+        // pointer into orderPool_, with no guarantee the order was still
+        // alive — a concurrent fill or a shutdown sweep frees that slot.
         if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-            releasePosition(book->getOrder(req.orderId));
+            releasePosition(book->cancelOrderReleasing(req.orderId));
+        } else {
+            book->cancelOrder(req.orderId);
         }
-        book->cancelOrder(req.orderId);
         if (journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
@@ -618,10 +623,15 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                 std::vector<OrderId> ids;
                 book->forEachOrder([&](const Order& o) { ids.push_back(o.id); });
                 for (OrderId id : ids) {
+                    // H1: read the exposure inside cancelOrderReleasing's own critical
+                    // section. The previous form dereferenced an UNLOCKED getOrder()
+                    // pointer into orderPool_, with no guarantee the order was still
+                    // alive — a concurrent fill or a shutdown sweep frees that slot.
                     if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                        releasePosition(book->getOrder(id));
+                        releasePosition(book->cancelOrderReleasing(id));
+                    } else {
+                        book->cancelOrder(id);
                     }
-                    book->cancelOrder(id);
                     if (journal_) {
                         std::lock_guard<std::mutex> lock(journalMutex_);
                         journal_->logCancelOrder(id);
@@ -844,10 +854,15 @@ void MatchingEngine::cancelAllRestingOrders() {
         std::vector<OrderId> ids;
         book->forEachOrderLocked([&](const Order& o) { ids.push_back(o.id); });
         for (OrderId id : ids) {
+            // H1: read the exposure inside cancelOrderReleasing's own critical
+            // section. The previous form dereferenced an UNLOCKED getOrder()
+            // pointer into orderPool_, with no guarantee the order was still
+            // alive — a concurrent fill or a shutdown sweep frees that slot.
             if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                releasePosition(book->getOrder(id));
+                releasePosition(book->cancelOrderReleasing(id));
+            } else {
+                book->cancelOrder(id);
             }
-            book->cancelOrder(id);
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
                 journal_->logCancelOrder(id);
@@ -871,10 +886,15 @@ size_t MatchingEngine::cancelDayOrders() {
             if (o.timeInForce == TimeInForce::DAY) dayIds.push_back(o.id);
         });
         for (OrderId id : dayIds) {
+            // H1: read the exposure inside cancelOrderReleasing's own critical
+            // section. The previous form dereferenced an UNLOCKED getOrder()
+            // pointer into orderPool_, with no guarantee the order was still
+            // alive — a concurrent fill or a shutdown sweep frees that slot.
             if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                releasePosition(book->getOrder(id));
+                releasePosition(book->cancelOrderReleasing(id));
+            } else {
+                book->cancelOrder(id);
             }
-            book->cancelOrder(id);
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
                 journal_->logCancelOrder(id);
@@ -961,6 +981,13 @@ void MatchingEngine::releasePosition(const Order* order) {
     int64_t signedRest = (order->side == Side::Buy) ? static_cast<int64_t>(order->remainingQty)
                                                     : -static_cast<int64_t>(order->remainingQty);
     positions_[order->participantId].fetch_sub(signedRest, std::memory_order_relaxed);
+}
+
+void MatchingEngine::releasePosition(const OrderBook::OrderExposure& e) {
+    if (!e.found || e.participantId >= MAX_PARTICIPANTS || e.remainingQty == 0) return;
+    int64_t signedRest = (e.side == Side::Buy) ? static_cast<int64_t>(e.remainingQty)
+                                               : -static_cast<int64_t>(e.remainingQty);
+    positions_[e.participantId].fetch_sub(signedRest, std::memory_order_relaxed);
 }
 
 void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
@@ -1296,6 +1323,13 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
+    // H1: once graceful shutdown has begun the sweeps are returning orders to
+    // the pool. A cancel admitted after that raced the teardown and
+    // dereferenced freed pool memory. Same gate submitOrder already uses.
+    if (shuttingDown_.load(std::memory_order_acquire)) [[unlikely]] {
+        return rejectedAsync(RejectReason::EngineStopped);
+    }
+
     uint64_t sequenceId = nextSubmitSequence_.fetch_add(1, std::memory_order_relaxed);
 
     if (async_) {
@@ -1321,10 +1355,15 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
     }
     // P2-9: release the cancelled order's working exposure before it leaves the
     // book (read remaining qty while the order still exists).
+    // H1: read the exposure inside cancelOrderReleasing's own critical
+    // section. The previous form dereferenced an UNLOCKED getOrder()
+    // pointer into orderPool_, with no guarantee the order was still
+    // alive — a concurrent fill or a shutdown sweep frees that slot.
     if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-        releasePosition(book->getOrder(orderId));
+        releasePosition(book->cancelOrderReleasing(orderId));
+    } else {
+        book->cancelOrder(orderId);
     }
-    book->cancelOrder(orderId);
     if (journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);

@@ -408,7 +408,29 @@ public:
     }
 
     // Getters
+    // H1: getOrder() takes NO lock and hands out a raw pointer into orderPool_.
+    // Callers that dereferenced it — every releasePosition(book->getOrder(id))
+    // site — read a pooled Order with no lock and no liveness guarantee, which
+    // is a use-after-free once a concurrent fill or a shutdown sweep has
+    // returned that slot to the pool. Prefer cancelOrderReleasing() below;
+    // getOrder() remains for single-threaded tests and read-only inspection.
     const Order* getOrder(OrderId orderId) const;
+
+    // Position-relevant fields of an order, returned BY VALUE so no pointer
+    // escapes the lock. `found` false means the order was already gone.
+    struct OrderExposure {
+        ParticipantId participantId{0};
+        Side          side{Side::Buy};
+        Quantity      remainingQty{0};
+        bool          found{false};
+    };
+
+    // Cancel the order and report the exposure it was holding, both inside the
+    // SAME bookLock_ critical section. This replaces the
+    // getOrder()-then-cancelOrder() pattern: the read now provably happens
+    // while the order is still alive, and it costs one lock acquisition rather
+    // than the two a separate locked getter would add to the cancel hot path.
+    OrderExposure cancelOrderReleasing(OrderId orderId);
     size_t getBidLevelsCount() const;
     size_t getAskLevelsCount() const;
     SymbolId getSymbolId() const { return symbolId_; }

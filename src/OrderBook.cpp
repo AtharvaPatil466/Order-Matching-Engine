@@ -877,17 +877,15 @@ void OrderBook::match(Order* incoming) {
     // change) — and O(1) instead of O(depth).
     // The mode is loop-invariant — incoming->participantId never changes across
     // the sweep — so resolve it once here instead of re-hashing it on every
-    // self-match, and fold STPMode::None into stpClear.
+    // self-match.
     //
-    // STPMode::None means the participant configured NO self-trade prevention,
-    // so a self-cross must trade like any other match. The pre-fix code entered
-    // the STP path anyway, got Action::NoSelfTrade back, and fell through a
-    // `default:` that killed the order while reporting a full fill. Skipping the
-    // path outright is both what the mode's contract promises and strictly
-    // cheaper than entering it only to decline.
+    // NOTE: the mode is deliberately NOT folded into stpClear. Every mode,
+    // including DefaultCancelIncoming, prevents the self-cross; there is no
+    // "prevention off" setting to short-circuit on. Self-matching is prohibited
+    // at essentially every regulated venue, so the unconfigured default
+    // prevents too.
     const STPMode stpMode = getSTPMode(incoming->participantId);
-    const bool stpClear = (stpMode == STPMode::None) ||
-                          stpNoneResting(incoming->participantId);
+    const bool stpClear = stpNoneResting(incoming->participantId);
 
     // P1-3/P1-4/P1-5: buffer per-fill side effects on the stack and flush them
     // AFTER the loop rather than firing virtual onTrade dispatches, audit logs
@@ -1024,14 +1022,6 @@ void OrderBook::match(Order* incoming) {
                     (bookOrder->type == OrderType::Iceberg)
                     ? bookOrder->visibleQty : bookOrder->remainingQty));
 
-            // NoSelfTrade means "proceed normally" — fall out of the STP block
-            // and let the fill path below run. Unreachable in practice because
-            // stpClear already excludes STPMode::None and checkSMP has
-            // established same-participant, but expressed as a guard rather
-            // than a switch case so that if it IS ever reached the outcome is a
-            // normal trade, not the locked/crossed book that breaking out of
-            // the match loop here would leave behind.
-            if (stp.action != STPResult::Action::NoSelfTrade) {
             // NO `default:` — deliberately. The missing NoSelfTrade case fell
             // through to a default that silently zeroed the incoming order, and
             // that silence IS C1. With every action named, adding an
@@ -1039,7 +1029,14 @@ void OrderBook::match(Order* incoming) {
             // a new silent phantom fill.
             switch (stp.action) {
             case STPResult::Action::NoSelfTrade:
-                break;  // guarded above; never taken
+                // Same participant with no explicit mode configured. checkSMP
+                // has already established same-participant, so this IS a real
+                // self-cross — the incoming order is cancelled, the safe
+                // default. What C1 changed is that it is now LABELLED as an STP
+                // cancellation instead of reported as a full fill.
+                // remainingQty is deliberately left alone; see CancelIncoming.
+                incoming->status = OrderStatus::CancelledBySTP;
+                break;
             case STPResult::Action::CancelIncoming:
                 // NOTE: remainingQty is deliberately left ALONE. The pre-fix
                 // code zeroed it to mean "stop matching", but remainingQty == 0
@@ -1074,7 +1071,6 @@ void OrderBook::match(Order* incoming) {
                 continue;  // try next resting order
             }
             break;  // STP acted: stop matching this order
-            }  // if (action != NoSelfTrade)
         }
 
         Quantity available = (bookOrder->type == OrderType::Iceberg)

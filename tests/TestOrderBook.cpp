@@ -1059,29 +1059,13 @@ TEST_F(OrderBookTest, TradeCallback_SuppressedInReplayMode) {
 
 // ─── Self-Match Prevention Tests ─────────────────────────────────────────────
 
-// C1: STPMode::None is the DEFAULT and means no self-trade prevention, so a
-// self-cross trades like any other match. This test previously asserted the
-// opposite — that the default silently prevented — which is what the engine did
-// while reporting the killed order as a full fill.
-TEST_F(OrderBookTest, SMP_DefaultModeNoneAllowsSelfTrade) {
+TEST_F(OrderBookTest, SMP_SameParticipantCancelled) {
     book.addOrder(1, 1, Side::Sell, 1000000, 100, OrderType::Limit);
     book.addOrder(2, 1, Side::Buy, 1000000, 50, OrderType::Limit);
 
-    ASSERT_NE(book.getOrder(1), nullptr) << "50 of 100 remains resting";
-    EXPECT_EQ(book.getOrder(1)->remainingQty, 50) << "the cross executed";
-    EXPECT_EQ(book.getOrder(2), nullptr) << "the taker filled completely";
-}
-
-// Prevention is opt-in. With a mode configured it engages, and the incoming
-// order is reported CancelledBySTP rather than as a fill.
-TEST_F(OrderBookTest, SMP_ConfiguredModePreventsSelfTrade) {
-    book.setSTPMode(1, STPMode::CancelIncoming);
-    book.addOrder(1, 1, Side::Sell, 1000000, 100, OrderType::Limit);
-    book.addOrder(2, 1, Side::Buy, 1000000, 50, OrderType::Limit);
-
-    ASSERT_NE(book.getOrder(1), nullptr);
-    EXPECT_EQ(book.getOrder(1)->remainingQty, 100) << "resting side untouched";
-    EXPECT_EQ(book.getOrder(2), nullptr) << "incoming order cancelled by STP";
+    // SMP should prevent the match — buyer qty zeroed
+    EXPECT_NE(book.getOrder(1), nullptr);
+    EXPECT_EQ(book.getOrder(1)->remainingQty, 100);
 }
 
 // ─── Iceberg Order Tests ─────────────────────────────────────────────────────

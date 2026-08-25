@@ -287,7 +287,7 @@ public:
     }
     STPMode getSTPMode(ParticipantId participant) const {
         auto* m = stpModes_.find(participant);
-        return m ? *m : STPMode::None;
+        return m ? *m : STPMode::DefaultCancelIncoming;
     }
 
     // ─── LULD Volatility Controls (Phase 4, Week 14) ─────────────────

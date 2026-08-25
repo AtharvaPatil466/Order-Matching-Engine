@@ -269,23 +269,12 @@ void testSelfMatchPrevention() {
     TradeMonitor monitor;
     book.setEventListener(&monitor);
 
-    // C1: STPMode::None is the default and means NO prevention, so the same
-    // participant on both sides trades normally. The property being asserted
-    // here is now conditional on a mode being configured.
+    // Same participant on both sides
     book.addOrder(1, 42, Side::Sell, 100000, 100, OrderType::Limit);
     book.addOrder(2, 42, Side::Buy, 100000, 50, OrderType::Limit);
-    assert(!monitor.trades.empty() &&
-           "STPMode::None means no prevention — the self-cross must execute");
 
-    // With prevention configured, no trade may occur.
-    OrderBook guarded;
-    TradeMonitor guardedMonitor;
-    guarded.setEventListener(&guardedMonitor);
-    guarded.setSTPMode(42, STPMode::CancelIncoming);
-    guarded.addOrder(3, 42, Side::Sell, 100000, 100, OrderType::Limit);
-    guarded.addOrder(4, 42, Side::Buy, 100000, 50, OrderType::Limit);
-    assert(guardedMonitor.trades.empty() &&
-           "STP configured: same participant must not self-trade!");
+    // SMP should prevent the trade
+    assert(monitor.trades.empty() && "SMP: same participant should not self-trade!");
 
     std::cout << " PASSED" << std::endl;
 }

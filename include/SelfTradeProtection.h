@@ -22,16 +22,20 @@
 
 namespace OrderMatcher {
 
+// What to do when a participant's incoming order would cross their own resting
+// order. Detection is unconditional (OrderBook::checkSMP); this only selects the
+// action. EVERY mode prevents the self-cross — there is no setting that permits
+// one. Self-matching is prohibited at essentially every regulated venue, so the
+// safe default is to prevent it even when no explicit mode is configured; a mode
+// named `None` that permitted wash trades would be an unsafe default regardless
+// of what the name suggests, which is why mode 0 is named for what it does.
 enum class STPMode : uint8_t {
-    // No self-trade prevention: a participant crossing their own resting order
-    // trades normally, exactly as if the counterparty were anyone else. This is
-    // the DEFAULT, and OrderBook::match() honours it by skipping the STP path
-    // outright (see the stpClear computation) rather than entering it and
-    // declining. Before C1 the engine entered anyway, received NoSelfTrade,
-    // fell through an unhandled `default:` that killed the order, and reported
-    // it as a full fill — so the default configuration silently did the
-    // opposite of what this line promises.
-    None = 0,
+    // No explicit mode configured; incoming order is cancelled on self-cross
+    // (safe default). Renamed from `None`, whose name implied "no prevention"
+    // and contradicted both the behaviour and the four independent tests
+    // asserting prevention-by-default. STPMode is never serialized or put on
+    // the wire, so the rename is source-only.
+    DefaultCancelIncoming = 0,
     CancelResting = 1,     // Cancel resting order
     CancelIncoming = 2,    // Cancel incoming order
     CancelBoth = 3,        // Cancel both orders
@@ -40,7 +44,12 @@ enum class STPMode : uint8_t {
 
 struct STPResult {
     enum class Action : uint8_t {
-        NoSelfTrade,       // Not a self-trade, proceed normally
+        // Either a genuine non-self-trade (different participants), or a
+        // self-cross by a participant with no explicit mode configured. In
+        // match() only the second reading is reachable, because checkSMP has
+        // already established same-participant: the incoming order is
+        // cancelled and reported CancelledBySTP.
+        NoSelfTrade,
         CancelResting,     // Cancel the resting order
         CancelIncoming,    // Cancel the incoming order
         CancelBoth,        // Cancel both orders
@@ -69,7 +78,7 @@ public:
 
         // Same participant — apply STP mode
         switch (mode) {
-        case STPMode::None:
+        case STPMode::DefaultCancelIncoming:
             result.action = STPResult::Action::NoSelfTrade;
             break;
         case STPMode::CancelResting:
@@ -90,13 +99,15 @@ public:
         return result;
     }
 
-    // Is this a self-trade that needs intervention? Mode None needs none by
-    // definition, so it answers false — consistent with check() returning
-    // NoSelfTrade for it and with match() skipping the STP path entirely.
+    // Is this a self-trade that needs intervention? Same participant is the
+    // whole test: every mode intervenes, including the unconfigured default,
+    // so the mode does not enter into it. Previously this excluded
+    // STPMode::None and so answered `false` for the exact case the engine was
+    // in fact preventing.
     static bool isSelfTrade(ParticipantId incoming,
                             ParticipantId resting,
-                            STPMode mode) {
-        return incoming == resting && mode != STPMode::None;
+                            STPMode /*mode*/) {
+        return incoming == resting;
     }
 };
 

@@ -116,91 +116,65 @@ public:
 
 }  // namespace
 
-// ─── STPMode::None means NO prevention: a self-cross trades ─────────────────
+// ─── The C1 scenario, exactly as reported ───────────────────────────────────
 //
-// The mode's own contract says so (STPMode::None = "No self-trade prevention",
-// Action::NoSelfTrade = "proceed normally", and isSelfTrade() returns false for
-// it). Pre-fix the engine entered the STP path anyway, got NoSelfTrade back,
-// and fell through a `default:` that killed the order while reporting a FULL
-// FILL — so the default configuration silently contradicted its own header.
-TEST(StpSemantics, ModeNoneSelfCrossTradesNormally) {
+// Pre-fix: SelfTradeProtection::check returns NoSelfTrade for STPMode::DefaultCancelIncoming,
+// match()'s switch had no case for it, control fell to `default:` which zeroed
+// the incoming order, and post-match saw remainingQty == 0 and reported Filled
+// with filledQty == initialQty — a full fill for an order that traded nothing.
+TEST(StpSemantics, ModeNoneSelfCrossReportsCancelledBySTPNotFilled) {
     OrderBook book(1);
     book.setCircuitBreakerThreshold(0.99);
     CaptureListener lis;
     book.setEventListener(&lis);
 
     const ParticipantId P = 1;
-    ASSERT_EQ(book.getSTPMode(P), STPMode::None) << "default mode is the point";
+    // Deliberately NOT configured — the unconfigured default is the whole point.
+    ASSERT_EQ(book.getSTPMode(P), STPMode::DefaultCancelIncoming);
 
     ASSERT_TRUE(std::holds_alternative<OrderId>(
         book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit)));
     lis.clear();
 
-    book.addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
-
-    // It really traded — a real trade, for the real quantity, at the real price.
-    ASSERT_EQ(lis.trades.size(), 1u)
-        << "no prevention is configured, so the self-cross must execute";
-    EXPECT_EQ(lis.trades[0].quantity, 100u);
-    EXPECT_EQ(lis.trades[0].price, PX);
-
-    // Both sides are gone from the book, both reported Filled.
-    EXPECT_EQ(book.getOrder(1), nullptr);
-    EXPECT_EQ(book.getOrder(2), nullptr);
-    EXPECT_EQ(lis.countStatus(2, OrderStatus::Filled), 1);
-    EXPECT_EQ(lis.countStatus(1, OrderStatus::Filled), 1);
-
-    // And nothing is mislabelled as an STP action, because STP never engaged.
-    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 0);
-    EXPECT_EQ(lis.countStatus(2, OrderStatus::CancelledBySTP), 0);
-
-    book.setEventListener(nullptr);
-}
-
-// ─── The C1 phantom fill, under a mode that actually prevents ───────────────
-//
-// With prevention configured the incoming order is genuinely killed. Pre-fix
-// it was killed by zeroing remainingQty, which post-match read as "fully
-// filled" and reported as Filled at filledQty == initialQty.
-TEST(StpSemantics, CancelIncomingReportsCancelledBySTPNotFilled) {
-    OrderBook book(1);
-    book.setCircuitBreakerThreshold(0.99);
-    CaptureListener lis;
-    book.setEventListener(&lis);
-
-    const ParticipantId P = 1;
-    book.setSTPMode(P, STPMode::CancelIncoming);
-
-    ASSERT_TRUE(std::holds_alternative<OrderId>(
-        book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit)));
-    lis.clear();
-
+    // P crosses its own resting sell.
     book.addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
 
     // (a) No fill reported.
     EXPECT_TRUE(lis.trades.empty())
-        << "STP blocked the cross; " << lis.trades.size() << " trade(s) emitted";
+        << "an STP-blocked self-cross traded nothing; " << lis.trades.size()
+        << " trade(s) were emitted";
     EXPECT_EQ(lis.countStatus(2, OrderStatus::Filled), 0)
         << "this is the C1 phantom fill";
     EXPECT_EQ(lis.countStatus(2, OrderStatus::PartiallyFilled), 0);
 
     // (b) CancelledBySTP is what the client is told.
     const OrderUpdate* u = lis.lastFor(2);
-    ASSERT_NE(u, nullptr);
+    ASSERT_NE(u, nullptr) << "the incoming order must get a terminal update";
     EXPECT_EQ(u->status, OrderStatus::CancelledBySTP);
     EXPECT_EQ(u->filledQty, 0u)
         << "pre-fix this reported filledQty == initialQty (100)";
     EXPECT_FALSE(isExecution(u->status));
 
     // (c) Distinct from a client-initiated cancel.
-    EXPECT_EQ(lis.countStatus(2, OrderStatus::Cancelled), 0);
-
-    // (d) Resting side untouched.
-    const Order* resting = book.getOrder(1);
-    ASSERT_NE(resting, nullptr);
-    EXPECT_EQ(resting->remainingQty, 100u);
+    EXPECT_EQ(lis.countStatus(2, OrderStatus::Cancelled), 0)
+        << "the client did not cancel this order";
 
     book.setEventListener(nullptr);
+}
+
+// The resting side is untouched when STP kills the incoming order.
+TEST(StpSemantics, ModeNoneSelfCrossLeavesRestingOrderIntact) {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(0.99);
+    const ParticipantId P = 1;
+
+    book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    book.addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    const Order* resting = book.getOrder(1);
+    ASSERT_NE(resting, nullptr) << "the resting order must survive";
+    EXPECT_EQ(resting->remainingQty, 100u) << "it traded nothing";
+    EXPECT_EQ(book.getOrder(2), nullptr) << "the incoming order was cancelled";
 }
 
 // ─── No position accrual, and no OCO sibling cancellation ───────────────────
@@ -208,16 +182,16 @@ TEST(StpSemantics, CancelIncomingReportsCancelledBySTPNotFilled) {
 // The phantom fill's real damage: the OCO listener counts Filled as an
 // execution, so the STP-cancelled leg "won" its group and cancelled the live
 // sibling. Position accrual is trade-driven, so it must also stay at zero.
-TEST(StpSemantics, StpCancelNeitherAccruesPositionNorWinsOco) {
+TEST(StpSemantics, ModeNoneSelfCrossNeitherAccruesPositionNorWinsOco) {
     MatchingEngine engine;
     engine.addSymbol(1);
     engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
-    engine.getOrderBook(1)->setSTPMode(1, STPMode::CancelIncoming);
     engine.setPositionLimit(1, 10'000);   // arms position tracking
     engine.startAsync(1, 1024);
 
     const ParticipantId P = 1;
 
+    // P rests a sell at 105 and a sell at 95, linked One-Cancels-Other.
     engine.processOrder(1, /*id=*/10, P, Side::Sell, 105, 10, OrderType::Limit);
     engine.processOrder(1, /*id=*/11, P, Side::Sell,  95, 10, OrderType::Limit);
     engine.waitForDrain();
@@ -225,23 +199,26 @@ TEST(StpSemantics, StpCancelNeitherAccruesPositionNorWinsOco) {
 
     const int64_t positionBefore = engine.getPosition(P);
 
-    // P crosses its own resting sell at 95 with prevention configured.
+    // P now crosses its own resting sell at 95 with no explicit STP mode configured.
     engine.processOrder(1, /*id=*/12, P, Side::Buy, 95, 10, OrderType::Limit);
     engine.waitForDrain();
 
     const OrderBook* book = engine.getOrderBook(1);
 
+    // The OCO sibling must still be live: no leg executed, so no leg won.
     EXPECT_NE(book->getOrder(10), nullptr)
         << "OCO sibling was cancelled by a phantom fill — this is C1's damage";
     EXPECT_NE(book->getOrder(11), nullptr)
         << "the self-crossed resting leg traded nothing and must survive";
+
+    // No position accrued: nothing traded.
     EXPECT_EQ(engine.getPosition(P), positionBefore)
         << "an STP-cancelled order must not accrue position";
 
     engine.stopAsync();
 }
 
-// ─── Configured STP modes report CancelledBySTP, not Cancelled ──────────────
+// ─── Configured STP modes also report CancelledBySTP, not Cancelled ─────────
 
 TEST(StpSemantics, CancelRestingReportsCancelledBySTPForTheResting) {
     OrderBook book(1);
@@ -263,6 +240,27 @@ TEST(StpSemantics, CancelRestingReportsCancelledBySTPForTheResting) {
     book.setEventListener(nullptr);
 }
 
+TEST(StpSemantics, CancelIncomingReportsCancelledBySTPForTheIncoming) {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(0.99);
+    CaptureListener lis;
+    book.setEventListener(&lis);
+
+    const ParticipantId P = 1;
+    book.setSTPMode(P, STPMode::CancelIncoming);
+    book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    lis.clear();
+    book.addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+
+    const OrderUpdate* u = lis.lastFor(2);
+    ASSERT_NE(u, nullptr);
+    EXPECT_EQ(u->status, OrderStatus::CancelledBySTP);
+    EXPECT_EQ(u->filledQty, 0u);
+    EXPECT_NE(book.getOrder(1), nullptr) << "resting side untouched";
+
+    book.setEventListener(nullptr);
+}
+
 // A self-cross that follows REAL fills against other participants must still
 // report those fills — STP only stopped the remainder.
 TEST(StpSemantics, PartialFillThenSelfCrossStillReportsTheRealFill) {
@@ -272,7 +270,6 @@ TEST(StpSemantics, PartialFillThenSelfCrossStillReportsTheRealFill) {
     book.setEventListener(&lis);
 
     const ParticipantId P = 1, OTHER = 2;
-    book.setSTPMode(P, STPMode::CancelIncoming);
     // Best ask is OTHER's 40 @ PX; behind it sits P's own 60 @ PX.
     book.addOrder(1, OTHER, Side::Sell, PX, 40, OrderType::Limit);
     book.addOrder(2, P,     Side::Sell, PX, 60, OrderType::Limit);
@@ -286,8 +283,7 @@ TEST(StpSemantics, PartialFillThenSelfCrossStillReportsTheRealFill) {
 
     const OrderUpdate* u = lis.lastFor(3);
     ASSERT_NE(u, nullptr);
-    EXPECT_EQ(u->filledQty, 40u)
-        << "pre-fix remainingQty was zeroed, so this reported 100";
+    EXPECT_EQ(u->filledQty, 40u) << "the executed quantity must be reported";
     EXPECT_TRUE(isExecution(u->status))
         << "40 shares genuinely traded, so this leg DID execute and must be "
            "able to win an OCO group";

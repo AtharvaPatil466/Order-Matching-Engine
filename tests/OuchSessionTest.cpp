@@ -437,6 +437,13 @@ void test_SessionReplaceUpdatesPriceAndQty() {
     TEST(SessionReplaceUpdatesPriceAndQty) {
         MatchingEngine engine;
         engine.addSymbol(7);
+        // H2: cancelReplace now runs the same admission checks as a new order,
+        // including the circuit breaker. This test reprices 1000 -> 1100, a 10%
+        // move that the default breaker refuses — and would equally refuse for
+        // a NEW order at 1100. Relax it: this test covers OUCH replace
+        // plumbing, not risk policy. Before H2 the replace bypassed the breaker
+        // entirely and this passed by omission.
+        engine.getOrderBook(7)->setCircuitBreakerThreshold(0.99);
         engine.start();
 
         std::string sent;

@@ -262,6 +262,55 @@ bool OrderBook::checkCircuitBreaker(Price price) {
     return deviation <= cbThreshold_;
 }
 
+RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
+                                       Price price, Quantity qty, OrderType type,
+                                       bool riskChecksBypassed) {
+    // Trading state. A replace is a new admission decision, so the same states
+    // that refuse new orders refuse a replace.
+    if (tradingState_ == TradingState::Halted)    return RejectReason::MarketHalted;
+    if (tradingState_ == TradingState::PostClose) return RejectReason::MarketClosed;
+
+#ifndef OB_LEAN_MODE
+    // Risk limits — this is also what bounds an arbitrary quantity increase
+    // (maxOrderSize / maxOrderNotional / maxPositionSize).
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty))
+        return RejectReason::RiskLimitBreached;
+#else
+    (void)participantId; (void)riskChecksBypassed;
+#endif
+
+    const bool priced = (type == OrderType::Limit    || type == OrderType::IOC  ||
+                         type == OrderType::FOK      || type == OrderType::PostOnly ||
+                         type == OrderType::Iceberg  || type == OrderType::Hidden);
+
+    // Price band (LULD). Same integer-exact form as addOrder's copy.
+    if (priced && priceBandPct_ > 0.0 && referencePrice_ > 0) {
+        Price half = static_cast<Price>(
+            static_cast<double>(referencePrice_) * priceBandPct_);
+        if (price < referencePrice_ - half || price > referencePrice_ + half)
+            return RejectReason::OutsidePriceBand;
+    }
+
+#ifndef OB_LEAN_MODE
+    // Circuit breaker: the TEST only. addOrder additionally transitions the
+    // book into VolatilityAuction on a breach; a replace must not move the
+    // market's trading state, so it only declines.
+    if (priced && !checkCircuitBreaker(price))
+        return RejectReason::VolatilityCircuitBreaker;
+#endif
+
+    // PostOnly must never cross. Without this a repriced PostOnly matched as
+    // an aggressor, which is the exact inversion of what PostOnly means.
+    if (type == OrderType::PostOnly) {
+        const bool wouldCross = (side == Side::Buy)
+            ? (!asks_.empty() && price >= asks_.bestPrice())
+            : (!bids_.empty() && price <= bids_.bestPrice());
+        if (wouldCross) return RejectReason::PostOnlyWouldCross;
+    }
+
+    return RejectReason::None;
+}
+
 bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
     // Detect same-participant self-trade. STP mode controls the ACTION
     // (cancel incoming/resting/both) but detection is always on.
@@ -1584,6 +1633,20 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
         order->type == OrderType::StopLimit ||
         order->type == OrderType::TrailingStop ||
         order->type == OrderType::Pegged) [[unlikely]] {
+        return false;
+    }
+
+    // H2: a replace is a fresh admission decision. Previously cancelReplace
+    // ran only the qty/price sanity checks above, so it bypassed the trading
+    // state gate, risk limits (hence arbitrary quantity increases), the LULD
+    // price band, the circuit breaker, and — most seriously — the PostOnly
+    // would-cross test, letting a repriced PostOnly match as an AGGRESSOR.
+    // (Pool pressure is not in this list: cancelReplace reuses the existing
+    // Order and never calls orderPool_.allocate(), so there is nothing to
+    // shed.) Rejecting leaves the original order untouched and resting.
+    if (checkAdmission(order->participantId, order->side, newPrice, newQty,
+                       order->type, /*riskChecksBypassed=*/false)
+            != RejectReason::None) [[unlikely]] {
         return false;
     }
 

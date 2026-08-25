@@ -579,6 +579,17 @@ private:
     AuctionResult discoverUncrossPrice() const;
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
     bool checkCircuitBreaker(Price price);
+
+    // H2: the PURE admission checks — no state mutation, no events, no
+    // reject notifications. Returns RejectReason::None if the order may be
+    // admitted. Shared so cancelReplace applies the same gates as a new
+    // order; addOrder still runs its own inline copies because those are
+    // interleaved with side effects (breaker -> VolatilityAuction transition,
+    // referencePrice_ init, rejectedOrders accounting) that a replace must
+    // NOT trigger. Folding addOrder onto this is a mechanical follow-up.
+    RejectReason checkAdmission(ParticipantId participantId, Side side,
+                                Price price, Quantity qty, OrderType type,
+                                bool riskChecksBypassed);
     bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
 
     // C1: finalize an order that STP removed mid-match. True => deallocated,

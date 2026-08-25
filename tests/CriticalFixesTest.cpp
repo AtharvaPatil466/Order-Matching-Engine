@@ -435,3 +435,117 @@ TEST(CriticalFixes, TouchedPricesDoesNotOverflowOnLongStpSweep) {
 
     book.setEventListener(nullptr);
 }
+
+// ─── H2: cancelReplace must run the same admission checks as a new order ────
+//
+// It previously ran only the qty==0 / price<=0 sanity checks, so a replace
+// bypassed the trading-state gate, risk limits (hence arbitrary quantity
+// increases), the LULD price band, the circuit breaker, and the PostOnly
+// would-cross test. A rejected replace must leave the original order resting
+// and unmodified.
+//
+// (Pool pressure is NOT in this list: cancelReplace reuses the existing Order
+// and never calls orderPool_.allocate(), so there is nothing to shed.)
+
+namespace {
+// A book with a resting buy owned by participant 1 at PX, breaker relaxed so
+// each test can arm exactly the one control it is about.
+OrderId seedReplaceTarget(OrderBook& book, Quantity qty = 100) {
+    book.setCircuitBreakerThreshold(0.99);
+    book.addOrder(1, 1, Side::Buy, PX, qty, OrderType::Limit);
+    return 1;
+}
+}  // namespace
+
+TEST(AuditFixes, CancelReplaceHonoursRiskLimits) {
+    OrderBook book(1);
+    seedReplaceTarget(book);
+
+    RiskLimits limits;
+    limits.maxOrderSize = 150;          // the replace below asks for 5000
+    book.setRiskLimits(/*pid=*/1, limits);
+
+    EXPECT_FALSE(book.cancelReplace(1, PX, /*newQty=*/5000))
+        << "an arbitrary quantity increase must be bounded by maxOrderSize";
+    const Order* o = book.getOrder(1);
+    ASSERT_NE(o, nullptr) << "a rejected replace leaves the order resting";
+    EXPECT_EQ(o->remainingQty, 100u) << "and unmodified";
+
+    // Within the limit it still works.
+    EXPECT_TRUE(book.cancelReplace(1, PX, /*newQty=*/120));
+    EXPECT_EQ(book.getOrder(1)->remainingQty, 120u);
+}
+
+TEST(AuditFixes, CancelReplaceHonoursPriceBand) {
+    OrderBook book(1);
+    seedReplaceTarget(book);
+    book.setPriceBandPct(0.02);          // +/- 2% around the reference
+
+    EXPECT_FALSE(book.cancelReplace(1, /*newPrice=*/PX * 2, 100))
+        << "a replace outside the LULD band must be refused";
+    ASSERT_NE(book.getOrder(1), nullptr);
+    EXPECT_EQ(book.getOrder(1)->price, PX) << "original price untouched";
+
+    EXPECT_TRUE(book.cancelReplace(1, PX + PX / 100, 100)) << "in-band replace works";
+}
+
+TEST(AuditFixes, CancelReplaceHonoursCircuitBreaker) {
+    OrderBook book(1);
+    book.addOrder(1, 1, Side::Buy, PX, 100, OrderType::Limit);  // sets reference
+    book.setCircuitBreakerThreshold(0.05);                      // 5%
+
+    EXPECT_FALSE(book.cancelReplace(1, /*newPrice=*/PX + PX / 5, 100))
+        << "a 20% reprice must trip the same breaker a new order would";
+    ASSERT_NE(book.getOrder(1), nullptr);
+    EXPECT_EQ(book.getOrder(1)->price, PX);
+}
+
+TEST(AuditFixes, CancelReplaceHonoursTradingState) {
+    OrderBook book(1);
+    seedReplaceTarget(book);
+
+    book.setTradingState(TradingState::Halted);
+    EXPECT_FALSE(book.cancelReplace(1, PX, 50))
+        << "replace must be refused while halted, as a new order is";
+
+    book.setTradingState(TradingState::PostClose);
+    EXPECT_FALSE(book.cancelReplace(1, PX, 50))
+        << "and after the close";
+
+    book.setTradingState(TradingState::Continuous);
+    EXPECT_TRUE(book.cancelReplace(1, PX, 50)) << "allowed again once trading";
+}
+
+// The sharpest of the five: a PostOnly order repriced across the spread used
+// to MATCH AS AGGRESSOR — the exact inversion of what PostOnly means.
+TEST(AuditFixes, CancelReplacePostOnlyThatWouldCrossIsRejectedNotMatched) {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(0.99);
+
+    UpdateCountingListener lis;
+    book.setEventListener(&lis);
+
+    // Resting ask from another participant at PX.
+    book.addOrder(10, /*pid=*/2, Side::Sell, PX, 100, OrderType::Limit);
+    // Our PostOnly buy rests safely below it.
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(11, /*pid=*/1, Side::Buy, PX - 1000, 100, OrderType::PostOnly)));
+    lis.updates.clear();
+
+    // Reprice it up onto the ask. This WOULD cross.
+    EXPECT_FALSE(book.cancelReplace(11, PX, 100))
+        << "a PostOnly replace that would cross must be rejected";
+
+    // It neither traded nor moved.
+    const Order* po = book.getOrder(11);
+    ASSERT_NE(po, nullptr) << "the PostOnly order must still be resting";
+    EXPECT_EQ(po->price, PX - 1000) << "at its original price";
+    EXPECT_EQ(po->remainingQty, 100u) << "having traded nothing";
+
+    const Order* ask = book.getOrder(10);
+    ASSERT_NE(ask, nullptr) << "the resting ask must be untouched";
+    EXPECT_EQ(ask->remainingQty, 100u)
+        << "pre-fix the repriced PostOnly aggressed into it";
+
+    book.setEventListener(nullptr);
+}

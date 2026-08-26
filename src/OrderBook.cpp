@@ -2258,8 +2258,39 @@ void OrderBook::releaseOnCloseOrders() {
 }
 
 void OrderBook::cancelLocOrders() {
-    for (OrderId id : locActiveIds_) {
+    // H4: this was a range-for over locActiveIds_ while cancelOrderImpl
+    // swap-erases from that same container (:1580), which broke two ways.
+    //
+    //  1. Skipping. erase_swap(i) moves the LAST element into slot i; the
+    //     iterator then advances to i+1, so the relocated element is never
+    //     visited. Roughly half the LOC orders were skipped.
+    //  2. Stale tail reads. Range-for captures __end once, at the original
+    //     size_, so the loop kept reading indices past the shrunken size_.
+    //     Those slots are valid storage in a fixed T[16384] holding
+    //     already-processed ids, so this is NOT out of bounds and no
+    //     sanitizer reports it — it just silently does nothing.
+    //
+    // The survivors then stayed resting while the trailing clear() wiped the
+    // tracking list, orphaning them: live in the book, invisible to every
+    // later LOC sweep.
+    //
+    // Drain from the tail instead. Copying the id list first would be 128 KB
+    // of stack for a 16384-entry FixedVector; taking the last element is O(1)
+    // and immune to the swap, because the element erase_swap relocates is the
+    // one we are already holding.
+    while (!locActiveIds_.empty()) {
+        const size_t last = locActiveIds_.size() - 1;
+        const OrderId id = locActiveIds_[last];
         cancelOrderImpl(id);
+        // cancelOrderImpl erases the id itself for a live LOC order. If the
+        // order was ALREADY gone it early-returns on the orderLookup_ miss
+        // without erasing, so drop the entry here or this loop never
+        // terminates.
+        if (!locActiveIds_.empty() &&
+            locActiveIds_.size() - 1 == last &&
+            locActiveIds_[last] == id) {
+            locActiveIds_.erase_swap(last);
+        }
     }
     locActiveIds_.clear();
 }

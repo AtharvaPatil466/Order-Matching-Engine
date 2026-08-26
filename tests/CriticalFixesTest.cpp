@@ -626,3 +626,125 @@ TEST(AuditFixes, MinQtySatisfiedStillMatches) {
     EXPECT_EQ(book.getOrder(2)->remainingQty, 20u);
     expectNotLockedOrCrossed(book, "satisfiable minQty match");
 }
+
+// ─── H4: cancelLocOrders must sweep every unfilled LOC order ────────────────
+//
+// THESE ARE INVARIANT GUARDS, NOT REPRODUCERS. They pass against the pre-fix
+// code too, and that is worth stating precisely, because the reported
+// consequence — "LOC orders survive post-close uncross and leak as resting" —
+// is NOT reachable as described. A randomised sweep of 3000 configurations
+// (1-40 LOC orders, varying ask depth, marketable and non-marketable mixed)
+// against the pre-fix code produced zero survivors.
+//
+// Why the old code worked, and why it should not have: it range-for'd over
+// locActiveIds_ while cancelOrderImpl swap-erases from that same container.
+// Range-for captures __end ONCE, at the original size_. erase_swap(i) moves
+// the last element into slot i — skipping it, since the iterator has already
+// passed — but never clears the vacated tail slot. So the loop's over-run past
+// the shrunken size_ reads exactly the ids the swap skipped. The two errors are
+// precise inverses for this access pattern, and the sweep completes by
+// accident.
+//
+// It is correct only while it keeps reading logically-dead storage beyond
+// size_. Clearing on erase, a bounds-checked index, a size_-respecting
+// iterator, or a different container all break it silently. The fix removes
+// that dependency; these tests pin the invariant so a future regression is
+// caught whether or not the accident still holds.
+
+TEST(AuditFixes, PostCloseCancelsEveryUnfilledLocOrder) {
+    // Enough orders that the swap-erase skip is unmistakable; an odd count so
+    // an off-by-one in the drain shows up too.
+    constexpr int kLocOrders = 25;
+
+    OrderBook book(1); relaxBook(book);
+    book.setTradingState(TradingState::AuctionClose);
+
+    // LOC buys priced far below any possible cross, so none of them can fill
+    // and all must be cancelled by the post-close sweep.
+    for (int i = 0; i < kLocOrders; ++i) {
+        auto r = book.addOrder(static_cast<OrderId>(100 + i), /*pid=*/1, Side::Buy,
+                               PX - 1000 - i, /*qty=*/10, OrderType::LOC);
+        ASSERT_TRUE(std::holds_alternative<OrderId>(r))
+            << "setup: LOC order " << i << " must be accepted";
+    }
+
+    // A crossing pair so the uncross actually runs its full path rather than
+    // taking the no-cross early return.
+    book.addOrder(1, 2, Side::Sell, PX, 50, OrderType::Limit);
+    book.addOrder(2, 3, Side::Buy,  PX, 50, OrderType::Limit);
+
+    book.uncross();
+
+    int survivors = 0;
+    for (int i = 0; i < kLocOrders; ++i)
+        if (book.getOrder(static_cast<OrderId>(100 + i))) ++survivors;
+
+    EXPECT_EQ(survivors, 0)
+        << survivors << " of " << kLocOrders << " LOC orders survived the "
+           "post-close sweep and are now orphaned — resting in the book with "
+           "locActiveIds_ already cleared";
+}
+
+// The no-cross early return (uncross's `!res.hasCross` branch) reaches
+// cancelLocOrders by a different path; it must sweep completely too.
+TEST(AuditFixes, PostCloseCancelsEveryLocOrderWhenNothingCrosses) {
+    constexpr int kLocOrders = 17;
+
+    OrderBook book(1); relaxBook(book);
+    book.setTradingState(TradingState::AuctionClose);
+
+    for (int i = 0; i < kLocOrders; ++i) {
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(static_cast<OrderId>(200 + i), 1, Side::Buy,
+                          PX - 1000 - i, 10, OrderType::LOC)));
+    }
+    // No opposing liquidity at all => discoverUncrossPrice reports no cross.
+    book.uncross();
+
+    int survivors = 0;
+    for (int i = 0; i < kLocOrders; ++i)
+        if (book.getOrder(static_cast<OrderId>(200 + i))) ++survivors;
+
+    EXPECT_EQ(survivors, 0) << survivors << " LOC orders survived the "
+                               "no-cross post-close path";
+}
+
+// The realistic case: SOME LOC orders fill at the uncross and some do not.
+// A filled LOC is deallocated in the match path without ever calling
+// cancelOrderImpl, so its id is left STALE in locActiveIds_. Stale ids do not
+// erase (cancelOrderImpl early-returns on the orderLookup_ miss) while live
+// ones do, which desynchronises the swap-erase from the captured __end and
+// makes the skip real. A uniform all-cancel sweep happens to self-correct —
+// the stale tail reads recover exactly the skipped ids — which is why this
+// mixed case is the one that matters.
+TEST(AuditFixes, PostCloseCancelsUnfilledLocOrdersWhenOthersFilled) {
+    constexpr int kFilling = 8;    // marketable: these fill at the uncross
+    constexpr int kResting = 17;   // far below: these must all be cancelled
+
+    OrderBook book(1); relaxBook(book);
+    book.setTradingState(TradingState::AuctionClose);
+
+    // Ask liquidity for the filling LOCs to trade against.
+    book.addOrder(1, 2, Side::Sell, PX, kFilling * 10, OrderType::Limit);
+
+    // Marketable LOC buys, interleaved with non-marketable ones so the stale
+    // and live entries are mixed through locActiveIds_ rather than segregated.
+    for (int i = 0; i < kFilling + kResting; ++i) {
+        const bool marketable = (i % 3 == 0) && (i / 3) < kFilling;
+        const Price px = marketable ? PX + 1000 : PX - 5000 - i;
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(static_cast<OrderId>(300 + i), 1, Side::Buy, px, 10,
+                          OrderType::LOC)));
+    }
+
+    book.uncross();
+
+    // Every LOC that did not fill must be gone. Any survivor is orphaned:
+    // still resting, with locActiveIds_ already cleared behind it.
+    int survivors = 0;
+    for (int i = 0; i < kFilling + kResting; ++i)
+        if (book.getOrder(static_cast<OrderId>(300 + i))) ++survivors;
+
+    EXPECT_EQ(survivors, 0)
+        << survivors << " unfilled LOC orders survived the post-close sweep";
+}

@@ -835,11 +835,23 @@ void testMinQty() {
     // Resting sell 30 @ 100
     book.addOrder(1, 1, Side::Sell, 1000000, 30, OrderType::Limit);
 
-    // Buy 100 with minQty 50 -> only 30 available, won't match, rests in book
+    // H3: buy 100 @ the SAME price with minQty 50 — only 30 available, so the
+    // minimum cannot be met. This order CROSSES, so it must not rest: doing so
+    // left bid == ask == 1000000, a locked book. This assertion previously
+    // required exactly that invalid state.
     book.addOrder(2, 2, Side::Buy, 1000000, 100, OrderType::Limit, 0, 0,
                   TimeInForce::GTC, 0, 0, PegType::None, 0, 0, 50);
-    assert(book.getOrder(1) != nullptr); // sell still resting
-    assert(book.getOrder(2) != nullptr); // buy resting (minQty not met)
+    assert(book.getOrder(1) != nullptr); // sell untouched — nothing traded
+    assert(book.getOrder(2) == nullptr); // crossing + minQty unmet -> cancelled
+    assert(book.getBestBid() == 0);      // and the book is not locked
+    assert(book.getBestAsk() == 1000000);
+
+    // A NON-crossing minQty order still rests and waits for liquidity — that
+    // is the useful case and the one the semantic exists for.
+    book.addOrder(4, 4, Side::Buy, 999000, 100, OrderType::Limit, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::None, 0, 0, 50);
+    assert(book.getOrder(4) != nullptr);
+    assert(book.getBestBid() < book.getBestAsk());
 
     // IOC with minQty that can't be met -> cancel
     book.addOrder(3, 3, Side::Buy, 1000000, 100, OrderType::IOC, 0, 0,

@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <thread>
+#include <limits>
 #include <variant>
 
 using namespace OrderMatcher;
@@ -548,4 +549,80 @@ TEST(AuditFixes, CancelReplacePostOnlyThatWouldCrossIsRejectedNotMatched) {
         << "pre-fix the repriced PostOnly aggressed into it";
 
     book.setEventListener(nullptr);
+}
+
+// ─── H3: a crossing minQty order must never rest, locking the book ──────────
+//
+// checkMinQty counts liquidity at CROSSING prices only, so a false return
+// still permits some crossable size — just less than minQty. Resting
+// unconditionally parked the order at a price that crosses, leaving bid >= ask.
+// The semantic is a minimum on the FIRST execution (minQty is checked once at
+// admission and the stored field is never read again), so a non-crossing order
+// may still rest and wait; a crossing one may not.
+
+namespace {
+// The book invariant under test: never locked (bid == ask) or crossed
+// (bid > ask). Empty sides read as 0 / Price max, matching ManualTest's
+// fuzz invariant.
+void expectNotLockedOrCrossed(const OrderBook& book, const char* phase) {
+    const Price bb = book.getBestBid();
+    const Price ba = book.getBestAsk();
+    if (bb == 0 || ba == std::numeric_limits<Price>::max()) return;  // a side is empty
+    EXPECT_LT(bb, ba) << "book is " << (bb == ba ? "LOCKED" : "CROSSED")
+                      << " after " << phase << " (bid=" << bb << " ask=" << ba << ")";
+}
+}  // namespace
+
+TEST(AuditFixes, MinQtyCrossingAtSamePriceDoesNotLockTheBook) {
+    OrderBook book(1); relaxBook(book);
+
+    book.addOrder(1, 1, Side::Sell, PX, 30, OrderType::Limit);
+    expectNotLockedOrCrossed(book, "setup");
+
+    // minQty 50, but only 30 is available at a crossing price.
+    book.addOrder(2, 2, Side::Buy, PX, 100, OrderType::Limit, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::None, 0, 0, /*minQty=*/50);
+
+    expectNotLockedOrCrossed(book, "crossing minQty buy at the same price");
+    EXPECT_EQ(book.getOrder(2), nullptr) << "it must be cancelled, not rested";
+    ASSERT_NE(book.getOrder(1), nullptr) << "and nothing may have traded";
+    EXPECT_EQ(book.getOrder(1)->remainingQty, 30u);
+}
+
+TEST(AuditFixes, MinQtyCrossingThroughDoesNotCrossTheBook) {
+    OrderBook book(1); relaxBook(book);
+
+    book.addOrder(1, 1, Side::Sell, PX, 30, OrderType::Limit);
+    // Priced ABOVE the ask — resting this would leave bid > ask outright.
+    book.addOrder(2, 2, Side::Buy, PX + 1000, 100, OrderType::Limit, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::None, 0, 0, /*minQty=*/50);
+
+    expectNotLockedOrCrossed(book, "minQty buy priced through the ask");
+    EXPECT_EQ(book.getOrder(2), nullptr);
+}
+
+// The useful case is preserved: a passive minQty order waits for liquidity.
+TEST(AuditFixes, MinQtyNonCrossingStillRestsAndWaits) {
+    OrderBook book(1); relaxBook(book);
+
+    book.addOrder(1, 1, Side::Sell, PX, 30, OrderType::Limit);
+    book.addOrder(2, 2, Side::Buy, PX - 1000, 100, OrderType::Limit, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::None, 0, 0, /*minQty=*/50);
+
+    EXPECT_NE(book.getOrder(2), nullptr) << "a non-crossing minQty order rests";
+    expectNotLockedOrCrossed(book, "non-crossing minQty buy");
+}
+
+// When the minimum IS satisfiable, the order matches as normal.
+TEST(AuditFixes, MinQtySatisfiedStillMatches) {
+    OrderBook book(1); relaxBook(book);
+
+    book.addOrder(1, 1, Side::Sell, PX, 80, OrderType::Limit);
+    book.addOrder(2, 2, Side::Buy, PX, 100, OrderType::Limit, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::None, 0, 0, /*minQty=*/50);
+
+    EXPECT_EQ(book.getOrder(1), nullptr) << "80 available >= minQty 50, so it traded";
+    ASSERT_NE(book.getOrder(2), nullptr) << "20 remains resting";
+    EXPECT_EQ(book.getOrder(2)->remainingQty, 20u);
+    expectNotLockedOrCrossed(book, "satisfiable minQty match");
 }

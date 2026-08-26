@@ -781,7 +781,31 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
                 return orderId;
             }
-            // For limit orders, rest in book without matching (will match later)
+            // H3: a limit order may rest here ONLY if it does not cross.
+            //
+            // checkMinQty counts liquidity at crossing prices only, so a false
+            // return still permits some crossable size — just less than
+            // minQty. Resting unconditionally therefore parked the order at a
+            // price that crosses the opposite side, leaving bid >= ask: an
+            // invalid book. (Ask 30 @ 100, buy 100 @ 100 minQty 50 => both
+            // rest at 100, locked.)
+            //
+            // The semantic is a minimum on the FIRST execution: minQty is
+            // checked once at admission and the stored field is never read
+            // again, so matching has no per-fill minimum to enforce. A
+            // non-crossing order can therefore rest and wait for liquidity —
+            // that is the useful case and it stays. A crossing one cannot
+            // wait, because waiting is what produces the locked book, so it is
+            // cancelled, exactly as the IOC branch above does.
+            const bool wouldCross = (side == Side::Buy)
+                ? (!asks_.empty() && price >= asks_.bestPrice())
+                : (!bids_.empty() && price <= bids_.bestPrice());
+            if (wouldCross) [[unlikely]] {
+                orderLookup_.erase(orderId);
+                orderPool_.deallocate(order);
+                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
+                return orderId;
+            }
             addToBook(order);
             if (!order->isHidden)
                 notifyMarketData(MarketDataUpdate::Action::Add, side, price);

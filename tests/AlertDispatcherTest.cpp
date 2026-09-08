@@ -203,6 +203,37 @@ void test_json_escaping() {
     PASS();
 }
 
+// H18: the built-in transport has no TLS client, so an https:// webhook
+// cannot be delivered. It used to `return true; // Pretend success`, which
+// counted every undelivered alert as sent and held alertsFailed() at zero —
+// and every webhook worth configuring (Slack, PagerDuty) is https. An alerting
+// system that lies about delivery is worse than no alerting at all.
+void test_https_webhook_is_not_reported_as_delivered() {
+    TEST(HttpsWebhookNotSilentlyDropped);
+
+    AlertDispatcher alerts;
+    // Reported at configuration time, not only during the incident.
+    assert(!alerts.addWebhook("https://hooks.slack.com/services/x",
+                              AlertDispatcher::Format::Slack, "", AlertLevel::Info)
+           && "addWebhook must report an https URL the transport cannot deliver");
+    assert(alerts.addWebhook("http://test.local/ok", AlertDispatcher::Format::Generic,
+                             "", AlertLevel::Info)
+           && "a plain http URL is deliverable");
+    alerts.start();
+
+    alerts.fire(AlertLevel::Critical, "test", "msg");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    alerts.stop();
+
+    // The https hook must count as a failure, never as a delivery. (The http
+    // hook has no listener either, so it fails too — both are honest.)
+    assert(alerts.alertsFired() == 1);
+    assert(alerts.alertsDelivered() == 0 && "nothing was actually delivered");
+    assert(alerts.alertsFailed() > 0 && "undelivered alerts must be counted");
+
+    PASS();
+}
+
 int main() {
     std::cout << "\n═══ AlertDispatcher Tests ═══\n\n";
 
@@ -213,6 +244,7 @@ int main() {
     test_delivery_failure();
     test_multiple_webhooks();
     test_json_escaping();
+    test_https_webhook_is_not_reported_as_delivered();
 
     std::cout << "\n─── Results: " << passed << " passed ───\n";
     std::cout << "\nAll alert dispatcher tests passed.\n\n";

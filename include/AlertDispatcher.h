@@ -16,6 +16,8 @@
 //   alerts.fire(AlertLevel::Critical, "circuit_breaker",
 //               "Symbol AAPL halted: price moved >5% in 1s");
 
+#include "StructuredLog.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -76,10 +78,16 @@ public:
     AlertDispatcher(const AlertDispatcher&) = delete;
     AlertDispatcher& operator=(const AlertDispatcher&) = delete;
 
-    void addWebhook(const std::string& url, Format fmt = Format::Generic,
+    // Returns false if the URL cannot be delivered to by the built-in
+    // transport, so an operator finds out at configuration time rather than
+    // during the incident the alert was supposed to announce. The webhook is
+    // still registered — a custom deliveryFunction (or a future TLS client)
+    // may well handle it — but the caller is told.
+    bool addWebhook(const std::string& url, Format fmt = Format::Generic,
                     const std::string& routingKey = "",
                     AlertLevel minLevel = AlertLevel::Warning) {
         webhooks_.push_back({url, fmt, routingKey, minLevel});
+        return !(url.rfind("https://", 0) == 0);
     }
 
     void start() {
@@ -252,12 +260,18 @@ private:
             host = hostPort;
         }
 
-        // For HTTPS we'd need TLS — skip actual delivery but log.
-        // In production, link against OpenSSL or use a sidecar proxy.
+        // No TLS client here (no library dependency), so an https:// webhook
+        // cannot be delivered. Report that honestly. Returning true made the
+        // dispatcher count undelivered alerts as sent and kept alertsFailed()
+        // at zero — an alerting system that lies about delivery is worse than
+        // no alerting at all, and every webhook worth configuring (the Slack
+        // and PagerDuty endpoints in this file's own usage example) is https.
+        // Route through a local HTTP sidecar, or link a TLS client.
         if (https) {
-            // Log that we would have sent the alert
-            // (TLS without a library dependency is not feasible)
-            return true;  // Pretend success; real deploy uses HTTP proxy
+            obSink().log(obEvent("alert_delivery_unsupported")
+                             .kv("scheme", "https")
+                             .kv("host", host));
+            return false;
         }
 
         // Resolve host

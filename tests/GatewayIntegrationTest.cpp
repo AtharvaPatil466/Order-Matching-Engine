@@ -27,9 +27,13 @@ public:
     TestClient() : fd_(-1) {}
     ~TestClient() { disconnect(); }
 
-    bool connect(uint16_t port) {
+    bool connect(uint16_t port, int rcvBuf = 0) {
         fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (fd_ < 0) return false;
+
+        // Shrink the receive window before connect() so a client that stops
+        // reading backs the gateway up after KBs rather than MBs.
+        if (rcvBuf > 0) setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
 
         int flag = 1;
         setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
@@ -571,6 +575,66 @@ void testGatewayProtocolRejectsUnsupportedVersion() {
     std::cout << "testGatewayProtocolRejectsUnsupportedVersion PASSED" << std::endl;
 }
 
+// ─── Test 9: a slow reader is dropped, not buffered without bound (H14) ─────
+//
+// The gateway queues whatever it cannot write immediately into a per-client
+// writeBuf. A client that never reads is not idle — it keeps sending, which
+// refreshes lastActivity — so the idle timeout never reaps it and the queue
+// was the process's only memory bound: one connection could grow it until the
+// engine died. The queue is now capped and the connection dropped instead.
+void testSlowReaderIsDroppedNotBufferedForever() {
+    std::cout << "Running testSlowReaderIsDroppedNotBufferedForever..." << std::endl;
+
+    MatchingEngine engine;
+    engine.start();
+    engine.addSymbol(0);
+
+    TcpGateway gateway(engine);
+    assert(gateway.start(0));
+    uint16_t port = gateway.port();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    TestClient client;
+    assert(client.connect(port, /*rcvBuf=*/2048));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    assert(gateway.clientCount() == 1);
+
+    // Pump orders and never read a single response. Each one produces an ack
+    // far larger than the request, so the outbound queue grows much faster
+    // than the inbound one — the client cannot stall itself out first.
+    std::atomic<bool> stop{false};
+    std::thread pump([&] {
+        for (uint64_t i = 1; i < 200000 && !stop.load(); ++i) {
+            OrderRequest req{};
+            req.type          = OrderRequest::Type::NewOrder;
+            req.symbolId      = 0;
+            req.orderId       = i;
+            req.participantId = 100;
+            req.side          = Side::Buy;
+            req.price         = toPrice(1.00);
+            req.qty           = 1;
+            req.orderType     = OrderType::Limit;
+            if (!client.sendOrder(req)) return;
+        }
+    });
+
+    // The gateway must hang up on it rather than queue forever.
+    bool dropped = false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (gateway.clientCount() == 0) { dropped = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    stop.store(true);
+    pump.join();
+
+    assert(dropped && "gateway kept buffering for a client that never reads");
+
+    gateway.stop();
+    engine.stop();
+    std::cout << "testSlowReaderIsDroppedNotBufferedForever PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "\n=== Gateway Integration Tests ===" << std::endl;
 
@@ -582,6 +646,7 @@ int main() {
     testGatewayRejectResponse();
     testGatewayProtocolV2Envelope();
     testGatewayProtocolRejectsUnsupportedVersion();
+    testSlowReaderIsDroppedNotBufferedForever();
 
     std::cout << "\nALL GATEWAY INTEGRATION TESTS PASSED!" << std::endl;
     return 0;

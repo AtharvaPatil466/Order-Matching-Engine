@@ -15,6 +15,7 @@
 
 #include <arpa/inet.h>
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -34,9 +35,12 @@ using namespace OrderMatcher;
 
 namespace {
 
-int connectTo(uint16_t port) {
+int connectTo(uint16_t port, int rcvBuf = 0) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    // Shrink the receive window before connect() so the gateway's send buffer
+    // fills after a few hundred KB rather than megabytes.
+    if (rcvBuf > 0) ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
     int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 #ifdef SO_NOSIGPIPE
@@ -227,7 +231,96 @@ int main() {
         std::puts("[scenario one-byte] passed");
     }
 
-    // ── Scenario 3: clean shutdown ──────────────────────────────────────────
+    // ── Scenario 3: slow reader must be cut, never corrupted (H8) ───────────
+    //
+    // The accepted fd is non-blocking, so a client that stops reading makes
+    // send() return short mid-ExecutionReport. The old callback returned on
+    // the first short write and then wrote the NEXT report straight after the
+    // truncated one — a byte stream no FIX client can resynchronise on, with
+    // nothing in the protocol to detect it. The gateway must instead stop
+    // writing and drop the session; FIX recovers that by seqnum resend.
+    {
+        int fd = connectTo(port, /*rcvBuf=*/2048);
+        assert(fd >= 0);
+
+        auto logon = makeLogon(/*seqNum=*/1);
+        assert(sendAll(fd, logon.data(), logon.size()));
+        auto logonAck = recvFixFrame(fd, std::chrono::milliseconds(500));
+        {
+            FixMessage la;
+            assert(la.parse(logonAck.data(), logonAck.size()) && "logon ack parse");
+            assert(la.getString(FixTag::MsgType) == "A" && "expected Logon ack");
+        }
+
+        // Pump orders from a second thread and never read the replies here.
+        // A thread because our own send() will block once the gateway stops
+        // draining input to wait on its stalled write.
+        std::atomic<bool> stopPump{false};
+        std::thread pump([&] {
+            for (uint64_t seq = 2; seq < 20000 && !stopPump.load(); ++seq) {
+                auto f = makeNewOrder(static_cast<OrderId>(2000 + seq), kSym,
+                                      /*qty=*/1, /*price=*/1010, seq);
+                if (!sendAll(fd, f.data(), f.size())) return;
+            }
+        });
+
+        // Read nothing for long enough that the gateway's send buffer fills
+        // and its bounded POLLOUT drain expires.
+        std::this_thread::sleep_for(std::chrono::milliseconds(750));
+
+        // Now drain to EOF and inspect the shape of what actually arrived.
+        std::string stream;
+        bool hungUp = false;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        char tmp[4096];
+        while (std::chrono::steady_clock::now() < deadline) {
+            ssize_t n = ::recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT);
+            if (n > 0) { stream.append(tmp, size_t(n)); continue; }
+            if (n == 0) { hungUp = true; break; }        // FIN
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+            // Closing a socket that still has unread inbound data queued sends
+            // RST, not FIN — so a reset is the same signal here.
+            if (errno == ECONNRESET) { hungUp = true; }
+            break;
+        }
+        stopPump.store(true);
+        pump.join();
+
+        // The gateway must have hung up. Without that this scenario proves
+        // nothing, so fail loudly rather than pass vacuously.
+        assert(hungUp && "gateway did not close the stalled session");
+
+        // Shape check: complete messages, then AT MOST one truncated tail.
+        // Any message header appearing after an incomplete message is the
+        // corruption this test exists to catch.
+        const std::string kHead = std::string("8=FIX");
+        size_t pos = 0, complete = 0;
+        while (pos < stream.size()) {
+            assert(stream.compare(pos, kHead.size(), kHead) == 0 &&
+                   "stream did not resume at a message boundary");
+            // Trailer is "<SOH>10=NNN<SOH>".
+            std::string trailer = std::string(1, FIX_SOH) + "10=";
+            size_t t = stream.find(trailer, pos);
+            if (t == std::string::npos || t + 8 > stream.size()) {
+                // Incomplete tail — allowed, but it must be the LAST thing
+                // in the stream (no further message may follow it).
+                assert(stream.find(kHead, pos + 1) == std::string::npos &&
+                       "a new FIX message was written after a truncated one");
+                break;
+            }
+            pos = t + 8;
+            ++complete;
+        }
+        assert(complete > 0 && "no complete ExecutionReports arrived at all");
+        std::printf("[scenario slow-reader] passed (%zu complete msgs, cut cleanly)\n",
+                    complete);
+        ::close(fd);
+    }
+
+    // ── Scenario 4: clean shutdown ──────────────────────────────────────────
     gw.stop();
     engine.stop();
 

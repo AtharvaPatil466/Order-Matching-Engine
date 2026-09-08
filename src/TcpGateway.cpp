@@ -439,6 +439,13 @@ bool TcpGateway::feedBytes(int fd, ClientState& state) {
         }
         processMessage(fd, req);
 
+        // processMessage() may have blown the outbound queue ceiling. Reap
+        // here, where `state` is still alive, rather than inside sendResponse.
+        if (state.writeBufOverflowed) {
+            removeClient(fd);
+            return false;
+        }
+
         // Shift buffer (in case of pipelined messages)
         size_t consumed = totalMsgSize;
         if (state.readPos > consumed) {
@@ -580,6 +587,19 @@ bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp) {
     std::vector<char> buf(sizeof(uint32_t) + payloadLen);
     std::memcpy(buf.data(), &len, sizeof(uint32_t));
     std::memcpy(buf.data() + sizeof(uint32_t), payload, payloadLen);
+
+    // Refuse to queue past the per-client ceiling. Dropping the connection is
+    // the only bound available: the client is not idle (it keeps sending, so
+    // lastActivity keeps refreshing) and it is not reading, so the queue would
+    // otherwise grow until the process dies. Flag it rather than removing here
+    // — feedBytes() still holds a reference into clients_ for this fd.
+    if (state.writeBuf.size() + buf.size() > kMaxWriteBufBytes) {
+        state.writeBufOverflowed = true;
+        state.writeBuf.clear();
+        state.writeBuf.shrink_to_fit();
+        obSink().log(obEvent("gateway_write_buffer_overflow").kv("fd", (long long)fd));
+        return false;
+    }
 
     // If write buffer already has data, just append
     if (!state.writeBuf.empty()) {

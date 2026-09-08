@@ -124,8 +124,11 @@ private:
         std::vector<char> readBuf;
         size_t readPos{0};
         struct sockaddr_in addr;
-        // Write-side output buffering
+        // Write-side output buffering. Bounded: a client that stops reading
+        // must not be able to make the gateway queue unbounded memory on its
+        // behalf (writeBufOverflowed marks it for reaping).
         std::vector<char> writeBuf;
+        bool writeBufOverflowed{false};
         // Idle timeout tracking
         std::chrono::steady_clock::time_point lastActivity;
         uint16_t protocolVersion{GATEWAY_PROTOCOL_V1};
@@ -171,6 +174,12 @@ private:
 
     // Idle timeout (default 60 seconds)
     std::chrono::seconds idleTimeout_{60};
+
+    // Ceiling on one client's queued outbound bytes. A slow reader is not
+    // idle — it keeps sending, refreshing lastActivity — so the idle timeout
+    // never reaps it and the queue is the only thing that bounds its memory.
+    // ponytail: fixed byte cap, no per-client tuning until a deployment needs it.
+    static constexpr size_t kMaxWriteBufBytes = 1u << 20;  // 1 MiB
 
 public:
     void setIdleTimeout(std::chrono::seconds timeout) { idleTimeout_ = timeout; }

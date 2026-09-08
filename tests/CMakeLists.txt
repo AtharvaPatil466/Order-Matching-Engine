@@ -20,7 +20,7 @@ target_link_libraries(UnitTests PRIVATE OrderMatcher gtest_main)
 include(GoogleTest)
 gtest_discover_tests(UnitTests
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;unit")
+    PROPERTIES LABELS "project\;unit")
 
 # enable_assertions(target) — applied per-test-binary to force
 # assertion-rich, debug-friendly builds of TEST bodies. Note: this
@@ -58,7 +58,7 @@ gtest_discover_tests(BenchmarkRegression
     # so these must not run concurrently with other ctest tests under -j — CPU
     # contention inflates p99 past the bar and false-fails (same principle as the
     # Debug+FI gate above: only measure/enforce in the calibrated configuration).
-    PROPERTIES LABELS "project;benchmark-regression" RUN_SERIAL TRUE)
+    PROPERTIES LABELS "project\;benchmark-regression" RUN_SERIAL TRUE)
 
 # The p99 thresholds are calibrated for an optimized Release build on x86 bare
 # metal. Debug is 3-5x slower and fault injection adds hot-path overhead, so the
@@ -105,7 +105,7 @@ target_link_libraries(RiskControlsTest PRIVATE OrderMatcher gtest_main)
 enable_assertions(RiskControlsTest)
 gtest_discover_tests(RiskControlsTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;risk")
+    PROPERTIES LABELS "project\;risk")
 
 # AdminServer endpoint integration test (HTTP /prometheus, /health)
 add_executable(AdminServerEndpointsTest AdminServerEndpointsTest.cpp)
@@ -535,13 +535,13 @@ add_executable(StpSemanticsTest StpSemanticsTest.cpp)
 target_link_libraries(StpSemanticsTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(StpSemanticsTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;matching;stp")
+    PROPERTIES LABELS "project\;matching\;stp")
 
 add_executable(CriticalFixesTest CriticalFixesTest.cpp)
 target_link_libraries(CriticalFixesTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(CriticalFixesTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;correctness")
+    PROPERTIES LABELS "project\;correctness")
 
 add_executable(AdvancedOrdersTest TestAdvancedOrders.cpp)
 target_link_libraries(AdvancedOrdersTest PRIVATE OrderMatcher)
@@ -619,7 +619,7 @@ add_executable(ShadowModeTest ShadowModeTest.cpp)
 target_link_libraries(ShadowModeTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ShadowModeTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;shadow;integration")
+    PROPERTIES LABELS "project\;shadow\;integration")
 
 # FIX inbound boundary-validation tests (seqnum, logon gate, required
 # fields, BodyLength cross-check, TargetCompID, unknown enums)
@@ -627,7 +627,7 @@ add_executable(FixValidationTest FixValidationTest.cpp)
 target_link_libraries(FixValidationTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(FixValidationTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;fix;validation")
+    PROPERTIES LABELS "project\;fix\;validation")
 
 # ContingencyManager OCO linkage tests (assert-based, engine-agnostic)
 add_executable(ContingencyManagerTest TestContingencyManager.cpp)
@@ -642,91 +642,91 @@ add_executable(ImpactModelTest TestImpactModel.cpp)
 target_link_libraries(ImpactModelTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ImpactModelTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;impact")
+    PROPERTIES LABELS "project\;quant\;impact")
 
 # Agent-based market simulation: NoiseTrader, MarketMaker, InformedTrader, SimulationDriver
 add_executable(SimulationTest TestSimulation.cpp)
 target_link_libraries(SimulationTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(SimulationTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;simulation")
+    PROPERTIES LABELS "project\;simulation")
 
 # Research replay harness: journal-driven replay with trade/book-update callbacks
 add_executable(TestResearchHarness TestResearchHarness.cpp)
 target_link_libraries(TestResearchHarness PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(TestResearchHarness
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;research;unit")
+    PROPERTIES LABELS "project\;research\;unit")
 
 # Microstructure metrics: effective spread, realized spread, Kyle's lambda, Amihud, VPIN
 add_executable(TestMicrostructureMetrics TestMicrostructureMetrics.cpp)
 target_link_libraries(TestMicrostructureMetrics PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(TestMicrostructureMetrics
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;research;unit")
+    PROPERTIES LABELS "project\;research\;unit")
 
 # Almgren-Chriss optimal execution trajectory planner (header-only)
 add_executable(OptimalExecutionTest TestOptimalExecution.cpp)
 target_link_libraries(OptimalExecutionTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(OptimalExecutionTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;execution")
+    PROPERTIES LABELS "project\;quant\;execution")
 
 # Execution quality analytics: IS decomposition, VWAP/TWAP benchmarks, spread capture
 add_executable(ExecutionAnalyticsTest TestExecutionAnalytics.cpp)
 target_link_libraries(ExecutionAnalyticsTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ExecutionAnalyticsTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;execution")
+    PROPERTIES LABELS "project\;quant\;execution")
 
 add_executable(OrderFlowAnalyticsTest TestOrderFlowAnalytics.cpp)
 target_link_libraries(OrderFlowAnalyticsTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(OrderFlowAnalyticsTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;microstructure")
+    PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(ResearchSerializerTest TestResearchSerializer.cpp)
 target_link_libraries(ResearchSerializerTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ResearchSerializerTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;serializer")
+    PROPERTIES LABELS "project\;quant\;serializer")
 
 # VPIN (Volume-Synchronized Probability of Informed Trading) calculator
 add_executable(VPINTest TestVPINCalculator.cpp)
 target_link_libraries(VPINTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(VPINTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;microstructure")
+    PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(SpreadDecompositionTest TestSpreadDecomposition.cpp)
 target_link_libraries(SpreadDecompositionTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(SpreadDecompositionTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;microstructure")
+    PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(CalibrationPipelineTest TestCalibrationPipeline.cpp)
 target_link_libraries(CalibrationPipelineTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(CalibrationPipelineTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;backtest")
+    PROPERTIES LABELS "project\;quant\;backtest")
 
 add_executable(BacktestEngineTest TestBacktestEngine.cpp)
 target_link_libraries(BacktestEngineTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(BacktestEngineTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;backtest")
+    PROPERTIES LABELS "project\;quant\;backtest")
 
 add_executable(SignalGeneratorTest TestSignalGenerator.cpp)
 target_link_libraries(SignalGeneratorTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(SignalGeneratorTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;signals")
+    PROPERTIES LABELS "project\;quant\;signals")
 
 add_executable(ResearchDashboardTest TestResearchDashboard.cpp)
 target_link_libraries(ResearchDashboardTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ResearchDashboardTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;dashboard")
+    PROPERTIES LABELS "project\;quant\;dashboard")
 
 # Signal-driven paper trading loop (header-only PaperTrader)
 add_executable(PaperTraderTest TestPaperTrader.cpp)
@@ -734,21 +734,21 @@ target_link_libraries(PaperTraderTest PRIVATE OrderMatcher gtest_main)
 target_include_directories(PaperTraderTest PRIVATE include)
 gtest_discover_tests(PaperTraderTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;quant;paper-trading")
+    PROPERTIES LABELS "project\;quant\;paper-trading")
 
 # MOC/LOC on-close order types
 add_executable(MocLocTest TestMocLocOrders.cpp)
 target_link_libraries(MocLocTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(MocLocTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;auction;moc;loc")
+    PROPERTIES LABELS "project\;auction\;moc\;loc")
 
 # LMM/DMM market-maker role allocation
 add_executable(LmmDmmTest TestLmmDmmAllocation.cpp)
 target_link_libraries(LmmDmmTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(LmmDmmTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project;allocation;dmm")
+    PROPERTIES LABELS "project\;allocation\;dmm")
 
 # Admin bearer token + /readyz endpoint tests
 add_executable(AdminAuthTest AdminAuthTest.cpp)

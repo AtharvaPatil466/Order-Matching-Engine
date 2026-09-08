@@ -79,6 +79,45 @@ jobs:
           name: e2e-benchmark-smoke-${{ matrix.name }}
           path: e2e_benchmark_smoke.txt
 
+  latency-gate:
+    name: Ubuntu Release Latency Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The p99 thresholds in tests/BenchmarkRegression.cpp are calibrated for
+      # an optimized x86 Release build, and CMake only defines
+      # OB_ENFORCE_LATENCY_THRESHOLD for Release-without-fault-injection. Until
+      # this lane existed no workflow met that description: ci.yml ran macOS
+      # Release plus Ubuntu Debug/ASan and Ubuntu TSan Debug, every one of them
+      # excluding BenchmarkRegressionTest, and benchmark-gate.yml builds Ubuntu
+      # Release with -DBUILD_TESTS=OFF. The gate compiled, skipped itself, and
+      # enforced nothing anywhere.
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_SANITIZERS=OFF
+          -DENABLE_FAULT_INJECTION=OFF
+          -DBUILD_TESTS=ON
+          -DBUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Enforce p99 latency thresholds
+        # ONLY this label, and never under -j: the thresholds are calibrated
+        # single-threaded and uncontended, so running alongside the rest of the
+        # suite inflates p99 and false-fails (the target already sets
+        # RUN_SERIAL, this keeps the lane honest end to end).
+        #
+        # until-pass:2 because a p99 on a shared runner is a statistical
+        # measurement, and one noisy-neighbour spike is not a regression. A
+        # real regression is reproducible and fails both attempts. Without the
+        # retry this lane flakes, and a flaky gate gets switched off again —
+        # which is how it became a dead letter the first time.
+        run: ctest --test-dir build --output-on-failure -L benchmark-regression --repeat until-pass:2
+
   fault-injection:
     name: Ubuntu Fault Injection
     runs-on: ubuntu-latest

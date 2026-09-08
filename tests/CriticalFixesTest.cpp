@@ -803,3 +803,35 @@ TEST(AuditFixes, FatFingerNotionalCapAgreesWithOrderBookNotionalCap) {
     EXPECT_FALSE(std::holds_alternative<RejectReason>(under))
         << "$50 must pass a $100 cap";
 }
+
+// ─── H12: a custom pool capacity must not overflow the frozen lookup map ────
+//
+// orderLookup_ was pinned at INITIAL_CAPACITY (200,000 -> 524,288 buckets,
+// rehash threshold 262,144) while orderPoolCapacity was a caller-supplied
+// parameter with no upper bound. Ask for a pool bigger than that and the pool
+// happily hands out orders past the frozen map's threshold: with assertions
+// compiled in (the shipped configuration) the matching thread aborts, and
+// without them it silently rehashes — an allocation on the hot path that
+// reallocates storage under any concurrent reader. Both sizings now come from
+// the same expression, so the map cannot be under-sized for its own pool.
+TEST(AuditFixes, CustomOrderPoolCapacityDoesNotOverflowFrozenLookup) {
+    constexpr size_t kPool = 300'000;              // > INITIAL_CAPACITY
+    constexpr OrderId kCount = 262'200;            // > old threshold (262,144)
+
+    OrderBook book(1, MatchAlgorithm::PriceTime, kPool);
+    relaxBook(book);
+
+    // Resting buys well below the market so nothing ever matches or leaves.
+    for (OrderId id = 1; id <= kCount; ++id) {
+        auto r = book.addOrder(id, 1, Side::Buy, PX - 100'000 - Price(id % 1000), 1,
+                               OrderType::Limit);
+        ASSERT_TRUE(std::holds_alternative<OrderId>(r))
+            << "order " << id << " rejected while the pool still had room";
+    }
+
+    // Every order must still be findable — a rehash under a reader is exactly
+    // what makes this dangerous rather than merely slow.
+    EXPECT_NE(book.getOrder(1), nullptr);
+    EXPECT_NE(book.getOrder(kCount), nullptr);
+    EXPECT_NE(book.getOrder(kCount / 2), nullptr);
+}

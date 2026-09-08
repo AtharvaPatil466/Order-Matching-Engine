@@ -14,16 +14,21 @@ constexpr size_t INITIAL_CAPACITY = 200000;
 
 OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCapacity)
     : bids_(Side::Buy, 200001), asks_(Side::Sell, 200001),
-      orderLookup_(INITIAL_CAPACITY),
+      orderLookup_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
       orderPool_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
       symbolId_(symbolId), matchAlgorithm_(algo),
       participantRisk_(1024), participantOrders_(64) {
-    // orderLookup_ is sized to the engine's default pool capacity (>= any custom
-    // orderPoolCapacity), so with the 50% load factor its rehash threshold sits
-    // well above the max live orders the pool can hand out — it can never rehash
-    // during matching. Freeze it so any future sizing regression that breaks that
-    // invariant is caught (debug assert) instead of silently paying a
-    // stop-the-world rehash on the hot path.
+    // orderLookup_ is sized from the SAME expression as the pool, so it holds
+    // every order the pool can hand out with room to spare (50% load factor) and
+    // can never rehash during matching. It used to be pinned at INITIAL_CAPACITY
+    // while orderPoolCapacity was a caller-supplied parameter with no upper
+    // bound: any caller asking for a pool larger than INITIAL_CAPACITY got a
+    // frozen map it could overflow, which is a stop-the-world rehash — an
+    // allocation on the matching thread, and reallocated storage under any
+    // concurrent reader. The invariant was stated in this comment and enforced
+    // nowhere; tying the two sizings together makes it true by construction.
+    // The freeze below then catches a future sizing regression instead of
+    // silently paying for it on the hot path.
     orderLookup_.disallowRehash();
 
     // P3-8: per-symbol pool-utilization gauge. The label is embedded in the

@@ -75,8 +75,16 @@ constexpr size_t SOUP_MAX_PACKET_PAYLOAD = 65534;  // 65535 - 1 (type byte)
 // bytes written = payloadLen + 3. The function does not zero-init
 // the buffer or validate the payload — caller decides what type
 // byte and payload to use.
+// Returns 0 without writing anything if the payload cannot be framed. The
+// length field is 16 bits and the cast below used to truncate silently: a
+// 65535-byte payload wrote totalLen = 0 while the memcpy still copied all
+// 65535 bytes, so the peer read a zero-length packet and then resynchronised
+// on message data — every subsequent byte on that session misparsed, with
+// nothing to signal it. SOUP_MAX_PACKET_PAYLOAD was already declared for
+// exactly this bound; now it is enforced.
 inline size_t soupWriteEnvelope(uint8_t* out, uint8_t packetType,
                                 const void* payload, size_t payloadLen) {
+    if (payloadLen > SOUP_MAX_PACKET_PAYLOAD) return 0;
     // Length = type byte (1) + payload bytes. Excludes the 2 length
     // bytes themselves.
     uint16_t totalLen = static_cast<uint16_t>(payloadLen + 1);

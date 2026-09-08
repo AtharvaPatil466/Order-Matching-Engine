@@ -1596,13 +1596,19 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
 // ─── Modify (quantity reduction only, preserves time priority) ───────────────
 
 bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty) {
+    RejectReason ignored = RejectReason::None;
+    return modifyOrder(orderId, newQty, ignored);
+}
+
+bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    reason = RejectReason::None;
 
     auto* orderPtr = orderLookup_.find(orderId);
-    if (!orderPtr) [[unlikely]] return false;
+    if (!orderPtr) [[unlikely]] { reason = RejectReason::OrderNotFound; return false; }
 
     Order* order = *orderPtr;
-    if (!order) return false;
+    if (!order) { reason = RejectReason::OrderNotFound; return false; }
 
     if (newQty < order->remainingQty) {
         const Quantity displayBefore = displayQuantity(*order);
@@ -1627,6 +1633,10 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty) {
         return true;
     }
 
+    // Found, but newQty is not a reduction. Growing in place would forfeit time
+    // priority anyway, so that is a cancel-replace, not a modify — and
+    // answering OrderNotFound told the client its live order had vanished.
+    reason = RejectReason::InvalidQuantity;
     return false;
 }
 

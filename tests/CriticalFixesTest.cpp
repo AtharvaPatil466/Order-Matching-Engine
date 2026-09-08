@@ -10,12 +10,14 @@
 #include "OrderBook.h"
 #include "MatchingEngine.h"
 #include "FlatHashMap.h"
+#include "SoupBinTCP.h"
 #include "Types.h"
 
 #include <atomic>
 #include <thread>
 #include <limits>
 #include <variant>
+#include <vector>
 
 using namespace OrderMatcher;
 
@@ -894,4 +896,52 @@ TEST(AuditFixes, MidPriceDoesNotOverflowAtExtremePrices) {
     EXPECT_GT(mid, 0) << "midpoint wrapped negative";
     EXPECT_GE(mid, kHuge);
     EXPECT_LE(mid, kHuge + 2);
+}
+
+// ─── L3: a modify that is not a reduction is not "order not found" ──────────
+//
+// OrderBook::modifyOrder returned false both when the order was gone and when
+// newQty was not a reduction (this engine only shrinks in place). The engine
+// mapped both to OrderNotFound, so a client trying to increase quantity was
+// told its live, resting order did not exist.
+TEST(AuditFixes, ModifyToLargerQuantityIsNotReportedAsOrderNotFound) {
+    OrderBook book(1); relaxBook(book);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, 1, Side::Buy, PX - 10'000, 100, OrderType::Limit)));
+
+    RejectReason reason = RejectReason::None;
+
+    EXPECT_TRUE(book.modifyOrder(1, 50, reason));
+    EXPECT_EQ(reason, RejectReason::None);
+
+    // Still resting, so "not found" would be a lie.
+    ASSERT_NE(book.getOrder(1), nullptr);
+    EXPECT_FALSE(book.modifyOrder(1, 500, reason));
+    EXPECT_EQ(reason, RejectReason::InvalidQuantity)
+        << "a live order refusing a qty increase must not report OrderNotFound";
+
+    // A genuinely absent order still reports OrderNotFound.
+    EXPECT_FALSE(book.modifyOrder(999, 10, reason));
+    EXPECT_EQ(reason, RejectReason::OrderNotFound);
+}
+
+// ─── L10: SoupBinTCP framing must refuse what it cannot describe ────────────
+//
+// The 16-bit length field was filled by a silent truncating cast, so a payload
+// of SOUP_MAX_PACKET_PAYLOAD+1 wrote length 0 while still copying every byte.
+// The peer reads a zero-length packet, then resynchronises on message data —
+// the whole session misparses from there with nothing to signal it.
+TEST(AuditFixes, SoupEnvelopeRefusesPayloadTooLargeForItsLengthField) {
+    std::vector<uint8_t> out(SOUP_MAX_PACKET_PAYLOAD + 8, 0xAB);
+    std::vector<uint8_t> payload(SOUP_MAX_PACKET_PAYLOAD + 1, 0xCD);
+
+    EXPECT_EQ(soupWriteEnvelope(out.data(), 'S', payload.data(), payload.size()), 0u)
+        << "an unframeable payload must be refused, not truncated";
+    EXPECT_EQ(out[0], 0xAB) << "nothing may be written when framing is refused";
+
+    // The largest framable payload still works and reports the right length.
+    const size_t n = soupWriteEnvelope(out.data(), 'S', payload.data(),
+                                       SOUP_MAX_PACKET_PAYLOAD);
+    EXPECT_EQ(n, SOUP_MAX_PACKET_PAYLOAD + 3);
+    EXPECT_EQ((out[0] << 8) | out[1], int(SOUP_MAX_PACKET_PAYLOAD + 1));
 }

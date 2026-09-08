@@ -245,13 +245,15 @@ private:
         if (len + 3 <= 1024) {
             uint8_t buf[1024];
             size_t n = soupWriteEnvelope(buf, packetType, payload, len);
+            if (n == 0) return;  // unframeable payload — see soupWriteEnvelope
             send_(std::string_view(reinterpret_cast<const char*>(buf), n));
         } else {
             std::string buf;
             buf.resize(len + 3);
-            soupWriteEnvelope(reinterpret_cast<uint8_t*>(buf.data()),
-                              packetType, payload, len);
-            send_(std::string_view(buf));
+            size_t n = soupWriteEnvelope(reinterpret_cast<uint8_t*>(buf.data()),
+                                         packetType, payload, len);
+            if (n == 0) return;  // never put a mis-framed packet on the wire
+            send_(std::string_view(buf.data(), n));
         }
         lastOwnSendMs_ = lastNowMs_;
     }

@@ -233,6 +233,11 @@ public:
                   bool riskChecksBypassed = false);
     void cancelOrder(OrderId orderId);
     bool modifyOrder(OrderId orderId, Quantity newQty);
+    // Same, but reports why it failed. A modify can fail because the order is
+    // gone OR because newQty is not a reduction (this engine only shrinks in
+    // place); callers that surface a reject reason to a client must be able to
+    // tell those apart instead of answering "order not found" to a live order.
+    bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason);
 
     // Cancel/Replace: full amendment (price change loses time priority)
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty);

@@ -1404,7 +1404,8 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Qu
     if (!book) {
         return rejectedAsync(RejectReason::SymbolNotFound);
     }
-    bool modified = book->modifyOrder(orderId, newQty);
+    RejectReason modifyReason = RejectReason::None;
+    bool modified = book->modifyOrder(orderId, newQty, modifyReason);
     if (modified && journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
@@ -1413,7 +1414,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Qu
         maybeTriggerAutoCheckpoint();
     }
     return modified ? SubmitResult::accepted(sequenceId)
-                    : SubmitResult::rejected(RejectReason::OrderNotFound);
+                    : SubmitResult::rejected(modifyReason);
 }
 
 bool MatchingEngine::cancelReplace(SymbolId symbolId, OrderId orderId, Price newPrice,

@@ -48,14 +48,9 @@ bool HierarchicalRiskManager::tierBreached(const EntityState& state, Side side,
         return true;
     }
 
-    // --- Max order notional (price * qty) ----------------------------------
-    // Guard against negative prices and overflow by computing in long double
-    // for the comparison; notionals here are well within long double's exact
-    // integer range for realistic prices/quantities.
+    // --- Max order notional, in whole currency units (see orderNotional) ----
     if (lim.maxOrderNotional > 0) {
-        const long double notional =
-            static_cast<long double>(price) * static_cast<long double>(qty);
-        if (notional > static_cast<long double>(lim.maxOrderNotional)) {
+        if (orderNotional(price, qty) > static_cast<__int128>(lim.maxOrderNotional)) {
             return true;
         }
     }

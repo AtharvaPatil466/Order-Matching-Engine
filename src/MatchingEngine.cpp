@@ -1026,9 +1026,7 @@ RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, 
         }
         const int64_t maxNotional = ffMaxNotional_[sym].load(std::memory_order_relaxed);
         if (maxNotional != 0 && price > 0) {
-            // __int128 avoids overflow for price*qty at venue scale.
-            const __int128 notional = static_cast<__int128>(price) * static_cast<__int128>(qty);
-            if (notional > static_cast<__int128>(maxNotional)) {
+            if (orderNotional(price, qty) > static_cast<__int128>(maxNotional)) {
                 fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
                 logRiskReject("fat_finger_notional", sym, pid, RejectReason::FatFingerReject);
                 return RejectReason::FatFingerReject;

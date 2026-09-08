@@ -167,6 +167,19 @@ enum class ParticipantRole : uint8_t {
 // Fixed-point price constants (4 decimal places)
 constexpr int64_t PRICE_PRECISION = 10000;
 
+// Order notional in WHOLE currency units.
+//
+// price is fixed-point (PRICE_PRECISION ticks per currency unit) and qty is a
+// whole count, so price*qty is scaled up by PRICE_PRECISION and must be scaled
+// back down. Every risk cap in the engine is expressed in whole units; a check
+// that skips the divide compares against a limit 10,000x too large and lets
+// oversized orders through. Widened to __int128 first because price*qty
+// overflows int64 at venue scale (1e11 x 1e8 = 1e19 > INT64_MAX), and signed
+// overflow is UB that wraps negative — i.e. silently passes the cap.
+constexpr __int128 orderNotional(Price price, Quantity qty) {
+    return (static_cast<__int128>(price) * static_cast<__int128>(qty)) / PRICE_PRECISION;
+}
+
 inline double toDouble(Price p) {
     return static_cast<double>(p) / PRICE_PRECISION;
 }

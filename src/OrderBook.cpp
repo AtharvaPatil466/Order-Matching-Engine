@@ -228,12 +228,8 @@ bool OrderBook::checkRiskLimits(ParticipantId participantId, Price price, Quanti
     if (state->maxOrderSize > 0 && qty > state->maxOrderSize) return false;
 
     if (state->maxOrderNotional > 0) {
-        // price * qty can exceed int64 for large orders; computing it in int64
-        // is signed-overflow UB that wraps negative and silently bypasses the
-        // cap. Widen to __int128 so the notional comparison is always exact.
-        __int128 notional = (static_cast<__int128>(price) * static_cast<__int128>(qty))
-                            / PRICE_PRECISION;
-        if (notional > static_cast<__int128>(state->maxOrderNotional)) return false;
+        if (orderNotional(price, qty) > static_cast<__int128>(state->maxOrderNotional))
+            return false;
     }
 
     if (state->maxPositionSize > 0) {
@@ -1563,9 +1559,10 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
 
     Order* order = *orderPtr;
     if (!order) return;
-#ifndef OB_LEAN_MODE
-    participantRisk_[OTRKey(order->participantId, symbolId_)].ordersSubmitted++;
-#endif
+    // No ordersSubmitted++ here: a cancel is not a submission. Counting it
+    // inflated getOTR() (and the /otr admin endpoint) on every cancel, so a
+    // participant that quotes and pulls normally reads as an OTR abuser.
+    // Submissions are counted once, at admission (recordOrderSubmit).
 
     // Remove from special tracking lists (FixedVector::erase_value — O(n) swap-erase)
     if (order->type == OrderType::Stop || order->type == OrderType::StopLimit

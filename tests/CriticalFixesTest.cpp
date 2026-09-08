@@ -748,3 +748,58 @@ TEST(AuditFixes, PostCloseCancelsUnfilledLocOrdersWhenOthersFilled) {
     EXPECT_EQ(survivors, 0)
         << survivors << " unfilled LOC orders survived the post-close sweep";
 }
+
+// ─── H15: a cancel is not a submission ──────────────────────────────────────
+//
+// cancelOrderImpl incremented ordersSubmitted on every cancel, so a
+// quote-and-pull participant's order-to-trade ratio climbed with no order
+// flow behind it — inflating the /otr admin endpoint and any throttle read
+// off it. Submissions are counted once, at admission.
+TEST(AuditFixes, CancelDoesNotInflateOrderToTradeRatio) {
+    OrderBook book(1); relaxBook(book);
+    const ParticipantId P = 42;
+
+    for (OrderId id = 1; id <= 5; ++id)
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(id, P, Side::Buy, PX - 10'000, 10, OrderType::Limit)));
+    EXPECT_EQ(book.getParticipantStats(P).ordersSubmitted, 5u);
+
+    for (OrderId id = 1; id <= 5; ++id) book.cancelOrder(id);
+
+    EXPECT_EQ(book.getParticipantStats(P).ordersSubmitted, 5u)
+        << "cancelling 5 resting orders must not count as 5 more submissions";
+}
+
+// ─── H16: every notional cap is denominated in whole currency units ─────────
+//
+// price is fixed-point (PRICE_PRECISION ticks per unit) and qty is whole, so
+// notional = price*qty/PRICE_PRECISION. OrderBook divided; the fat-finger and
+// hierarchical checks did not, making those caps 10,000x too loose for the
+// same configured number. All four now route through orderNotional().
+TEST(AuditFixes, NotionalHelperIsWholeCurrencyUnitsAndDoesNotOverflow) {
+    // $100.00 x 100 shares = $10,000.
+    EXPECT_EQ(orderNotional(100 * PRICE_PRECISION, 100), __int128(10'000));
+    // The overflow case from Fix #1: 1e11 x 1e8 = 1e19 (> INT64_MAX) -> 1e15.
+    EXPECT_EQ(orderNotional(100'000'000'000LL, 100'000'000ULL), __int128(1'000'000'000'000'000LL));
+}
+
+TEST(AuditFixes, FatFingerNotionalCapAgreesWithOrderBookNotionalCap) {
+    // One order, one number: $200 notional ($2.00 x 100). A $100 cap must
+    // reject it on BOTH paths; pre-fix the fat-finger path compared 2,000,000
+    // against 100 in mismatched units and rejected everything instead.
+    const Price  px  = 2 * PRICE_PRECISION;
+    const Quantity q = 100;
+    ASSERT_EQ(orderNotional(px, q), __int128(200));
+
+    OrderBook book(1); relaxBook(book);
+    RiskLimits limits;
+    limits.maxOrderNotional = 100;   // $100
+    book.setRiskLimits(7, limits);
+    auto over = book.addOrder(1, 7, Side::Buy, px, q, OrderType::IOC);
+    EXPECT_TRUE(std::holds_alternative<RejectReason>(over)) << "$200 > $100 cap";
+
+    // $50 notional ($0.50 x 100) is under the same cap and must be admitted.
+    auto under = book.addOrder(2, 7, Side::Buy, PRICE_PRECISION / 2, q, OrderType::IOC);
+    EXPECT_FALSE(std::holds_alternative<RejectReason>(under))
+        << "$50 must pass a $100 cap";
+}

@@ -68,10 +68,9 @@ struct alignas(64) ParticipantRiskState {
             return false;
         }
 
-        // Max order notional (price × qty)
+        // Max order notional, in whole currency units (see orderNotional).
         if (maxOrderNotional > 0) {
-            Price notional = price * static_cast<Price>(qty);
-            if (notional > maxOrderNotional) {
+            if (orderNotional(price, qty) > static_cast<__int128>(maxOrderNotional)) {
                 return false;
             }
         }

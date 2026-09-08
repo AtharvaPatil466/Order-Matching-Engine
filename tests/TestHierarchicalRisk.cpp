@@ -41,10 +41,10 @@ void test_trader_order_limits() {
 
     TierLimits lim;
     lim.maxOrderSize     = 100;        // qty cap
-    lim.maxOrderNotional = 1'000'000;  // price*qty cap
+    lim.maxOrderNotional = 100;        // notional cap, WHOLE currency units
     rm.setLimits(RiskTier::Trader, kT1, lim);
 
-    // Within both limits: 50 @ 100 -> notional 5,000.
+    // Within both limits: 50 @ 100 (=$0.01) -> notional $0.
     {
         auto d = rm.check(kT1, Side::Buy, /*price*/100, /*qty*/50, /*ref*/0);
         assert(d.allowed);
@@ -59,7 +59,7 @@ void test_trader_order_limits() {
         assert(d.breachedTier == RiskTier::Trader);
     }
 
-    // Within size cap but over notional cap: 100 @ 20000 -> 2,000,000 > 1,000,000.
+    // Within size cap but over notional cap: 100 @ 20000 (=$2.00) -> $200 > $100.
     {
         auto d = rm.check(kT1, Side::Buy, /*price*/20'000, /*qty*/100, /*ref*/0);
         assert(!d.allowed);
@@ -68,7 +68,7 @@ void test_trader_order_limits() {
     }
 
     // Exactly at the notional boundary is allowed (strictly-greater rejects):
-    // 100 @ 10000 -> 1,000,000 == cap.
+    // 100 @ 10000 (=$1.00) -> $100 == cap.
     {
         auto d = rm.check(kT1, Side::Buy, /*price*/10'000, /*qty*/100, /*ref*/0);
         assert(d.allowed);

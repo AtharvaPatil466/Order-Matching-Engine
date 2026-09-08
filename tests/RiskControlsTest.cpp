@@ -155,15 +155,17 @@ TEST_F(RiskFixture, FatFingerRejectsPriceDeviation) {
 }
 
 TEST_F(RiskFixture, FatFingerRejectsExcessiveNotional) {
-    // notional = price * qty. maxNotional between the two cases below.
+    // notional = price * qty / PRICE_PRECISION, in WHOLE currency units, the
+    // same denomination OrderBook's maxOrderNotional uses (see orderNotional).
+    // kRef is $100.00, so the cap sits between the two cases below.
     engine.setFatFingerLimits(kSym, /*maxQty=*/1'000'000, /*devPct=*/0.0,
-                              /*maxNotional=*/50'000'000);
+                              /*maxNotional=*/5'000);
 
-    auto big = buy(1, 1, kRef, 100);  // 1e6 * 100 = 1e8 > 5e7
+    auto big = buy(1, 1, kRef, 100);  // $100.00 x 100 = $10,000 > $5,000
     EXPECT_FALSE(big.isAccepted());
     EXPECT_EQ(big.rejectReason, RejectReason::FatFingerReject);
 
-    EXPECT_TRUE(buy(2, 1, kRef, 10).isAccepted());  // 1e7 < 5e7
+    EXPECT_TRUE(buy(2, 1, kRef, 10).isAccepted());  // $1,000 < $5,000
 }
 
 // ─── P2-11 OTR THROTTLE ─────────────────────────────────────────────────────

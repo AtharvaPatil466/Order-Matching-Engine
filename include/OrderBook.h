@@ -749,7 +749,6 @@ private:
 
     // Per-participant tracking — open-addressing hash maps
     FlatHashMap<OTRKey, ParticipantRiskState, OTRKeyHash> participantRisk_;
-    FlatHashMap<ParticipantId, FixedVector<OrderId, 4096>> participantOrders_;
 
     // Trade history — bounded ring buffer (streams out, never reallocates)
     RingBuffer<Trade> tradeHistory_{65536};

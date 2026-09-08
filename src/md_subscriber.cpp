@@ -3,13 +3,17 @@
 #include <iomanip>
 #include <chrono>
 #include <thread>
+#include <atomic>
 #include <csignal>
 
 using namespace OrderMatcher;
 
-static volatile bool running = true;
+// std::atomic<bool>, not volatile bool: a handler may only touch a lock-free
+// atomic or a volatile sig_atomic_t — anything else is undefined, however
+// reliably it happens to work. Matches src/main.cpp's g_running.
+static std::atomic<bool> running{true};
 
-void signalHandler(int) { running = false; }
+void signalHandler(int) { running.store(false, std::memory_order_release); }
 
 int main(int argc, char* argv[]) {
     std::string shmName = (argc > 1) ? argv[1] : "orderbook_md";

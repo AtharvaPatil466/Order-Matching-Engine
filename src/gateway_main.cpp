@@ -21,8 +21,11 @@
 
 using namespace OrderMatcher;
 
-static volatile bool running = true;
-void signalHandler(int) { running = false; }
+// std::atomic<bool>, not volatile bool: a handler may only touch a lock-free
+// atomic or a volatile sig_atomic_t — anything else is undefined, however
+// reliably it happens to work. Matches src/main.cpp's g_running.
+static std::atomic<bool> running{true};
+void signalHandler(int) { running.store(false, std::memory_order_release); }
 
 // Combined listener: logs trades + publishes market data to shared memory
 struct GatewayListener : EventListener {

@@ -17,7 +17,7 @@ OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCap
       orderLookup_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
       orderPool_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
       symbolId_(symbolId), matchAlgorithm_(algo),
-      participantRisk_(1024), participantOrders_(64) {
+      participantRisk_(1024) {
     // orderLookup_ is sized from the SAME expression as the pool, so it holds
     // every order the pool can hand out with room to spare (50% load factor) and
     // can never rehash during matching. It used to be pinned at INITIAL_CAPACITY
@@ -620,9 +620,6 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         order->prev = nullptr;
 
         orderLookup_.insert(orderId, order);
-#ifndef OB_LEAN_MODE
-        participantOrders_[participantId].push_back(orderId);
-#endif
         notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
         if (obSinkActive()) obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
 
@@ -686,9 +683,6 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     // --- Register for O(1) lookup ---
     orderLookup_.insert(orderId, order);
-#ifndef OB_LEAN_MODE
-    participantOrders_[participantId].push_back(orderId);
-#endif
 
     notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
     if (obSinkActive()) obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
@@ -1768,30 +1762,42 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
 uint64_t OrderBook::cancelAllForParticipant(ParticipantId participantId) {
     std::unique_lock<std::mutex> lock(bookLock_);
 
+    // Scan the live book. This used to consult a per-participant index
+    // (participantOrders_), which was wrong three ways at once: it was a
+    // FixedVector<OrderId, 4096> whose push_back return was ignored, so once
+    // full it silently stopped recording; cancelOrderImpl never removed from
+    // it, so it filled with the ids of long-dead orders; and the sweep copied
+    // only its first 4096 entries before clearing the whole thing. For any
+    // participant past 4096 lifetime orders in a book that combination
+    // cancelled nothing — every id filtered out by contains() — while leaving
+    // their live orders resting AND untracked, so a second call could not find
+    // them either. An engaged kill switch that silently leaves orders working
+    // is worse than one that fails loudly.
+    //
+    // orderLookup_ is the authoritative record, so ask it directly and drop the
+    // index entirely. ponytail: O(lookup capacity) per sweep instead of O(live
+    // orders for this participant). The kill switch is a rare control-plane
+    // operation and correctness beats speed here; this is also exactly what the
+    // OB_LEAN_MODE build already did.
+    constexpr size_t kBatch = 4096;
     uint64_t count = 0;
-    OrderId ids[4096];
-    size_t idCount = 0;
+    OrderId ids[kBatch];
 
-#ifndef OB_LEAN_MODE
-    auto* orders = participantOrders_.find(participantId);
-    if (!orders) return 0;
-
-    for (size_t i = 0; i < orders->size() && idCount < 4096; ++i) {
-        ids[idCount++] = (*orders)[i];
-    }
-    orders->clear();
-#else
-    orderLookup_.forEach([&](OrderId id, Order* order) {
-        if (order && order->participantId == participantId && idCount < 4096) {
-            ids[idCount++] = id;
-        }
-    });
-#endif
-
-    for (size_t i = 0; i < idCount; ++i) {
-        if (orderLookup_.contains(ids[i])) {
-            cancelOrderImpl(ids[i]);  // already holding the lock
-            ++count;
+    // Re-scan until a pass finds nothing: one pass caps out at kBatch, and
+    // cancelOrderImpl mutates orderLookup_, so collect then cancel.
+    for (;;) {
+        size_t n = 0;
+        orderLookup_.forEach([&](OrderId id, Order* order) {
+            if (order && order->participantId == participantId && n < kBatch) {
+                ids[n++] = id;
+            }
+        });
+        if (n == 0) break;
+        for (size_t i = 0; i < n; ++i) {
+            if (orderLookup_.contains(ids[i])) {
+                cancelOrderImpl(ids[i]);  // already holding the lock
+                ++count;
+            }
         }
     }
 
@@ -2517,7 +2523,10 @@ Price OrderBook::getMidPrice() const {
     Price bb = getBestBid();
     Price ba = getBestAsk();
     if (bb == 0 || ba == std::numeric_limits<Price>::max()) return 0;
-    return (bb + ba) / 2;
+    // bb + ba overflows int64 for large prices, and signed overflow is UB that
+    // wraps to a negative mid. Both are validated positive, so ba - bb cannot
+    // overflow and this form is exact for every representable pair.
+    return bb + (ba - bb) / 2;
 }
 
 } // namespace OrderMatcher

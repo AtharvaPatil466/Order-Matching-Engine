@@ -37,6 +37,9 @@ int main() {
     book.addOrder(/*id=*/1, /*pid=*/1, Side::Buy, /*price=*/1000,
                   /*qty=*/100, OrderType::Limit);
 
+    // Enough interleavings to be meaningful; reached in ~50ms unloaded.
+    constexpr uint64_t kMinSnapshots = 1001;
+
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> snapsTaken{0};
     std::atomic<uint64_t> torn{0};
@@ -87,9 +90,18 @@ int main() {
         }
     });
 
-    // Run for a fixed duration. Long enough to accumulate many
-    // interleavings; short enough to keep the test fast.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // Run until the reader has taken enough snapshots to be meaningful, NOT
+    // for a fixed wall-clock. The old form slept 500ms and then asserted the
+    // reader had managed >1000 iterations — a throughput floor inside a
+    // correctness test, which fails on a loaded machine or an efficiency core
+    // while `torn` is still 0. That is a flaky gate, and a flaky gate gets
+    // ignored. The work target is the same; only the stopping rule changed.
+    // The deadline is a backstop against a genuine hang, not a budget.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (snapsTaken.load(std::memory_order_relaxed) < kMinSnapshots &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     stop.store(true, std::memory_order_relaxed);
     reader.join();
     writer.join();
@@ -101,8 +113,9 @@ int main() {
     assert(torn.load() == 0 &&
            "torn snapshot observed — bookLock_ does not actually serialize "
            "snapshot reads against writer mutations");
-    assert(snapsTaken.load() > 1000 &&
-           "snapshot loop ran too few iterations to be a meaningful test");
+    assert(snapsTaken.load() >= kMinSnapshots &&
+           "snapshot loop did not reach the target iteration count within the "
+           "deadline — the reader or writer is wedged, not merely slow");
 
     std::puts("SnapshotConsistencyTest passed");
     return 0;

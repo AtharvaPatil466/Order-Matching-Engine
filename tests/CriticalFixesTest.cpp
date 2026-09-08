@@ -835,3 +835,63 @@ TEST(AuditFixes, CustomOrderPoolCapacityDoesNotOverflowFrozenLookup) {
     EXPECT_NE(book.getOrder(kCount), nullptr);
     EXPECT_NE(book.getOrder(kCount / 2), nullptr);
 }
+
+// ─── L4/C5: the participant kill switch must not truncate at 4096 ───────────
+//
+// participantOrders_ is append-only — cancelOrderImpl never removes from it —
+// so its first entries are the participant's OLDEST order ids, long dead. The
+// sweep copied only the first 4096 and then cleared the whole vector, so for
+// any participant past 4096 lifetime orders it cancelled ~nothing (every id
+// filtered out by contains()) and orphaned the live ones: still resting, no
+// longer tracked, invisible to a second kill-switch call. Engaged kill switch,
+// live orders, zero reported cancels.
+TEST(AuditFixes, ParticipantKillSwitchCancelsPastTheBatchCap) {
+    OrderBook book(1, MatchAlgorithm::PriceTime, 20'000);
+    relaxBook(book);
+    const ParticipantId P = 5;
+
+    // 4600 orders that are dead by the time the sweep runs, so they occupy the
+    // whole first batch of the tracking vector...
+    constexpr OrderId kDead = 4600;
+    for (OrderId id = 1; id <= kDead; ++id) {
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(id, P, Side::Buy, PX - 50'000, 1, OrderType::Limit)));
+        book.cancelOrder(id);
+    }
+
+    // ...then 500 live ones behind them.
+    constexpr OrderId kLive = 500;
+    for (OrderId i = 0; i < kLive; ++i) {
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(kDead + 1 + i, P, Side::Buy, PX - 60'000, 1, OrderType::Limit)));
+    }
+
+    const uint64_t cancelled = book.cancelAllForParticipant(P);
+
+    EXPECT_EQ(cancelled, kLive) << "kill switch must cancel every live order";
+    int survivors = 0;
+    for (OrderId i = 0; i < kLive; ++i)
+        if (book.getOrder(kDead + 1 + i)) ++survivors;
+    EXPECT_EQ(survivors, 0)
+        << survivors << " orders survived an engaged participant kill switch";
+}
+
+// ─── L1: getMidPrice must not overflow to a negative mid ────────────────────
+//
+// (bb + ba) / 2 overflows int64 once the two sides sum past INT64_MAX, and
+// signed overflow is UB that wraps negative — a negative midpoint feeds pegged
+// orders and the price-band check.
+TEST(AuditFixes, MidPriceDoesNotOverflowAtExtremePrices) {
+    OrderBook book(1); relaxBook(book);
+    constexpr Price kHuge = std::numeric_limits<Price>::max() / 2 + 1000;
+
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, 1, Side::Buy, kHuge, 1, OrderType::Limit)));
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(2, 2, Side::Sell, kHuge + 2, 1, OrderType::Limit)));
+
+    const Price mid = book.getMidPrice();
+    EXPECT_GT(mid, 0) << "midpoint wrapped negative";
+    EXPECT_GE(mid, kHuge);
+    EXPECT_LE(mid, kHuge + 2);
+}

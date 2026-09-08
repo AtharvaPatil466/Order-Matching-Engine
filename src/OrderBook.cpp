@@ -1180,7 +1180,7 @@ void OrderBook::match(Order* incoming) {
         t.sequenceNumber = nextSequenceNumber_++;
         t.symbolId = symbolId_;
         t.aggressorSide = incoming->side;
-        tradeHistory_.push(t);
+        tradeHistory_.pushOverwrite(t);
         // P1-3 BATCH FILL EVENTS: buffer the trade instead of firing the onTrade
         // vtable dispatch here; flushFills() dispatches all of them after the loop
         // in the exact same order (and P1-5 emits logTradeFill from the same
@@ -1449,7 +1449,7 @@ void OrderBook::matchProRata(Order* incoming) {
             t.sequenceNumber = nextSequenceNumber_++;
             t.symbolId = symbolId_;
             t.aggressorSide = incoming->side;
-            tradeHistory_.push(t);
+            tradeHistory_.pushOverwrite(t);
             if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
             if (bookOrder->remainingQty == 0) {
@@ -2181,7 +2181,7 @@ void OrderBook::uncross() {
         t.timestamp = nowNs();
         t.sequenceNumber = nextSequenceNumber_++;
         t.symbolId = symbolId_;
-        tradeHistory_.push(t);
+        tradeHistory_.pushOverwrite(t);
         if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
         // After the execution, before either side is torn down — both

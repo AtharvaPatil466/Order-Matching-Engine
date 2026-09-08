@@ -32,6 +32,27 @@ public:
         return false; // Buffer full
     }
 
+    // Producer-side push that never drops the NEWEST item: when the ring is
+    // full it retires the OLDEST to make room. push() does the opposite —
+    // it returns false and discards the incoming item — which turns a
+    // "most recent N" buffer into a "first N of the session" buffer once it
+    // fills, silently and permanently.
+    //
+    // Advancing head_ here is a consumer-side move, so this is correct ONLY
+    // where the producer is the sole mutator. tradeHistory_ is exactly that:
+    // its accessor is const-only precisely so nothing else can pop.
+    void pushOverwrite(const T& item) {
+        const auto current_tail = tail_.load(std::memory_order_relaxed);
+        const auto next_tail = (current_tail + 1) & mask_;
+
+        if (next_tail == head_.load(std::memory_order_acquire)) {
+            const auto current_head = head_.load(std::memory_order_relaxed);
+            head_.store((current_head + 1) & mask_, std::memory_order_release);
+        }
+        buffer[current_tail] = item;
+        tail_.store(next_tail, std::memory_order_release);
+    }
+
     bool pop(T& item) {
         const auto current_head = head_.load(std::memory_order_relaxed);
 

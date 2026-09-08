@@ -10,6 +10,7 @@
 #include "OrderBook.h"
 #include "MatchingEngine.h"
 #include "FlatHashMap.h"
+#include "RingBuffer.h"
 #include "SoupBinTCP.h"
 #include "Types.h"
 
@@ -944,4 +945,30 @@ TEST(AuditFixes, SoupEnvelopeRefusesPayloadTooLargeForItsLengthField) {
                                        SOUP_MAX_PACKET_PAYLOAD);
     EXPECT_EQ(n, SOUP_MAX_PACKET_PAYLOAD + 3);
     EXPECT_EQ((out[0] << 8) | out[1], int(SOUP_MAX_PACKET_PAYLOAD + 1));
+}
+
+// ─── L2: trade history must keep the NEWEST trades, not the first 65536 ─────
+//
+// tradeHistory_ is a bounded "recent trades" ring whose accessor is const-only,
+// so nothing can ever pop it. It was filled with push(), which returns false
+// and discards the INCOMING trade once full — so after 65536 trades the
+// history froze permanently on the oldest ones and every later trade vanished
+// with the return value ignored at all three call sites. SimulationDriver
+// reads "the last element is the most recent trade" off this ring, so its
+// last-price and volume signal silently went stale for the rest of the session.
+TEST(AuditFixes, TradeHistoryRingKeepsTheNewestEntriesWhenFull) {
+    RingBuffer<uint64_t> ring(8);           // capacity 8 -> 7 usable slots
+    for (uint64_t i = 0; i < 20; ++i) ring.pushOverwrite(i);
+
+    EXPECT_EQ(ring.size(), 7u) << "ring must stay full, not stop accepting";
+
+    // The survivors must be the last seven pushed (13..19), in order.
+    std::vector<uint64_t> got;
+    uint64_t v = 0;
+    while (ring.pop(v)) got.push_back(v);
+
+    ASSERT_EQ(got.size(), 7u);
+    for (size_t i = 0; i < got.size(); ++i)
+        EXPECT_EQ(got[i], 13u + i) << "at index " << i
+            << " — oldest entries must be retired, newest kept";
 }

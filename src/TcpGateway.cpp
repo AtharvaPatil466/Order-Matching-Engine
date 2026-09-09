@@ -216,9 +216,22 @@ void TcpGateway::removeWriteFromEventLoop(int fd) {
 }
 
 void TcpGateway::wakeEventLoop() {
-    if (shutdownPipe_[1] >= 0) {
-        char c = 1;
-        (void)write(shutdownPipe_[1], &c, 1);
+    if (shutdownPipe_[1] < 0) return;
+
+    // A (void) cast does NOT silence glibc's warn_unused_result on write(),
+    // only Clang's — which is why this compiled on macOS and broke every Linux
+    // lane under -Werror. Consume the result and say what each outcome means.
+    const char c = 1;
+    ssize_t n;
+    do {
+        n = write(shutdownPipe_[1], &c, 1);
+    } while (n < 0 && errno == EINTR);
+
+    // EAGAIN: an unread wake byte is already queued, so the loop is going to
+    // wake regardless. Anything else means this wake was lost — not fatal, the
+    // loop also polls on a 10ms timeout, but it should not pass unrecorded.
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        obSink().log(obEvent("gateway_wake_failed").kv("errno", (long long)errno));
     }
 }
 

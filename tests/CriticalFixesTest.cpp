@@ -972,3 +972,46 @@ TEST(AuditFixes, TradeHistoryRingKeepsTheNewestEntriesWhenFull) {
         EXPECT_EQ(got[i], 13u + i) << "at index " << i
             << " — oldest entries must be retired, newest kept";
 }
+
+// ─── Book corruption: cancel-replacing a PARKED order into the live book ────
+//
+// cancelReplace rejected Stop/StopLimit/TrailingStop/Pegged but not MOC/LOC,
+// so repricing a parked on-close order ran the resting-order path:
+// removeFromBook (a silent no-op — it was never in the book) then addToBook,
+// which put a parked order into the LIVE book while it was still queued in
+// onCloseOrders_. releaseOnCloseOrders() then handed that same node to
+// uncross(), which addToBook'd it a SECOND time — one Order linked into two
+// price levels at once. The uncross freed it through one level and left the
+// other pointing at freed memory; the next match() over that level freed it
+// again (ObjectPool's double-free assert), and before that the level's total
+// disagreed with its own contents.
+TEST(AuditFixes, CancelReplaceOfParkedOnCloseOrderDoesNotEnterTheBook) {
+    OrderBook book(1); relaxBook(book);
+    book.setTradingState(TradingState::Continuous);
+
+    // Parked: submitted outside AuctionClose, so it waits in onCloseOrders_.
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, 1, Side::Buy, PX, 15, OrderType::MOC)));
+    const Order* moc = book.getOrder(1);
+    ASSERT_NE(moc, nullptr);
+    ASSERT_FALSE(moc->inBook) << "an MOC must be parked, not resting";
+
+    // Repricing a parked order must be refused, not silently rest it.
+    EXPECT_FALSE(book.cancelReplace(1, PX - 30'000, 17))
+        << "cancelReplace must refuse a parked order";
+
+    const Order* after = book.getOrder(1);
+    ASSERT_NE(after, nullptr) << "a refused replace leaves the order intact";
+    EXPECT_FALSE(after->inBook)
+        << "a parked on-close order must never be linked into the live book";
+
+    // The book must still be empty of it: nothing displayed at either price.
+    const auto snap = book.getSnapshot(MarketDataSnapshot::MAX_DEPTH);
+    EXPECT_EQ(snap.bidCount, 0u) << "a parked MOC must not appear as depth";
+
+    // And the release path must still work afterwards: one entry, one level.
+    book.setTradingState(TradingState::AuctionClose);
+    book.addOrder(2, 2, Side::Sell, PX, 15, OrderType::Limit);
+    book.uncross();   // must not abort on a double-linked node
+    SUCCEED();
+}

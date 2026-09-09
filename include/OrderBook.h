@@ -239,6 +239,16 @@ public:
     // tell those apart instead of answering "order not found" to a live order.
     bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason);
 
+private:
+    // Drop `order` from every special-order tracking list that can hold a raw
+    // pointer to it. MUST run before the order is returned to the pool: those
+    // lists outlive the order, and a stale entry is a dangling pointer that a
+    // later sweep will dereference and free again. Type-gated, so the common
+    // Limit case costs a couple of predictable branches and no list scan.
+    void untrackOrder(Order* order);
+
+public:
+
     // Cancel/Replace: full amendment (price change loses time priority)
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty);
 

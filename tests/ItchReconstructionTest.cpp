@@ -572,11 +572,24 @@ void test_AuctionUncrossReconstructs() {
 void test_RandomisedFlowStaysInSync() {
     TEST(RandomisedFlowStaysInSync) {
         Fixture f;
-        // Fixed seed: this must be reproducible when it fails.
-        std::mt19937 rng(20260813u);
-        std::uniform_int_distribution<int> actionDist(0, 16);
-        std::uniform_int_distribution<int> priceDist(995, 1005);
-        std::uniform_int_distribution<int> qtyDist(10, 120);
+        // Fixed seed: this must be reproducible when it fails. It was not.
+        // std::uniform_int_distribution is implementation-defined, so libc++
+        // and libstdc++ draw DIFFERENT sequences from the same seed — this
+        // soak explored one path on macOS and another on Linux, and a failure
+        // found on one could not be reproduced on the other. mt19937 itself is
+        // specified exactly, so a modulo draw off it is identical everywhere.
+        // The slight modulo bias is irrelevant to a soak; reproducibility is
+        // the entire point of a fixed seed.
+        //
+        // ITCH_SOAK_SEED overrides it, so the same binary can sweep seeds
+        // when hunting for a divergence.
+        const char* seedEnv = std::getenv("ITCH_SOAK_SEED");
+        const unsigned seed = seedEnv ? static_cast<unsigned>(std::strtoul(seedEnv, nullptr, 10))
+                                      : 20260813u;
+        std::mt19937 rng(seed);
+        auto pick = [&rng](int lo, int hi) {
+            return lo + static_cast<int>(rng() % static_cast<uint32_t>(hi - lo + 1));
+        };
 
         std::vector<OrderId> resting;
         OrderId nextId = 1000;
@@ -597,9 +610,9 @@ void test_RandomisedFlowStaysInSync() {
         int replaces = 0;
 
         for (int step = 0; step < 600; ++step) {
-            const int action = actionDist(rng);
-            const auto price = static_cast<Price>(priceDist(rng));
-            const auto qty   = static_cast<Quantity>(qtyDist(rng));
+            const int action = pick(0, 16);
+            const auto price = static_cast<Price>(pick(995, 1005));
+            const auto qty   = static_cast<Quantity>(pick(10, 120));
             const Side side  = (step % 2 == 0) ? Side::Buy : Side::Sell;
             const OrderId id = nextId++;
 
@@ -640,7 +653,7 @@ void test_RandomisedFlowStaysInSync() {
             } else if (action == 7) {
                 // Stop: invisible until the market trades through stopPrice,
                 // then rests as a limit (and shows up) or fills outright.
-                const auto stopPx = static_cast<Price>(priceDist(rng));
+                const auto stopPx = static_cast<Price>(pick(995, 1005));
                 f.engine.submitOrder(1, id, 4, side, price, qty, OrderType::Stop,
                                      /*stopPrice=*/stopPx);
                 resting.push_back(id);
@@ -648,7 +661,7 @@ void test_RandomisedFlowStaysInSync() {
             } else if (action == 8) {
                 // StopLimit: triggers to a limit at stopLimitPrice, which may
                 // differ from the trigger level.
-                const auto stopPx = static_cast<Price>(priceDist(rng));
+                const auto stopPx = static_cast<Price>(pick(995, 1005));
                 f.engine.submitOrder(1, id, 5, side, price, qty, OrderType::StopLimit,
                                      /*stopPrice=*/stopPx, /*displayQty=*/0,
                                      TimeInForce::GTC, /*expiryTime=*/0,
@@ -670,7 +683,7 @@ void test_RandomisedFlowStaysInSync() {
             } else if (action == 14) {
                 // TrailingStop: parked, and mutated on every trade.
                 f.engine.submitOrder(1, id, 7, side, price, qty, OrderType::TrailingStop,
-                                     /*stopPrice=*/static_cast<Price>(priceDist(rng)),
+                                     /*stopPrice=*/static_cast<Price>(pick(995, 1005)),
                                      /*displayQty=*/0, TimeInForce::GTC,
                                      /*expiryTime=*/0, /*stopLimitPrice=*/0,
                                      PegType::None, /*pegOffset=*/0,

@@ -885,6 +885,7 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
     notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP,
                       victim->initialQty - victim->remainingQty, 0);
     stpNoteRemoved(victim);
+    untrackOrder(victim);
     lvl->remove(victim);
     orderLookup_.erase(victim->id);
     orderPool_.deallocate(victim);
@@ -1193,6 +1194,7 @@ void OrderBook::match(Order* incoming) {
             bookOrder->status = OrderStatus::Filled;
             notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->initialQty, 0, bestPrice);
             stpNoteRemoved(bookOrder);
+            untrackOrder(bookOrder);
             level->remove(bookOrder);
             // P1-4 DEFER erase: the node is already unlinked from its level and
             // returned to the pool below, and matching never consults
@@ -1552,6 +1554,42 @@ void OrderBook::setTradingState(TradingState s) {
     }
 }
 
+// Drop `order` from every tracking list that holds a raw pointer to it.
+//
+// These lists outlive the orders they point at, so an entry left behind after
+// the order returns to the pool is a dangling pointer — the next sweep over
+// that list dereferences freed memory and frees it a second time. Cancel has
+// always done this; the fill path did not, which is the bug this exists to
+// stop from recurring: any site that returns an order to the pool calls this
+// first, whether the order died by cancel, fill, expiry or uncross.
+//
+// Type-gated on purpose. erase_value is an O(n) scan of up to 16384 entries,
+// which must not run on the matching hot path for the plain Limit orders that
+// are never in any of these lists.
+void OrderBook::untrackOrder(Order* order) {
+    if (!order) return;
+    switch (order->type) {
+        case OrderType::Stop:
+        case OrderType::StopLimit:
+        case OrderType::MIT:
+            stopOrders_.erase_value(order);
+            break;
+        case OrderType::TrailingStop:
+            trailingStopOrders_.erase_value(order);
+            break;
+        case OrderType::Pegged:
+            peggedOrders_.erase_value(order);
+            break;
+        case OrderType::MOC:
+        case OrderType::LOC:
+            onCloseOrders_.erase_value(order);
+            locActiveIds_.erase_value(order->id);
+            break;
+        default:
+            break;
+    }
+}
+
 void OrderBook::cancelOrderImpl(OrderId orderId) {
     auto* orderPtr = orderLookup_.find(orderId);
     if (!orderPtr) [[unlikely]] return;
@@ -1563,18 +1601,7 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
     // participant that quotes and pulls normally reads as an OTR abuser.
     // Submissions are counted once, at admission (recordOrderSubmit).
 
-    // Remove from special tracking lists (FixedVector::erase_value — O(n) swap-erase)
-    if (order->type == OrderType::Stop || order->type == OrderType::StopLimit
-        || order->type == OrderType::MIT) {
-        stopOrders_.erase_value(order);
-    } else if (order->type == OrderType::TrailingStop) {
-        trailingStopOrders_.erase_value(order);
-    } else if (order->type == OrderType::Pegged) {
-        peggedOrders_.erase_value(order);
-    } else if (order->type == OrderType::MOC || order->type == OrderType::LOC) {
-        onCloseOrders_.erase_value(order);
-        locActiveIds_.erase_value(order->id);
-    }
+    untrackOrder(order);
 
     // Capture before removeFromBook clears the flag. A parked order was never
     // displayed at this price, so cancelling it changes no visible level and
@@ -1663,6 +1690,26 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
         order->type == OrderType::StopLimit ||
         order->type == OrderType::TrailingStop ||
         order->type == OrderType::Pegged) [[unlikely]] {
+        return false;
+    }
+
+    // A parked order is not a resting order. MOC, LOC-before-release and a
+    // market order held for an auction all live in their own tracking list
+    // with inBook == false, waiting to be released into the book later.
+    // Repricing one used to run the resting-order path below — removeFromBook
+    // (a silent no-op, it was never in the book) and then addToBook — which
+    // put a parked order into the LIVE book while it was still queued for
+    // release. releaseOnCloseOrders() then handed that same node to uncross(),
+    // which addToBook'd it a second time: one node linked into two price
+    // levels at once. The uncross freed it via one level and left the other
+    // pointing at freed memory, so the next match() over that level freed it
+    // again — a double free, and before that a book whose level totals
+    // disagreed with their own contents.
+    //
+    // Gate on the invariant rather than extending the type list above: that
+    // list has already drifted once (it never covered MOC/LOC), and inBook is
+    // the property that actually decides whether the code below is valid.
+    if (!order->inBook) [[unlikely]] {
         return false;
     }
 
@@ -2248,6 +2295,13 @@ void OrderBook::cancelAuctionMarketOrders() {
     for (Order* m : auctionMarketOrders_) {
         auto* p = orderLookup_.find(m->id);
         if (!p || *p != m) continue;
+        // removeFromBook before freeing, exactly as uncross()'s own cancel
+        // pass does. A parked market order is normally not in the book, but
+        // "normally" is what the double free above relied on: if anything
+        // ever rests one, freeing it here would leave its level pointing at
+        // freed memory. Free nothing that is still linked.
+        removeFromBook(m);
+        untrackOrder(m);
         notifyOrderUpdate(m->id, OrderStatus::Cancelled, 0, 0);
         orderLookup_.erase(m->id);
         orderPool_.deallocate(m);

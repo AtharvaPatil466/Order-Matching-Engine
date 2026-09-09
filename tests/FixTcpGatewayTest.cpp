@@ -240,7 +240,20 @@ int main() {
     // nothing in the protocol to detect it. The gateway must instead stop
     // writing and drop the session; FIX recovers that by seqnum resend.
     {
-        int fd = connectTo(port, /*rcvBuf=*/2048);
+        // Its own gateway, with a deliberately small socket send buffer. How
+        // many bytes it takes to back up a socket is a kernel tuning
+        // parameter, not a property of the gateway: macOS backs up after a
+        // few hundred KB, Linux auto-tunes into the megabytes, and under
+        // sanitizers the difference is the whole 60s test budget. Pinning
+        // both ends makes the stall reachable in well under a second
+        // everywhere. Production keeps the OS default (the knob defaults off).
+        FixTcpGateway slowGw(engine, /*maxFrameSize=*/64 * 1024,
+                             /*sendBufferBytes=*/4096);
+        assert(slowGw.start(0));
+        const uint16_t slowPort = slowGw.port();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        int fd = connectTo(slowPort, /*rcvBuf=*/2048);
         assert(fd >= 0);
 
         auto logon = makeLogon(/*seqNum=*/1);
@@ -255,18 +268,33 @@ int main() {
         // Pump orders from a second thread and never read the replies here.
         // A thread because our own send() will block once the gateway stops
         // draining input to wait on its stalled write.
+        //
+        // No fixed order count and no fixed sleep: how much data it takes to
+        // fill the pipe is a property of the host, not of the code under test.
+        // Linux auto-tunes the send buffer into the megabytes, so a cap that
+        // stalls macOS sails straight through and the scenario proves nothing.
+        // Pump until the pipe actually backs up, and wait on a real signal.
         std::atomic<bool> stopPump{false};
+        std::atomic<bool> pumpEnded{false};
         std::thread pump([&] {
-            for (uint64_t seq = 2; seq < 20000 && !stopPump.load(); ++seq) {
+            for (uint64_t seq = 2; seq < 200'000 && !stopPump.load(); ++seq) {
                 auto f = makeNewOrder(static_cast<OrderId>(2000 + seq), kSym,
                                       /*qty=*/1, /*price=*/1010, seq);
-                if (!sendAll(fd, f.data(), f.size())) return;
+                if (!sendAll(fd, f.data(), f.size())) break;
             }
+            pumpEnded.store(true);
         });
 
-        // Read nothing for long enough that the gateway's send buffer fills
-        // and its bounded POLLOUT drain expires.
-        std::this_thread::sleep_for(std::chrono::milliseconds(750));
+        // Read nothing while we wait. The pump ends when the gateway hangs up
+        // (our send fails) — that is the outcome under test. If it instead
+        // blocks because the gateway is stalled mid-write, the deadline below
+        // releases us and the drain unblocks it.
+        const auto stallDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!pumpEnded.load() &&
+               std::chrono::steady_clock::now() < stallDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
 
         // Now drain to EOF and inspect the shape of what actually arrived.
         std::string stream;
@@ -286,8 +314,15 @@ int main() {
             if (errno == ECONNRESET) { hungUp = true; }
             break;
         }
+        // Unblock the pump before joining. If the gateway did NOT hang up (the
+        // bug this scenario exists to catch), our sender is still parked in a
+        // blocking send() on a socket nobody is draining, and join() would
+        // hang until ctest's timeout kills the whole binary. shutdown() makes
+        // that case fail on the assertion below instead, which says why.
         stopPump.store(true);
+        ::shutdown(fd, SHUT_RDWR);
         pump.join();
+        slowGw.stop();
 
         // The gateway must have hung up. Without that this scenario proves
         // nothing, so fail loudly rather than pass vacuously.

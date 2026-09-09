@@ -58,8 +58,16 @@ namespace OrderMatcher {
 
 class FixTcpGateway {
 public:
-    explicit FixTcpGateway(MatchingEngine& engine, size_t maxFrameSize = 64 * 1024)
-        : engine_(engine), maxFrameSize_(maxFrameSize) {}
+    // sendBufferBytes: SO_SNDBUF for accepted connections. 0 (the default)
+    // leaves the OS default alone, so production behaviour is unchanged. It
+    // exists so a test can make "this client stopped reading" reachable in
+    // bounded time: otherwise saturating the socket means pushing however many
+    // megabytes the host happens to auto-tune to, which is a property of the
+    // kernel rather than of the code under test.
+    explicit FixTcpGateway(MatchingEngine& engine, size_t maxFrameSize = 64 * 1024,
+                           int sendBufferBytes = 0)
+        : engine_(engine), maxFrameSize_(maxFrameSize),
+          sendBufferBytes_(sendBufferBytes) {}
 
     ~FixTcpGateway() { stop(); }
 
@@ -196,6 +204,10 @@ private:
             }
             int flag = 1;
             ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+            if (sendBufferBytes_ > 0) {
+                ::setsockopt(cfd, SOL_SOCKET, SO_SNDBUF, &sendBufferBytes_,
+                             sizeof(sendBufferBytes_));
+            }
 #ifdef SO_NOSIGPIPE
             ::setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &flag, sizeof(flag));
 #endif
@@ -306,6 +318,7 @@ private:
 
     MatchingEngine&                              engine_;
     size_t                                       maxFrameSize_;
+    int                                          sendBufferBytes_{0};
     int                                          listenFd_{-1};
     int                                          evFd_{-1};
     int                                          wake_[2]{-1, -1};

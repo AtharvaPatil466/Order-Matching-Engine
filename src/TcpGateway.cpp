@@ -172,8 +172,18 @@ void TcpGateway::addToEventLoop(int fd) {
     EV_SET(&ev, fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
     kevent(evFd_, &ev, 1, nullptr, 0, nullptr);
 #elif defined(USE_EPOLL)
+    // Level-triggered, NOT EPOLLET. Edge-triggered epoll only re-notifies when
+    // the socket transitions to readable, so it is only safe if every wake-up
+    // drains to a genuine EAGAIN. handleClientData() does not: it also stops
+    // when the framing buffer is full, and the fault injector's spurious
+    // EAGAIN stops it deliberately — with a comment saying the data will be
+    // picked up on "the next epoll wake-up", which is a level-triggered
+    // assumption. Under EPOLLET there was no next wake-up: the level never
+    // changed, so bytes already in the socket sat there and the client waited
+    // forever for a response. kqueue is level-triggered by default, which is
+    // why this only ever failed on Linux.
     struct epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLET;
+    ev.events = EPOLLIN;
     ev.data.fd = fd;
     epoll_ctl(evFd_, EPOLL_CTL_ADD, fd, &ev);
 #endif
@@ -195,8 +205,12 @@ void TcpGateway::addWriteToEventLoop(int fd) {
     EV_SET(&ev, fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, nullptr);
     kevent(evFd_, &ev, 1, nullptr, 0, nullptr);
 #elif defined(USE_EPOLL)
+    // Level-triggered here too (see addToEventLoop). EPOLLOUT stays armed only
+    // while writeBuf has bytes — flushWriteBuffer() calls
+    // removeWriteFromEventLoop() the moment it drains — so level-triggered
+    // cannot spin on a writable idle socket.
     struct epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    ev.events = EPOLLIN | EPOLLOUT;
     ev.data.fd = fd;
     epoll_ctl(evFd_, EPOLL_CTL_MOD, fd, &ev);
 #endif
@@ -209,7 +223,7 @@ void TcpGateway::removeWriteFromEventLoop(int fd) {
     kevent(evFd_, &ev, 1, nullptr, 0, nullptr);
 #elif defined(USE_EPOLL)
     struct epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLET;
+    ev.events = EPOLLIN;
     ev.data.fd = fd;
     epoll_ctl(evFd_, EPOLL_CTL_MOD, fd, &ev);
 #endif

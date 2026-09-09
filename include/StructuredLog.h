@@ -24,6 +24,7 @@
 //     before the engine starts. (Adding a shared_mutex around setSink
 //     is trivial if needed; left out to keep the no-op path cheap.)
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <string_view>

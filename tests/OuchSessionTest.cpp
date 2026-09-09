@@ -280,7 +280,13 @@ void test_SessionRejectsUnregisteredSymbol() {
         CHECK(sent.size() == OUCH_SIZE_ORDER_REJECTED);
         const auto* resp = reinterpret_cast<const uint8_t*>(sent.data());
         CHECK(resp[0] == OUCH_MT_ORDER_REJECTED);
-        CHECK(readU64BE(resp + 9) >= 0);  // token slot is valid ascii
+        // The token slot is 14 ASCII-decimal bytes, so readU64BE(..) >= 0 was
+        // vacuously true on an unsigned value — it asserted nothing while
+        // claiming to validate the field. parseAsciiDecimal checks the
+        // encoding AND yields the value, so assert the echoed token too.
+        uint64_t echoedToken = 0;
+        CHECK(parseAsciiDecimal(resp + 9, 14, echoedToken));
+        CHECK(echoedToken == 2002ULL);
         CHECK(resp[23] == OUCH_REJECT_INVALID_STOCK);  // 'S'
     } END
 }
@@ -593,7 +599,11 @@ void test_SessionEmitsExecutedOnPartialFill() {
         const auto* resp = reinterpret_cast<const uint8_t*>(sent.data());
         CHECK(resp[0] == OUCH_MT_ORDER_EXECUTED);
         CHECK(readU64BE(resp + 1) == 777ULL);          // injected clock
-        CHECK(readU64BE(resp + 9) >= 0);               // token slot is ascii
+        // As above: unsigned >= 0 asserted nothing. This 'E' is for the
+        // resting buy, so the token slot must echo that order's token.
+        uint64_t echoedToken = 0;
+        CHECK(parseAsciiDecimal(resp + 9, 14, echoedToken));
+        CHECK(echoedToken == 1001ULL);
         CHECK(readU32BE(resp + 23) == 30);             // executed shares
         CHECK(readU32BE(resp + 27) == 1000);           // execution price
     } END

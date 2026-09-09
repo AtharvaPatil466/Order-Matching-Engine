@@ -2324,10 +2324,13 @@ TEST_F(ProRataTest, BasicProportionalAllocation) {
     const Order* o2 = book.getOrder(2);
     const Order* o3 = book.getOrder(3);
 
-    // Each should have 50% remaining (approximately due to rounding)
-    if (o1) EXPECT_LE(o1->remainingQty, 100);
-    if (o2) EXPECT_LE(o2->remainingQty, 200);
-    if (o3) EXPECT_LE(o3->remainingQty, 300);
+    // Each should have 50% remaining (approximately due to rounding).
+    // Braces are required, not style: EXPECT_LE expands to an if/else, so an
+    // unbraced `if (o1) EXPECT_LE(...)` is a dangling else that GCC rejects
+    // under -Werror.
+    if (o1) { EXPECT_LE(o1->remainingQty, 100); }
+    if (o2) { EXPECT_LE(o2->remainingQty, 200); }
+    if (o3) { EXPECT_LE(o3->remainingQty, 300); }
 }
 
 TEST_F(ProRataTest, SingleOrderAtLevel) {

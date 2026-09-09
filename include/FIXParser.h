@@ -125,12 +125,24 @@ inline std::string nowFixUTCTime() {
     std::time_t t = system_clock::to_time_t(secs);
     std::tm tm{};
     gmtime_r(&t, &tm);
+    // Reduce each field to the width its FIX representation actually has.
+    // Without this GCC cannot bound the %0Nd conversions from a struct tm
+    // whose members are plain ints — it must assume e.g. tm_year could print
+    // 11 characters — and -Wformat-truncation fails the build under -Werror.
+    // The masks are also the correct framing behaviour: these are fixed-width
+    // FIX fields, so an out-of-range clock must not widen the message.
+    const int  year   = (tm.tm_year + 1900) % 10000;
+    const int  month  = (tm.tm_mon + 1) % 100;
+    const int  day    = tm.tm_mday % 100;
+    const int  hour   = tm.tm_hour % 100;
+    const int  minute = tm.tm_min % 100;
+    const int  second = tm.tm_sec % 100;
+    const long milli  = static_cast<long>(millis) % 1000;
+
     char buf[32];
     std::snprintf(buf, sizeof(buf),
-                  "%04d%02d%02d-%02d:%02d:%02d.%03lld",
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec,
-                  static_cast<long long>(millis));
+                  "%04d%02d%02d-%02d:%02d:%02d.%03ld",
+                  year, month, day, hour, minute, second, milli);
     return std::string(buf);
 }
 

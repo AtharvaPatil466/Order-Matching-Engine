@@ -45,6 +45,10 @@ namespace FixTag {
     constexpr int NewSeqNo      = 36;
     constexpr int PossDupFlag   = 43;
     constexpr int SenderCompID  = 49;
+    // Credentials on Logon (35=A). H7: SenderCompID alone is a claim, not a
+    // proof — anyone can put any value in tag 49.
+    constexpr int Username      = 553;
+    constexpr int Password      = 554;
     constexpr int TargetCompID  = 56;
     constexpr int ClOrdID       = 11;   // Client Order ID
     constexpr int OrigClOrdID   = 41;   // Original Client Order ID (for cancel/replace)

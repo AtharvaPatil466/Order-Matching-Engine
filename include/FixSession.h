@@ -19,6 +19,7 @@
 // undefined functions, never framed properly, and had no consumers.
 
 #include "FIXParser.h"
+#include "ParticipantAuth.h"
 #include "FixFramer.h"
 #include "MatchingEngine.h"
 
@@ -116,6 +117,13 @@ public:
     uint64_t ordersRejected()  const { return ordersRejected_; }
     uint64_t sessionMessagesHandled() const { return sessionMessagesHandled_; }
     uint64_t expectedInboundSeqNum() const { return expectedInboundSeqNum_; }
+    // H7: bind this session's identity to a credential. Optional — with no
+    // authenticator, or one holding no credentials, the session behaves
+    // exactly as before (SenderCompID trusted as-is).
+    void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
+    const AuthorizedIdentity& identity() const { return identity_; }
+    uint64_t ordersRejectedUnauthorized() const { return unauthorizedRejects_; }
+
     bool loggedOn() const { return loggedOn_; }
     bool shouldDisconnect() const { return closeAfterSend_; }
 
@@ -239,6 +247,18 @@ private:
             return;
         }
 
+        // The identity check is per MESSAGE, not just per session: one
+        // authenticated session may legitimately act for several participant
+        // ids, and nothing stops a client putting a different SenderCompID on
+        // each order. Authenticating once and then trusting tag 49 would leave
+        // exactly the hole this closes.
+        if (auth_ && auth_->enabled() && !identity_.permits(params.participantId)) {
+            ++unauthorizedRejects_;
+            ++ordersRejected_;
+            sendReject(params.orderId, "participant not authorized for this session");
+            return;
+        }
+
         SubmitResult r;
         switch (params.action) {
         case FixOrderParams::Action::NewOrder:
@@ -337,6 +357,21 @@ private:
         ++sessionMessagesHandled_;
 
         if (msgType == "A") {
+            // Authenticate BEFORE accepting the logon. SenderCompID is a
+            // claim; Username/Password is what backs it. A failed logon is
+            // answered with Logout, not an accepted session — otherwise an
+            // unauthenticated peer sits in a logged-on state and its orders
+            // are only stopped later, one at a time.
+            if (auth_ && auth_->enabled()) {
+                identity_ = auth_->authenticate(msg.getString(FixTag::Username),
+                                                msg.getString(FixTag::Password));
+                if (!identity_.valid()) {
+                    ++unauthorizedRejects_;
+                    sendAdmin("5", {{FixTag::Text, "authentication failed"}});
+                    loggedOn_ = false;
+                    return;
+                }
+            }
             loggedOn_ = true;
             auto hb = msg.getUint64(FixTag::HeartBtInt);
             if (hb > 0 && hb <= UINT32_MAX) {
@@ -473,6 +508,9 @@ private:
     uint64_t                         ordersRejected_{0};
     uint64_t                         sessionMessagesHandled_{0};
     bool                             loggedOn_{false};
+    const ParticipantAuth*           auth_{nullptr};
+    AuthorizedIdentity               identity_;
+    uint64_t                         unauthorizedRejects_{0};
     bool                             closeAfterSend_{false};
 };
 

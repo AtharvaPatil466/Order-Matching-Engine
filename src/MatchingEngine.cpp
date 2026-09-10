@@ -488,11 +488,22 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             continue;
         }
 
-        // Queue is empty. This is the only safe place to honour the backstop:
-        // checking it while work remained would cut the queue short and drop
-        // orders that were accepted, which the in-band Shutdown message
-        // deliberately never does.
-        if (workersShouldStop_.load(std::memory_order_acquire)) break;
+        // Backstop exit. A FAILED pop is not the same as an empty queue: this
+        // is an MPSC ring, so pop() also returns false while a producer has
+        // claimed a slot and not yet published it. Leaving on that alone drops
+        // work that was already counted as submitted, and waitForDrain() then
+        // waits forever for a message nobody will ever process — which is
+        // exactly the hang this backstop was added to prevent, reintroduced
+        // one layer down.
+        //
+        // So confirm against this thread's own counters: only leave once it
+        // has processed everything ever submitted to it. An in-flight producer
+        // leaves processed < submitted, and we keep spinning until it lands.
+        if (workersShouldStop_.load(std::memory_order_acquire) &&
+            threadStats_[threadIndex].processed.load(std::memory_order_acquire) >=
+            threadStats_[threadIndex].submitted.load(std::memory_order_acquire)) {
+            break;
+        }
 
         ++idleSpins;
         if (idleSpins < 128) {

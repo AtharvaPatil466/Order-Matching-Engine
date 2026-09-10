@@ -1,4 +1,5 @@
 #include "AdminServer.h"
+#include "ParticipantAuth.h"
 #include "LatencyTracker.h"
 #include "Metrics.h"
 #include "Journal.h"
@@ -43,14 +44,8 @@ T parseQueryUInt(std::string_view query, std::string_view key, T defaultVal = 0)
 // short-circuiting == leaks the position of the first mismatching byte
 // through response timing, which lets an attacker recover the token
 // byte-by-byte. Length is still leaked; that is standard and harmless.
-bool constantTimeEquals(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    unsigned char diff = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        diff |= static_cast<unsigned char>(a[i] ^ b[i]);
-    }
-    return diff == 0;
-}
+// Now shared: see constantTimeEquals in ParticipantAuth.h, which the
+// order-entry auth path needs too. One implementation, one set of eyes on it.
 
 }  // namespace
 

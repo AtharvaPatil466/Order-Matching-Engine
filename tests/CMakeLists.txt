@@ -70,6 +70,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
     target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
 endif()
 
+# Participant authentication (H7). No GTest dependency.
+add_executable(ParticipantAuthTest ParticipantAuthTest.cpp)
+target_link_libraries(ParticipantAuthTest PRIVATE OrderMatcher)
+enable_assertions(ParticipantAuthTest)
+add_test(NAME ParticipantAuthTest COMMAND ParticipantAuthTest)
+set_tests_properties(ParticipantAuthTest PROPERTIES TIMEOUT 60 LABELS "project\;security")
+
 # Durable client acknowledgements (C4). No GTest dependency.
 add_executable(DurableAckTest DurableAckTest.cpp)
 target_link_libraries(DurableAckTest PRIVATE OrderMatcher)

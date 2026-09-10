@@ -1,4 +1,5 @@
 #include "TcpGateway.h"
+#include "ParticipantAuth.h"
 #include "MarketDataPublisher.h"
 #include <iostream>
 #include <csignal>
@@ -433,8 +434,37 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // H7: participant credentials. A separate file, not engine.conf —
+        // same reasoning as the admin token: the main config travels into
+        // tickets and chat logs, and secrets should not travel with it.
+        //
+        // Absent, the gateway behaves exactly as before: identities are taken
+        // on trust. Present, it refuses every request, because this protocol
+        // has no login frame and cannot verify who is asking. That refusal is
+        // the point — an operator who configures credentials has decided the
+        // port must be attributable, and silently serving it anyway would undo
+        // that decision.
+        ParticipantAuth participantAuth;
+        const char* credPathEnv = std::getenv("OB_PARTICIPANT_CREDENTIALS");
+        if (credPathEnv && *credPathEnv) {
+            if (ParticipantAuth::fileIsOverlyPermissive(credPathEnv)) {
+                std::cerr << "[Auth] WARNING: " << credPathEnv
+                          << " is readable by group or other. Secrets in a "
+                             "world-readable file are not secrets; chmod 600 it.\n";
+            }
+            std::string err;
+            const int n = participantAuth.loadFromFile(credPathEnv, &err);
+            if (n < 0) {
+                std::cerr << "[Auth] FATAL: " << err << "\n";
+                return 1;
+            }
+            std::cout << "[Auth] Loaded " << n << " participant credential(s) from "
+                      << credPathEnv << "\n";
+        }
+
         // Start TCP gateway
         TcpGateway gateway(engine);
+        gateway.setParticipantAuth(participantAuth.enabled() ? &participantAuth : nullptr);
         if (!gateway.start(port)) {
             std::cerr << "Failed to start gateway on port " << port << std::endl;
             return 1;

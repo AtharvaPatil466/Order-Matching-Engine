@@ -57,11 +57,14 @@
 #include "Types.h"
 
 #include <algorithm>
+#include <fstream>
 #include <cstddef>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#include <sys/stat.h>
 
 namespace OrderMatcher {
 
@@ -113,6 +116,98 @@ public:
 
     void clear() { credentials_.clear(); }
 
+    // Load credentials from a file, one per line:
+    //
+    //     # comment
+    //     firm-a:s3cret:100,101
+    //     firm-b:0th3r:200
+    //
+    // Deliberately a SEPARATE file rather than a key in engine.conf, following
+    // the precedent already set by the admin token (--admin-token /
+    // OB_ADMIN_TOKEN, never config): the main config gets copied into tickets
+    // and pasted into chat, and secrets should not travel with it. A dedicated
+    // file can also carry restrictive permissions, which is checked below.
+    //
+    // Returns the number of credentials loaded, or -1 on a file that cannot be
+    // read. Any malformed line is a hard failure with a description in `error`,
+    // not a skip: a typo that silently drops a firm's credential would show up
+    // as that firm being unable to trade, at the worst possible moment.
+    int loadFromFile(const std::string& path, std::string* error = nullptr) {
+        std::ifstream in(path);
+        if (!in) {
+            if (error) *error = "cannot open credentials file: " + path;
+            return -1;
+        }
+
+        std::unordered_map<std::string, Credential> loaded;
+        std::string line;
+        int lineNo = 0;
+        while (std::getline(in, line)) {
+            ++lineNo;
+            const std::string t = trim(line);
+            if (t.empty() || t[0] == '#') continue;
+
+            const size_t c1 = t.find(':');
+            const size_t c2 = (c1 == std::string::npos) ? std::string::npos
+                                                        : t.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) {
+                if (error) *error = "line " + std::to_string(lineNo) +
+                                    ": expected user:secret:ids";
+                return -1;
+            }
+
+            const std::string user   = trim(t.substr(0, c1));
+            const std::string secret = t.substr(c1 + 1, c2 - c1 - 1);
+            const std::string idList = t.substr(c2 + 1);
+            if (user.empty() || secret.empty()) {
+                if (error) *error = "line " + std::to_string(lineNo) +
+                                    ": empty user or secret";
+                return -1;
+            }
+
+            std::vector<ParticipantId> ids;
+            size_t pos = 0;
+            while (pos <= idList.size()) {
+                const size_t comma = idList.find(',', pos);
+                const std::string tok =
+                    trim(idList.substr(pos, comma == std::string::npos
+                                                ? std::string::npos
+                                                : comma - pos));
+                if (!tok.empty()) {
+                    if (tok.find_first_not_of("0123456789") != std::string::npos) {
+                        if (error) *error = "line " + std::to_string(lineNo) +
+                                            ": non-numeric participant id '" + tok + "'";
+                        return -1;
+                    }
+                    ids.push_back(static_cast<ParticipantId>(std::stoull(tok)));
+                }
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+            if (ids.empty()) {
+                // Authenticating but authorising nothing is almost certainly a
+                // typo, and it fails closed in a way that looks like an engine
+                // fault rather than a config one. Say so now.
+                if (error) *error = "line " + std::to_string(lineNo) +
+                                    ": credential '" + user + "' lists no participant ids";
+                return -1;
+            }
+            loaded[user] = Credential{secret, std::move(ids)};
+        }
+
+        credentials_ = std::move(loaded);
+        return static_cast<int>(credentials_.size());
+    }
+
+    // True if the file is readable by group or other. Secrets in a
+    // world-readable file are not secrets; the caller decides whether that is
+    // fatal or a warning.
+    static bool fileIsOverlyPermissive(const std::string& path) {
+        struct stat st{};
+        if (::stat(path.c_str(), &st) != 0) return false;
+        return (st.st_mode & (S_IRGRP | S_IROTH)) != 0;
+    }
+
     // False when nothing is registered. Gateways skip enforcement entirely in
     // that case, which is the pre-H7 behaviour.
     bool   enabled()          const { return !credentials_.empty(); }
@@ -140,6 +235,13 @@ public:
     }
 
 private:
+    static std::string trim(const std::string& v) {
+        const size_t b = v.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return "";
+        const size_t e = v.find_last_not_of(" \t\r\n");
+        return v.substr(b, e - b + 1);
+    }
+
     struct Credential {
         std::string                secret;
         std::vector<ParticipantId> allowed;

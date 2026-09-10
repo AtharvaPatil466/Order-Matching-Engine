@@ -18,6 +18,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -171,6 +172,76 @@ void test_EmptyAllowListAuthorizesNothing() {
     PASS();
 }
 
+// ─── 10: loading credentials from a file ────────────────────────────────────
+void test_LoadsCredentialsFromFile() {
+    TEST(LoadsCredentialsFromFile);
+    const std::string path = "/tmp/ob_creds_ok.txt";
+    {
+        std::ofstream out(path);
+        out << "# desks for firm-a\n"
+            << "firm-a:s3cret:100,101\n"
+            << "\n"
+            << "firm-b:0th3r:200\n";
+    }
+
+    ParticipantAuth auth;
+    std::string err;
+    assert(auth.loadFromFile(path, &err) == 2 && err.empty());
+
+    auto a = auth.authenticate("firm-a", "s3cret");
+    assert(a.valid() && a.permits(100) && a.permits(101) && !a.permits(200));
+    auto b = auth.authenticate("firm-b", "0th3r");
+    assert(b.valid() && b.permits(200) && !b.permits(100));
+
+    std::remove(path.c_str());
+    PASS();
+}
+
+// ─── 11: a malformed line fails loudly, it does not skip ────────────────────
+//
+// Skipping would drop a firm's credential silently, and the symptom — that
+// firm unable to trade — would surface at the worst possible moment and look
+// like an engine fault rather than a typo.
+void test_MalformedCredentialLineIsFatal() {
+    TEST(MalformedCredentialLineIsFatal);
+    struct Case { const char* body; const char* what; };
+    const Case cases[] = {
+        {"firm-a:s3cret\n",           "missing id list"},
+        {"firm-a:s3cret:1,abc\n",     "non-numeric id"},
+        {":s3cret:100\n",             "empty user"},
+        {"firm-a::100\n",             "empty secret"},
+        {"firm-a:s3cret:\n",          "no ids at all"},
+    };
+
+    for (const auto& c : cases) {
+        const std::string path = "/tmp/ob_creds_bad.txt";
+        { std::ofstream out(path); out << c.body; }
+
+        ParticipantAuth auth;
+        std::string err;
+        const int n = auth.loadFromFile(path, &err);
+        assert(n == -1 && "malformed line must fail the load");
+        assert(!err.empty() && "and must say which line and why");
+        assert(!auth.enabled() && "a failed load must not half-apply");
+        std::remove(path.c_str());
+    }
+    PASS();
+}
+
+// ─── 12: a missing file is an error, not silently "no credentials" ──────────
+//
+// Treating an unreadable file as "auth disabled" would turn a typo in the path
+// into a silently unauthenticated venue.
+void test_MissingCredentialFileIsAnError() {
+    TEST(MissingCredentialFileIsAnError);
+    ParticipantAuth auth;
+    std::string err;
+    assert(auth.loadFromFile("/tmp/ob_creds_does_not_exist_12345", &err) == -1);
+    assert(!err.empty());
+    assert(!auth.enabled());
+    PASS();
+}
+
 }  // namespace
 
 int main() {
@@ -185,6 +256,9 @@ int main() {
     test_ConstantTimeEqualsBasics();
     test_SoupNotAuthorizedCodeExists();
     test_EmptyAllowListAuthorizesNothing();
+    test_LoadsCredentialsFromFile();
+    test_MalformedCredentialLineIsFatal();
+    test_MissingCredentialFileIsAnError();
 
     std::cout << "\n" << passed << " passed\n\n";
     return 0;

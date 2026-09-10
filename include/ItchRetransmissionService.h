@@ -28,6 +28,8 @@
 
 #include "MoldPacketJournal.h"
 #include "OuchProtocol.h"  // readU16BE / readU64BE
+#include "RateLimiter.h"
+#include "StructuredLog.h"
 #include "SoupBinTcpSession.h"
 
 #include <atomic>
@@ -65,6 +67,23 @@ constexpr size_t ITCH_RETRANSMIT_REQUEST_BYTES = 11;
 // request from the next uncovered sequence. Sized to comfortably cover
 // realistic multicast gaps while keeping any one request bounded.
 constexpr uint16_t ITCH_RETRANSMIT_MAX_REPLAY = 1024;
+
+// Concurrency and budget bounds.
+//
+// A re-request is ~11 bytes on the wire and can return up to
+// ITCH_RETRANSMIT_MAX_REPLAY sequenced messages. That per-request clamp bounds
+// ONE request; nothing bounded how many a subscriber could issue, or how many
+// subscribers could connect. The service spawns an OS thread per accepted
+// connection, so an unbounded accept loop is also an unbounded thread count —
+// and every thread object stayed in workerThreads_ until stop(), so even a
+// polite client reconnecting in a loop grew the vector without limit.
+//
+// These are deliberately generous: a genuine subscriber recovering a gap
+// issues a short burst of re-requests and stops. Anything sustained past this
+// is not gap recovery.
+constexpr size_t   ITCH_RETRANSMIT_MAX_CONNECTIONS  = 64;
+constexpr uint64_t ITCH_RETRANSMIT_REQS_PER_SEC     = 50;
+constexpr uint64_t ITCH_RETRANSMIT_REQ_BURST        = 200;
 
 // Synchronous helper: validate and parse a re-request payload from
 // the wire. Returns true on a well-formed request.
@@ -143,10 +162,13 @@ public:
             std::lock_guard<std::mutex> lock(connsMutex_);
             for (int fd : openFds_) ::shutdown(fd, SHUT_RDWR);
         }
-        for (auto& t : workerThreads_) {
-            if (t.joinable()) t.join();
+        {
+            std::lock_guard<std::mutex> lock(threadsMutex_);
+            for (auto& [t, done] : workerThreads_) {
+                if (t.joinable()) t.join();
+            }
+            workerThreads_.clear();
         }
-        workerThreads_.clear();
         openFds_.clear();
     }
 
@@ -154,6 +176,9 @@ public:
     bool     isRunning()              const { return running_.load(); }
     uint64_t requestsServed()         const { return requestsServed_.load(); }
     uint64_t messagesReplayedTotal()  const { return messagesReplayedTotal_.load(); }
+    uint64_t requestsThrottled()      const { return requestsThrottled_.load(); }
+    uint64_t connectionsRejected()    const { return connectionsRejected_.load(); }
+    size_t   activeConnections()      const { return activeConnections_.load(); }
 
 private:
     void acceptorLoop() {
@@ -169,12 +194,59 @@ private:
             }
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+            // Retire threads whose connection has ended. Without this the
+            // vector grew by one std::thread for every connection ever
+            // accepted — a client reconnecting in a loop exhausted memory even
+            // while holding only one connection open at a time.
+            reapFinishedConnections();
+
+            // Cap concurrency. Each connection owns an OS thread, so an
+            // unbounded accept loop is an unbounded thread count: a few
+            // thousand sockets is all it takes to exhaust the process. Refuse
+            // past the cap by closing immediately — a subscriber that cannot
+            // be served should find out now, not by being queued behind a
+            // flood.
+            if (activeConnections_.load(std::memory_order_relaxed) >=
+                ITCH_RETRANSMIT_MAX_CONNECTIONS) {
+                ++connectionsRejected_;
+                obSink().log(obEvent("itch_retransmit_connection_refused",
+                                     LogSeverity::Warn)
+                                 .kv("active", (long long)activeConnections_.load()));
+                ::close(fd);
+                continue;
+            }
+
             {
                 std::lock_guard<std::mutex> lock(connsMutex_);
                 openFds_.insert(fd);
             }
-            workerThreads_.emplace_back(
-                &ItchRetransmissionService::connectionLoop, this, fd);
+            activeConnections_.fetch_add(1, std::memory_order_relaxed);
+            auto done = std::make_shared<std::atomic<bool>>(false);
+            {
+                std::lock_guard<std::mutex> lock(threadsMutex_);
+                workerThreads_.emplace_back(
+                    std::thread([this, fd, done] {
+                        connectionLoop(fd);
+                        activeConnections_.fetch_sub(1, std::memory_order_relaxed);
+                        done->store(true, std::memory_order_release);
+                    }),
+                    done);
+            }
+        }
+    }
+
+    // Join and drop every connection thread that has finished. Called from the
+    // acceptor only, so it never blocks a live connection.
+    void reapFinishedConnections() {
+        std::lock_guard<std::mutex> lock(threadsMutex_);
+        for (auto it = workerThreads_.begin(); it != workerThreads_.end();) {
+            if (it->second->load(std::memory_order_acquire)) {
+                if (it->first.joinable()) it->first.join();
+                it = workerThreads_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -203,14 +275,29 @@ private:
         auto* journalPtr = &journal_;
         auto requestsCtr = &requestsServed_;
         auto messagesCtr = &messagesReplayedTotal_;
+        auto throttledCtr = &requestsThrottled_;
+        auto budget = std::make_shared<TokenBucket>(ITCH_RETRANSMIT_REQS_PER_SEC,
+                                                    ITCH_RETRANSMIT_REQ_BURST);
         std::weak_ptr<SoupBinTcpSession> soupWeak = soup;
 
         soup->setOnAppPayload(
-            [journalPtr, requestsCtr, messagesCtr, soupWeak]
+            [journalPtr, requestsCtr, messagesCtr, throttledCtr, budget, soupWeak]
             (const uint8_t* p, size_t n, bool /*sequenced*/) {
                 ItchRetransmitRequest req;
                 if (!parseRetransmitRequest(p, n, req)) return;
                 ++*requestsCtr;
+
+                // Per-connection budget. Without it the per-request clamp
+                // bounds a single reply but not the stream: a client could
+                // issue re-requests back to back and make the venue spend all
+                // its egress replaying the journal at one subscriber. Over
+                // budget, drop the request silently rather than replying —
+                // answering "you are going too fast" to a flood is itself a
+                // reply, and doubles the work the flood was trying to cause.
+                if (!budget->tryConsume(nowNs())) {
+                    ++*throttledCtr;
+                    return;
+                }
 
                 auto s = soupWeak.lock();
                 if (!s) return;
@@ -275,7 +362,14 @@ private:
     uint16_t                 boundPort_{0};
 
     std::thread              acceptorThread_;
-    std::vector<std::thread> workerThreads_;
+    // Thread plus a flag it sets on exit, so the acceptor can reap finished
+    // connections without blocking on live ones.
+    std::vector<std::pair<std::thread, std::shared_ptr<std::atomic<bool>>>>
+                             workerThreads_;
+    std::mutex               threadsMutex_;
+    std::atomic<uint64_t>    requestsThrottled_{0};
+    std::atomic<size_t>      activeConnections_{0};
+    std::atomic<uint64_t>    connectionsRejected_{0};
     std::mutex               connsMutex_;
     std::unordered_set<int>  openFds_;
 

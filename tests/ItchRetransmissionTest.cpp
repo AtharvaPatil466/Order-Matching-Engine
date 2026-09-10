@@ -292,6 +292,63 @@ std::vector<uint8_t> buildLoginSession(const std::string& u, const std::string& 
 
 }  // namespace
 
+// H13: the service spawns an OS thread per accepted connection, and nothing
+// bounded how many it would accept. A few thousand sockets exhausts the
+// process — no request even has to be sent. Past the cap a connection is
+// refused immediately rather than queued behind a flood.
+void test_ServiceRefusesConnectionsPastTheCap() {
+    TEST(ServiceRefusesConnectionsPastTheCap) {
+        MoldPacketJournal j;
+        ItchRetransmissionService svc(j, "REPLAY");
+        CHECK(svc.start(0));
+
+        // Hold open the cap, then a few more.
+        std::vector<int> fds;
+        const size_t over = ITCH_RETRANSMIT_MAX_CONNECTIONS + 8;
+        for (size_t i = 0; i < over; ++i) {
+            int fd = tcpConnect(svc.boundPort());
+            if (fd >= 0) fds.push_back(fd);
+            // The acceptor needs a moment to run; without it the test races
+            // the accept loop and measures nothing.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        CHECK(svc.activeConnections() <= ITCH_RETRANSMIT_MAX_CONNECTIONS);
+        CHECK(svc.connectionsRejected() > 0);
+
+        for (int fd : fds) ::close(fd);
+        svc.stop();
+    } END
+}
+
+// The thread vector used to grow by one entry per connection EVER accepted, so
+// a client reconnecting in a loop exhausted memory while never holding more
+// than one connection open. Finished threads are now reaped by the acceptor.
+void test_ServiceReapsFinishedConnectionThreads() {
+    TEST(ServiceReapsFinishedConnectionThreads) {
+        MoldPacketJournal j;
+        ItchRetransmissionService svc(j, "REPLAY");
+        CHECK(svc.start(0));
+
+        // Sequentially connect and disconnect far more times than the cap.
+        for (size_t i = 0; i < ITCH_RETRANSMIT_MAX_CONNECTIONS * 3; ++i) {
+            int fd = tcpConnect(svc.boundPort());
+            if (fd >= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                ::close(fd);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // Never more than the cap live at once, and nothing was refused —
+        // proof the finished ones were retired rather than accumulating.
+        CHECK(svc.activeConnections() <= ITCH_RETRANSMIT_MAX_CONNECTIONS);
+        svc.stop();
+    } END
+}
+
 void test_ServiceBindsAndAccepts() {
     TEST(ServiceBindsAndAccepts) {
         MoldPacketJournal j;
@@ -543,6 +600,8 @@ int main() {
     test_ServiceRejectsMismatchedSession();
     test_ServiceAcceptsMatchingSession();
     test_ServiceCapsOverSizedReplay();
+    test_ServiceRefusesConnectionsPastTheCap();
+    test_ServiceReapsFinishedConnectionThreads();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

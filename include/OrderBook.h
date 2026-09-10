@@ -479,6 +479,12 @@ public:
     // The slot cannot express the difference. Separating them needs an API
     // change — an explicit add/clear contract, or a MultiplexListener the
     // book owns — which is the fan-out work, not this.
+    // Current client-facing listener, so a decorator can interpose without the
+    // application losing what it registered.
+    EventListener* eventListener() const {
+        return listener_ == &nullListener() ? nullptr : listener_;
+    }
+
     void setEventListener(EventListener* listener) {
         listener_ = listener ? listener : &nullListener();
         refreshTradeListenerFlag();

@@ -70,6 +70,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
     target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
 endif()
 
+# Durable client acknowledgements (C4). No GTest dependency.
+add_executable(DurableAckTest DurableAckTest.cpp)
+target_link_libraries(DurableAckTest PRIVATE OrderMatcher)
+enable_assertions(DurableAckTest)
+add_test(NAME DurableAckTest COMMAND DurableAckTest)
+set_tests_properties(DurableAckTest PROPERTIES TIMEOUT 60 LABELS "project;durability")
+
 # Journal Crash Recovery Tests (no GTest dependency)
 add_executable(JournalCrashTest JournalCrashTest.cpp)
 target_link_libraries(JournalCrashTest PRIVATE OrderMatcher)

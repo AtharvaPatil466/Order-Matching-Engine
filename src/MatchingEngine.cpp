@@ -1287,6 +1287,9 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::SymbolNotFound);
     }
 
+    // Capture everything this order emits so none of it reaches the client
+    // before the journal entry behind it is durable. No-op when disabled.
+    durabilityGate_.beginOrder();
     AddOrderResult result = book->addOrder(orderId, participantId, side, price, qty,
                                            type, stopPrice, displayQty, tif, expiryTime,
                                            stopLimitPrice, pegType, pegOffset, trailAmount,
@@ -1301,13 +1304,27 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         reservePosition(participantId, side, o ? o->remainingQty : 0);
     }
     if (journal_ && std::holds_alternative<OrderId>(result)) {
+        uint64_t appendOrdinal = 0;
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
             journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
                                   expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
                                   pegOffset, trailAmount, minQty, hidden);
+            appendOrdinal = journal_->entriesAppended();
         }
+        // Hold this order's events until that entry is durable. Note the
+        // commit may already have happened inside logAddOrder (Immediate
+        // policy, or a full batch), in which case releaseThrough has already
+        // run for this ordinal and commitOrder releases immediately.
+        durabilityGate_.commitOrder(appendOrdinal);
+        if (durabilityGate_.enabled() && durableEntries_ >= appendOrdinal)
+            durabilityGate_.releaseThrough(durableEntries_);
         maybeTriggerAutoCheckpoint();
+    } else {
+        // No journal entry — a reject, or journalling is off. There is nothing
+        // for these events to wait on, and leaving the gate armed would spill
+        // them into the next order's group and hold them indefinitely.
+        durabilityGate_.abandonOrder();
     }
     return orderBookResultToSubmitResult(result, sequenceId);
 }
@@ -1370,6 +1387,49 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
         maybeTriggerAutoCheckpoint();
     }
     return acceptedAsync(sequenceId);
+}
+
+// C4: see the declaration in MatchingEngine.h for what this trades away.
+bool MatchingEngine::enableDurableClientAcks(bool on) {
+    if (!on) {
+        // Never strand events that are already held: they describe writes that
+        // did happen, and a client that never hears about them is worse off
+        // than one told slightly early.
+        durabilityGate_.releaseAllForShutdown();
+        durabilityGate_.setEnabled(false);
+        if (journal_) journal_->setOnDurable(nullptr);
+        books_.forEach([this](SymbolId, const std::unique_ptr<OrderBook>& book) {
+            if (book && book->eventListener() == &durabilityGate_)
+                book->setEventListener(durabilityGate_.downstream());
+        });
+        return true;
+    }
+
+    // The async path acks at enqueue, before matching has even run, so gating
+    // the event dispatch would leave that ack exactly as undurable as it is
+    // now while advertising a guarantee. Refuse rather than half-provide.
+    if (async_) return false;
+    if (!journal_) return false;
+
+    // Interpose on every book's client-facing listener. The gate forwards to
+    // whatever the application registered, so nothing is stolen — but a
+    // setEventListener() call AFTER this point replaces the gate and silently
+    // turns the guarantee off, which is why this is enabled once at startup.
+    books_.forEach([this](SymbolId, const std::unique_ptr<OrderBook>& book) {
+        if (!book) return;
+        if (book->eventListener() != &durabilityGate_) {
+            durabilityGate_.setDownstream(book->eventListener());
+            book->setEventListener(&durabilityGate_);
+        }
+    });
+
+    durableEntries_ = journal_->entriesAppended();
+    journal_->setOnDurable([this](size_t n) {
+        durableEntries_ += n;
+        durabilityGate_.releaseThrough(durableEntries_);
+    });
+    durabilityGate_.setEnabled(true);
+    return true;
 }
 
 bool MatchingEngine::modifyOrder(SymbolId symbolId, OrderId orderId, Quantity newQty) {

@@ -360,6 +360,20 @@ public:
     // of the callback. Copy the bytes if you need them longer.
     using OnCommitFn = std::function<void(const JournalEntry* entries, size_t count)>;
     void setOnCommit(OnCommitFn fn) { onCommit_ = std::move(fn); }
+    OnCommitFn onCommit() const { return onCommit_; }
+
+    // Second post-barrier hook, reserved for the owning MatchingEngine, fired
+    // under exactly the same durability guarantee as onCommit_. Separate slot
+    // rather than chaining onto onCommit_ because that one belongs to the
+    // application (main.cpp installs the replication ack there): whichever set
+    // it last would silently disable the other, and one of the two would be a
+    // durability guarantee that stopped holding without any sign.
+    // `n` is the number of entries that just became durable.
+    void setOnDurable(std::function<void(size_t)> fn) { onDurable_ = std::move(fn); }
+
+    // Total entries handed to appendEntry() since construction. Pair with the
+    // count reported to onCommit_ to learn which appends are durable.
+    uint64_t entriesAppended() const { return entriesAppended_; }
     size_t bytesOnDisk() const {
         if (!file_) {
             return 0;
@@ -398,6 +412,13 @@ protected:
             return;
         }
         batch_.push_back(entry);
+        // Append ordinal, distinct from sequenceNumber: sequences are assigned
+        // at COMMIT time so a crash leaks no phantom numbers, which makes them
+        // useless for identifying an entry that has only been appended. This
+        // counts appends, and entries commit strictly FIFO, so comparing it
+        // against the running total of committed entries tells a caller
+        // exactly which appends are now durable. See DurabilityGate.
+        ++entriesAppended_;
 
         if (syncPolicy_ == SyncPolicy::Immediate || batch_.size() >= batchSize_) {
             commitBatch();
@@ -537,6 +558,9 @@ protected:
         // ack-before-fsync hazard.
         if (durable && onCommit_ && actuallyWritten > 0) {
             onCommit_(batch_.data(), actuallyWritten);
+        }
+        if (durable && onDurable_ && actuallyWritten > 0) {
+            onDurable_(actuallyWritten);
         }
 
         // Pop the persisted prefix. Anything past it stays in batch_ and
@@ -778,6 +802,9 @@ protected:
         if (durable && onCommit_ && written > 0) {
             onCommit_(bufPtr, written);
         }
+        if (durable && onDurable_ && written > 0) {
+            onDurable_(written);
+        }
 
         {
             std::lock_guard<std::mutex> lk(ringMu_);
@@ -923,6 +950,7 @@ private:
     // by the writer thread on the sync path / setup — hence atomic. Read by the
     // background checkpoint thread via needsCheckpoint().
     std::atomic<size_t> persistedEntries_{0};
+    uint64_t            entriesAppended_{0};
     std::vector<JournalEntry> batch_;
     // CONTRACT: onCommit_ fires on the reaper thread — must be lock-free and
     // must not touch OrderBook state.
@@ -937,6 +965,7 @@ private:
     // Keep it to lock-free byte-shipping only — e.g. hand committed bytes to the
     // ReplicationCoordinator's transport; never reach back into engine state.
     OnCommitFn onCommit_;
+    std::function<void(size_t)> onDurable_;
     size_t maxSizeMb_{0};
 
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)

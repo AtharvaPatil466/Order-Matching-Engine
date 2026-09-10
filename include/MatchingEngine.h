@@ -1,6 +1,7 @@
 #pragma once
 
 #include "OrderBook.h"
+#include "DurabilityGate.h"
 #include "Journal.h"
 #include "ContingencyManager.h"
 #include "FeeEngine.h"
@@ -273,6 +274,29 @@ public:
     // hook that ships each committed batch to backups.
     Journal* getJournal() { return journal_.get(); }
 
+    // ── C4: durable client acknowledgements ─────────────────────────────────
+    //
+    // Off by default. While off, behaviour is exactly as before: fills reach
+    // the client from inside book->addOrder(), before the journal entry behind
+    // them has even been appended, let alone synced. That is bounded-loss —
+    // GroupCommit(64) can lose up to 63 orders whose fills clients already
+    // acted on — and it is fast.
+    //
+    // On, a client sees nothing about an order until the journal entry for it
+    // is on stable storage. That is what "acknowledged" ought to mean at a
+    // venue, and it costs the commit interval on every client-visible event.
+    //
+    // Returns false if the combination is not supported: the async submit path
+    // acknowledges at enqueue, before matching has happened at all, so gating
+    // the dispatch would leave that ack still undurable and claim a guarantee
+    // this does not provide. Refusing is better than half of one.
+    bool enableDurableClientAcks(bool on);
+    bool durableClientAcks() const { return durabilityGate_.enabled(); }
+
+    // Events held back waiting for a commit. Should sit near zero; a rising
+    // value means the journal has stalled and clients are hearing nothing.
+    size_t pendingDurableEvents() const { return durabilityGate_.pendingGroups(); }
+
     // Toggle replay mode across every registered book. Backups run
     // permanently in replay mode so that applying primary-shipped
     // journal entries does not re-emit market data or order updates
@@ -454,6 +478,8 @@ private:
     std::vector<std::vector<SymbolId>> symbolsByThread_;
     std::atomic<bool> running_{false};
     std::unique_ptr<Journal> journal_;
+    DurabilityGate           durabilityGate_;
+    uint64_t                 durableEntries_{0};  // running total reported durable
     std::atomic<bool> booksFrozen_{false};
     // P3-6: set by gracefulShutdown() to refuse NEW orders while draining.
     // Reset on start()/startAsync() so an engine can be restarted in-process.

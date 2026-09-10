@@ -1167,3 +1167,34 @@ TEST(AuditFixes, CheckpointSnapshotDoesNotSyncPerEntry) {
     }
     std::remove(path.c_str());
 }
+
+// ─── flush() must drain the batch, not commit once ──────────────────────────
+//
+// commitBatch() writes a PREFIX and deliberately keeps an unwritten suffix in
+// batch_ for the next commit when the write comes up short. flush() called it
+// once, so "flushed" did not mean "on disk" — yet readAll(), truncate(),
+// rewriteAtomically() and the destructor all assume it does.
+//
+// This was latent while the checkpoint snapshot used SyncPolicy::Immediate
+// with batch size 1: a single-entry batch either wrote or did not, so no
+// suffix could be stranded. Batching the snapshot (H6) made it reachable, and
+// CheckpointChaosTest caught it under an injected torn write — a rewrite
+// reported success while publishing a snapshot missing entries, which for a
+// checkpoint means resting orders lost permanently.
+TEST(AuditFixes, FlushDrainsEveryAppendedEntry) {
+    const std::string path = "/tmp/ob_flush_drain_test.journal";
+    std::remove(path.c_str());
+    {
+        Journal j(path, Journal::SyncPolicy::GroupCommit, 4096);
+        for (int i = 0; i < 100; ++i)
+            j.logAddOrder(OrderId(i + 1), 1, 1, Side::Buy, PX, 10, OrderType::Limit,
+                          TimeInForce::GTC, 0, 0, 0, 0, PegType::None, 0, 0, 0, false);
+
+        EXPECT_GT(j.pendingEntries(), 0u) << "batch should be holding entries";
+        j.flush();
+        EXPECT_EQ(j.pendingEntries(), 0u)
+            << "flush() must leave nothing undrained — callers treat it as "
+               "'the file is complete'";
+    }
+    std::remove(path.c_str());
+}

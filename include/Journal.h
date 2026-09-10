@@ -272,7 +272,24 @@ public:
         }
 
         if (!batch_.empty()) {
-            commitBatch();
+            // Drain, do not commit once. commitBatch() writes a PREFIX and
+            // deliberately keeps an unwritten suffix in batch_ for the next
+            // commit when the write comes up short (a real short write, or an
+            // injected torn write). One call therefore does not mean "the
+            // batch is on disk", and every caller of flush() — readAll(),
+            // truncate(), rewriteAtomically(), the destructor — assumes it
+            // does. With SyncPolicy::Immediate and batch size 1 the gap could
+            // not bite, because a single-entry batch either wrote or did not.
+            // With a real batch it silently loses the suffix.
+            //
+            // Stop on no progress rather than spinning: if a commit writes
+            // nothing at all, retrying cannot help, and the caller checks
+            // pendingEntries() to find out.
+            while (!batch_.empty()) {
+                const size_t before = batch_.size();
+                commitBatch();
+                if (batch_.size() >= before) break;
+            }
         } else {
             std::fflush(file_);
         }
@@ -303,6 +320,7 @@ public:
         flush();
 
         const std::string tmpPath = filePath_ + ".tmp";
+        bool snapshotComplete = false;
         {
             // GroupCommit, NOT Immediate-with-batch-1.
             //
@@ -331,6 +349,17 @@ public:
             temp.truncate();
             writer(temp);
             temp.flush();
+            // The snapshot is about to REPLACE the live journal, so publishing
+            // a partial one loses resting orders permanently — worse than not
+            // checkpointing at all. If flush() could not drain every entry
+            // (a short or torn write), abandon the rewrite and leave the
+            // original in place; the caller sees false and the pre-call state,
+            // which is exactly the atomicity contract.
+            snapshotComplete = (temp.pendingEntries() == 0);
+        }
+        if (!snapshotComplete) {
+            std::remove(tmpPath.c_str());
+            return false;
         }
 
         close();
@@ -402,6 +431,11 @@ public:
     // journal it did not construct will actually do per append.
     SyncPolicy syncPolicy() const { return syncPolicy_; }
     size_t     batchSize()  const { return batchSize_; }
+
+    // Entries appended but not yet on disk. Non-zero after flush() means the
+    // write could not make progress; the caller must not treat the file as
+    // complete.
+    size_t pendingEntries() const { return batch_.size(); }
     size_t bytesOnDisk() const {
         if (!file_) {
             return 0;

@@ -1128,3 +1128,42 @@ TEST(AuditFixes, UncrossRetiresAFullyFilledIcebergFromTheFeed) {
     std::string err;
     EXPECT_TRUE(book.validateIntegrity(&err)) << err;
 }
+
+// ─── H6: a checkpoint must not fsync once per snapshotted order ─────────────
+//
+// checkpointInternal holds journalMutex_ across rewriteAtomically, so every
+// worker's journal append is blocked for its entire duration. The snapshot was
+// written with SyncPolicy::Immediate and batch size 1 — one fsync per resting
+// order — which measured 53.8 SECONDS for a 20,000-order book. That is a
+// minute-long global stall, and the likeliest reason a worker was still
+// holding its ring when shutdown was requested.
+//
+// Per-entry durability bought nothing: atomicity comes from rename(2), a crash
+// before it discards the temp file wholesale, and the single flush() before
+// the rename is what actually makes the bytes durable.
+//
+// Asserting a wall-clock bound would be a throughput floor in a correctness
+// test — the thing that made SnapshotConsistencyTest flaky. Assert the
+// property instead: the snapshot journal must not be in per-entry sync mode.
+TEST(AuditFixes, CheckpointSnapshotDoesNotSyncPerEntry) {
+    const std::string path = "/tmp/ob_ckpt_policy_test.journal";
+    std::remove(path.c_str());
+    {
+        Journal j(path);
+        Journal::SyncPolicy observed = Journal::SyncPolicy::Immediate;
+        size_t observedBatch = 1;
+
+        ASSERT_TRUE(j.rewriteAtomically([&](Journal& snapshot) {
+            observed = snapshot.syncPolicy();
+            observedBatch = snapshot.batchSize();
+            snapshot.logSnapshot(1, 1, 1, Side::Buy, 1'000'000, 10, OrderType::Limit,
+                                 TimeInForce::GTC, 0, 0, 0, 0, PegType::None, 0, 0, 0, false);
+        }));
+
+        EXPECT_EQ(observed, Journal::SyncPolicy::GroupCommit)
+            << "the snapshot must not fsync per entry — it is durable at the "
+               "single flush before rename(2)";
+        EXPECT_GT(observedBatch, 1u) << "batch size 1 is per-entry sync by another name";
+    }
+    std::remove(path.c_str());
+}

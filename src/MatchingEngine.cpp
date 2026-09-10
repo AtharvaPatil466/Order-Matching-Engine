@@ -312,6 +312,15 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
         requestQueues_.push_back(std::make_unique<MpscQueue<OrderRequest>>(queueSize));
         workerThreads_.emplace_back(&MatchingEngine::workerLoop, this, i);
     }
+
+    // Sync start() has always logged engine_start; the async path — the one
+    // production actually runs — logged nothing at all, so an operator who
+    // enabled logging saw silence at the single most important moment.
+    obSink().log(obEvent("engine_start")
+                     .kv("mode", "async")
+                     .kv("symbols", (unsigned long long)symbolIds_.size())
+                     .kv("threads", (unsigned long long)numThreads_)
+                     .kv("queue_size", (unsigned long long)queueSize));
 }
 
 void MatchingEngine::startExpiryTimer(uint64_t intervalMs) {

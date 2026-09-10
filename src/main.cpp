@@ -103,6 +103,33 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── Structured logging sink ──────────────────────────────────────
+    // config/engine.conf.example has documented `log_sink = stderr | null`
+    // since it was written, and nothing read the key: no production entry
+    // point ever called setObSink(), so obSink() resolved to NullSink and
+    // EVERY structured log in the engine went nowhere. That covers the events
+    // an operator most needs — risk rejects, circuit-breaker trips, kill
+    // switch sweeps, gateway disconnects, control-plane contention, an
+    // undeliverable alert — all built, all discarded.
+    //
+    // Installed before validation and before the engine exists, so startup
+    // problems are the first thing the sink sees.
+    //
+    // Default stays `null`, matching what the example file calls the
+    // production default: obSinkActive() gates event construction on the hot
+    // path, and a LogEvent heap-allocates per .kv(), which measures 5-8x on
+    // matching latency. Turning logs on is an operator's decision; what was
+    // wrong was that they could not make it.
+    static JsonStderrSink jsonSink;
+    const std::string logSink = cfg.getString("log_sink", "null");
+    if (logSink == "stderr") {
+        setObSink(&jsonSink);
+        std::cout << "[Log] Structured sink: stderr (JSON)\n";
+    } else if (logSink != "null" && !logSink.empty()) {
+        std::cerr << "[Log] WARNING: unknown log_sink '" << logSink
+                  << "' — expected 'stderr' or 'null'; logging stays off\n";
+    }
+
     // ── Startup config validation (P3-7, fail-fast) ───────────────────
     // Validate every declared instrument / participant and the journal path
     // BEFORE constructing the engine. On ANY problem, print each one and

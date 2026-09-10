@@ -41,7 +41,13 @@ jobs:
           -DBUILD_BENCHMARKS=${{ matrix.thread_sanitizer == 'ON' && 'OFF' || 'ON' }}
 
       - name: Build
-        run: cmake --build build --parallel
+        # Bounded parallelism, not `--parallel` (which fans out to nproc).
+        # A sanitizer build of this tree peaks at a few GB per translation
+        # unit, and four of those at once OOM-kills cc1plus on a standard
+        # runner — which surfaces as "Killed signal terminated program
+        # cc1plus" and exit 143, not as a compile error. Two keeps headroom;
+        # the wall-clock cost is far smaller than a red lane nobody trusts.
+        run: cmake --build build --parallel ${{ (matrix.sanitizers == 'ON' || matrix.thread_sanitizer == 'ON') && '2' || '4' }}
 
       - name: Test
         if: matrix.thread_sanitizer != 'ON'
@@ -103,7 +109,7 @@ jobs:
           -DBUILD_BENCHMARKS=OFF
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 4
 
       - name: Enforce p99 latency thresholds
         # ONLY this label, and never under -j: the thresholds are calibrated
@@ -133,7 +139,7 @@ jobs:
           -DBUILD_BENCHMARKS=OFF
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 4
 
       - name: Test
         # Full suite with fault-injection points compiled in (OB_ENABLE_FAULT_INJECTION).

@@ -1082,3 +1082,49 @@ TEST(AuditFixes, StpCancelOfRestingOrderPublishesItsRemoval) {
     EXPECT_GT(listener.updates.size(), before)
         << "the removal must be announced, not silent";
 }
+
+// ─── Auction feed fidelity: a filled iceberg must be retired from the feed ───
+//
+// An auction fills against an order's FULL remaining size, so uncross()
+// re-derives and re-announces (Rest) an iceberg's displayed slice after every
+// fill. When the order was then exhausted it was freed without publishing any
+// per-order removal, so the last thing the feed heard about it was that fresh
+// slice — and every downstream book kept displaying size that no longer
+// existed and could never trade. The level-scoped Modify the uncross publishes
+// updates L2 aggregates but says nothing about the order, so it cannot retire
+// the entry either.
+TEST(AuditFixes, UncrossRetiresAFullyFilledIcebergFromTheFeed) {
+    struct VisibleTracker : EventListener {
+        std::vector<BookVisibleUpdate> seen;
+        void onTrade(const Trade&) override {}
+        void onOrderUpdate(const OrderUpdate&) override {}
+        void onMarketData(const MarketDataUpdate&) override {}
+        void onBookVisible(const BookVisibleUpdate& u) override { seen.push_back(u); }
+    } tracker;
+
+    OrderBook book(1); relaxBook(book);
+    book.setEventListener(&tracker);
+    book.setTradingState(TradingState::PreOpen);
+
+    // Iceberg sell, displayed in slices, plus a buy that consumes all of it.
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, 1, Side::Sell, PX, 100, OrderType::Iceberg, 0, /*displayQty=*/10)));
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(2, 2, Side::Buy, PX, 100, OrderType::Limit)));
+
+    book.uncross();
+
+    ASSERT_EQ(book.getOrder(1), nullptr) << "the iceberg must be fully filled";
+
+    // The feed's last word on the iceberg must be that it is gone, not a
+    // freshly-announced slice.
+    const BookVisibleUpdate* last = nullptr;
+    for (const auto& u : tracker.seen)
+        if (u.orderId == 1) last = &u;
+    ASSERT_NE(last, nullptr) << "the iceberg was never announced at all";
+    EXPECT_EQ(last->action, BookVisibleUpdate::Action::Remove)
+        << "a filled iceberg left the feed advertising its last slice";
+
+    std::string err;
+    EXPECT_TRUE(book.validateIntegrity(&err)) << err;
+}

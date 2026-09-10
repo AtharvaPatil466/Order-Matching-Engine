@@ -2349,24 +2349,40 @@ void OrderBook::uncross() {
         const Price buyerPrice = buyer->price;
         const Price sellerPrice = seller->price;
 
+        // Retiring a fully-filled order in the cross. The per-order removal
+        // MUST be published: an auction fills against an order's full
+        // remaining size, so an iceberg's slice is re-derived and re-announced
+        // (Rest) after every fill. If the order is then exhausted and freed
+        // silently, the last thing the feed heard about it was that fresh
+        // slice — and every downstream book keeps displaying it forever, size
+        // that no longer exists and can never trade. The level-scoped Modify
+        // published below updates L2 aggregates but says nothing about the
+        // order, so it cannot retire the entry either.
+        auto retireFilled = [&](Order* o, OrderList* lvl, FlatPriceMap& book) {
+            const bool    wasDisplayed = o->inBook && !o->isHidden;
+            const OrderId id           = o->id;
+            const Side    side         = o->side;
+            const Price   px           = o->price;
+
+            o->status = OrderStatus::Filled;
+            notifyOrderUpdate(id, OrderStatus::Filled, o->initialQty, 0, bestUncrossPrice);
+            stpNoteRemoved(o);
+            untrackOrder(o);
+            lvl->remove(o);
+            orderLookup_.erase(id);
+            orderPool_.deallocate(o);
+            if (lvl->empty()) book.eraseBest();
+
+            if (wasDisplayed)
+                notifyBookVisible(BookVisibleUpdate::Action::Remove, id, side, px, 0);
+        };
+
         if (buyer->remainingQty == 0) {
-            buyer->status = OrderStatus::Filled;
-            notifyOrderUpdate(buyer->id, OrderStatus::Filled, buyer->initialQty, 0, bestUncrossPrice);
-            stpNoteRemoved(buyer);
-            bidLevel->remove(buyer);
-            orderLookup_.erase(buyer->id);
-            orderPool_.deallocate(buyer);
-            if (bidLevel->empty()) bids_.eraseBest();
+            retireFilled(buyer, bidLevel, bids_);
         }
 
         if (seller->remainingQty == 0) {
-            seller->status = OrderStatus::Filled;
-            notifyOrderUpdate(seller->id, OrderStatus::Filled, seller->initialQty, 0, bestUncrossPrice);
-            stpNoteRemoved(seller);
-            askLevel->remove(seller);
-            orderLookup_.erase(seller->id);
-            orderPool_.deallocate(seller);
-            if (askLevel->empty()) asks_.eraseBest();
+            retireFilled(seller, askLevel, asks_);
         }
 
         // Publish after the teardown so each level reports its settled state.

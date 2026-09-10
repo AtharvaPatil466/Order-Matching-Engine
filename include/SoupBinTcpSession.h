@@ -107,6 +107,13 @@ public:
         sendApp(SOUP_PT_UNSEQUENCED_DATA, payload, len);
     }
 
+    // End the session from the server side: send EndOfSession and mark it
+    // closed, exactly as a client-initiated logout does. The protocol's way of
+    // saying "this session cannot serve you; re-establish and re-sync" — which
+    // is the only honest answer when a subscriber asks for data that has aged
+    // out of the retransmission window.
+    void endSession() { handleLogout(); }
+
     bool loggedIn()              const { return loggedIn_; }
     bool closed()                const { return sessionClosed_; }
     uint64_t nextOutboundSeq()   const { return nextOutboundSeq_; }

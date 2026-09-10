@@ -177,6 +177,7 @@ public:
     uint64_t requestsServed()         const { return requestsServed_.load(); }
     uint64_t messagesReplayedTotal()  const { return messagesReplayedTotal_.load(); }
     uint64_t requestsThrottled()      const { return requestsThrottled_.load(); }
+    uint64_t requestsAgedOut()        const { return requestsAgedOut_.load(); }
     uint64_t connectionsRejected()    const { return connectionsRejected_.load(); }
     size_t   activeConnections()      const { return activeConnections_.load(); }
 
@@ -276,12 +277,14 @@ private:
         auto requestsCtr = &requestsServed_;
         auto messagesCtr = &messagesReplayedTotal_;
         auto throttledCtr = &requestsThrottled_;
+        auto agedOutCtr = &requestsAgedOut_;
         auto budget = std::make_shared<TokenBucket>(ITCH_RETRANSMIT_REQS_PER_SEC,
                                                     ITCH_RETRANSMIT_REQ_BURST);
         std::weak_ptr<SoupBinTcpSession> soupWeak = soup;
 
         soup->setOnAppPayload(
-            [journalPtr, requestsCtr, messagesCtr, throttledCtr, budget, soupWeak]
+            [journalPtr, requestsCtr, messagesCtr, throttledCtr, agedOutCtr,
+             budget, soupWeak]
             (const uint8_t* p, size_t n, bool /*sequenced*/) {
                 ItchRetransmitRequest req;
                 if (!parseRetransmitRequest(p, n, req)) return;
@@ -299,8 +302,31 @@ private:
                     return;
                 }
 
+
                 auto s = soupWeak.lock();
                 if (!s) return;
+                // Aged-out range. replayRange() returns how many it delivered
+                // and the service discarded it, so a subscriber asking for a
+                // range whose start had already been evicted got a SHORT
+                // stream it could not tell apart from a complete one — it
+                // believed it had filled a gap that is in fact gone forever,
+                // and carried on with a hole in its book.
+                //
+                // Under-delivery at the TOP of the range is benign (those
+                // sequences simply have not been published yet, and a later
+                // re-request gets them). Under-delivery at the FRONT is not
+                // recoverable by asking again, so say so: EndOfSession is the
+                // protocol's "re-establish and re-sync", which is the only
+                // honest answer. Silence would be a lie.
+                if (journalPtr->size() > 0 &&
+                    req.startSeq < journalPtr->lowestSeq()) {
+                    ++*agedOutCtr;
+                    obSink().log(obEvent("itch_retransmit_aged_out", LogSeverity::Warn)
+                                     .kv("requested_start", (long long)req.startSeq)
+                                     .kv("oldest_retained", (long long)journalPtr->lowestSeq()));
+                    s->endSession();
+                    return;
+                }
                 // Bound the per-request work: clamp count==0 ("to end of
                 // journal") and any count above the cap down to
                 // ITCH_RETRANSMIT_MAX_REPLAY, so one slow subscriber can't
@@ -368,6 +394,7 @@ private:
                              workerThreads_;
     std::mutex               threadsMutex_;
     std::atomic<uint64_t>    requestsThrottled_{0};
+    std::atomic<uint64_t>    requestsAgedOut_{0};
     std::atomic<size_t>      activeConnections_{0};
     std::atomic<uint64_t>    connectionsRejected_{0};
     std::mutex               connsMutex_;

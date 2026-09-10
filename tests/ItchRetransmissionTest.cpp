@@ -474,12 +474,21 @@ void test_ServiceMissingRangeReturnsNoReplays() {
                           inner, sizeof(inner));
         sendAll(fd, req, sizeof(req));
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // The subscriber must be TOLD. Delivering nothing and saying nothing
+        // leaves it unable to distinguish "the range is gone forever" from
+        // "there was nothing to send", so it carries on believing it filled a
+        // gap that is in fact unrecoverable. EndOfSession is the protocol's
+        // "re-establish and re-sync".
+        auto pkt = recvSoupPacket(fd);
+        CHECK(!pkt.empty() && "aged-out request must draw a response");
+        CHECK(pkt[2] == static_cast<uint8_t>(SOUP_PT_END_OF_SESSION)
+              && "an aged-out range must end the session, not go silent");
 
         ::close(fd);
         svc.stop();
         CHECK(svc.messagesReplayedTotal() == 0
               && "requested range entirely missing → no replays");
+        CHECK(svc.requestsAgedOut() == 1 && "the miss must be counted");
     } END
 }
 

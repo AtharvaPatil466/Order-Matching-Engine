@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace OrderMatcher {
@@ -884,12 +885,31 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
     victim->status = OrderStatus::CancelledBySTP;
     notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP,
                       victim->initialQty - victim->remainingQty, 0);
+
+    // Capture before the teardown frees the node.
+    const bool     wasDisplayed = victim->inBook && !victim->isHidden;
+    const OrderId  victimId     = victim->id;
+    const Side     victimSide   = victim->side;
+    const Price    victimPrice  = victim->price;
+
     stpNoteRemoved(victim);
     untrackOrder(victim);
     lvl->remove(victim);
     orderLookup_.erase(victim->id);
     orderPool_.deallocate(victim);
     if (lvl->empty()) book.eraseBest();
+
+    // Publish the removal. Without this an STP-cancelled resting order left
+    // the book silently as far as market data was concerned: the public feed
+    // kept advertising displayed size that no longer existed and could never
+    // trade, indefinitely — phantom liquidity created by the venue's own STP
+    // action. Every other path that takes a displayed order off the book
+    // publishes this pair; this one did not.
+    if (wasDisplayed) {
+        notifyMarketData(MarketDataUpdate::Action::Delete, victimSide, victimPrice);
+        notifyBookVisible(BookVisibleUpdate::Action::Remove, victimId,
+                          victimSide, victimPrice, 0);
+    }
 }
 
 // C1: terminal handling for an order that STP removed mid-match. Returns true
@@ -1566,6 +1586,77 @@ void OrderBook::setTradingState(TradingState s) {
 // Type-gated on purpose. erase_value is an O(n) scan of up to 16384 entries,
 // which must not run on the matching hot path for the plain Limit orders that
 // are never in any of these lists.
+// Structural invariant: the price-level lists and orderLookup_ must describe
+// exactly the same set of live orders. Every drift this engine has had showed
+// up here first — a node linked into two levels (freed once, dangling in the
+// other), or a node erased from the lookup but left linked (depth that
+// overstates what the book can actually trade).
+bool OrderBook::validateIntegrity(std::string* err) const {
+    std::unique_lock<std::mutex> lock(bookLock_);
+
+    std::set<OrderId> seen;
+    std::string problem;
+
+    auto checkSide = [&](const FlatPriceMap& book, Side side, const char* label) {
+        book.forEachLevel([&](Price levelPrice, const OrderList& level) {
+            for (Order* o = level.front(); o; o = o->next) {
+                if (!problem.empty()) return;
+                auto fail = [&](const std::string& why) {
+                    problem = std::string(label) + " level " + std::to_string(levelPrice)
+                            + ": order #" + (o ? std::to_string(o->id) : std::string("?"))
+                            + " " + why;
+                };
+                if (!seen.insert(o->id).second) {
+                    fail("appears in the book more than once (double-linked node)");
+                    return;
+                }
+                auto* looked = orderLookup_.find(o->id);
+                if (!looked) {
+                    fail("is linked in the book but absent from orderLookup_");
+                    return;
+                }
+                if (*looked != o) {
+                    fail("is linked in the book but orderLookup_ maps its id elsewhere");
+                    return;
+                }
+                if (!o->inBook) {
+                    fail("is linked in the book with inBook == false");
+                    return;
+                }
+                if (o->price != levelPrice) {
+                    fail("sits at the wrong price level (order says "
+                         + std::to_string(o->price) + ")");
+                    return;
+                }
+                if (o->side != side) {
+                    fail("is on the wrong side of the book");
+                    return;
+                }
+            }
+        });
+    };
+
+    checkSide(bids_, Side::Buy, "bid");
+    if (problem.empty()) checkSide(asks_, Side::Sell, "ask");
+
+    // The other direction: anything orderLookup_ calls resting must be linked.
+    if (problem.empty()) {
+        orderLookup_.forEach([&](OrderId id, Order* o) {
+            if (!problem.empty() || !o) return;
+            if (o->inBook && seen.find(id) == seen.end()) {
+                problem = "order #" + std::to_string(id) +
+                          " has inBook == true but is not linked into any price level";
+            }
+        });
+    }
+
+    if (!problem.empty()) {
+        if (err) *err = problem;
+        return false;
+    }
+    return true;
+}
+
 void OrderBook::untrackOrder(Order* order) {
     if (!order) return;
     switch (order->type) {
@@ -1581,9 +1672,24 @@ void OrderBook::untrackOrder(Order* order) {
             peggedOrders_.erase_value(order);
             break;
         case OrderType::MOC:
+            // An MOC moves from onCloseOrders_ into auctionMarketOrders_ when
+            // the closing cross releases it, so it can be sitting in either.
+            onCloseOrders_.erase_value(order);
+            locActiveIds_.erase_value(order->id);
+            auctionMarketOrders_.erase_value(order);
+            break;
         case OrderType::LOC:
             onCloseOrders_.erase_value(order);
             locActiveIds_.erase_value(order->id);
+            break;
+        case OrderType::Market:
+            // A market order submitted during an auction parks here until the
+            // uncross. Missing this was a live dangling pointer: cancelling a
+            // parked market order freed it while auctionMarketOrders_ kept
+            // pointing at the slot, the pool re-handed that slot to an
+            // unrelated new order, and the next uncross() repriced THAT order
+            // and addToBook'd it a second time — one node in two price levels.
+            auctionMarketOrders_.erase_value(order);
             break;
         default:
             break;

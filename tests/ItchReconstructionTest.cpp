@@ -152,7 +152,16 @@ struct Fixture {
         book->setEventListener(pub.get());
     }
 
-    void check() const { assertBooksMatch(reco, *book); }
+    void check() const {
+        // Structural check first: a book whose price levels disagree with
+        // orderLookup_ is already broken, and saying so names the operation
+        // that broke it instead of the feed divergence it causes several
+        // steps later.
+        std::string err;
+        if (!book->validateIntegrity(&err))
+            throw std::runtime_error("book integrity: " + err);
+        assertBooksMatch(reco, *book);
+    }
 };
 
 }  // namespace
@@ -707,8 +716,21 @@ void test_RandomisedFlowStaysInSync() {
                 // Reprice and resize. Hits shrink-in-place, grow-with-loss-of-
                 // priority, and the crossing-aggressor path, over a book that
                 // already holds icebergs, hidden orders and triggered stops.
-                const size_t idx = rng() % resting.size();
-                if (f.engine.cancelReplace(1, resting[idx], price, qty)) ++replaces;
+                // Pick a target that is actually resting. `resting` accumulates
+                // every id ever submitted — parked stops, MOC/LOC awaiting
+                // release, and orders long since filled or cancelled — and
+                // cancelReplace correctly refuses all of those. A blind pick
+                // therefore measured how often we happened to land on a live
+                // order, not whether the replace path works; it only cleared
+                // the coverage floor below because repricing a PARKED order
+                // used to "succeed" by corrupting the book.
+                for (int tries = 0; tries < 8; ++tries) {
+                    const size_t idx = rng() % resting.size();
+                    const Order* target = f.book->getOrder(resting[idx]);
+                    if (!target || !target->inBook) continue;
+                    if (f.engine.cancelReplace(1, resting[idx], price, qty)) ++replaces;
+                    break;
+                }
             } else if (!resting.empty()) {
                 const size_t idx = rng() % resting.size();
                 f.engine.cancelOrder(1, resting[idx]);

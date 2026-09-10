@@ -248,6 +248,18 @@ private:
     void untrackOrder(Order* order);
 
 public:
+    // Debug-only structural invariant check over the whole book.
+    //
+    // The price-level linked lists and orderLookup_ are two views of the same
+    // set of live orders, maintained by hand at ~25 sites. When they drift the
+    // engine does not fail loudly — it reports depth that does not match its
+    // own contents, or frees a node twice. Both happened, and both were found
+    // only because a randomised soak happened to walk the right path.
+    //
+    // Returns true if consistent; otherwise false with a description in `err`.
+    // Cost is O(orders), so this is a test/debug tool, not a hot-path check.
+    bool validateIntegrity(std::string* err = nullptr) const;
+
 
     // Cancel/Replace: full amendment (price change loses time priority)
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty);

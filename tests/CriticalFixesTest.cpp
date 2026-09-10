@@ -1015,3 +1015,70 @@ TEST(AuditFixes, CancelReplaceOfParkedOnCloseOrderDoesNotEnterTheBook) {
     book.uncross();   // must not abort on a double-linked node
     SUCCEED();
 }
+
+// ─── Dangling pointer: a cancelled parked market order left in the auction list
+//
+// auctionMarketOrders_ holds raw Order*, and cancelOrderImpl untracked every
+// other list but not this one. Cancelling a market order parked for an auction
+// therefore freed it while auctionMarketOrders_ kept pointing at the pool slot.
+// The pool re-handed that slot to an unrelated new order, and the next
+// uncross() treated THAT order as a parked market order: repriced it to the
+// clearing price and addToBook'd it a second time, linking one node into two
+// price levels. Downstream that surfaced as a double free, as depth that
+// disagreed with the book's own contents, and as a livelock.
+TEST(AuditFixes, CancellingParkedAuctionMarketOrderLeavesNoDanglingPointer) {
+    OrderBook book(1); relaxBook(book);
+    book.setTradingState(TradingState::PreOpen);
+
+    // Park a market order for the auction, then cancel it.
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, 1, Side::Buy, 0, 50, OrderType::Market)));
+    ASSERT_NE(book.getOrder(1), nullptr);
+    book.cancelOrder(1);
+    ASSERT_EQ(book.getOrder(1), nullptr);
+
+    // Fill the freed slot with ordinary resting orders, one of which will be
+    // handed the cancelled order's pool slot.
+    for (OrderId id = 10; id < 40; ++id) {
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            book.addOrder(id, 2, Side::Buy, PX - 1000 - Price(id), 10, OrderType::Limit)));
+    }
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(100, 3, Side::Sell, PX - 2000, 10, OrderType::Limit)));
+
+    // The uncross must not touch any of them as if it were the dead market
+    // order. Pre-fix this double-linked a node and corrupted the book.
+    book.uncross();
+
+    std::string err;
+    EXPECT_TRUE(book.validateIntegrity(&err)) << err;
+}
+
+// ─── Market data: an STP-cancelled resting order must leave the feed ─────────
+//
+// stpCancelRestingOrder tore the order out of the book but published no
+// removal, so a displayed order killed by the venue's own self-trade
+// prevention stayed on the public feed forever — advertised size that no
+// longer existed and could never trade.
+TEST(AuditFixes, StpCancelOfRestingOrderPublishesItsRemoval) {
+    OrderBook book(1); relaxBook(book);
+    UpdateCountingListener listener;
+    book.setEventListener(&listener);
+    const ParticipantId P = 9;
+
+    book.setSTPMode(P, STPMode::CancelResting);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit)));
+
+    const size_t before = listener.updates.size();
+    // Same participant crosses their own resting order -> STP kills the maker.
+    book.addOrder(2, P, Side::Buy, PX, 100, OrderType::Limit);
+    ASSERT_EQ(book.getOrder(1), nullptr) << "the resting order must be gone";
+
+    // The engine no longer holds it, so the book must not still show depth.
+    const auto snap = book.getSnapshot(MarketDataSnapshot::MAX_DEPTH);
+    EXPECT_EQ(snap.askCount, 0u)
+        << "STP removed the only ask; the book must not still display it";
+    EXPECT_GT(listener.updates.size(), before)
+        << "the removal must be announced, not silent";
+}

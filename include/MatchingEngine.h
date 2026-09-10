@@ -491,6 +491,13 @@ private:
 
     // Async mode (Thread Pool)
     bool async_{false};
+
+    // Backstop exit for workers, checked ONLY when a worker's queue is empty.
+    // stopAsync() delivers shutdown in-band so it queues behind existing work
+    // and nothing is lost; but that push spins until it succeeds, so a worker
+    // whose ring stayed full would wedge shutdown forever. This lets such a
+    // worker leave once it has drained everything, without the message.
+    std::atomic<bool> workersShouldStop_{false};
     size_t numThreads_{1};
     std::vector<std::unique_ptr<MpscQueue<OrderRequest>>> requestQueues_;
     std::vector<std::thread> workerThreads_;
@@ -555,6 +562,10 @@ private:
     // queue it could overtake them, they would land after the sweep, and they
     // would survive it — reintroducing the bug this fixes.
     void enqueueControl(size_t threadIndex, const OrderRequest& req);
+    // Bounded variant; see the definition. Returns false if the ring stayed
+    // full, in which case nothing was enqueued and no counters moved.
+    bool tryEnqueueControl(size_t threadIndex, const OrderRequest& req,
+                           uint64_t maxSpins = 1'000'000);
 
     // Resting orders for `pid` across every book, or all orders when pid is
     // kKillAllParticipants. Takes each book's shared lock, so it is safe to

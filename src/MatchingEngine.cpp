@@ -95,6 +95,25 @@ bool MatchingEngine::enqueueSafe(size_t threadIndex, const OrderRequest& req) {
 
 // C5: never-drop control-plane enqueue. See the header for why this shares the
 // order ring rather than using a side channel.
+// Bounded sibling of enqueueControl, for the one caller that must not spin
+// forever. Does the submitted_/wakeup bookkeeping ONLY on success: counting a
+// message that was never queued would make waitForDrain() wait for something
+// that is never going to be processed.
+bool MatchingEngine::tryEnqueueControl(size_t threadIndex, const OrderRequest& req,
+                                       uint64_t maxSpins) {
+    for (uint64_t spins = 0; spins < maxSpins; ++spins) {
+        if (requestQueues_[threadIndex]->push(req)) {
+            threadStats_[threadIndex].submitted.fetch_add(1, std::memory_order_relaxed);
+            submittedTotal_.fetch_add(1, std::memory_order_release);
+            queueWakeups_[threadIndex].fetch_add(1, std::memory_order_release);
+            queueWakeups_[threadIndex].notify_one();
+            return true;
+        }
+        cpuRelax();
+    }
+    return false;
+}
+
 void MatchingEngine::enqueueControl(size_t threadIndex, const OrderRequest& req) {
     uint64_t spins = 0;
     while (!requestQueues_[threadIndex]->push(req)) {
@@ -236,6 +255,7 @@ void MatchingEngine::ensureDefaultSymbol() {
 
 void MatchingEngine::start() {
     shuttingDown_.store(false, std::memory_order_release);
+    workersShouldStop_.store(false, std::memory_order_release);
     booksFrozen_.store(true, std::memory_order_release);
     running_.store(true, std::memory_order_release);
     obSink().log(obEvent("engine_start")
@@ -282,6 +302,7 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     workerThreads_.reserve(numThreads_);
 
     shuttingDown_.store(false, std::memory_order_release);
+    workersShouldStop_.store(false, std::memory_order_release);
     running_.store(true, std::memory_order_release);
     booksFrozen_.store(true, std::memory_order_release);
     async_ = true;
@@ -361,10 +382,26 @@ void MatchingEngine::stopAsync() {
     OrderRequest shutdown{};
     shutdown.type = OrderRequest::Type::Shutdown;
 
-    // This loop is where enqueueControl came from — shutdown has always been
-    // undroppable. The kill switch and expiry sweeps now use the same helper.
+    // Shutdown goes in-band so it queues behind accepted work and nothing is
+    // dropped. But enqueueControl spins until the push succeeds, and a worker
+    // whose ring is full at this moment drains it only if it is still running
+    // — so a wedged or slow worker turned "stop the engine" into an infinite
+    // spin on the caller's thread, with no timeout and no diagnostic. That is
+    // the shutdown hang the audit flagged.
+    //
+    // Bounded attempt, then a flag the worker checks once its queue is empty.
+    // Both paths still drain every accepted order first; the flag only removes
+    // the requirement that there be ring space for the message itself.
     for (size_t i = 0; i < numThreads_; ++i) {
-        enqueueControl(i, shutdown);
+        if (!tryEnqueueControl(i, shutdown)) {
+            obSink().log(obEvent("shutdown_enqueue_full", LogSeverity::Warn)
+                .kv("thread", (long long)i));
+        }
+    }
+    workersShouldStop_.store(true, std::memory_order_release);
+    for (size_t i = 0; i < numThreads_; ++i) {
+        queueWakeups_[i].fetch_add(1, std::memory_order_release);
+        queueWakeups_[i].notify_one();
     }
 
     for (auto& thread : workerThreads_) {
@@ -441,6 +478,12 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             }
             continue;
         }
+
+        // Queue is empty. This is the only safe place to honour the backstop:
+        // checking it while work remained would cut the queue short and drop
+        // orders that were accepted, which the in-band Shutdown message
+        // deliberately never does.
+        if (workersShouldStop_.load(std::memory_order_acquire)) break;
 
         ++idleSpins;
         if (idleSpins < 128) {

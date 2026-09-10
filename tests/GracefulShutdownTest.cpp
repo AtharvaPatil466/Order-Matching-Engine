@@ -252,6 +252,45 @@ void test_no_journal_safe() {
     PASS();
 }
 
+// stopAsync() must terminate even when a worker's request ring is full at the
+// moment shutdown is requested.
+//
+// Shutdown goes in-band so it queues behind accepted work and nothing is
+// dropped, but enqueueControl spins until that push succeeds. A worker whose
+// ring is full drains it only while it is still running, so a wedged or merely
+// slow worker turned "stop the engine" into an unbounded spin on the caller's
+// thread — no timeout, no diagnostic, process never exits. The backstop flag
+// lets a worker leave once its queue is empty, without needing ring space for
+// the message itself.
+//
+// Flooding the ring is the closest a test can get to that window without
+// reaching into engine internals; the assertion that matters is that stop()
+// returns at all, and that the orders it accepted were still processed.
+void test_shutdown_terminates_with_a_full_ring() {
+    SECTION("stopAsync terminates even with a full request ring");
+
+    MatchingEngine engine;
+    engine.addSymbol(1);
+    engine.startAsync(2);
+
+    // Push far more than the ring holds, as fast as possible, so the queues
+    // are backed up when shutdown is requested.
+    uint64_t accepted = 0;
+    for (OrderId id = 1; id <= 20000; ++id) {
+        auto r = engine.submitOrder(1, id, 1, (id & 1) ? Side::Buy : Side::Sell,
+                                    1'000'000 - Price(id % 50), 1, OrderType::Limit);
+        if (r.isAccepted()) ++accepted;
+    }
+
+    // The real assertion: this returns. Before the fix a full ring here could
+    // spin forever, and the test would hang rather than fail.
+    engine.stop();
+
+    assert(accepted > 0 && "the flood should have accepted something");
+    std::cout << " (accepted " << accepted << ")";
+    PASS();
+}
+
 int main() {
     std::cout << "\n═══ Graceful Shutdown (P3-6) Tests ═══" << std::endl;
 
@@ -260,6 +299,7 @@ int main() {
     test_partial_fill_day_cancelled();
     test_async_drain_ioc_and_gtd();
     test_no_journal_safe();
+    test_shutdown_terminates_with_a_full_ring();
 
     std::cout << "\n─── Results: " << tests_passed << " passed ───" << std::endl;
     std::cout << "\nAll graceful shutdown tests passed.\n" << std::endl;

@@ -538,6 +538,29 @@ bool TcpGateway::decodeFrame(ClientState& state, uint32_t msgLen,
 }
 
 void TcpGateway::processMessage(int fd, const OrderRequest& req) {
+    // H7: this protocol carries no credentials. There is no login frame, so
+    // req.participantId is an unverifiable claim — and Type::KillSwitch below
+    // acts on it directly, meaning any connection that can reach this port
+    // could disable any participant's trading.
+    //
+    // When an operator has configured a credential store, serving requests we
+    // cannot attribute would silently undo that decision on this one gateway.
+    // Refuse instead: fail closed, say why, and let the operator either add
+    // the login frame (the follow-up) or keep this port off.
+    if (auth_ && auth_->enabled()) {
+        GatewayResponse denied{};
+        denied.type = GatewayResponse::Type::Error;
+        denied.orderId = req.orderId;
+        denied.rejectReason = RejectReason::None;
+        std::snprintf(denied.errorMessage, sizeof(denied.errorMessage),
+                      "binary gateway cannot authenticate; participant identity unverifiable");
+        obSink().log(obEvent("gateway_unauthenticated_request", LogSeverity::Warn)
+                         .kv("claimed_participant", (long long)req.participantId)
+                         .kv("request_type", (long long)static_cast<int>(req.type)));
+        sendResponse(fd, denied);
+        return;
+    }
+
     SubmitResult result = SubmitResult::rejected(RejectReason::EngineStopped);
 
     switch (req.type) {

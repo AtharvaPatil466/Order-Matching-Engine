@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MatchingEngine.h"
+#include "ParticipantAuth.h"
 #include <string>
 #include <vector>
 #include <thread>
@@ -118,6 +119,11 @@ public:
 
     void clearAllowedIPs() { allowedIPs_.clear(); }
 
+    // H7: install the credential store. This protocol has no login frame, so
+    // the gateway cannot verify req.participantId; with a store configured it
+    // refuses every request rather than serving unattributable ones.
+    void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
+
 private:
     // Per-client state for partial read buffering and write queueing
     struct ClientState {
@@ -173,6 +179,7 @@ private:
     int shutdownPipe_[2] = {-1, -1};
 
     // Idle timeout (default 60 seconds)
+    const ParticipantAuth* auth_{nullptr};
     std::chrono::seconds idleTimeout_{60};
 
     // Ceiling on one client's queued outbound bytes. A slow reader is not

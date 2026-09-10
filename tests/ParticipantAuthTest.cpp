@@ -14,6 +14,7 @@
 // Distinct from AdminAuthTest, which covers the admin port's bearer token.
 
 #include "ParticipantAuth.h"
+#include "SoupBinTCP.h"
 
 #include <cassert>
 #include <cstdio>
@@ -141,6 +142,35 @@ void test_ConstantTimeEqualsBasics() {
     PASS();
 }
 
+// ─── 8: the OUCH gateway had the reject code all along ──────────────────────
+//
+// SOUP_LOGIN_REJECT_NOT_AUTHORIZED ('A') has been defined since the SoupBinTCP
+// header was written. Nothing ever sent it, because nothing ever checked a
+// credential — the login validator defaulted to "accept every login".
+void test_SoupNotAuthorizedCodeExists() {
+    TEST(SoupNotAuthorizedCodeExists);
+    assert(SOUP_LOGIN_REJECT_NOT_AUTHORIZED == 'A');
+    assert(SOUP_LOGIN_REJECT_SESSION_NOT_AVAILABLE == 'S');
+    PASS();
+}
+
+// ─── 9: a credential covering no participants authorises nothing ────────────
+//
+// A misconfiguration — credential present, allow-list empty — must fail
+// closed. Authenticating successfully is not the same as being entitled to
+// anything.
+void test_EmptyAllowListAuthorizesNothing() {
+    TEST(EmptyAllowListAuthorizesNothing);
+    ParticipantAuth auth;
+    auth.addCredential("firm-a", "s3cret", {});
+
+    auto id = auth.authenticate("firm-a", "s3cret");
+    assert(id.valid() && "the credential itself is good");
+    assert(!id.permits(0));
+    assert(!id.permits(100) && "authenticated is not the same as authorised");
+    PASS();
+}
+
 }  // namespace
 
 int main() {
@@ -153,6 +183,8 @@ int main() {
     test_ReAddingCredentialReplaces();
     test_WrongSecretsAllFailRegardlessOfPrefix();
     test_ConstantTimeEqualsBasics();
+    test_SoupNotAuthorizedCodeExists();
+    test_EmptyAllowListAuthorizesNothing();
 
     std::cout << "\n" << passed << " passed\n\n";
     return 0;

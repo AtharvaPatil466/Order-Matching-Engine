@@ -22,6 +22,9 @@
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 #include "OuchProtocol.h"
+#include "ParticipantAuth.h"
+
+#include <memory>
 
 #include <chrono>
 #include <cstdint>
@@ -227,6 +230,22 @@ private:
         // exchange reference number returned in 'A' equals the token.
         OrderId engineId = static_cast<OrderId>(o.orderToken);
 
+        // H7: the firm on an EnterOrder is a claim by the client. Check it
+        // against what this session actually authenticated as, per message —
+        // one session may act for several firms, and nothing stops a client
+        // varying the field per order, so a login-time check alone would leave
+        // the hole open. No dedicated OUCH reject code exists for this ('A',
+        // 'R' and the rest all mean something specific), so it goes out as the
+        // spec's generic 'O' and is counted separately here rather than
+        // inventing wire semantics.
+        if (auth_ && auth_->enabled() &&
+            !(identity_ && identity_->permits(o.firm))) {
+            ++ordersRejected_;
+            ++unauthorizedRejects_;
+            sendReject(o.orderToken, OUCH_REJECT_OTHER);
+            return;
+        }
+
         // Pre-register BOTH directions of the token↔engineId mapping
         // before submitOrder so that any immediate fills (an
         // aggressive Limit / IOC that matches resting liquidity on
@@ -392,6 +411,21 @@ private:
             static_cast<uint64_t>(engineId), o.display);
         send_(std::string_view(reinterpret_cast<const char*>(buf), n));
     }
+
+public:
+    // H7: bind this session's orders to an authenticated identity. Both are
+    // optional; with no authenticator, or one holding no credentials, the
+    // session behaves exactly as before (the firm field trusted as-is).
+    void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
+    void setAuthorizedIdentity(std::shared_ptr<const AuthorizedIdentity> id) {
+        identity_ = std::move(id);
+    }
+    uint64_t ordersRejectedUnauthorized() const { return unauthorizedRejects_; }
+
+private:
+    const ParticipantAuth*                    auth_{nullptr};
+    std::shared_ptr<const AuthorizedIdentity> identity_;
+    uint64_t                                  unauthorizedRejects_{0};
 
     void sendReject(uint64_t orderToken, char reasonCode) {
         if (!send_) return;

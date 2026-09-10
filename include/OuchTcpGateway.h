@@ -69,6 +69,11 @@ public:
     OuchTcpGateway(const OuchTcpGateway&) = delete;
     OuchTcpGateway& operator=(const OuchTcpGateway&) = delete;
 
+    // H7: install the credential store. Without one the gateway accepts any
+    // login and trusts the firm field on every order, which is the behaviour
+    // this exists to end.
+    void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
+
     void setLoginValidator(LoginValidator v) {
         loginValidator_ = std::move(v);
     }
@@ -190,14 +195,25 @@ private:
                 ::send(fd, bytes.data(), bytes.size(), 0);
             },
             serverSession_);
-        if (loginValidator_) {
-            soup->setOnLoginRequest(loginValidator_);
-        } else {
-            // Default: accept every login.
-            soup->setOnLoginRequest([](const SoupLoginRequest&) {
-                return char{0};
+        // H7: authenticate at login and remember what this session may act as.
+        // The identity is shared because the validator has to be installed
+        // before OuchSession exists, and OuchSession then reads it per order.
+        auto identity = std::make_shared<AuthorizedIdentity>();
+        const ParticipantAuth* auth = auth_;
+        LoginValidator userValidator = loginValidator_;
+        soup->setOnLoginRequest(
+            [auth, identity, userValidator](const SoupLoginRequest& req) -> char {
+                if (auth && auth->enabled()) {
+                    *identity = auth->authenticate(req.username, req.password);
+                    if (!identity->valid()) {
+                        // The protocol has had this code all along; nothing
+                        // ever sent it, because nothing ever checked.
+                        return SOUP_LOGIN_REJECT_NOT_AUTHORIZED;
+                    }
+                }
+                if (userValidator) return userValidator(req);
+                return char{0};   // no auth configured: accept, as before
             });
-        }
 
         // OuchSession holds a raw reference to soup; we need it alive
         // for the duration. Construct ouch on the stack using
@@ -207,6 +223,9 @@ private:
             [soupShared](std::string_view ouchBytes) {
                 soupShared->sendUnsequenced(ouchBytes.data(), ouchBytes.size());
             });
+
+        ouch.setParticipantAuth(auth_);
+        ouch.setAuthorizedIdentity(identity);
 
         soupShared->setOnAppPayload(
             [&ouch](const uint8_t* p, size_t n, bool /*sequenced*/) {
@@ -256,6 +275,7 @@ private:
     MatchingEngine&            engine_;
     std::string                serverSession_;
     LoginValidator             loginValidator_;
+    const ParticipantAuth* auth_{nullptr};
 
     std::atomic<bool>          running_{false};
     int                        listenFd_{-1};

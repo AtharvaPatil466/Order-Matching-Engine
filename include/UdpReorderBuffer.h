@@ -12,6 +12,20 @@
 // it is filled, so a merely-reordered datagram is recovered with NO NAK, and a
 // genuinely-lost one triggers a NAK for exactly the newly-missing range.
 //
+// NAK TIMING. A gap is not NAK'd the instant it is discovered. Reordering is
+// normal on UDP — 1,2,4,3 means seq 3 is in flight, not lost — and NAKing on
+// first sight requests a retransmission of a datagram already on its way. That
+// costs bandwidth twice and loads the retransmission service for nothing, which
+// is precisely what this class's own header promised it would avoid ("a merely
+// reordered datagram is recovered with NO NAK") and did not: the NAK fired
+// before the reorder window had any chance to close the hole.
+//
+// A newly-discovered hole is now recorded as PENDING and only NAK'd once
+// nakDelayDatagrams() further datagrams have arrived without filling it, or
+// immediately if the ring must evict it (at that point the hole cannot be
+// recovered by waiting, so waiting only delays recovery). Set the delay to 0
+// to restore NAK-on-sight.
+//
 // The "NAK only the NEW gap" rule (spec) is driven by highestSeen_, the highest
 // sequence ever observed. When a future datagram at `seq` arrives, everything in
 // (highestSeen_, seq) is newly discovered as missing — earlier holes were already
@@ -101,22 +115,42 @@ public:
             ++expected_;
             if (seq > highestSeen_) highestSeen_ = seq;
             drainContiguous();
+            // The datagram that closes a hole arrives on THIS path, not the
+            // future-datagram one, so ageing has to run here too — otherwise a
+            // gap that was filled by reordering is never reaped and its NAK
+            // still fires once the window expires, which is the whole bug.
+            agePendingGaps();
             return;
         }
 
-        // seq > expected_: a gap exists. NAK ONLY the newly-discovered missing
-        // range (highestSeen_, seq) — earlier holes were NAK'd already.
+        // seq > expected_: a gap exists. Record ONLY the newly-discovered missing
+        // range (highestSeen_, seq) — earlier holes are already pending or NAK'd.
         if (seq > highestSeen_ + 1) {
             const uint64_t nakStart = highestSeen_ + 1;
             const uint32_t nakCount = static_cast<uint32_t>(seq - nakStart);
             ++gapsDetected_;
             gapDatagrams_ += nakCount;
-            if (nakHook_) nakHook_(nakStart, nakCount);
+            recordPendingGap(nakStart, nakCount);
         }
 
         bufferFuture(seq, data, len);
         if (seq > highestSeen_) highestSeen_ = seq;
+
+        // One more datagram has gone by without the hole closing. Anything that
+        // has now waited out the window is genuinely lost, not reordered.
+        agePendingGaps();
     }
+
+    // Datagrams a hole may lag by before it is treated as lost rather than
+    // reordered. 0 restores NAK-on-sight.
+    void setNakDelayDatagrams(uint32_t n) { nakDelayDatagrams_ = n; }
+    uint32_t nakDelayDatagrams() const { return nakDelayDatagrams_; }
+
+    // Gaps discovered but not yet NAK'd — still inside the reorder window.
+    uint32_t pendingGaps() const { return pendingCount_; }
+    // Gaps that closed on their own before the window expired: reordering that
+    // would previously have produced a spurious retransmission request.
+    uint64_t naksAvoided() const { return naksAvoided_; }
 
     // ── Counters (5 of the 7 required live here; tx_naks_sent / tx_nak_drops are
     //    owned by the NAK hook implementation in DpdkGateway) ──────────────────
@@ -135,6 +169,69 @@ private:
         uint64_t  expectedSeq{0};  // 0 = empty; otherwise the seq this slot holds
         RxMessage msg;
     };
+
+    // ── Pending-gap window ─────────────────────────────────────────────────
+    //
+    // A hole is held here until it has been outstanding for nakDelayDatagrams_
+    // subsequent arrivals. If it closes first — the ordinary reordering case —
+    // it is dropped without ever asking for a retransmission.
+    //
+    // Fixed capacity, no allocation: this runs on the DPDK poll core. If more
+    // distinct holes are outstanding than the window can track, the oldest is
+    // NAK'd immediately rather than forgotten — under that much loss, waiting
+    // is not what recovery needs.
+    static constexpr uint32_t kMaxPendingGaps = 16;
+
+    struct PendingGap {
+        uint64_t start;
+        uint32_t count;
+        uint32_t age;      // datagrams observed since discovery
+    };
+
+    void recordPendingGap(uint64_t start, uint32_t count) {
+        if (nakDelayDatagrams_ == 0) {               // NAK-on-sight
+            if (nakHook_) nakHook_(start, count);
+            return;
+        }
+        // A hole at least as wide as the reorder window cannot close by
+        // reordering: the missing datagrams could not be buffered even if they
+        // arrived. Waiting would only delay recovery, so NAK it now. Deferral
+        // is for holes small enough that in-flight reordering could still fill
+        // them.
+        if (count >= Depth) {
+            if (nakHook_) nakHook_(start, count);
+            return;
+        }
+        if (pendingCount_ == kMaxPendingGaps) {
+            const PendingGap oldest = pending_[0];
+            if (nakHook_) nakHook_(oldest.start, oldest.count);
+            for (uint32_t i = 1; i < pendingCount_; ++i) pending_[i - 1] = pending_[i];
+            --pendingCount_;
+        }
+        pending_[pendingCount_++] = PendingGap{start, count, 0};
+    }
+
+    // Drop any pending gap the ring has since filled, and NAK any that has now
+    // waited out the window.
+    void agePendingGaps() {
+        uint32_t out = 0;
+        for (uint32_t i = 0; i < pendingCount_; ++i) {
+            PendingGap g = pending_[i];
+
+            // Fully delivered while we waited: pure reordering, no NAK. expected_
+            // only advances past a sequence once it has been delivered.
+            if (expected_ > g.start + g.count - 1) {
+                ++naksAvoided_;
+                continue;
+            }
+            if (++g.age >= nakDelayDatagrams_) {
+                if (nakHook_) nakHook_(g.start, g.count);
+                continue;
+            }
+            pending_[out++] = g;
+        }
+        pendingCount_ = out;
+    }
 
     void deliver(const RxMessage& m) {
         if (deliverHook_) deliverHook_(m);
@@ -181,6 +278,13 @@ private:
             ++expected_;
         }
     }
+
+    PendingGap pending_[kMaxPendingGaps]{};
+    uint32_t   pendingCount_{0};
+    // Default 16: comfortably longer than in-network reordering, far shorter
+    // than a human notices. 0 restores NAK-on-sight.
+    uint32_t   nakDelayDatagrams_{16};
+    uint64_t   naksAvoided_{0};
 
     uint64_t expected_{0};
     uint64_t highestSeen_{0};

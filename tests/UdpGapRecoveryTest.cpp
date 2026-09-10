@@ -90,22 +90,52 @@ void testSingleGap() {
     h.feed(2);
     assert(orderIs(h.delivered, {1, 2}) && "1,2 delivered immediately");
 
-    h.feed(4);  // gap at 3: 4 is buffered, NAK(3,1)
+    h.feed(4);  // gap at 3: 4 is buffered, gap PENDING (not yet NAK'd)
     assert(orderIs(h.delivered, {1, 2}) && "4 not delivered while 3 is missing");
     assert(h.rb.reorderBuffered() == 1);
-    assert(h.naks.size() == 1);
-    assert(h.naks[0].first == 3 && h.naks[0].second == 1);
+    // Reordering is normal on UDP: 3 may simply be in flight. NAKing here asks
+    // for a retransmission of a datagram already on its way — the spurious-NAK
+    // bug this class's header always disclaimed and the code performed anyway.
+    assert(h.naks.empty() && "a freshly-discovered hole must not NAK on sight");
+    assert(h.rb.pendingGaps() == 1);
 
-    h.feed(3);  // retransmit fills the hole: deliver 3, then drain 4
+    h.feed(3);  // 3 was merely reordered: hole closes with no NAK ever sent
     assert(h.rb.reorderRecovered() == 1);
     assert(orderIs(h.delivered, {1, 2, 3, 4}));
+    assert(h.naks.empty() && "a reordered datagram must be recovered with NO NAK");
+    assert(h.rb.naksAvoided() == 1);
     std::printf("testSingleGap PASSED\n");
+}
+
+// ── Test 2b ──────────────────────────────────────────────────────────────────
+// The other half of the contract: a hole that does NOT close inside the window
+// is genuinely lost and must still be NAK'd, or deferring the NAK would simply
+// break recovery instead of making it cheaper.
+void testLostDatagramStillNaksAfterWindow() {
+    std::printf("Running testLostDatagramStillNaksAfterWindow...\n");
+    RxHarness<64> h;
+    h.rb.setNakDelayDatagrams(4);   // short window keeps the test quick
+    h.feed(1);
+    h.feed(2);
+    h.feed(4);                      // hole at 3, pending
+    assert(h.naks.empty());
+
+    // Further traffic arrives and 3 never shows up.
+    for (uint64_t seq = 5; seq <= 9; ++seq) h.feed(seq);
+
+    assert(!h.naks.empty() && "a hole that outlives the window must be NAK'd");
+    assert(h.naks[0].first == 3 && h.naks[0].second == 1);
+    assert(h.rb.naksAvoided() == 0 && "nothing was recovered by reordering here");
+    std::printf("testLostDatagramStillNaksAfterWindow PASSED\n");
 }
 
 // ── Test 3 ───────────────────────────────────────────────────────────────────
 void testMultipleGaps() {
     std::printf("Running testMultipleGaps...\n");
     RxHarness<64> h;
+    // This test is about WHICH range is NAK'd (only the newly-discovered one),
+    // not about when. Pin NAK-on-sight so the two concerns stay separable.
+    h.rb.setNakDelayDatagrams(0);
     h.feed(1);
     h.feed(2);
     h.feed(5);  // holes 3,4 -> NAK(3,2), buffer 5
@@ -197,6 +227,9 @@ void testNakTxDropDoesNotStallRx() {
     std::printf("Running testNakTxDropDoesNotStallRx...\n");
     RxHarness<64> h;
     h.nakAlwaysDrops = true;  // every NAK "drops" as if the TX pool were full
+    // Subject here is that a NAK TX drop does not stall RX, not when the NAK
+    // is emitted. Pin NAK-on-sight so the drop happens on the same call.
+    h.rb.setNakDelayDatagrams(0);
 
     h.feed(1);  // delivered normally
     h.feed(3);  // gap at 2 -> NAK(2,1) attempted, dropped; seq 3 still buffered
@@ -214,6 +247,7 @@ int main() {
     std::printf("\n=== UDP Gap-Recovery Tests ===\n");
     testInOrderDelivery();
     testSingleGap();
+    testLostDatagramStillNaksAfterWindow();
     testMultipleGaps();
     testReorderWindowOverflow();
     testDuplicateDropped();

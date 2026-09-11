@@ -211,6 +211,58 @@ void test_RiskLimitsSetThroughEngineAreEnforced() {
     PASS();
 }
 
+// ─── 7: a per-participant fee schedule overrides the default ───────────────
+//
+// setParticipantFeeSchedule was at 0.00%. The fee engine itself is live —
+// feeEngine_.applyFill runs on every fill — so this is operator-facing config
+// for a working subsystem that simply had no caller. An override that silently
+// did not apply would charge the wrong participants the wrong fees, and the
+// venue would only find out when someone reconciled a statement.
+void test_ParticipantFeeScheduleOverridesTheDefault() {
+    TEST(ParticipantFeeScheduleOverridesTheDefault);
+    MatchingEngine engine;
+    engine.addSymbol(kSym);
+
+    // Everyone pays 10bps taker by default; participant 42 is on 0.
+    FeeSchedule base;
+    base.makerBps = 0.0;
+    base.takerBps = 10.0;
+    engine.setDefaultFeeSchedule(base);
+
+    FeeSchedule vip;
+    vip.makerBps = 0.0;
+    vip.takerBps = 0.0;
+    engine.setParticipantFeeSchedule(/*participantId=*/42, vip);
+
+    // ASYNC, deliberately. Fees, hierarchical-risk accrual and the CAT audit
+    // trail are all applied by driveOco(), which only runs on the worker path
+    // in processRequest(). In sync mode none of the three does anything — an
+    // embedder using start() gets no fees and no indication of it. Production
+    // runs startAsync (main.cpp), so this is the posture that matters, but the
+    // asymmetry is worth knowing about.
+    engine.startAsync(1, 1024);
+
+    // A standard taker crosses a resting maker and is charged.
+    engine.submitOrder(kSym, 1, 100, Side::Sell, kPx, 100, OrderType::Limit);
+    engine.submitOrder(kSym, 2, 7,   Side::Buy,  kPx, 100, OrderType::Limit);
+
+    // The VIP taker crosses an identical maker and is not.
+    engine.submitOrder(kSym, 3, 100, Side::Sell, kPx, 100, OrderType::Limit);
+    engine.submitOrder(kSym, 4, 42,  Side::Buy,  kPx, 100, OrderType::Limit);
+
+    // Async: let the workers drain before reading accruals.
+    engine.waitForDrain();
+
+    const int64_t standardFee = engine.accruedFee(7);
+    const int64_t vipFee      = engine.accruedFee(42);
+
+    assert(standardFee > 0 && "the default schedule must charge a taker");
+    assert(vipFee == 0 && "the per-participant override must replace the default");
+
+    engine.stop();
+    PASS();
+}
+
 }  // namespace
 
 int main() {
@@ -222,6 +274,7 @@ int main() {
     test_ResumeVolatilityAuctionsReturnsSymbolsToTrading();
     test_ReplayModeAppliesToAllBooks();
     test_RiskLimitsSetThroughEngineAreEnforced();
+    test_ParticipantFeeScheduleOverridesTheDefault();
 
     std::cout << "\n" << passed << " passed\n\n";
     return 0;

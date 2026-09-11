@@ -445,13 +445,11 @@ public:
     // ─── Phase 4: Capacity Monitor ──────────────────────────────────
     CapacityMonitor& getCapacityMonitor() { return capacityMonitor_; }
 
-    // ─── Legacy single-symbol interface (backward compat, uses symbol 0) ───
-    void processOrder(OrderId orderId, ParticipantId participantId, Side side,
-                      Price price, Quantity qty, OrderType type,
-                      Price stopPrice = 0, Quantity displayQty = 0);
-    void cancelOrder(OrderId orderId);
-    void uncross() { uncross(0); }
-    double getVWAP() const;
+    // The legacy single-symbol interface (processOrder/cancelOrder/uncross/
+    // getVWAP without a SymbolId, all implicitly symbol 0) was removed: it had
+    // no caller anywhere in src, tests or benchmarks, and llvm-cov confirmed
+    // every one of them at 0.00%. Covering unused compatibility surface would
+    // have manufactured a coverage number instead of confidence.
 
 enum class RiskValidationResult : uint8_t {
     NotValidated,
@@ -680,7 +678,11 @@ private:
                                    Price price, Quantity qty, OrderType type);
     // Reserve/release working-order exposure for the position limit.
     void reservePosition(ParticipantId pid, Side side, Quantity restingQty);
-    void releasePosition(const Order* order);
+    // Only the OrderExposure overload exists. The Order* one was removed: it
+    // had no callers, and it dereferenced a pooled Order — the exact hazard
+    // (H1) that OrderExposure was introduced to avoid by copying the fields it
+    // needs while the book lock is held. A dead function that reintroduces a
+    // fixed bug the moment someone reaches for it is worse than no function.
     // H1 overload: takes the exposure BY VALUE, read under bookLock_ by
     // OrderBook::cancelOrderReleasing(), so no Order* is dereferenced outside
     // the lock. Prefer this at every cancel/sweep site.

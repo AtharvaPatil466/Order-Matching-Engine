@@ -1039,13 +1039,6 @@ void MatchingEngine::reservePosition(ParticipantId pid, Side side, Quantity rest
     positions_[pid].fetch_add(signedRest, std::memory_order_relaxed);
 }
 
-void MatchingEngine::releasePosition(const Order* order) {
-    if (!order || order->participantId >= MAX_PARTICIPANTS || order->remainingQty == 0) return;
-    int64_t signedRest = (order->side == Side::Buy) ? static_cast<int64_t>(order->remainingQty)
-                                                    : -static_cast<int64_t>(order->remainingQty);
-    positions_[order->participantId].fetch_sub(signedRest, std::memory_order_relaxed);
-}
-
 void MatchingEngine::releasePosition(const OrderBook::OrderExposure& e) {
     if (!e.found || e.participantId >= MAX_PARTICIPANTS || e.remainingQty == 0) return;
     int64_t signedRest = (e.side == Side::Buy) ? static_cast<int64_t>(e.remainingQty)
@@ -2082,22 +2075,6 @@ void MatchingEngine::processFIXMessage(const std::string& rawFix) {
     default:
         break;
     }
-}
-
-void MatchingEngine::processOrder(OrderId orderId, ParticipantId participantId, Side side,
-                                  Price price, Quantity qty, OrderType type,
-                                  Price stopPrice, Quantity displayQty) {
-    processOrder(static_cast<SymbolId>(0), orderId, participantId, side, price, qty, type,
-                 stopPrice, displayQty);
-}
-
-void MatchingEngine::cancelOrder(OrderId orderId) {
-    cancelOrder(static_cast<SymbolId>(0), orderId);
-}
-
-double MatchingEngine::getVWAP() const {
-    auto* book = getOrderBook(0);
-    return book ? book->getVWAP() : 0.0;
 }
 
 LatencyTracker MatchingEngine::getAggregateE2ELatency() const {

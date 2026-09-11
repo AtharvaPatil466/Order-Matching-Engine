@@ -70,6 +70,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
     target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
 endif()
 
+# Engine lifecycle surfaces: expiry timer, auctions, replay mode (H11).
+add_executable(EngineLifecycleTest EngineLifecycleTest.cpp)
+target_link_libraries(EngineLifecycleTest PRIVATE OrderMatcher)
+enable_assertions(EngineLifecycleTest)
+add_test(NAME EngineLifecycleTest COMMAND EngineLifecycleTest)
+set_tests_properties(EngineLifecycleTest PROPERTIES TIMEOUT 60 LABELS "project;lifecycle")
+
 # Replication apply + snapshot (H11). No GTest dependency.
 add_executable(ReplicationApplyTest ReplicationApplyTest.cpp)
 target_link_libraries(ReplicationApplyTest PRIVATE OrderMatcher)

@@ -70,6 +70,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
     target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
 endif()
 
+# Replication apply + snapshot (H11). No GTest dependency.
+add_executable(ReplicationApplyTest ReplicationApplyTest.cpp)
+target_link_libraries(ReplicationApplyTest PRIVATE OrderMatcher)
+enable_assertions(ReplicationApplyTest)
+add_test(NAME ReplicationApplyTest COMMAND ReplicationApplyTest)
+set_tests_properties(ReplicationApplyTest PROPERTIES TIMEOUT 60 LABELS "project;replication")
+
 # Participant authentication (H7). No GTest dependency.
 add_executable(ParticipantAuthTest ParticipantAuthTest.cpp)
 target_link_libraries(ParticipantAuthTest PRIVATE OrderMatcher)

@@ -284,10 +284,41 @@ int main(int argc, char* argv[]) {
             engine.setReplayModeAllBooks(true);
 
             coord->setJournalApplyCallback([&engine](const uint8_t* data, size_t len) {
-                if (len != sizeof(JournalEntry)) return;
+                if (len != sizeof(JournalEntry)) {
+                    std::cerr << "[Replication] DIVERGED: malformed entry ("
+                              << len << " bytes, expected " << sizeof(JournalEntry)
+                              << ")\n";
+                    obSink().log(obEvent("replication_apply_failed", LogSeverity::Error)
+                                     .kv("reason", "malformed_entry")
+                                     .kv("bytes", (long long)len));
+                    return;
+                }
                 JournalEntry entry{};
                 std::memcpy(&entry, data, sizeof(entry));
-                engine.applyReplicatedEntry(entry);
+
+                // applyReplicatedEntry returns false when it could NOT apply —
+                // most importantly when the entry names a symbol this backup was
+                // not configured with, because start() freezes books_ (worker
+                // threads iterate it, so inserting under them would race) and a
+                // running backup therefore cannot create a book on demand.
+                //
+                // This return value was discarded. A backup that ignores it keeps
+                // looking healthy while its book silently diverges from the
+                // primary's, and finds out at promotion — which is the
+                // split-brain the whole replication path exists to prevent. It is
+                // loud now: the operator can resync or fail over deliberately
+                // rather than discovering it during an incident.
+                if (!engine.applyReplicatedEntry(entry)) {
+                    std::cerr << "[Replication] DIVERGED: could not apply entry"
+                              << " type=" << static_cast<int>(entry.entryType)
+                              << " symbol=" << entry.symbolId
+                              << " order=" << entry.orderId
+                              << " — this backup is NO LONGER a faithful copy\n";
+                    obSink().log(obEvent("replication_apply_failed", LogSeverity::Error)
+                                     .kv("entry_type", (long long)static_cast<int>(entry.entryType))
+                                     .kv("symbol", (long long)entry.symbolId)
+                                     .kv("order", (long long)entry.orderId));
+                }
             });
 
             coord->setPromotionCallback([&engine]() {

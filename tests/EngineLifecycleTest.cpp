@@ -50,6 +50,23 @@ bool waitFor(Fn&& cond, std::chrono::milliseconds limit = std::chrono::milliseco
     return cond();
 }
 
+// Depth at one price, read through getSnapshot() — which takes bookLock_.
+//
+// NOT getOrder(): its own comment (added by the H1 fix) says it takes no lock
+// and is "for single-threaded tests and read-only inspection". These tests run
+// a live expiry-timer thread mutating the book, so reading through it raced —
+// ThreadSanitizer caught exactly that, in the timer's orderLookup_.erase()
+// against a main-thread find(). The product was right and the test was wrong.
+Quantity depthAt(const OrderBook& book, Side side, Price price) {
+    const auto snap = book.getSnapshot(MarketDataSnapshot::MAX_DEPTH);
+    const size_t n = (side == Side::Buy) ? snap.bidCount : snap.askCount;
+    const PriceLevel* src = (side == Side::Buy) ? snap.bids : snap.asks;
+    for (size_t i = 0; i < n; ++i) {
+        if (src[i].price == price) return src[i].totalQuantity;
+    }
+    return 0;
+}
+
 // ─── 1: the expiry timer actually retires a GTD order ───────────────────────
 //
 // The timer thread is the only thing that expires orders on a live engine. An
@@ -71,19 +88,22 @@ void test_ExpiryTimerRetiresGtdOrders() {
     engine.submitOrder(kSym, 2, 100, Side::Buy, kPx - 2000, 50, OrderType::Limit);
 
     auto* book = engine.getOrderBook(kSym);
-    assert(book->getOrder(1) && book->getOrder(2));
+    assert(depthAt(*book, Side::Buy, kPx - 1000) == 50);
+    assert(depthAt(*book, Side::Buy, kPx - 2000) == 50);
 
     engine.startExpiryTimer(/*intervalMs=*/5);
 
     // Before its time it must stay. Give the timer several ticks to get this
     // wrong in, rather than asserting after the first one.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    assert(book->getOrder(1) && "a GTD order must not expire before its time");
+    assert(depthAt(*book, Side::Buy, kPx - 1000) == 50 &&
+           "a GTD order must not expire before its time");
 
     now.store(5'001, std::memory_order_relaxed);
-    assert(waitFor([&] { return book->getOrder(1) == nullptr; }) &&
+    assert(waitFor([&] { return depthAt(*book, Side::Buy, kPx - 1000) == 0; }) &&
            "the expiry timer must retire a GTD order once its time passes");
-    assert(book->getOrder(2) && "a GTC order must survive the sweep");
+    assert(depthAt(*book, Side::Buy, kPx - 2000) == 50 &&
+           "a GTC order must survive the sweep");
 
     engine.stopExpiryTimer();
     engine.stop();
@@ -110,7 +130,9 @@ void test_ExpiryTimerStartIsIdempotent() {
     engine.submitOrder(kSym, 1, 100, Side::Buy, kPx, 10, OrderType::Limit,
                        0, 0, TimeInForce::GTD, /*expiryTime=*/2'000);
     now.store(2'001, std::memory_order_relaxed);
-    assert(waitFor([&] { return engine.getOrderBook(kSym)->getOrder(1) == nullptr; }));
+    assert(waitFor([&] {
+        return depthAt(*engine.getOrderBook(kSym), Side::Buy, kPx) == 0;
+    }));
 
     // The real assertion: this returns. A leaked second thread would hang it.
     engine.stopExpiryTimer();

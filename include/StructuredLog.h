@@ -80,16 +80,38 @@ public:
         std::fputs("{\"severity\":\"", stderr);
         std::fputs(sev, stderr);
         std::fputs("\",\"event\":\"", stderr);
-        std::fwrite(e.name.data(), 1, e.name.size(), stderr);
+        writeEscaped(e.name);
         std::fputc('"', stderr);
         for (auto& [k, v] : e.fields) {
             std::fputs(",\"", stderr);
-            std::fwrite(k.data(), 1, k.size(), stderr);
+            writeEscaped(k);
             std::fputs("\":\"", stderr);
-            std::fwrite(v.data(), 1, v.size(), stderr);
+            writeEscaped(v);
             std::fputc('"', stderr);
         }
         std::fputs("}\n", stderr);
+    }
+
+private:
+    // Values reach this sink from the wire — a rejected login's user name, a
+    // client-supplied identifier. Written raw, a quote closes the JSON string
+    // early and a newline ends the line, so a sender who picks their own name
+    // can forge whole log entries and bury the real one. Escape here, once,
+    // rather than asking every call site to sanitise: the sink is the only
+    // place that knows it is emitting JSON.
+    static void writeEscaped(std::string_view s) {
+        for (unsigned char c : s) {
+            switch (c) {
+                case '"':  std::fputs("\\\"", stderr); break;
+                case '\\': std::fputs("\\\\", stderr); break;
+                case '\n': std::fputs("\\n",  stderr); break;
+                case '\r': std::fputs("\\r",  stderr); break;
+                case '\t': std::fputs("\\t",  stderr); break;
+                default:
+                    if (c < 0x20) std::fprintf(stderr, "\\u%04x", c);
+                    else          std::fputc(c, stderr);
+            }
+        }
     }
 };
 

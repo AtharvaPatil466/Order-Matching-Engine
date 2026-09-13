@@ -22,6 +22,8 @@
 #include <filesystem>
 #include <string>
 
+#include <unistd.h>
+
 using namespace OrderMatcher;
 
 namespace {
@@ -210,6 +212,64 @@ void test_orders_accepted_rejected_counters() {
            "expected 2 rejected orders this run");
 }
 
+// Capture one JsonStderrSink line. The sink writes to stderr directly — it is
+// the reference dev backend, not an injectable seam — so redirect the real fd.
+std::string captureJsonLine(const LogEvent& e) {
+    std::FILE* tmp = std::tmpfile();
+    assert(tmp && "tmpfile() unavailable");
+
+    std::fflush(stderr);
+    const int saved = ::dup(STDERR_FILENO);
+    assert(saved >= 0);
+    ::dup2(::fileno(tmp), STDERR_FILENO);
+
+    JsonStderrSink sink;
+    sink.log(e);
+    std::fflush(stderr);
+
+    ::dup2(saved, STDERR_FILENO);
+    ::close(saved);
+
+    std::rewind(tmp);
+    std::string out;
+    char buf[512];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), tmp)) > 0) out.append(buf, n);
+    std::fclose(tmp);
+    return out;
+}
+
+void test_json_sink_shape() {
+    assert(captureJsonLine(obEvent("trade").kv("price", 1000ll)) ==
+           "{\"severity\":\"info\",\"event\":\"trade\",\"price\":\"1000\"}\n");
+}
+
+// A participant picks their own login name, and a rejected login logs it. With
+// the value written raw, this single field closes the JSON string, ends the
+// line, and starts a second forged record saying the login succeeded — so the
+// attacker writes the log entry that was supposed to incriminate them.
+void test_json_sink_escapes_wire_supplied_values() {
+    const std::string forged =
+        "eve\",\"outcome\":\"ok\"}\n{\"severity\":\"info\",\"event\":\"login_ok";
+    const std::string line =
+        captureJsonLine(obEvent("gateway_login_rejected", LogSeverity::Warn)
+                            .kv("user", forged));
+
+    assert(!line.empty());
+    assert(line.find('\n') == line.size() - 1 && "one event must stay one line");
+    assert(line.rfind("{\"severity\":\"warn\",\"event\":\"gateway_login_rejected\"", 0) == 0);
+    assert(line.find("\\\"") != std::string::npos && "quote must be escaped");
+    assert(line.find("\\n") != std::string::npos && "newline must be escaped");
+}
+
+void test_json_sink_escapes_backslash_and_control_bytes() {
+    std::string nasty = "a\\b";
+    nasty += '\t';
+    nasty += '\x01';
+    const std::string line = captureJsonLine(obEvent("x").kv("k", nasty));
+    assert(line.find("\"k\":\"a\\\\b\\t\\u0001\"") != std::string::npos);
+}
+
 void test_no_events_after_unset() {
     CapturingSink cap;
     setObSink(&cap);
@@ -230,6 +290,9 @@ int main() {
     test_trading_state_change_event();
     test_metrics_counter_wired_in_journal_commits();
     test_orders_accepted_rejected_counters();
+    test_json_sink_shape();
+    test_json_sink_escapes_wire_supplied_values();
+    test_json_sink_escapes_backslash_and_control_bytes();
     test_no_events_after_unset();
     std::puts("StructuredLogTest passed");
     return 0;

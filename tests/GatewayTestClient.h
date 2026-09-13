@@ -7,6 +7,7 @@
 #include "TcpGateway.h"
 
 #include <cstring>
+#include <string_view>
 
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -73,6 +74,24 @@ public:
         return sendAll(&len, sizeof(len)) && sendAll(&frame, sizeof(frame));
     }
 
+    // H7 login frame. makeGatewayLogin() owns the flag bit and payload size so
+    // the test cannot drift from what a real client would send.
+    bool sendLogin(std::string_view user, std::string_view secret,
+                   uint64_t clientRequestId = 0) {
+        GatewayLoginV2 frame = makeGatewayLogin(user, secret, clientRequestId);
+        uint32_t len = htonl(sizeof(frame));
+        return sendAll(&len, sizeof(len)) && sendAll(&frame, sizeof(frame));
+    }
+
+    // A well-formed V2 order frame carrying a flag the gateway does not know.
+    bool sendOrderWithFlags(const OrderRequest& req, uint32_t flags) {
+        GatewayRequestV2 frame{};
+        frame.header.flags = flags;
+        frame.request = req;
+        uint32_t len = htonl(sizeof(frame));
+        return sendAll(&len, sizeof(len)) && sendAll(&frame, sizeof(frame));
+    }
+
     bool sendUnsupportedV2Version(const OrderRequest& req) {
         GatewayRequestV2 frame{};
         frame.header.version = 99;
@@ -95,6 +114,14 @@ public:
         len = ntohl(len);
         if (len != sizeof(GatewayResponseV2)) return false;
         return recvAll(&resp, sizeof(resp));
+    }
+
+    // Bound the blocking recvs so a gateway that answers nothing fails the
+    // test instead of hanging the suite.
+    void setRecvTimeout(int seconds) {
+        struct timeval tv{};
+        tv.tv_sec = seconds;
+        setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
 
     int fd() const { return fd_; }

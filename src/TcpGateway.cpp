@@ -457,14 +457,21 @@ bool TcpGateway::feedBytes(int fd, ClientState& state) {
             break;
         }
 
-        OrderRequest req{};
+        DecodedFrame frame{};
         GatewayResponse errorResp{};
-        if (!decodeFrame(state, msgLen, req, errorResp)) {
+        if (!decodeFrame(state, msgLen, frame, errorResp)) {
             sendResponse(fd, errorResp);
             removeClient(fd);
             return false;
         }
-        processMessage(fd, req);
+        if (frame.kind == DecodedFrame::Kind::Login) {
+            if (!handleLogin(fd, state, frame.login)) {
+                removeClient(fd);
+                return false;
+            }
+        } else {
+            processMessage(fd, state, frame.order);
+        }
 
         // processMessage() may have blown the outbound queue ceiling. Reap
         // here, where `state` is still alive, rather than inside sendResponse.
@@ -488,12 +495,16 @@ bool TcpGateway::feedBytes(int fd, ClientState& state) {
 }
 
 bool TcpGateway::decodeFrame(ClientState& state, uint32_t msgLen,
-                             OrderRequest& req, GatewayResponse& errorResp) {
+                             DecodedFrame& out, GatewayResponse& errorResp) {
     const char* payload = state.readBuf.data() + sizeof(uint32_t);
     errorResp.type = GatewayResponse::Type::Error;
+    out.kind = DecodedFrame::Kind::Order;
 
     if (msgLen == sizeof(OrderRequest)) {
-        std::memcpy(&req, payload, sizeof(OrderRequest));
+        // Bare V1 frame: no header, so no room for a flag and no way to log
+        // in. Under auth a V1 client is simply never authenticated, and
+        // processMessage() rejects it.
+        std::memcpy(&out.order, payload, sizeof(OrderRequest));
         state.protocolVersion = GATEWAY_PROTOCOL_V1;
         state.lastClientRequestId = 0;
         return true;
@@ -524,41 +535,119 @@ bool TcpGateway::decodeFrame(ClientState& state, uint32_t msgLen,
                       "Invalid gateway frame header size");
         return false;
     }
-    if (header.payloadSize != sizeof(OrderRequest) ||
+    if ((header.flags & ~GATEWAY_FLAGS_KNOWN) != 0) {
+        std::snprintf(errorResp.errorMessage, sizeof(errorResp.errorMessage),
+                      "Unsupported gateway frame flags: 0x%x",
+                      static_cast<unsigned>(header.flags));
+        return false;
+    }
+
+    const bool isLogin = (header.flags & GATEWAY_FLAG_LOGIN) != 0;
+    const uint32_t expectedPayload =
+        isLogin ? sizeof(GatewayLoginRequest) : sizeof(OrderRequest);
+    if (header.payloadSize != expectedPayload ||
         header.headerSize + header.payloadSize != msgLen) {
         std::snprintf(errorResp.errorMessage, sizeof(errorResp.errorMessage),
                       "Invalid gateway frame payload size");
         return false;
     }
 
-    std::memcpy(&req, payload + header.headerSize, sizeof(OrderRequest));
+    if (isLogin) {
+        out.kind = DecodedFrame::Kind::Login;
+        std::memcpy(&out.login, payload + header.headerSize, sizeof(out.login));
+    } else {
+        std::memcpy(&out.order, payload + header.headerSize, sizeof(out.order));
+    }
     state.protocolVersion = header.version;
     state.lastClientRequestId = header.clientRequestId;
     return true;
 }
 
-void TcpGateway::processMessage(int fd, const OrderRequest& req) {
-    // H7: this protocol carries no credentials. There is no login frame, so
-    // req.participantId is an unverifiable claim — and Type::KillSwitch below
-    // acts on it directly, meaning any connection that can reach this port
-    // could disable any participant's trading.
+// A fixed-width wire field, bounded. strnlen so an unterminated field stops at
+// the struct boundary instead of reading into whatever follows.
+static std::string_view wireField(const char* p, size_t cap) {
+    return std::string_view(p, ::strnlen(p, cap));
+}
+
+bool TcpGateway::handleLogin(int fd, ClientState& state,
+                             const GatewayLoginRequest& login) {
+    GatewayResponse resp{};
+    resp.orderId      = 0;
+    resp.rejectReason = RejectReason::None;
+
+    if (!auth_ || !auth_->enabled()) {
+        // Say so explicitly rather than letting authenticate() fail against an
+        // empty store. A client that thinks it is authenticating to a gateway
+        // that enforces nothing is a misconfiguration worth surfacing at the
+        // first connection, not at the first incident.
+        resp.type = GatewayResponse::Type::Error;
+        std::snprintf(resp.errorMessage, sizeof(resp.errorMessage),
+                      "gateway has no credential store configured");
+        sendResponse(fd, resp);
+        return false;
+    }
+
+    const std::string_view user = wireField(login.user, sizeof(login.user));
+    AuthorizedIdentity id =
+        auth_->authenticate(user, wireField(login.secret, sizeof(login.secret)));
+
+    if (!id.valid()) {
+        // One attempt per connection: the client must reconnect to try again,
+        // which puts the accept path's cost and the IP allow-list in front of
+        // an online guessing loop.
+        obSink().log(obEvent("gateway_login_rejected", LogSeverity::Warn)
+                         .kv("user", user));
+        resp.type = GatewayResponse::Type::Error;
+        std::snprintf(resp.errorMessage, sizeof(resp.errorMessage),
+                      "login rejected");
+        sendResponse(fd, resp);
+        return false;
+    }
+
+    state.identity = std::move(id);
+    obSink().log(obEvent("gateway_login_ok")
+                     .kv("user", state.identity.user())
+                     .kv("participants", (long long)state.identity.allowed().size()));
+
+    resp.type = GatewayResponse::Type::Ack;
+    sendResponse(fd, resp);
+    return true;
+}
+
+void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& req) {
+    // H7: req.participantId is a claim the client makes about itself. With a
+    // credential store configured, the session has to have logged in and the
+    // credential has to cover the participant being claimed — otherwise any
+    // connection that reaches this port could trade on another firm's account
+    // or, through Type::KillSwitch below, halt their trading outright.
     //
-    // When an operator has configured a credential store, serving requests we
-    // cannot attribute would silently undo that decision on this one gateway.
-    // Refuse instead: fail closed, say why, and let the operator either add
-    // the login frame (the follow-up) or keep this port off.
+    // Still open: Cancel/Modify/CancelReplace address an order by id alone and
+    // the engine does not check who owns it, so a logged-in session can still
+    // act on another participant's resting order. Closing that needs the
+    // requesting participant threaded into MatchingEngine's cancel path; the
+    // check below does not cover it.
     if (auth_ && auth_->enabled()) {
-        GatewayResponse denied{};
-        denied.type = GatewayResponse::Type::Error;
-        denied.orderId = req.orderId;
-        denied.rejectReason = RejectReason::None;
-        std::snprintf(denied.errorMessage, sizeof(denied.errorMessage),
-                      "binary gateway cannot authenticate; participant identity unverifiable");
-        obSink().log(obEvent("gateway_unauthenticated_request", LogSeverity::Warn)
-                         .kv("claimed_participant", (long long)req.participantId)
-                         .kv("request_type", (long long)static_cast<int>(req.type)));
-        sendResponse(fd, denied);
-        return;
+        const char* denial = nullptr;
+        if (!state.identity.valid()) {
+            denial = "not logged in; send a login frame first";
+        } else if (!state.identity.permits(req.participantId)) {
+            denial = "credential does not cover the requested participant";
+        }
+        if (denial) {
+            obSink().log(obEvent("gateway_unauthorized_request", LogSeverity::Warn)
+                             .kv("user", state.identity.valid()
+                                             ? std::string_view(state.identity.user())
+                                             : std::string_view("-"))
+                             .kv("claimed_participant", (long long)req.participantId)
+                             .kv("request_type", (long long)static_cast<int>(req.type)));
+            GatewayResponse denied{};
+            denied.type = GatewayResponse::Type::Error;
+            denied.orderId = req.orderId;
+            denied.rejectReason = RejectReason::None;
+            std::snprintf(denied.errorMessage, sizeof(denied.errorMessage), "%s", denial);
+            sendResponse(fd, denied);
+            return;
+        }
     }
 
     SubmitResult result = SubmitResult::rejected(RejectReason::EngineStopped);

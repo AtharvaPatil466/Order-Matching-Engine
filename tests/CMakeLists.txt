@@ -91,6 +91,13 @@ enable_assertions(ParticipantAuthTest)
 add_test(NAME ParticipantAuthTest COMMAND ParticipantAuthTest)
 set_tests_properties(ParticipantAuthTest PROPERTIES TIMEOUT 60 LABELS "project;security")
 
+# Binary gateway login frame + per-participant authorisation (H7).
+add_executable(GatewayLoginTest GatewayLoginTest.cpp)
+target_link_libraries(GatewayLoginTest PRIVATE OrderMatcher)
+enable_assertions(GatewayLoginTest)
+add_test(NAME GatewayLoginTest COMMAND GatewayLoginTest)
+set_tests_properties(GatewayLoginTest PROPERTIES TIMEOUT 120 LABELS "project;security;integration")
+
 # Durable client acknowledgements (C4). No GTest dependency.
 add_executable(DurableAckTest DurableAckTest.cpp)
 target_link_libraries(DurableAckTest PRIVATE OrderMatcher)

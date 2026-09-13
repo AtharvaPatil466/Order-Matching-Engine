@@ -3,6 +3,7 @@
 #include "MatchingEngine.h"
 #include "ParticipantAuth.h"
 #include <string>
+#include <string_view>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -40,6 +41,15 @@ constexpr uint32_t GATEWAY_MAX_FRAME_SIZE = 1024 * 1024;
 constexpr uint16_t GATEWAY_REQUEST_HEADER_SIZE = 24;
 constexpr uint16_t GATEWAY_RESPONSE_HEADER_SIZE = 24;
 
+// Frame kind rides in the V2 header's `flags` word, which was reserved and has
+// only ever been sent as zero. Zero still means "this payload is an
+// OrderRequest", so every existing client keeps working untouched and no
+// version bump is needed. Unknown bits are rejected rather than ignored —
+// quietly dropping a flag is how an authenticated frame gets downgraded into
+// an unauthenticated one.
+constexpr uint32_t GATEWAY_FLAG_LOGIN  = 1u << 0;
+constexpr uint32_t GATEWAY_FLAGS_KNOWN = GATEWAY_FLAG_LOGIN;
+
 #pragma pack(push, 1)
 struct GatewayRequestHeader {
     uint32_t magic{GATEWAY_PROTOCOL_MAGIC};
@@ -54,7 +64,36 @@ struct GatewayRequestV2 {
     GatewayRequestHeader header{};
     OrderRequest request{};
 };
+
+// Login payload (header.flags & GATEWAY_FLAG_LOGIN). Fixed-width fields rather
+// than length-prefixed strings, matching the rest of this protocol; the
+// gateway reads them with strnlen, so an unterminated field is truncated, not
+// run off the end of.
+struct GatewayLoginRequest {
+    char user[32];
+    char secret[64];
+};
+
+struct GatewayLoginV2 {
+    GatewayRequestHeader header{};
+    GatewayLoginRequest  login{};
+};
 #pragma pack(pop)
+
+// Build a login frame. One place knows the wire rules — the flag bit, the
+// payload size, and that both fields truncate rather than overrun — so a
+// client cannot get them subtly wrong.
+inline GatewayLoginV2 makeGatewayLogin(std::string_view user,
+                                       std::string_view secret,
+                                       uint64_t clientRequestId = 0) {
+    GatewayLoginV2 frame{};
+    frame.header.payloadSize     = sizeof(GatewayLoginRequest);
+    frame.header.flags           = GATEWAY_FLAG_LOGIN;
+    frame.header.clientRequestId = clientRequestId;
+    user.copy(frame.login.user, sizeof(frame.login.user) - 1);
+    secret.copy(frame.login.secret, sizeof(frame.login.secret) - 1);
+    return frame;
+}
 
 struct GatewayResponse {
     enum class Type : uint8_t {
@@ -119,9 +158,10 @@ public:
 
     void clearAllowedIPs() { allowedIPs_.clear(); }
 
-    // H7: install the credential store. This protocol has no login frame, so
-    // the gateway cannot verify req.participantId; with a store configured it
-    // refuses every request rather than serving unattributable ones.
+    // H7: install the credential store. With one configured, a connection must
+    // send a login frame (GATEWAY_FLAG_LOGIN) before any order, and may only
+    // act as a participant its credential covers. With none, the gateway keeps
+    // the pre-H7 behaviour and takes req.participantId on trust.
     void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
 
 private:
@@ -139,6 +179,19 @@ private:
         std::chrono::steady_clock::time_point lastActivity;
         uint16_t protocolVersion{GATEWAY_PROTOCOL_V1};
         uint64_t lastClientRequestId{0};
+        // Who this connection proved it is. Default-constructed permits
+        // nothing, so a session that never logged in fails closed.
+        AuthorizedIdentity identity;
+    };
+
+    // What one framed request turned out to be. The two payloads are small and
+    // a connection sends at most a handful of logins, so they sit side by side
+    // rather than in a variant.
+    struct DecodedFrame {
+        enum class Kind { Order, Login };
+        Kind                kind{Kind::Order};
+        OrderRequest        order{};
+        GatewayLoginRequest login{};
     };
 
     void eventLoop();
@@ -148,10 +201,14 @@ private:
     // Extracted from handleClientData so kernel and kernel-bypass transports
     // share one framer. Returns false if the client was removed (caller stops).
     bool feedBytes(int fd, ClientState& state);
-    void processMessage(int fd, const OrderRequest& req);
+    void processMessage(int fd, ClientState& state, const OrderRequest& req);
+    // Returns false when the connection must be closed. It does NOT remove the
+    // client itself: feedBytes still holds a reference into clients_ for this
+    // fd, so the caller does the removal once it is done with `state`.
+    bool handleLogin(int fd, ClientState& state, const GatewayLoginRequest& login);
     void removeClient(int fd);
     bool sendResponse(int fd, const GatewayResponse& resp);
-    bool decodeFrame(ClientState& state, uint32_t msgLen, OrderRequest& req,
+    bool decodeFrame(ClientState& state, uint32_t msgLen, DecodedFrame& out,
                      GatewayResponse& errorResp);
     bool isIPAllowed(uint32_t ip) const;
     void flushWriteBuffer(int fd);

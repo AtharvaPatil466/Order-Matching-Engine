@@ -1,5 +1,6 @@
 #include "MatchingEngine.h"
 #include "AdminServer.h"
+#include "CliFlags.h"
 #include "ReplicationProtocol.h"
 #include "Config.h"
 #include "ConfigValidator.h"
@@ -32,22 +33,6 @@ void signalHandler(int) {
 void sighupHandler(int) {
     g_reload_config.store(true, std::memory_order_release);
 }
-
-namespace {
-
-// Resolve a CLI flag, falling back to an OB_* environment variable.
-// Empty return means neither was supplied.
-std::string flagOrEnv(int argc, char** argv, const char* flag, const char* env) {
-    for (int i = 1; i < argc - 1; ++i) {
-        if (std::strcmp(argv[i], flag) == 0) {
-            return argv[i + 1];
-        }
-    }
-    if (const char* v = std::getenv(env)) return v;
-    return {};
-}
-
-}  // namespace
 
 int main(int argc, char* argv[]) {
     std::cout << "╔═══════════════════════════════════════════════════╗\n"
@@ -346,8 +331,11 @@ int main(int argc, char* argv[]) {
     AdminServer admin(engine, adminPort);
     admin.setReplicationCoordinator(coord.get());  // null is fine — standalone
     const std::string adminToken = flagOrEnv(argc, argv, "--admin-token", "OB_ADMIN_TOKEN");
-    const std::string adminNoAuth = flagOrEnv(argc, argv, "--admin-no-auth", "OB_ADMIN_NO_AUTH");
-    const bool adminAuthDisabled = (adminNoAuth == "1" || adminNoAuth == "true");
+    // Presence is enough. Read as a value-taking flag, a bare --admin-no-auth
+    // in the last argv slot was invisible, so the opt-out the FATAL message
+    // below tells operators to pass did nothing.
+    const bool adminAuthDisabled =
+        flagOrEnvBool(argc, argv, "--admin-no-auth", "OB_ADMIN_NO_AUTH");
 
     if (!adminToken.empty()) {
         admin.setAdminToken(adminToken);

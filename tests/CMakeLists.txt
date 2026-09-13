@@ -89,7 +89,7 @@ add_executable(ParticipantAuthTest ParticipantAuthTest.cpp)
 target_link_libraries(ParticipantAuthTest PRIVATE OrderMatcher)
 enable_assertions(ParticipantAuthTest)
 add_test(NAME ParticipantAuthTest COMMAND ParticipantAuthTest)
-set_tests_properties(ParticipantAuthTest PROPERTIES TIMEOUT 60 LABELS "project\;security")
+set_tests_properties(ParticipantAuthTest PROPERTIES TIMEOUT 60 LABELS "project;security")
 
 # Durable client acknowledgements (C4). No GTest dependency.
 add_executable(DurableAckTest DurableAckTest.cpp)

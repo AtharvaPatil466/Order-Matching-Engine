@@ -294,6 +294,41 @@ curl -H "X-Chaos-Token: $TOK" \
      "localhost:8080/chaos/order?orderId=1&participantId=1&price=100000&qty=1&side=0"
 ```
 
+### Order Entry Authentication
+
+`GatewayServer` refuses to start unless participant credentials are configured
+or authentication is explicitly turned off — the same bar the admin port has
+held for a while, applied to the port that moves money.
+
+```bash
+# One credential per line: user:secret:participantId[,participantId...]
+cat > /etc/orderbook/participants.conf <<'EOF'
+firm-a:s3cret:100,101
+firm-b:0th3r:200
+EOF
+chmod 600 /etc/orderbook/participants.conf    # warned about if group/other-readable
+
+GatewayServer 9876 --participant-credentials /etc/orderbook/participants.conf
+# or: OB_PARTICIPANT_CREDENTIALS=/etc/orderbook/participants.conf GatewayServer 9876
+
+# Deliberately unauthenticated (dev, or a port already isolated some other way)
+GatewayServer 9876 --no-participant-auth
+```
+
+A malformed line fails the whole load rather than being skipped: a typo that
+silently dropped a firm's credential would surface as that firm being unable to
+trade, at the worst possible moment.
+
+Clients authenticate per connection. On the binary protocol that is a login
+frame — the V2 header's `flags` word with `GATEWAY_FLAG_LOGIN` set, carrying
+`user`/`secret` — sent before the first order; FIX authenticates at Logon
+(tags 553/554) and OUCH at SoupBinTCP Login. A session may then only submit as
+a participant its credential covers, which includes the kill switch. A failed
+login closes the connection.
+
+The forwarding proxy (`OB_ENGINE_HOST`/`OB_ENGINE_PORT`) relays frames it does
+not interpret, so it does not authenticate; the engine it forwards to does.
+
 ### Replication (live binary)
 The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE` is set. Primary listens on `OB_REPLICATION_PORT` (default 9002); backup connects to `OB_PRIMARY_HOST`:`OB_PRIMARY_REPLICATION_PORT` and runs in replay mode until promotion. Set `OB_JOURNAL_PATH` to enable journal commit → backup shipping. The chaos suite (`docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build`) provides a fully-wired 1+1 topology.
 

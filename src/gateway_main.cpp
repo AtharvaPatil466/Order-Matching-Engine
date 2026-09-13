@@ -1,4 +1,5 @@
 #include "TcpGateway.h"
+#include "CliFlags.h"
 #include "ParticipantAuth.h"
 #include "MarketDataPublisher.h"
 #include <iostream>
@@ -380,7 +381,9 @@ int main(int argc, char* argv[]) {
     const char* engineHost = std::getenv("OB_ENGINE_HOST");
     const char* enginePortStr = std::getenv("OB_ENGINE_PORT");
 
-    if (engineHost && enginePortStr) {
+    // Set-but-empty is not "configured". Treating it as configured sends the
+    // process down the proxy path with nowhere to proxy to.
+    if (engineHost && *engineHost && enginePortStr && *enginePortStr) {
         // ----------------------------------------------------------------
         // FORWARDING MODE: proxy all client frames to the remote engine.
         // ----------------------------------------------------------------
@@ -388,6 +391,13 @@ int main(int argc, char* argv[]) {
 
         std::cout << "[Gateway] Forwarding mode: orders -> "
                   << engineHost << ":" << enginePort << std::endl;
+        // The proxy relays frames it does not interpret, so it cannot check a
+        // credential. Enforcement is the engine's, one hop down, and that
+        // engine now refuses to start unauthenticated — so adding a second,
+        // unsatisfiable gate here would only teach operators to pass the
+        // opt-out everywhere.
+        std::cout << "[Gateway] Note: the proxy does not authenticate; the "
+                     "engine it forwards to does.\n";
 
         ForwardingProxy proxy(engineHost, enginePort, port);
         if (!proxy.start()) {
@@ -409,6 +419,53 @@ int main(int argc, char* argv[]) {
         // LOCAL MODE: embedded matching engine (original behaviour).
         // ----------------------------------------------------------------
         std::cout << "[Gateway] Local mode: embedded engine" << std::endl;
+
+        // H7: participant credentials. A separate file, not engine.conf —
+        // same reasoning as the admin token: the main config travels into
+        // tickets and chat logs, and secrets should not travel with it.
+        //
+        // Required, not optional. This is the order-entry port; an operator
+        // who forgets the credentials file should find out at startup, not
+        // from an incident review. AdminServer has refused to boot without a
+        // token for a while, and the port that moves money should not hold
+        // itself to a lower bar than the port that reads status.
+        //
+        // Opting out stays available and has to be deliberate.
+        ParticipantAuth participantAuth;
+        const std::string credPath =
+            flagOrEnv(argc, argv, "--participant-credentials",
+                      "OB_PARTICIPANT_CREDENTIALS");
+        const bool authDisabled =
+            flagOrEnvBool(argc, argv, "--no-participant-auth",
+                          "OB_NO_PARTICIPANT_AUTH");
+
+        if (!credPath.empty()) {
+            if (ParticipantAuth::fileIsOverlyPermissive(credPath)) {
+                std::cerr << "[Auth] WARNING: " << credPath
+                          << " is readable by group or other. Secrets in a "
+                             "world-readable file are not secrets; chmod 600 it.\n";
+            }
+            std::string err;
+            const int n = participantAuth.loadFromFile(credPath, &err);
+            if (n < 0) {
+                std::cerr << "[Auth] FATAL: " << err << "\n";
+                return 1;
+            }
+            std::cout << "[Auth] Loaded " << n << " participant credential(s) from "
+                      << credPath << "\n";
+        } else if (authDisabled) {
+            std::cout << "[Auth] Participant auth explicitly disabled via "
+                         "--no-participant-auth. Every identity on this port is "
+                         "taken on trust.\n";
+        } else {
+            std::cerr << "[Auth] FATAL: no participant credentials configured.\n"
+                      << "        Set --participant-credentials /path/to/file\n"
+                      << "        (OB_PARTICIPANT_CREDENTIALS), one credential per\n"
+                      << "        line as user:secret:id[,id...], or pass\n"
+                      << "        --no-participant-auth (OB_NO_PARTICIPANT_AUTH=1)\n"
+                      << "        to accept every claimed identity on purpose.\n";
+            return 1;
+        }
 
         // Create matching engine
         MatchingEngine engine;
@@ -432,34 +489,6 @@ int main(int argc, char* argv[]) {
                 book->setEventListener(listener.get());
                 listeners.push_back(std::move(listener));
             }
-        }
-
-        // H7: participant credentials. A separate file, not engine.conf —
-        // same reasoning as the admin token: the main config travels into
-        // tickets and chat logs, and secrets should not travel with it.
-        //
-        // Absent, the gateway behaves exactly as before: identities are taken
-        // on trust. Present, it refuses every request, because this protocol
-        // has no login frame and cannot verify who is asking. That refusal is
-        // the point — an operator who configures credentials has decided the
-        // port must be attributable, and silently serving it anyway would undo
-        // that decision.
-        ParticipantAuth participantAuth;
-        const char* credPathEnv = std::getenv("OB_PARTICIPANT_CREDENTIALS");
-        if (credPathEnv && *credPathEnv) {
-            if (ParticipantAuth::fileIsOverlyPermissive(credPathEnv)) {
-                std::cerr << "[Auth] WARNING: " << credPathEnv
-                          << " is readable by group or other. Secrets in a "
-                             "world-readable file are not secrets; chmod 600 it.\n";
-            }
-            std::string err;
-            const int n = participantAuth.loadFromFile(credPathEnv, &err);
-            if (n < 0) {
-                std::cerr << "[Auth] FATAL: " << err << "\n";
-                return 1;
-            }
-            std::cout << "[Auth] Loaded " << n << " participant credential(s) from "
-                      << credPathEnv << "\n";
         }
 
         // Start TCP gateway

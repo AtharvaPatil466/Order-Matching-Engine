@@ -98,6 +98,21 @@ enable_assertions(GatewayLoginTest)
 add_test(NAME GatewayLoginTest COMMAND GatewayLoginTest)
 set_tests_properties(GatewayLoginTest PROPERTIES TIMEOUT 120 LABELS "project;security;integration")
 
+# The order-entry port must refuse to serve unauthenticated (H7). Run the real
+# binary with no credentials and no opt-out: it has to exit non-zero, and it
+# must never reach the point of binding a port. WILL_FAIL pins the exit status;
+# FAIL_REGULAR_EXPRESSION pins that it did not start listening anyway.
+#
+# The environment is cleared rather than inherited so a developer who exports
+# OB_PARTICIPANT_CREDENTIALS in their shell does not silently pass this.
+add_test(NAME GatewayRequiresAuthTest COMMAND GatewayServer 0)
+set_tests_properties(GatewayRequiresAuthTest PROPERTIES
+    WILL_FAIL TRUE
+    FAIL_REGULAR_EXPRESSION "Order Gateway listening"
+    TIMEOUT 30
+    LABELS "project;security"
+    ENVIRONMENT "OB_PARTICIPANT_CREDENTIALS=;OB_NO_PARTICIPANT_AUTH=;OB_ENGINE_HOST=;OB_ENGINE_PORT=")
+
 # Durable client acknowledgements (C4). No GTest dependency.
 add_executable(DurableAckTest DurableAckTest.cpp)
 target_link_libraries(DurableAckTest PRIVATE OrderMatcher)

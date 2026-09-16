@@ -106,6 +106,13 @@ enable_assertions(OrderOwnershipTest)
 add_test(NAME OrderOwnershipTest COMMAND OrderOwnershipTest)
 set_tests_properties(OrderOwnershipTest PROPERTIES TIMEOUT 120 LABELS "project;security;integration")
 
+# A shutdown that outruns its budget must say which worker it is waiting on.
+add_executable(ShutdownWatchdogTest ShutdownWatchdogTest.cpp)
+target_link_libraries(ShutdownWatchdogTest PRIVATE OrderMatcher)
+enable_assertions(ShutdownWatchdogTest)
+add_test(NAME ShutdownWatchdogTest COMMAND ShutdownWatchdogTest)
+set_tests_properties(ShutdownWatchdogTest PROPERTIES TIMEOUT 60 LABELS "project;lifecycle;concurrency")
+
 # The order-entry port must refuse to serve unauthenticated (H7). Run the real
 # binary with no credentials and no opt-out: it has to exit non-zero, and it
 # must never reach the point of binding a port. WILL_FAIL pins the exit status;

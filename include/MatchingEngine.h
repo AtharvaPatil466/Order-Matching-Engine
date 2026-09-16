@@ -114,6 +114,15 @@ public:
     void startAsync(size_t numThreads = 1, size_t queueSize = 8192);
     void stopAsync();
 
+    // How long stopAsync() waits for the workers before it starts reporting
+    // which ones have not exited, and how often it repeats. It never gives up
+    // and never detaches: a wedged worker still holds engine state, so
+    // abandoning it would trade a visible hang for a use-after-free. The point
+    // is that the hang stops being silent.
+    void setShutdownReportInterval(std::chrono::milliseconds every) {
+        shutdownReportInterval_ = every;
+    }
+
     // Wait until all queued requests have been processed
     void waitForDrain();
 
@@ -517,8 +526,20 @@ private:
     struct alignas(64) ThreadStats {
         std::atomic<uint64_t> submitted{0};
         std::atomic<uint64_t> processed{0};
+        // Set once, as the worker's last act. Deliberately NOT updated per
+        // request: this line is the hot path's own, and the shutdown
+        // diagnostic below reconstructs what it needs from submitted/processed
+        // rather than paying a store per order for state only a hang reads.
+        std::atomic<bool>     exited{false};
     };
     std::unique_ptr<ThreadStats[]> threadStats_;
+
+    // Report a slow shutdown after this long, then again on each interval.
+    std::chrono::milliseconds shutdownReportInterval_{5000};
+
+    // Wait for every worker to leave workerLoop(), reporting what is still
+    // running each interval. Returns once they are all out.
+    void awaitWorkerExit();
     std::atomic<uint64_t> submittedTotal_{0};
     std::atomic<uint64_t> processedTotal_{0};
     std::atomic<uint64_t> nextSubmitSequence_{1};

@@ -413,6 +413,10 @@ void MatchingEngine::stopAsync() {
         queueWakeups_[i].notify_one();
     }
 
+    // Report while we wait, then join — which is now known to return promptly,
+    // because every worker has already left its loop.
+    awaitWorkerExit();
+
     for (auto& thread : workerThreads_) {
         if (thread.joinable()) {
             thread.join();
@@ -518,6 +522,59 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
         queueWakeups_[threadIndex].wait(observedWake, std::memory_order_relaxed);
         observedWake = queueWakeups_[threadIndex].load(std::memory_order_relaxed);
         idleSpins = 0;
+    }
+
+    // Last act, covering both breaks above. Until this existed, stopAsync()
+    // could not tell a worker that was finishing from one that would never
+    // finish — join() looks identical either way.
+    threadStats_[threadIndex].exited.store(true, std::memory_order_release);
+}
+
+// Wait for every worker to leave workerLoop(), saying what is still running.
+//
+// join() has no timeout, so a genuinely wedged worker turned shutdown into a
+// silent hang: the process sat there until the orchestrator's grace period ran
+// out and SIGKILLed it, with nothing in the logs to say why. The fix is not to
+// stop waiting — a wedged worker still owns queues and book state this
+// function is about to destroy, so detaching it would trade a visible hang for
+// a use-after-free — but to make the wait explain itself.
+//
+// Slow is not the same as wedged, and this deliberately does not guess which
+// it is looking at: a final checkpoint fsync can legitimately take seconds.
+// It reports the counters and lets the operator judge.
+void MatchingEngine::awaitWorkerExit() {
+    const auto start = std::chrono::steady_clock::now();
+    size_t reports = 0;
+
+    for (;;) {
+        size_t running = 0;
+        for (size_t i = 0; i < numThreads_; ++i) {
+            if (!threadStats_[i].exited.load(std::memory_order_acquire)) ++running;
+        }
+        if (running == 0) break;
+
+        const auto waited = std::chrono::steady_clock::now() - start;
+        const auto due = shutdownReportInterval_ * (reports + 1);
+        if (waited >= due) {
+            ++reports;
+            const auto waitedMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(waited).count();
+            for (size_t i = 0; i < numThreads_; ++i) {
+                if (threadStats_[i].exited.load(std::memory_order_acquire)) continue;
+                const uint64_t sub = threadStats_[i].submitted.load(std::memory_order_acquire);
+                const uint64_t don = threadStats_[i].processed.load(std::memory_order_acquire);
+                obSink().log(obEvent("shutdown_worker_still_running", LogSeverity::Warn)
+                                 .kv("thread",    (long long)i)
+                                 .kv("waited_ms", (long long)waitedMs)
+                                 .kv("submitted", (unsigned long long)sub)
+                                 .kv("processed", (unsigned long long)don)
+                                 .kv("outstanding", (unsigned long long)(sub - don)));
+            }
+        }
+
+        // Polling, not atomic::wait(): this needs a deadline to report on, and
+        // wait() has none. The interval is shutdown-only, so the cost is noise.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 }
 

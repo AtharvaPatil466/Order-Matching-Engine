@@ -82,6 +82,16 @@ enum class PegType : uint8_t {
     PrimaryPeg   // Pegged to same-side best (best bid for buy, best ask for sell)
 };
 
+// "Whoever owns it" — the requester in a cancel/modify path that is not acting
+// for a participant at all. Internal sweeps (expiry, auction cleanup, the kill
+// switch, OCO's sibling cancel) act for the venue, so they are not constrained
+// by ownership; a request arriving from a client always carries a real id.
+//
+// Chosen as the max value rather than 0 because 0 is a legal ParticipantId and
+// is also what a default-constructed request carries — a sentinel that a
+// forgotten field can produce by accident is not a sentinel.
+constexpr ParticipantId kAnyParticipant = std::numeric_limits<ParticipantId>::max();
+
 enum class RejectReason : uint8_t {
     None,
     VolatilityCircuitBreaker, // The order that tripped the breaker
@@ -126,8 +136,25 @@ enum class RejectReason : uint8_t {
     // field 9, GatewayProtocol.h ExecutionReport.rejectReason), so inserting
     // mid-enum would silently renumber every later reason for live clients and
     // for any recorded capture. New reasons go at the end, always.
-    InvalidDisplayQty
+    InvalidDisplayQty,
+
+    // Cancel/Modify/CancelReplace naming an order the requester does not own.
+    // Deliberately distinct from OrderNotFound: answering "not found" for a
+    // live order tells the requester their guess missed, which is a probe for
+    // which order ids exist. It also hides a real authorisation failure behind
+    // what looks like a routine race.
+    NotOrderOwner
 };
+
+// What a client is told. NotOrderOwner is deliberately indistinguishable from
+// OrderNotFound on the wire: answering "that order exists, it is just not
+// yours" confirms the id is live, which turns a cancel into an order-id
+// oracle — walk the id space, keep the ones that come back "not yours", and
+// you have mapped a competitor's resting book. The distinction is kept
+// internally, where the logs and metrics are the ones that need it.
+constexpr RejectReason clientVisibleReason(RejectReason r) {
+    return r == RejectReason::NotOrderOwner ? RejectReason::OrderNotFound : r;
+}
 
 // Trading state controls how new orders are admitted into the book and
 // whether continuous matching runs. State transitions are monotonic with

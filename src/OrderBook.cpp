@@ -1524,14 +1524,28 @@ void OrderBook::matchProRata(Order* incoming) {
 
 // ─── Cancel ──────────────────────────────────────────────────────────────────
 
-void OrderBook::cancelOrder(OrderId orderId) {
+// Precondition: bookLock_ held. See the declaration for why.
+bool OrderBook::ownedBy(OrderId orderId, ParticipantId requester) const {
+    if (requester == kAnyParticipant) return true;
+    auto* p = orderLookup_.find(orderId);
+    if (!p || !*p) return true;   // absent — let not-found handling report it
+    return (*p)->participantId == requester;
+}
+
+void OrderBook::cancelOrder(OrderId orderId, ParticipantId requester) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    if (!ownedBy(orderId, requester)) return;
     cancelOrderImpl(orderId);
 }
 
-OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId) {
+OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId,
+                                                         ParticipantId requester) {
     std::unique_lock<std::mutex> lock(bookLock_);
     OrderExposure e;
+    if (!ownedBy(orderId, requester)) {
+        e.denied = true;
+        return e;   // found stays false: nothing cancelled, nothing to release
+    }
     if (auto* p = orderLookup_.find(orderId); p && *p) {
         const Order* o = *p;
         e.participantId = o->participantId;
@@ -1728,12 +1742,14 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
 
 // ─── Modify (quantity reduction only, preserves time priority) ───────────────
 
-bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty) {
+bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty,
+                            ParticipantId requester) {
     RejectReason ignored = RejectReason::None;
-    return modifyOrder(orderId, newQty, ignored);
+    return modifyOrder(orderId, newQty, ignored, requester);
 }
 
-bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason) {
+bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
+                            ParticipantId requester) {
     std::unique_lock<std::mutex> lock(bookLock_);
     reason = RejectReason::None;
 
@@ -1742,6 +1758,11 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
 
     Order* order = *orderPtr;
     if (!order) { reason = RejectReason::OrderNotFound; return false; }
+
+    if (!ownedBy(orderId, requester)) [[unlikely]] {
+        reason = RejectReason::NotOrderOwner;
+        return false;
+    }
 
     if (newQty < order->remainingQty) {
         const Quantity displayBefore = displayQuantity(*order);
@@ -1775,8 +1796,16 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
 
 // ─── Cancel/Replace (full amendment, price change loses priority) ────────────
 
-bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) {
+bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
+                              ParticipantId requester) {
+    RejectReason ignored = RejectReason::None;
+    return cancelReplace(orderId, newPrice, newQty, ignored, requester);
+}
+
+bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
+                              RejectReason& reason, ParticipantId requester) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    reason = RejectReason::OrderNotFound;
 
     auto* orderPtr = orderLookup_.find(orderId);
     if (!orderPtr) [[unlikely]] return false;
@@ -1784,7 +1813,13 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
     Order* order = *orderPtr;
     if (!order) return false;
 
-    if (newQty == 0 || newPrice <= 0) [[unlikely]] return false;
+    if (!ownedBy(orderId, requester)) [[unlikely]] {
+        reason = RejectReason::NotOrderOwner;
+        return false;
+    }
+
+    if (newQty == 0) [[unlikely]] { reason = RejectReason::InvalidQuantity; return false; }
+    if (newPrice <= 0) [[unlikely]] { reason = RejectReason::InvalidPrice; return false; }
 
     // Parked order types (Stop, StopLimit, TrailingStop, Pegged) live in
     // their own tracking lists and not in the priced book. cancelReplace
@@ -1796,6 +1831,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
         order->type == OrderType::StopLimit ||
         order->type == OrderType::TrailingStop ||
         order->type == OrderType::Pegged) [[unlikely]] {
+        reason = RejectReason::OrderTypeNotAllowedInState;
         return false;
     }
 
@@ -1816,6 +1852,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
     // list has already drifted once (it never covered MOC/LOC), and inBook is
     // the property that actually decides whether the code below is valid.
     if (!order->inBook) [[unlikely]] {
+        reason = RejectReason::OrderTypeNotAllowedInState;
         return false;
     }
 
@@ -1827,12 +1864,18 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty) 
     // (Pool pressure is not in this list: cancelReplace reuses the existing
     // Order and never calls orderPool_.allocate(), so there is nothing to
     // shed.) Rejecting leaves the original order untouched and resting.
-    if (checkAdmission(order->participantId, order->side, newPrice, newQty,
-                       order->type, /*riskChecksBypassed=*/false)
-            != RejectReason::None) [[unlikely]] {
+    if (const RejectReason admit =
+            checkAdmission(order->participantId, order->side, newPrice, newQty,
+                           order->type, /*riskChecksBypassed=*/false);
+        admit != RejectReason::None) [[unlikely]] {
+        // Was flattened to a bare false, so every admission failure — risk
+        // limit, price band, breaker, post-only would-cross — reached the
+        // client as "order not found".
+        reason = admit;
         return false;
     }
 
+    reason = RejectReason::None;
     Price oldPrice = order->price;
     bool priceChanged = (newPrice != oldPrice);
 

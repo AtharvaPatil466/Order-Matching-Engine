@@ -190,12 +190,25 @@ public:
                              PegType pegType = PegType::None, Price pegOffset = 0,
                              Price trailAmount = 0, Quantity minQty = 0, bool hidden = false);
 
-    void cancelOrder(SymbolId symbolId, OrderId orderId);
-    bool modifyOrder(SymbolId symbolId, OrderId orderId, Quantity newQty);
-    bool cancelReplace(SymbolId symbolId, OrderId orderId, Price newPrice, Quantity newQty);
-    SubmitResult submitCancel(SymbolId symbolId, OrderId orderId);
-    SubmitResult submitModify(SymbolId symbolId, OrderId orderId, Quantity newQty);
-    SubmitResult submitCancelReplace(SymbolId symbolId, OrderId orderId, Price newPrice, Quantity newQty);
+    // `requester` is the participant asking, and an order it does not own is
+    // left alone (RejectReason::NotOrderOwner). Cancel/Modify/CancelReplace
+    // address an order by id, and the id says nothing about who may touch it —
+    // so without this, any session that could guess an id could cancel another
+    // firm's resting order. kAnyParticipant is the default and means "no
+    // check", which is what internal and simulation callers want.
+    void cancelOrder(SymbolId symbolId, OrderId orderId,
+                     ParticipantId requester = kAnyParticipant);
+    bool modifyOrder(SymbolId symbolId, OrderId orderId, Quantity newQty,
+                     ParticipantId requester = kAnyParticipant);
+    bool cancelReplace(SymbolId symbolId, OrderId orderId, Price newPrice, Quantity newQty,
+                       ParticipantId requester = kAnyParticipant);
+    SubmitResult submitCancel(SymbolId symbolId, OrderId orderId,
+                              ParticipantId requester = kAnyParticipant);
+    SubmitResult submitModify(SymbolId symbolId, OrderId orderId, Quantity newQty,
+                              ParticipantId requester = kAnyParticipant);
+    SubmitResult submitCancelReplace(SymbolId symbolId, OrderId orderId,
+                                     Price newPrice, Quantity newQty,
+                                     ParticipantId requester = kAnyParticipant);
 
     // Kill switch: cancel all orders for a participant across ALL symbols
     uint64_t killSwitch(ParticipantId participantId);

@@ -94,6 +94,8 @@ inline int ordRejReasonCode(RejectReason r) {
     case RejectReason::RateLimitExceeded:           return 3;
     case RejectReason::RiskLimitBreached:           return 3;
     case RejectReason::OrderNotFound:               return 5;   // Unknown order
+    // Same code as OrderNotFound on purpose — see clientVisibleReason().
+    case RejectReason::NotOrderOwner:               return 5;
     case RejectReason::DuplicateOrderId:            return 6;   // Duplicate Order
     case RejectReason::FOKInsufficientLiquidity:    return 11;  // Unsupported order characteristic
     case RejectReason::PostOnlyWouldCross:          return 11;

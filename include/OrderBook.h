@@ -231,13 +231,19 @@ public:
                   PegType pegType = PegType::None, Price pegOffset = 0,
                   Price trailAmount = 0, Quantity minQty = 0, bool hidden = false,
                   bool riskChecksBypassed = false);
-    void cancelOrder(OrderId orderId);
-    bool modifyOrder(OrderId orderId, Quantity newQty);
+    // `requester` is the participant asking. An order it does not own is left
+    // alone — see ownedBy() below for why this lives here rather than in the
+    // caller. kAnyParticipant means "no check": internal sweeps act for the
+    // venue, not for a participant.
+    void cancelOrder(OrderId orderId, ParticipantId requester = kAnyParticipant);
+    bool modifyOrder(OrderId orderId, Quantity newQty,
+                     ParticipantId requester = kAnyParticipant);
     // Same, but reports why it failed. A modify can fail because the order is
     // gone OR because newQty is not a reduction (this engine only shrinks in
     // place); callers that surface a reject reason to a client must be able to
     // tell those apart instead of answering "order not found" to a live order.
-    bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason);
+    bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
+                     ParticipantId requester = kAnyParticipant);
 
 private:
     // Drop `order` from every special-order tracking list that can hold a raw
@@ -262,7 +268,16 @@ public:
 
 
     // Cancel/Replace: full amendment (price change loses time priority)
-    bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty);
+    bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
+                       ParticipantId requester = kAnyParticipant);
+    // Same, but reports why. A replace can fail because the order is gone,
+    // because it is a parked type, because the new price/qty are invalid, or
+    // because the requester does not own it — and a client told "order not
+    // found" about a live order it simply may not touch has been told the
+    // wrong thing. Mirrors modifyOrder's reason-reporting overload above.
+    bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
+                       RejectReason& reason,
+                       ParticipantId requester = kAnyParticipant);
 
     // Kill switch: cancel all orders for a participant
     uint64_t cancelAllForParticipant(ParticipantId participantId);
@@ -450,6 +465,10 @@ public:
         Side          side{Side::Buy};
         Quantity      remainingQty{0};
         bool          found{false};
+        // The order exists but `requester` does not own it. `found` stays
+        // false — nothing was cancelled, so there is no exposure to release
+        // and a caller that only checks `found` still does the right thing.
+        bool          denied{false};
     };
 
     // Cancel the order and report the exposure it was holding, both inside the
@@ -457,7 +476,8 @@ public:
     // getOrder()-then-cancelOrder() pattern: the read now provably happens
     // while the order is still alive, and it costs one lock acquisition rather
     // than the two a separate locked getter would add to the cancel hot path.
-    OrderExposure cancelOrderReleasing(OrderId orderId);
+    OrderExposure cancelOrderReleasing(OrderId orderId,
+                                       ParticipantId requester = kAnyParticipant);
     size_t getBidLevelsCount() const;
     size_t getAskLevelsCount() const;
     SymbolId getSymbolId() const { return symbolId_; }
@@ -578,6 +598,13 @@ private:
     // (expireOrders, cancelAllForParticipant) call this directly to
     // avoid self-deadlock on the non-recursive mutex.
     void cancelOrderImpl(OrderId orderId);
+
+    // True if `requester` may act on `orderId`. MUST be called with bookLock_
+    // held: it dereferences the pooled Order to read its owner, and reading
+    // that without the lock is the use-after-free H1 was about. Missing order
+    // is "permitted" so the caller's own not-found handling still runs and
+    // reports OrderNotFound rather than an ownership failure.
+    bool ownedBy(OrderId orderId, ParticipantId requester) const;
 
     // Release parked MOC/LOC orders into the book when AuctionClose begins.
     void releaseOnCloseOrders();

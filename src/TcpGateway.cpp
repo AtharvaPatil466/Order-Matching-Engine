@@ -33,6 +33,7 @@ const char* rejectReasonToString(RejectReason reason) {
     case RejectReason::InvalidDisplayQty: return "invalid display quantity";
     case RejectReason::SymbolNotFound: return "symbol not found";
     case RejectReason::OrderNotFound: return "order not found";
+    case RejectReason::NotOrderOwner: return "order not found";
     case RejectReason::OutOfPriceRange: return "out of price range";
     case RejectReason::CapacityExhausted: return "capacity exhausted";
     case RejectReason::RateLimitExceeded: return "rate limit exceeded";
@@ -652,6 +653,13 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
 
     SubmitResult result = SubmitResult::rejected(RejectReason::EngineStopped);
 
+    // Ownership enforcement is only meaningful once the identity is verified.
+    // With auth off, req.participantId is an unchecked claim, so enforcing
+    // against it buys nothing and would reject clients that never filled the
+    // field in — the check above has already established which case this is.
+    const ParticipantId requester =
+        (auth_ && auth_->enabled()) ? req.participantId : kAnyParticipant;
+
     switch (req.type) {
         case OrderRequest::Type::NewOrder:
             result = engine_.submitOrder(req.symbolId, req.orderId, req.participantId,
@@ -661,13 +669,14 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
                                          req.trailAmount, req.minQty, req.hidden);
             break;
         case OrderRequest::Type::Cancel:
-            result = engine_.submitCancel(req.symbolId, req.orderId);
+            result = engine_.submitCancel(req.symbolId, req.orderId, requester);
             break;
         case OrderRequest::Type::Modify:
-            result = engine_.submitModify(req.symbolId, req.orderId, req.newQty);
+            result = engine_.submitModify(req.symbolId, req.orderId, req.newQty, requester);
             break;
         case OrderRequest::Type::CancelReplace:
-            result = engine_.submitCancelReplace(req.symbolId, req.orderId, req.newPrice, req.newQty);
+            result = engine_.submitCancelReplace(req.symbolId, req.orderId,
+                                                req.newPrice, req.newQty, requester);
             break;
         case OrderRequest::Type::KillSwitch:
             engine_.killSwitch(req.participantId);
@@ -680,14 +689,18 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
 
     GatewayResponse resp{};
     resp.orderId = req.orderId;
-    resp.rejectReason = result.rejectReason;
+    // Collapse NotOrderOwner into OrderNotFound before the raw enum byte goes
+    // out: this field IS the wire value, so leaking the distinction here would
+    // undo the point of keeping them separate internally.
+    resp.rejectReason = clientVisibleReason(result.rejectReason);
     resp.sequenceId = result.sequenceId;
     if (result.isAccepted()) {
         resp.type = GatewayResponse::Type::Ack;
     } else {
         resp.type = GatewayResponse::Type::Error;
         std::snprintf(resp.errorMessage, sizeof(resp.errorMessage),
-                      "Rejected: %s", rejectReasonToString(result.rejectReason));
+                      "Rejected: %s",
+                      rejectReasonToString(clientVisibleReason(result.rejectReason)));
     }
     sendResponse(fd, resp);
 }

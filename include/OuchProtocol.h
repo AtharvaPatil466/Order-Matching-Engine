@@ -97,6 +97,8 @@ inline char ouchRejectCode(RejectReason r) {
     case RejectReason::InvalidQuantity:             return OUCH_REJECT_INVALID_QTY;
     case RejectReason::InvalidDisplayQty:           return OUCH_REJECT_INVALID_QTY;
     case RejectReason::OrderNotFound:               return OUCH_REJECT_OTHER;
+    // Same code as OrderNotFound on purpose — see clientVisibleReason().
+    case RejectReason::NotOrderOwner:               return OUCH_REJECT_OTHER;
     case RejectReason::RateLimitExceeded:           return OUCH_REJECT_RATE_LIMIT;
     case RejectReason::QueueBackpressure:           return OUCH_REJECT_OTHER;
     case RejectReason::EngineStopped:               return OUCH_REJECT_DESTINATION_CLOSED;

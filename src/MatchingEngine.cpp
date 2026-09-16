@@ -616,10 +616,21 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         // section. The previous form dereferenced an UNLOCKED getOrder()
         // pointer into orderPool_, with no guarantee the order was still
         // alive — a concurrent fill or a shutdown sweep frees that slot.
+        // req.participantId is the requester here, not the order's owner: for
+        // a Cancel it is whoever asked, and kAnyParticipant when the caller is
+        // internal. A denied cancel must not journal or release exposure, so
+        // bail before either.
+        const auto exposure =
+            book->cancelOrderReleasing(req.orderId, req.participantId);
+        if (exposure.denied) [[unlikely]] {
+            obSink().log(obEvent("cancel_denied_not_owner", LogSeverity::Warn)
+                             .kv("order_id",  (unsigned long long)req.orderId)
+                             .kv("symbol_id", (long long)req.symbolId)
+                             .kv("requester", (unsigned long long)req.participantId));
+            return;
+        }
         if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-            releasePosition(book->cancelOrderReleasing(req.orderId));
-        } else {
-            book->cancelOrder(req.orderId);
+            releasePosition(exposure);
         }
         if (journal_) {
             {
@@ -647,7 +658,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
-        if (book->modifyOrder(req.orderId, req.newQty) && journal_) {
+        if (book->modifyOrder(req.orderId, req.newQty, req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
                 journal_->logModifyOrder(req.orderId, req.newQty);
@@ -661,7 +672,8 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
-        if (book->cancelReplace(req.orderId, req.newPrice, req.newQty) && journal_) {
+        if (book->cancelReplace(req.orderId, req.newPrice, req.newQty,
+                                req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
                 journal_->logCancelReplace(req.orderId, req.newPrice, req.newQty);
@@ -1385,11 +1397,13 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     return orderBookResultToSubmitResult(result, sequenceId);
 }
 
-void MatchingEngine::cancelOrder(SymbolId symbolId, OrderId orderId) {
-    (void)submitCancel(symbolId, orderId);
+void MatchingEngine::cancelOrder(SymbolId symbolId, OrderId orderId,
+                                 ParticipantId requester) {
+    (void)submitCancel(symbolId, orderId, requester);
 }
 
-SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
+SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
+                                          ParticipantId requester) {
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
     }
@@ -1412,6 +1426,9 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
         req.type = OrderRequest::Type::Cancel;
         req.symbolId = symbolId;
         req.orderId = orderId;
+        // The worker does the ownership check; it has to travel with the
+        // request, because by the time the worker runs the caller is gone.
+        req.participantId = requester;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
@@ -1430,10 +1447,15 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId) {
     // section. The previous form dereferenced an UNLOCKED getOrder()
     // pointer into orderPool_, with no guarantee the order was still
     // alive — a concurrent fill or a shutdown sweep frees that slot.
+    // One lock acquisition either way: cancelOrderReleasing() does the same
+    // work as cancelOrder() plus reading three fields, which is cheaper than
+    // taking bookLock_ a second time to ask about ownership separately.
+    const auto exposure = book->cancelOrderReleasing(orderId, requester);
+    if (exposure.denied) [[unlikely]] {
+        return rejectedAsync(RejectReason::NotOrderOwner);
+    }
     if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-        releasePosition(book->cancelOrderReleasing(orderId));
-    } else {
-        book->cancelOrder(orderId);
+        releasePosition(exposure);
     }
     if (journal_) {
         {
@@ -1488,11 +1510,13 @@ bool MatchingEngine::enableDurableClientAcks(bool on) {
     return true;
 }
 
-bool MatchingEngine::modifyOrder(SymbolId symbolId, OrderId orderId, Quantity newQty) {
-    return submitModify(symbolId, orderId, newQty).isAccepted();
+bool MatchingEngine::modifyOrder(SymbolId symbolId, OrderId orderId, Quantity newQty,
+                                 ParticipantId requester) {
+    return submitModify(symbolId, orderId, newQty, requester).isAccepted();
 }
 
-SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Quantity newQty) {
+SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
+                                          Quantity newQty, ParticipantId requester) {
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
     }
@@ -1509,6 +1533,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Qu
         req.symbolId = symbolId;
         req.orderId = orderId;
         req.newQty = newQty;
+        req.participantId = requester;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
@@ -1521,7 +1546,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Qu
         return rejectedAsync(RejectReason::SymbolNotFound);
     }
     RejectReason modifyReason = RejectReason::None;
-    bool modified = book->modifyOrder(orderId, newQty, modifyReason);
+    bool modified = book->modifyOrder(orderId, newQty, modifyReason, requester);
     if (modified && journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
@@ -1534,12 +1559,13 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId, Qu
 }
 
 bool MatchingEngine::cancelReplace(SymbolId symbolId, OrderId orderId, Price newPrice,
-                                   Quantity newQty) {
-    return submitCancelReplace(symbolId, orderId, newPrice, newQty).isAccepted();
+                                   Quantity newQty, ParticipantId requester) {
+    return submitCancelReplace(symbolId, orderId, newPrice, newQty, requester).isAccepted();
 }
 
 SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orderId,
-                                                 Price newPrice, Quantity newQty) {
+                                                 Price newPrice, Quantity newQty,
+                                                 ParticipantId requester) {
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
     }
@@ -1557,6 +1583,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         req.orderId = orderId;
         req.newPrice = newPrice;
         req.newQty = newQty;
+        req.participantId = requester;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
             return rejectedAsync(RejectReason::QueueBackpressure);
@@ -1569,7 +1596,9 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         return rejectedAsync(RejectReason::SymbolNotFound);
     }
 
-    bool replaced = book->cancelReplace(orderId, newPrice, newQty);
+    RejectReason replaceReason = RejectReason::None;
+    bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
+                                        requester);
     if (replaced && journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
@@ -1578,7 +1607,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         maybeTriggerAutoCheckpoint();
     }
     return replaced ? SubmitResult::accepted(sequenceId)
-                    : SubmitResult::rejected(RejectReason::OrderNotFound);
+                    : SubmitResult::rejected(replaceReason);
 }
 
 uint64_t MatchingEngine::killSwitch(ParticipantId participantId) {

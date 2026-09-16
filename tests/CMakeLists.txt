@@ -98,6 +98,14 @@ enable_assertions(GatewayLoginTest)
 add_test(NAME GatewayLoginTest COMMAND GatewayLoginTest)
 set_tests_properties(GatewayLoginTest PROPERTIES TIMEOUT 120 LABELS "project;security;integration")
 
+# Who may cancel whose order (H7). The login frame proves identity; this is
+# the authorisation half it cannot reach.
+add_executable(OrderOwnershipTest OrderOwnershipTest.cpp)
+target_link_libraries(OrderOwnershipTest PRIVATE OrderMatcher)
+enable_assertions(OrderOwnershipTest)
+add_test(NAME OrderOwnershipTest COMMAND OrderOwnershipTest)
+set_tests_properties(OrderOwnershipTest PROPERTIES TIMEOUT 120 LABELS "project;security;integration")
+
 # The order-entry port must refuse to serve unauthenticated (H7). Run the real
 # binary with no credentials and no opt-out: it has to exit non-zero, and it
 # must never reach the point of binding a port. WILL_FAIL pins the exit status;

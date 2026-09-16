@@ -140,6 +140,8 @@ public:
         case RejectReason::InvalidQuantity:       return "qty";
         case RejectReason::InvalidDisplayQty:     return "display qty";
         case RejectReason::OrderNotFound:         return "not found";
+        // Same text as OrderNotFound on purpose — see clientVisibleReason().
+        case RejectReason::NotOrderOwner:         return "not found";
         case RejectReason::QueueBackpressure:     return "backpressure";
         case RejectReason::RateLimitExceeded:     return "rate limit";
         case RejectReason::EngineStopped:         return "engine stopped";
@@ -260,6 +262,16 @@ private:
         }
 
         SubmitResult r;
+        // Ownership enforcement is only meaningful once the identity is
+        // verified. With auth off, params.participantId is tag 49 taken on
+        // trust, so checking against it buys nothing — and it is 0 when the
+        // tag is absent, which would deny cancels that have always worked.
+        // The permits() check above has already established which case we are
+        // in. Same rule in TcpGateway.
+        const ParticipantId requester = (auth_ && auth_->enabled())
+                                            ? params.participantId
+                                            : kAnyParticipant;
+
         switch (params.action) {
         case FixOrderParams::Action::NewOrder:
             r = engine_.submitOrder(params.symbolId, params.orderId,
@@ -270,11 +282,12 @@ private:
                                     params.tif);
             break;
         case FixOrderParams::Action::Cancel:
-            r = engine_.submitCancel(params.symbolId, params.orderId);
+            r = engine_.submitCancel(params.symbolId, params.orderId, requester);
             break;
         case FixOrderParams::Action::CancelReplace:
             r = engine_.submitCancelReplace(params.symbolId, params.orderId,
-                                            params.newPrice, params.newQty);
+                                            params.newPrice, params.newQty,
+                                            requester);
             break;
         case FixOrderParams::Action::Unknown:
         default:

@@ -305,8 +305,13 @@ private:
         // (it gets a new identifier for the new order). So we rewrite
         // the maps: drop the old token, point the new token at the
         // same engineId, update engineId→token to the new token.
+        // `firm` is the participant this session submitted the order as, and
+        // identity_->permits() was checked then — so it is a verified owner,
+        // not a wire claim. OUCH's real protection here is structural (the
+        // token map is per-session, so a client cannot name another firm's
+        // order at all); this is the belt to that's braces.
         SubmitResult res = engine_.submitCancelReplace(
-            symbol, engineId, r.price, r.shares);
+            symbol, engineId, r.price, r.shares, firm);
         if (!res.isAccepted()) {
             ++replacesRejected_;
             sendReject(r.newOrderToken, ouchRejectCode(res.rejectReason));
@@ -344,7 +349,14 @@ private:
         // is a use-after-free. handleReplaceOrder already copies for the same
         // reason; this path did not.
         const TokenEntry entry = it->second;
-        SubmitResult r = engine_.submitCancel(entry.symbol, entry.orderId);
+        // Absent only if firmOf_ drifted from the token map, which the early
+        // return above already makes unreachable for a known token; fall back
+        // to no check rather than to 0, which is a legal participant id and
+        // would deny a legitimate cancel.
+        const ParticipantId owner = firmOf_.count(entry.orderId)
+                                        ? firmOf_[entry.orderId]
+                                        : kAnyParticipant;
+        SubmitResult r = engine_.submitCancel(entry.symbol, entry.orderId, owner);
         if (r.isAccepted()) {
             ++cancelsAccepted_;
             // Canceled-shares: the leaves quantity at cancel time. The

@@ -43,3 +43,6 @@ target_link_libraries(CoordinatedOmissionBenchmark PRIVATE OrderMatcher)
 add_executable(ColdCacheBenchmark ColdCacheBenchmark.cpp)
 target_link_libraries(ColdCacheBenchmark PRIVATE OrderMatcher)
 
+# H6 audit: journalMutex_ contention — engine end-to-end + critical section alone
+add_executable(JournalContentionBenchmark JournalContentionBenchmark.cpp)
+target_link_libraries(JournalContentionBenchmark PRIVATE OrderMatcher)

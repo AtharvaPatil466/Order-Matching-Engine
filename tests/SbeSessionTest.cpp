@@ -339,6 +339,168 @@ void test_SessionSkipsUnknownTemplate() {
     } END
 }
 
+
+// ─── Undefined field values are rejected, not coerced ───────────────────────
+//
+// Each of these used to fall through to a default: side != 1 became a SELL,
+// an unknown orderType became a LIMIT, an unknown timeInForce became GTC. So
+// a client encoder bug — a field offset off by one, an enum the two sides
+// disagree on — did not fail. It entered a live order on the wrong side of
+// the book, at the wrong type, and acknowledged it as accepted.
+
+void test_SessionRejectsUndefinedSide() {
+    TEST(SessionRejectsUndefinedSide) {
+        for (uint8_t bad : {uint8_t{0}, uint8_t{3}, uint8_t{7}, uint8_t{255}}) {
+            MatchingEngine engine;
+            engine.start();
+
+            std::string sent;
+            SbeSession sess(engine, [&](std::string_view b) { sent.append(b); });
+            auto wire = buildNewOrderV1Wire(4001, 1000, 10, /*side=*/bad);
+            CHECK(sess.feed(reinterpret_cast<const char*>(wire.data()),
+                            wire.size()));
+
+            CHECK(sess.ordersAccepted() == 0);
+            CHECK(sess.ordersRejected() == 1);
+
+            const auto* p = reinterpret_cast<const uint8_t*>(sent.data());
+            SbeOrderAckV1 ack;
+            readSbeOrderAckV1Block(p + SBE_MESSAGE_HEADER_BYTES, ack);
+            CHECK(ack.status == SBE_ORDER_ACK_STATUS_REJECTED);
+            CHECK(ack.rejectReason ==
+                  static_cast<uint8_t>(RejectReason::InvalidFieldValue));
+
+            // Nothing reached the book — in particular, nothing on the sell
+            // side, which is where a coerced value used to land.
+            const auto snap = engine.getOrderBook(0)->getSnapshot(
+                MarketDataSnapshot::MAX_DEPTH);
+            CHECK(snap.bidCount == 0);
+            CHECK(snap.askCount == 0);
+            engine.stop();
+        }
+    } END
+}
+
+void test_SessionRejectsUndefinedOrderType() {
+    TEST(SessionRejectsUndefinedOrderType) {
+        for (uint8_t bad : {uint8_t{0}, uint8_t{5}, uint8_t{99}}) {
+            MatchingEngine engine;
+            engine.start();
+
+            std::string sent;
+            SbeSession sess(engine, [&](std::string_view b) { sent.append(b); });
+            auto wire = buildNewOrderV1Wire(4101, 1000, 10, /*side=*/1,
+                                            /*type=*/bad);
+            CHECK(sess.feed(reinterpret_cast<const char*>(wire.data()),
+                            wire.size()));
+
+            CHECK(sess.ordersAccepted() == 0);
+            CHECK(sess.ordersRejected() == 1);
+
+            const auto* p = reinterpret_cast<const uint8_t*>(sent.data());
+            SbeOrderAckV1 ack;
+            readSbeOrderAckV1Block(p + SBE_MESSAGE_HEADER_BYTES, ack);
+            CHECK(ack.rejectReason ==
+                  static_cast<uint8_t>(RejectReason::InvalidFieldValue));
+            engine.stop();
+        }
+    } END
+}
+
+void test_SessionRejectsUndefinedTimeInForce() {
+    TEST(SessionRejectsUndefinedTimeInForce) {
+        MatchingEngine engine;
+        engine.start();
+
+        std::string sent;
+        SbeSession sess(engine, [&](std::string_view b) { sent.append(b); });
+        auto wire = buildNewOrderV2Wire(4201, 1000, 10, /*pid=*/7, /*tif=*/9);
+        CHECK(sess.feed(reinterpret_cast<const char*>(wire.data()),
+                        wire.size()));
+
+        CHECK(sess.ordersRejected() == 1);
+        const auto* p = reinterpret_cast<const uint8_t*>(sent.data());
+        SbeOrderAckV1 ack;
+        readSbeOrderAckV1Block(p + SBE_MESSAGE_HEADER_BYTES, ack);
+        CHECK(ack.rejectReason ==
+              static_cast<uint8_t>(RejectReason::InvalidFieldValue));
+        engine.stop();
+    } END
+}
+
+// Every DEFINED value still decodes. A validator that rejected everything
+// would pass the three tests above and fail in production on the first
+// legitimate sell.
+//
+// The assertion is on the REASON, not on acceptance: a Market or FOK order
+// against an empty book is rightly rejected for want of liquidity, and that
+// says nothing about whether its type byte decoded. Asserting "accepted"
+// here conflated the two and failed for the wrong reason.
+void test_SessionAcceptsEveryDefinedFieldValue() {
+    TEST(SessionAcceptsEveryDefinedFieldValue) {
+        auto lastReason = [](const std::string& sent) {
+            const auto* p = reinterpret_cast<const uint8_t*>(sent.data());
+            SbeOrderAckV1 ack;
+            readSbeOrderAckV1Block(p + SBE_MESSAGE_HEADER_BYTES, ack);
+            return ack.rejectReason;
+        };
+
+        for (uint8_t side : {uint8_t{1}, uint8_t{2}}) {
+            for (uint8_t type : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}}) {
+                MatchingEngine engine;
+                engine.start();
+                std::string sent;
+                SbeSession sess(engine, [&](std::string_view b) { sent.append(b); });
+                auto wire = buildNewOrderV1Wire(4301, 1000, 10, side, type);
+                CHECK(sess.feed(reinterpret_cast<const char*>(wire.data()),
+                                wire.size()));
+                CHECK(lastReason(sent) !=
+                      static_cast<uint8_t>(RejectReason::InvalidFieldValue));
+                engine.stop();
+            }
+        }
+
+        // A plain limit on each side must actually rest, so the loop above is
+        // not passing merely because everything was rejected for some other
+        // reason.
+        for (uint8_t side : {uint8_t{1}, uint8_t{2}}) {
+            MatchingEngine engine;
+            engine.start();
+            std::string sent;
+            SbeSession sess(engine, [&](std::string_view b) { sent.append(b); });
+            auto wire = buildNewOrderV1Wire(4302, 1000, 10, side, /*type=*/1);
+            CHECK(sess.feed(reinterpret_cast<const char*>(wire.data()),
+                            wire.size()));
+            CHECK(sess.ordersAccepted() == 1);
+            CHECK(sess.ordersRejected() == 0);
+
+            // And on the side it actually named — the coercion bug's symptom
+            // was a buy arriving as a sell.
+            const auto snap = engine.getOrderBook(0)->getSnapshot(
+                MarketDataSnapshot::MAX_DEPTH);
+            if (side == 1) {
+                CHECK(snap.bidCount == 1 && snap.askCount == 0);
+            } else {
+                CHECK(snap.askCount == 1 && snap.bidCount == 0);
+            }
+            engine.stop();
+        }
+
+        // Both defined timeInForce codes on v2.
+        for (uint8_t tif : {uint8_t{0}, uint8_t{1}}) {
+            MatchingEngine engine;
+            engine.start();
+            std::string sent;
+            SbeSession sess(engine, [&](std::string_view b) { sent.append(b); });
+            auto wire = buildNewOrderV2Wire(4401, 1000, 10, /*pid=*/7, tif);
+            CHECK(sess.feed(reinterpret_cast<const char*>(wire.data()),
+                            wire.size()));
+            CHECK(sess.ordersAccepted() == 1);
+            engine.stop();
+        }
+    } END
+}
+
 int main() {
     std::cout << "Running SbeSessionTest\n";
 
@@ -355,6 +517,11 @@ int main() {
     test_SessionRejectsBadSchemaId();
     test_SessionRejectsAbsurdBlockLength();
     test_SessionSkipsUnknownTemplate();
+
+    test_SessionRejectsUndefinedSide();
+    test_SessionRejectsUndefinedOrderType();
+    test_SessionRejectsUndefinedTimeInForce();
+    test_SessionAcceptsEveryDefinedFieldValue();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

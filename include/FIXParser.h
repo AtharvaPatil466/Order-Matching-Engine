@@ -98,6 +98,7 @@ inline int ordRejReasonCode(RejectReason r) {
     case RejectReason::NotOrderOwner:               return 5;
     case RejectReason::DuplicateOrderId:            return 6;   // Duplicate Order
     case RejectReason::FOKInsufficientLiquidity:    return 11;  // Unsupported order characteristic
+    case RejectReason::InvalidFieldValue:           return 11;
     case RejectReason::PostOnlyWouldCross:          return 11;
     case RejectReason::OrderTypeNotAllowedInState:  return 11;
     case RejectReason::InvalidQuantity:             return 13;  // Incorrect quantity

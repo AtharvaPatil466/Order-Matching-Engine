@@ -143,7 +143,14 @@ enum class RejectReason : uint8_t {
     // live order tells the requester their guess missed, which is a probe for
     // which order ids exist. It also hides a real authorisation failure behind
     // what looks like a routine race.
-    NotOrderOwner
+    NotOrderOwner,
+
+    // A field is present on the wire but carries a value the schema does not
+    // define — an SBE side byte of 7, an orderType of 99. Distinct from
+    // MissingRequiredField, which is for a field that is not there at all:
+    // telling a client "missing required field" about a field they did send
+    // points them at the wrong half of their encoder.
+    InvalidFieldValue
 };
 
 // What a client is told. NotOrderOwner is deliberately indistinguishable from

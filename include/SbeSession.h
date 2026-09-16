@@ -128,10 +128,30 @@ private:
             return;
         }
 
-        Side side = (msg.side == 1) ? Side::Buy : Side::Sell;
-        OrderType type = decodeOrderType(msg.orderType);
-        TimeInForce tif = (msg.timeInForce == 1) ? TimeInForce::DAY
-                                                  : TimeInForce::GTC;
+        // Validate before coercing. Each of these used to fall through to a
+        // default, so a byte the schema does not define became a specific,
+        // wrong order rather than a reject: side 7 entered as a SELL,
+        // orderType 99 rested as a LIMIT. A client encoder bug — a field
+        // offset off by one, an enum the two sides disagree on — turned into
+        // live orders on the wrong side of the book, acknowledged as accepted.
+        Side side;
+        if (!decodeSide(msg.side, side)) {
+            ++ordersRejected_;
+            sendAck(msg.orderId, /*accepted=*/false, RejectReason::InvalidFieldValue);
+            return;
+        }
+        OrderType type;
+        if (!decodeOrderType(msg.orderType, type)) {
+            ++ordersRejected_;
+            sendAck(msg.orderId, /*accepted=*/false, RejectReason::InvalidFieldValue);
+            return;
+        }
+        TimeInForce tif;
+        if (!decodeTimeInForce(msg.timeInForce, tif)) {
+            ++ordersRejected_;
+            sendAck(msg.orderId, /*accepted=*/false, RejectReason::InvalidFieldValue);
+            return;
+        }
 
         // SBE has no symbol field in this toy schema — production
         // would carry it. Default to symbol 0 (the session's
@@ -156,13 +176,34 @@ private:
         }
     }
 
-    static OrderType decodeOrderType(uint8_t code) {
+    // Each returns false for a value the schema does not define, rather than
+    // picking one. Out-parameter rather than an optional so the call sites
+    // stay a plain if — this is the decode hot path for the SBE session.
+    static bool decodeSide(uint8_t code, Side& out) {
         switch (code) {
-        case 1: return OrderType::Limit;
-        case 2: return OrderType::Market;
-        case 3: return OrderType::IOC;
-        case 4: return OrderType::FOK;
-        default: return OrderType::Limit;
+        case 1: out = Side::Buy;  return true;
+        case 2: out = Side::Sell; return true;
+        default: return false;
+        }
+    }
+
+    static bool decodeOrderType(uint8_t code, OrderType& out) {
+        switch (code) {
+        case 1: out = OrderType::Limit;  return true;
+        case 2: out = OrderType::Market; return true;
+        case 3: out = OrderType::IOC;    return true;
+        case 4: out = OrderType::FOK;    return true;
+        default: return false;
+        }
+    }
+
+    // 0 = GTC, 1 = DAY. A v1 message carries no timeInForce at all; the
+    // decoder supplies 0 for it, which is in range and stays GTC.
+    static bool decodeTimeInForce(uint8_t code, TimeInForce& out) {
+        switch (code) {
+        case 0: out = TimeInForce::GTC; return true;
+        case 1: out = TimeInForce::DAY; return true;
+        default: return false;
         }
     }
 

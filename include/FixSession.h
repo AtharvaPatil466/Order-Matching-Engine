@@ -139,6 +139,7 @@ public:
         case RejectReason::InvalidPrice:          return "price";
         case RejectReason::InvalidQuantity:       return "qty";
         case RejectReason::InvalidDisplayQty:     return "display qty";
+        case RejectReason::InvalidFieldValue:     return "invalid field value";
         case RejectReason::OrderNotFound:         return "not found";
         // Same text as OrderNotFound on purpose — see clientVisibleReason().
         case RejectReason::NotOrderOwner:         return "not found";

@@ -185,11 +185,14 @@ TEST(RejectReasonContract, RateLimitExceeded) {
 // ─── Completeness: every reason has a non-generic string mapping ────────────
 
 TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
-    // Hardcoded list of every value in the enum. If a new value is added
-    // without updating this list, the contract test won't fail — but the
-    // -Wswitch -Werror rule on FixSession::rejectReason already forces
-    // the case to be wired. Keeping the list explicit (not dynamic) is a
-    // deliberate redundancy: it surfaces the additions in code review.
+    // Every value in the enum. The list is hand-maintained and cannot detect
+    // its own omissions — and it had five: the four P2-8..P2-11 risk-control
+    // reasons and NotOrderOwner were all missing, so this test has been
+    // quietly checking a subset while claiming "EveryReason". The real
+    // enforcement is -Wswitch -Werror on FixSession::rejectReason, which
+    // makes a new reason a compile error until it is wired; this list is the
+    // redundancy that surfaces the addition in review, and the placeholder
+    // check below is what it actually buys.
     constexpr RejectReason kAll[] = {
         RejectReason::None,
         RejectReason::VolatilityCircuitBreaker,
@@ -212,9 +215,23 @@ TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
         RejectReason::DuplicateOrderId,
         RejectReason::UnsupportedFixVersion,
         RejectReason::MissingRequiredField,
+        RejectReason::KillSwitchActive,
+        RejectReason::PositionLimitExceeded,
+        RejectReason::FatFingerReject,
+        RejectReason::OrderToTradeRatioExceeded,
         RejectReason::PoolCapacityExceeded,
         RejectReason::InvalidDisplayQty,
+        RejectReason::NotOrderOwner,
+        RejectReason::InvalidFieldValue,
     };
+
+    // Pins the list against the enum's size. Appending a reason without
+    // listing it here now fails the build rather than silently narrowing what
+    // "every reason" means — which is exactly how the five above went missing.
+    static_assert(static_cast<size_t>(RejectReason::InvalidFieldValue) + 1 ==
+                      sizeof(kAll) / sizeof(kAll[0]),
+                  "a RejectReason was added — add it to kAll and update the "
+                  "last-value reference in this assert");
 
     for (RejectReason r : kAll) {
         const char* s = FixSession::rejectReason(r);

@@ -31,6 +31,7 @@ const char* rejectReasonToString(RejectReason reason) {
     case RejectReason::InvalidPrice: return "invalid price";
     case RejectReason::InvalidQuantity: return "invalid quantity";
     case RejectReason::InvalidDisplayQty: return "invalid display quantity";
+    case RejectReason::InvalidFieldValue: return "invalid field value";
     case RejectReason::SymbolNotFound: return "symbol not found";
     case RejectReason::OrderNotFound: return "order not found";
     case RejectReason::NotOrderOwner: return "order not found";

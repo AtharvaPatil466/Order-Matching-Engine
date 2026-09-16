@@ -1,14 +1,20 @@
 include(FetchContent)
 
+# Pinned by content, not just by tag. Without URL_HASH, every CI run built and
+# executed whatever bytes that URL happened to serve — a tag can be moved, and
+# GitHub's auto-generated archives are regenerated rather than immutable. The
+# test binaries link this and run in CI with the repository checked out, so
+# "whatever arrived" is a code-execution path.
+#
+# If the hash ever stops matching, the build fails loudly instead of building
+# the new bytes. That is the point: a mismatch is something to investigate, not
+# to paper over by deleting the line.
 FetchContent_Declare(
   googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+  URL      https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+  URL_HASH SHA256=1f357c27ca988c3f7c6b4bf68a9395005ac6761f034046e9dde0896e3aba00e4
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-# For older CMake or if URL fails, we might need alternatives, but this is standard.
-# However, to be safe and avoid network, I might check if GTest is installed.
-# But FetchContent is standard for modern CMake.
-# I'll stick to FetchContent.
 
 FetchContent_MakeAvailable(googletest)
 

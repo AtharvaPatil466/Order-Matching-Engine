@@ -19,8 +19,18 @@ public:
     AdminServer(MatchingEngine& engine, uint16_t port);
     ~AdminServer();
 
-    void start();
+    // False if the port could not be served — refused for want of a token,
+    // or socket/bind/listen failed. This used to return void and give up
+    // with a line on stderr, so a caller could not tell a listening admin
+    // port from a missing one, and neither could a test.
+    [[nodiscard]] bool start();
     void stop();
+
+    // The port actually bound, which is what the caller asked for unless it
+    // asked for 0 and let the OS choose. Meaningful only after a successful
+    // start(). Without this, callers that wanted an ephemeral port had to
+    // guess one instead and hope nothing else held it.
+    uint16_t port() const { return port_; }
 
     // Optional: attach a replication coordinator so /role and
     // /replication endpoints return live state. Pass nullptr (the

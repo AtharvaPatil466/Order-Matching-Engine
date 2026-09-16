@@ -4,6 +4,7 @@
 #include "Metrics.h"
 #include "Journal.h"
 #include "ReplicationProtocol.h"
+#include <cerrno>
 #include <charconv>
 #include <cstdlib>
 #include <iostream>
@@ -82,8 +83,8 @@ AdminServer::~AdminServer() {
     stop();
 }
 
-void AdminServer::start() {
-    if (running_) return;
+bool AdminServer::start() {
+    if (running_) return true;
 
     // Fail closed. The admin port is bound to INADDR_ANY and serves the full
     // book, participant risk state and (when chaos injection is enabled)
@@ -97,18 +98,13 @@ void AdminServer::start() {
                   << "              (with OB_CHAOS_INJECT) order injection.\n"
                   << "              Set a token via setAdminToken()/OB_ADMIN_TOKEN, or\n"
                   << "              call setAuthDisabled(true) to run it open on purpose.\n";
-        return;
+        return false;
     }
-    if (authDisabled_) {
-        std::cerr << "[AdminServer] WARNING: authentication explicitly disabled — every\n"
-                  << "              admin endpoint is callable by any client that can\n"
-                  << "              reach port " << port_ << ".\n";
-    }
-
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
-        std::cerr << "[AdminServer] Failed to create socket\n";
-        return;
+        std::cerr << "[AdminServer] Failed to create socket: "
+                  << std::strerror(errno) << "\n";
+        return false;
     }
 
     int opt = 1;
@@ -120,21 +116,41 @@ void AdminServer::start() {
     addr.sin_port = htons(port_);
 
     if (::bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[AdminServer] Failed to bind to port " << port_ << "\n";
+        std::cerr << "[AdminServer] Failed to bind to port " << port_ << ": "
+                  << std::strerror(errno) << "\n";
         ::close(sock);
-        return;
+        return false;
     }
 
     if (::listen(sock, 8) < 0) {
-        std::cerr << "[AdminServer] Failed to listen\n";
+        std::cerr << "[AdminServer] Failed to listen: " << std::strerror(errno) << "\n";
         ::close(sock);
-        return;
+        return false;
+    }
+
+    // Resolve what we actually got. Callers that pass 0 want the OS to pick,
+    // and until this existed they had to guess a free port instead — which is
+    // how two tests ended up deriving one from their pid and colliding with
+    // whatever else on the machine held it.
+    struct sockaddr_in bound{};
+    socklen_t boundLen = sizeof(bound);
+    if (::getsockname(sock, (struct sockaddr*)&bound, &boundLen) == 0) {
+        port_ = ntohs(bound.sin_port);
     }
 
     serverSocket_.store(sock);
     running_ = true;
     listenThread_ = std::thread(&AdminServer::listenLoop, this);
     std::cout << "[AdminServer] Listening on http://0.0.0.0:" << port_ << "\n";
+    // After the bind, so it names the port that is actually open. Printed
+    // before, it said "port 0" in exactly the configuration an operator would
+    // be reading these lines to understand.
+    if (authDisabled_) {
+        std::cerr << "[AdminServer] WARNING: authentication explicitly disabled — every\n"
+                  << "              admin endpoint is callable by any client that can\n"
+                  << "              reach port " << port_ << ".\n";
+    }
+    return true;
 }
 
 void AdminServer::stop() {

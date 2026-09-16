@@ -63,17 +63,6 @@ std::string httpGet(uint16_t port, const std::string& path) {
     return out;
 }
 
-// Find a fixed-format admin port. The OS will sometimes pick the same
-// port on a clean run; on collision we retry with a different one.
-// In production AdminServer would use port 0 (OS-picks); we keep an
-// explicit port here because AdminServer's API doesn't expose the
-// chosen port back to the caller.
-uint16_t pickPort() {
-    // Use the test pid as a port-space partition to avoid collisions
-    // when this test runs in parallel with itself in CI.
-    return static_cast<uint16_t>(40000 + (::getpid() % 5000));
-}
-
 }  // namespace
 
 int main() {
@@ -86,13 +75,15 @@ int main() {
     c.increment();
     c.increment();
 
-    uint16_t port = pickPort();
-    AdminServer admin(engine, port);
+    // Port 0: the OS picks, start() reports. The pid-derived port this used
+    // to guess is in the ephemeral range, so anything else on the machine
+    // could already hold it — and start() had no way to say the bind failed.
+    AdminServer admin(engine, 0);
     // This test exercises endpoint bodies, not auth — opt out explicitly,
     // since start() now refuses to listen without a token by default.
     admin.setAuthDisabled(true);
-    admin.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(admin.start() && "admin server failed to bind");
+    const uint16_t port = admin.port();
 
     // ---- /prometheus -------------------------------------------------------
     {

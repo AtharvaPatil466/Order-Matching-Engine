@@ -353,7 +353,15 @@ int main(int argc, char* argv[]) {
                   << "        port unauthenticated on purpose.\n";
         return 1;
     }
-    admin.start();
+    // A failed bind used to be a line on stderr and nothing more: the engine
+    // went on to announce "Ready for traffic" with no admin port, so the k8s
+    // liveness probe hit nothing and the pod looked dead for an unrelated
+    // reason. Refuse to come up instead.
+    if (!admin.start()) {
+        std::cerr << "[Admin] FATAL: admin server failed to start on port "
+                  << adminPort << ".\n";
+        return 1;
+    }
 
     // ── Warmup ───────────────────────────────────────────────────────
     // Skip warmup on backup: it would inject orders that the primary

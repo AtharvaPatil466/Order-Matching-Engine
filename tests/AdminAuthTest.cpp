@@ -47,9 +47,11 @@ std::string httpGet(uint16_t port, const std::string& path,
     ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 #endif
 
-    // 2-second recv timeout — prevents the test hanging on a slow or
-    // non-responding server.
-    struct timeval tv{2, 0};
+    // Bounded recv — prevents the test hanging on a slow or non-responding
+    // server. Generous, because it is only ever paid on a genuine failure:
+    // connect() succeeds off the listen backlog, so a healthy server answers
+    // immediately even if its accept loop has not been scheduled yet.
+    struct timeval tv{5, 0};
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     sockaddr_in addr{};
@@ -79,11 +81,6 @@ std::string httpGet(uint16_t port, const std::string& path,
     return out;
 }
 
-// Pick a stable-but-unlikely-to-collide admin port based on the PID.
-uint16_t pickPort() {
-    return static_cast<uint16_t>(45000 + (::getpid() % 3000));
-}
-
 }  // namespace
 
 int main() {
@@ -91,13 +88,19 @@ int main() {
     engine.addSymbol(0);
     engine.startAsync(1, 256);
 
-    const uint16_t port = pickPort();
-    AdminServer admin(engine, port);
+    // Port 0: the OS picks a free one and start() reports which. The old
+    // form derived a port from the pid and hoped — it collided in CI with
+    // another process's ephemeral port, the bind failed, start() had no way
+    // to say so, and the first request asserted on an empty response.
+    AdminServer admin(engine, 0);
     admin.setAdminToken("secret123");
-    admin.start();
+    assert(admin.start() && "admin server failed to bind");
+    const uint16_t port = admin.port();
+    assert(port != 0 && "start() must report the port it bound");
 
-    // Give the listen thread time to bind and start accept()ing.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // No sleep: bind() and listen() both complete inside start(), so a
+    // connect() lands in the backlog whether or not the accept loop has been
+    // scheduled yet.
 
     // ── 1. /health is exempt: no token required, always 200 ────────────
     {
@@ -186,32 +189,47 @@ int main() {
     // /risk to anyone with network reach. Omitting the token must now be a
     // startup failure, not a silent exposure.
     {
-        const uint16_t openPort = pickPort();
-        AdminServer unconfigured(engine, openPort);
-        unconfigured.start();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        auto r = httpGet(openPort, "/health");
-        assert(r.empty() &&
+        AdminServer unconfigured(engine, 0);
+        assert(!unconfigured.start() &&
                "AdminServer must not listen without a token or explicit opt-out");
-        std::puts("no token, no opt-out: port closed");
+        // Asserting on start() rather than probing a port: "nothing answered"
+        // was also true when the bind simply failed, so the old form passed
+        // for the wrong reason.
+        std::puts("no token, no opt-out: refused to start");
         unconfigured.stop();  // no-op; never started
     }
 
     // ── 10. Explicit opt-out still works, for local dev and tests ───────
     {
-        const uint16_t openPort = pickPort();
-        AdminServer opted(engine, openPort);
+        AdminServer opted(engine, 0);
         opted.setAuthDisabled(true);
-        opted.start();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        assert(opted.start() && "opted-out server failed to bind");
 
-        auto r = httpGet(openPort, "/metrics");
+        auto r = httpGet(opted.port(), "/metrics");
         assert(!r.empty() && "explicit opt-out must still serve");
         assert(r.find("HTTP/1.1 200") != std::string::npos &&
                "with auth explicitly disabled, /metrics must return 200");
         std::puts("explicit opt-out: /metrics 200 OK");
         opted.stop();
+    }
+
+    // ── 11. A bind failure is reported, not swallowed ───────────────────
+    // start()'s bool is load-bearing now: main.cpp treats false as fatal, and
+    // this test's own port-0 assertions rest on it. Take a port, then ask a
+    // second server for the same one.
+    {
+        AdminServer first(engine, 0);
+        first.setAuthDisabled(true);
+        assert(first.start() && "first server failed to bind");
+
+        AdminServer second(engine, first.port());
+        second.setAuthDisabled(true);
+        assert(!second.start() &&
+               "a port already in use must fail the bind, not be swallowed");
+        std::puts("port already in use: start() returns false");
+
+        second.stop();  // no-op; never started
+        first.stop();
     }
 
     engine.stopAsync();

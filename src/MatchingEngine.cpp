@@ -2115,11 +2115,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained) {
         }
     }
 
-    std::lock_guard<std::mutex> lock(journalMutex_);
-    if (!journal_) {
-        return;
-    }
-    journal_->rewriteAtomically([&](Journal& snapshotJournal) {
+    const auto writeSnapshot = [&](Journal& snapshotJournal) {
         for (const auto& [symbolId, order] : resting) {
             snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                         order.side, order.price, order.remainingQty,
@@ -2129,7 +2125,59 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained) {
                                         order.pegOffset, order.trailAmount,
                                         order.minQty, order.isHidden);
         }
-    });
+    };
+
+    // Phase 3: build the replacement OUTSIDE journalMutex_, then swap under it.
+    //
+    // Writing the snapshot is the expensive part — every resting order, plus a
+    // durability barrier — and it used to run with journalMutex_ held, so every
+    // worker's append stalled for its whole duration. Nothing in that build
+    // touches the live journal, so it does not need the lock.
+    //
+    // What DOES need the lock is the correctness question the split exposes:
+    // the snapshot describes the book as of `resting`, so any entry appended
+    // after that point would be destroyed by the rename. That window is not
+    // new — the gather has always run outside journalMutex_ — but moving the
+    // build out widens it from the rename to the whole write, which would turn
+    // a rare silent loss into a common one.
+    //
+    // So the append counter is checked under the lock before swapping. Nothing
+    // appended: swap, and no worker ever waited. Something appended: throw the
+    // prepared snapshot away and rebuild it under the lock, which is exactly
+    // what this function did before — correct, and slow only when it has to be.
+    //
+    // Note what this does NOT fix: the fallback path still carries the original
+    // window between the gather and the rewrite. Closing that properly means
+    // not replacing the log at all — writing the snapshot as a record IN the
+    // journal and replaying forward from it, the way a WAL checkpoint works —
+    // which is a format change, not a locking change.
+    uint64_t appendsBefore = 0;
+    {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        if (!journal_) {
+            return;
+        }
+        appendsBefore = journal_->entriesAppended();
+    }
+
+    const bool prepared = journal_->prepareRewrite(writeSnapshot);
+
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (!journal_) {
+        return;
+    }
+
+    if (prepared && journal_->entriesAppended() == appendsBefore) {
+        journal_->commitRewrite();
+        return;
+    }
+
+    obSink().log(obEvent("checkpoint_raced_appends", LogSeverity::Warn)
+                     .kv("appends_before", (unsigned long long)appendsBefore)
+                     .kv("appends_now",
+                         (unsigned long long)journal_->entriesAppended())
+                     .kv("prepared", prepared ? 1LL : 0LL));
+    journal_->rewriteAtomically(writeSnapshot);
 }
 
 void MatchingEngine::checkpoint() {

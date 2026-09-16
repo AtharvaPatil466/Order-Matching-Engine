@@ -316,9 +316,23 @@ public:
         persistedEntries_.store(0, std::memory_order_relaxed);
     }
 
+    // Split into prepare/commit so a caller can build the replacement OUTSIDE
+    // the lock that guards appends. prepareRewrite() writes only <path>.tmp and
+    // never touches this journal, so it is safe to run unlocked; commitRewrite()
+    // does the flush/close/rename/open and must be called under that lock.
+    //
+    // The caller is responsible for the part this class cannot see: if anything
+    // was appended between preparing and committing, the swap would discard it,
+    // because the snapshot was built from a book state that predates it. See
+    // MatchingEngine::checkpointInternal.
     bool rewriteAtomically(const std::function<void(Journal&)>& writer) {
-        flush();
+        if (!prepareRewrite(writer)) return false;
+        return commitRewrite();
+    }
 
+    // Build the replacement into <path>.tmp. Touches nothing owned by this
+    // journal; safe to call without the caller's append lock held.
+    bool prepareRewrite(const std::function<void(Journal&)>& writer) {
         const std::string tmpPath = filePath_ + ".tmp";
         bool snapshotComplete = false;
         {
@@ -336,10 +350,11 @@ public:
             // data never reached the platter. The temp.flush() below is that
             // barrier, and it is sufficient on its own.
             //
-            // This matters because checkpointInternal holds journalMutex_
-            // across this call, so every worker's journal append is blocked for
-            // its whole duration. Measured on a 20,000-order book: 53.8s
-            // before, 0.02s after.
+            // This mattered when checkpointInternal held journalMutex_ across
+            // the whole call, blocking every worker's append for its duration.
+            // Measured on a 20,000-order book: 53.8s before, 0.02s after. The
+            // build now runs outside that lock entirely (prepareRewrite), so
+            // what remains under it is the flush/close/rename/open.
             //
             // The batch bounds memory rather than durability: entries are held
             // until it fills, so a very large snapshot still commits in pieces
@@ -361,7 +376,18 @@ public:
             std::remove(tmpPath.c_str());
             return false;
         }
+        return true;
+    }
 
+    // Swap a prepared <path>.tmp over the live journal. MUST be called with the
+    // caller's append lock held: it closes and reopens the file handle.
+    bool commitRewrite() {
+        const std::string tmpPath = filePath_ + ".tmp";
+
+        // Commit whatever is still batched before the handle closes. Anything
+        // appended since prepareRewrite() is about to be discarded by the
+        // rename — that is the caller's invariant to enforce, not this one's.
+        flush();
         close();
 
         // Fault injection: simulate rename(2) failure (e.g., target on a

@@ -284,3 +284,49 @@ TEST_F(ResearchHarnessTest, IntegrationWithMicrostructureMetrics) {
     // All buys → OFI = +1.
     EXPECT_DOUBLE_EQ(metrics.orderFlowImbalance(), 1.0);
 }
+
+// ── Cancel replay is routed by order id, not by a symbol the record lacks ───
+//
+// Journal::logCancelOrder builds a value-initialised JournalEntry and sets only
+// the type, timestamp and order id — symbolId stays 0. ResearchHarness used to
+// dispatch on that field, so every cancel went to book 0. On a single-symbol
+// journal that is right by accident; on symbol 7 it silently did nothing, and
+// research replay reported a book still full of orders the venue had cancelled.
+//
+// Two symbols, neither of them 0, so the old code cannot pass by luck.
+TEST(ResearchHarnessCancelRouting, CancelAppliesToTheBookHoldingTheOrder) {
+    const auto path = (fs::temp_directory_path() /
+                       ("rh_cancel_" + std::to_string(::getpid()) + ".log")).string();
+    fs::remove(path);
+
+    constexpr SymbolId kA = 7;
+    constexpr SymbolId kB = 9;
+
+    {
+        Journal j(path, Journal::SyncPolicy::GroupCommit, 64);
+        j.logAddOrder(101, 10, kA, Side::Buy,  toPrice(100.0), 50, OrderType::Limit);
+        j.logAddOrder(202, 10, kB, Side::Sell, toPrice(101.0), 40, OrderType::Limit);
+        j.logCancelOrder(101);              // kA's order
+        j.logModifyOrder(202, 25);          // kB's order, shrink
+        j.flush();
+    }
+
+    MatchingEngine engine;
+    engine.addSymbol(kA);
+    engine.addSymbol(kB);
+    engine.start();
+
+    ResearchHarness harness(engine);
+    harness.loadJournal(path);
+    while (harness.step()) {}
+
+    const auto a = engine.getOrderBook(kA)->getSnapshot(MarketDataSnapshot::MAX_DEPTH);
+    EXPECT_EQ(a.bidCount, 0u) << "the cancel never reached symbol 7's book";
+
+    const auto b = engine.getOrderBook(kB)->getSnapshot(MarketDataSnapshot::MAX_DEPTH);
+    ASSERT_EQ(b.askCount, 1u) << "the modify removed the order instead of shrinking it";
+    EXPECT_EQ(b.asks[0].totalQuantity, 25u) << "the modify never reached symbol 9's book";
+
+    engine.stop();
+    fs::remove(path);
+}

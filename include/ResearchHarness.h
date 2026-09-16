@@ -2,6 +2,8 @@
 
 #include "EventListener.h"
 #include "Journal.h"
+
+#include <optional>
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 #include "Types.h"
@@ -136,6 +138,24 @@ private:
 
     // ── Helpers ──────────────────────────────────────────────────────
 
+    // Which book currently holds `orderId`, or nullopt if no book does — an
+    // order already filled or cancelled earlier in the replay, where doing
+    // nothing is the right answer. Nullopt rather than a sentinel symbol
+    // because 0 is a legal SymbolId and is exactly the wrong guess to make
+    // here; that is the bug this replaced.
+    //
+    // Single-threaded by construction: the harness replays one entry at a
+    // time on the caller's thread, which is the contract getOrder() documents.
+    std::optional<SymbolId> symbolOf(OrderId orderId) const {
+        for (SymbolId s : knownSymbols_) {
+            const OrderBook* bk = engine_.getOrderBook(s);
+            if (bk && bk->getOrder(orderId)) {
+                return s;
+            }
+        }
+        return std::nullopt;
+    }
+
     void installListeners() {
         knownSymbols_.clear();
         // Collect symbols referenced by entries and install this listener
@@ -173,17 +193,33 @@ private:
                     e.trailAmount, e.minQty, e.hidden);
                 break;
 
+            // These three records carry NO symbol: Journal::logCancelOrder and
+            // friends build a value-initialised JournalEntry and set only the
+            // type, timestamp and order id, so symbolId reads 0. Dispatching on
+            // it sent every cancel, modify and replace to book 0 — correct by
+            // accident for a single-symbol journal, and a silent no-op for any
+            // other symbol. Research replay of a real multi-symbol journal
+            // therefore kept every cancelled order resting.
+            //
+            // Resolve by order id instead, which is what the engine's own
+            // replayJournal() does with the same records.
             case JournalEntry::Type::CancelOrder:
-                engine_.submitCancel(e.symbolId, e.orderId);
+                if (auto sym = symbolOf(e.orderId)) {
+                    engine_.submitCancel(*sym, e.orderId);
+                }
                 break;
 
             case JournalEntry::Type::ModifyOrder:
-                engine_.submitModify(e.symbolId, e.orderId, e.newQty);
+                if (auto sym = symbolOf(e.orderId)) {
+                    engine_.submitModify(*sym, e.orderId, e.newQty);
+                }
                 break;
 
             case JournalEntry::Type::CancelReplace:
-                engine_.submitCancelReplace(e.symbolId, e.orderId,
-                                            e.newPrice, e.newQty);
+                if (auto sym = symbolOf(e.orderId)) {
+                    engine_.submitCancelReplace(*sym, e.orderId,
+                                                e.newPrice, e.newQty);
+                }
                 break;
         }
     }

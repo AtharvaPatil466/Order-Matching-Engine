@@ -1,10 +1,23 @@
 // TimeMachine — regulatory audit / postmortem replay tool.
 //
 // Replays a journal WAL file entry-by-entry and prints the L2 order book
-// state at a given point in time (--to <unix-ns>) or at end-of-journal.
+// state at a given point in time (--to) or at end-of-journal.
+//
+// TIMESTAMP DOMAIN. Journal timestamps are NOT Unix time. Journal::now() uses
+// steady_clock deliberately — a monotonic clock that NTP cannot step backwards,
+// because non-monotonic timestamps would break audit replay. Its epoch is
+// arbitrary (boot, on most platforms) and differs between runs of the writing
+// process.
+//
+// This tool used to advertise `--to <unix-ns>` and compare it against those
+// timestamps directly. No Unix timestamp is ever meaningfully comparable to a
+// since-boot count: a present-day value (~1.7e18) exceeds every entry, so the
+// tool replayed the whole journal and silently reported a cutoff it had not
+// applied. --to is therefore an OFFSET from the first entry in the file, which
+// is the only anchor the format actually provides.
 //
 // Usage:
-//   ./bin/TimeMachine --journal /path/to/journal.wal [--to <unix-ns>] [--depth 5]
+//   ./bin/TimeMachine --journal /path/to/journal.wal [--to <ns-after-first-entry>] [--depth 5]
 
 #include "MatchingEngine.h"
 #include "Journal.h"
@@ -18,18 +31,20 @@ using namespace OrderMatcher;
 
 static void usage(const char* prog) {
     std::fprintf(stderr,
-        "Usage: %s --journal <file> [--to <unix-ns>] [--depth <N>]\n"
+        "Usage: %s --journal <file> [--to <ns-after-first-entry>] [--depth <N>]\n"
         "\n"
         "  --journal FILE   path to the journal WAL file (required)\n"
-        "  --to NS          stop replaying at this Unix nanosecond timestamp\n"
-        "                   (default: replay entire journal)\n"
+        "  --to NS          stop this many nanoseconds after the FIRST entry's\n"
+        "                   timestamp. Journal timestamps are steady_clock since\n"
+        "                   boot, not Unix time, so an absolute wall-clock value\n"
+        "                   is not comparable to them (default: whole journal)\n"
         "  --depth N        price levels to show on each side (default: 5)\n",
         prog);
 }
 
 int main(int argc, char* argv[]) {
     std::string journalPath;
-    uint64_t stopTimestamp = UINT64_MAX;  // default: replay everything
+    uint64_t stopOffsetNs  = UINT64_MAX;  // default: replay everything
     size_t   depth         = 5;
 
     // ── Argument parsing ──────────────────────────────────────────────────────
@@ -37,7 +52,7 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--journal") == 0 && i + 1 < argc) {
             journalPath = argv[++i];
         } else if (std::strcmp(argv[i], "--to") == 0 && i + 1 < argc) {
-            stopTimestamp = std::strtoull(argv[++i], nullptr, 10);
+            stopOffsetNs = std::strtoull(argv[++i], nullptr, 10);
         } else if (std::strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
             depth = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
             if (depth == 0) depth = 1;
@@ -58,10 +73,6 @@ int main(int argc, char* argv[]) {
     }
 
     std::printf("[TimeMachine] Replaying journal: %s\n", journalPath.c_str());
-    if (stopTimestamp != UINT64_MAX) {
-        std::printf("[TimeMachine] Stopping at ts=%llu\n",
-                    (unsigned long long)stopTimestamp);
-    }
 
     // ── Read journal entries from disk ────────────────────────────────────────
     // Open read-only: we only need the on-disk bytes, no writes.
@@ -71,6 +82,21 @@ int main(int argc, char* argv[]) {
     if (entries.empty()) {
         std::fprintf(stderr, "[TimeMachine] No valid entries found in journal.\n");
         return 1;
+    }
+
+    // Anchor the cutoff to the first entry. Saturating add so a huge --to
+    // means "everything" rather than wrapping to "nothing".
+    uint64_t stopTimestamp = UINT64_MAX;
+    if (stopOffsetNs != UINT64_MAX) {
+        const uint64_t firstTs = entries.front().timestamp;
+        stopTimestamp = (stopOffsetNs > UINT64_MAX - firstTs)
+                            ? UINT64_MAX
+                            : firstTs + stopOffsetNs;
+        std::printf("[TimeMachine] First entry ts=%llu; stopping at ts=%llu "
+                    "(+%llu ns)\n",
+                    (unsigned long long)firstTs,
+                    (unsigned long long)stopTimestamp,
+                    (unsigned long long)stopOffsetNs);
     }
 
     // ── Replay into a fresh engine ────────────────────────────────────────────

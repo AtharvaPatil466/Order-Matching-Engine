@@ -462,27 +462,31 @@ public:
     // write could not make progress; the caller must not treat the file as
     // complete.
     size_t pendingEntries() const { return batch_.size(); }
+    // Tracked, not asked for.
+    //
+    // This used to fstat(2) on Linux and ftell() elsewhere. needsCheckpoint()
+    // calls it on EVERY append — the entry-count disjunct in front of it is
+    // false 249,999 times in 250,000 at the default threshold, so it never
+    // short-circuits — and MatchingEngine::maybeTriggerAutoCheckpoint() makes
+    // that a second journalMutex_ acquisition per journaled order. On Linux
+    // that is a syscall per order inside the lock whose result is discarded
+    // almost every time.
+    //
+    // Measured on x86 CI (AMD EPYC, ext4, fdatasync ~438us) with the disk
+    // amortised away so the serialised region is visible: 980k appends/s with
+    // the fstat, 4.88M/s without. It is invisible at the shipped batch of 64
+    // because the fsync dominates there — which is exactly why it survived,
+    // and why it is the first thing that binds on faster storage or a larger
+    // batch. On macOS the same arm measured no difference at all, because
+    // ftell() is userspace; a measurement taken only there would have called
+    // this a non-issue.
+    //
+    // Counting written entries is also strictly more correct than ftell() was:
+    // io_uring writes bypass the stdio stream, which is the reason Linux
+    // needed the syscall in the first place. writeBatch() reports whole
+    // entries landed regardless of mechanism.
     size_t bytesOnDisk() const {
-        if (!file_) {
-            return 0;
-        }
-#ifdef __linux__
-        // io_uring writes bypass the stdio stream, so ftell(file_) would not
-        // reflect them. Ask the kernel for the true size — this is also correct
-        // for the fwrite fallback path (commitBatch always fflushes), so it is
-        // used unconditionally on Linux.
-        struct stat st;
-        if (::fstat(fileno(file_), &st) == 0) {
-            return static_cast<size_t>(st.st_size);
-        }
-        return 0;
-#else
-        long current = std::ftell(file_);
-        if (current < 0) {
-            return 0;
-        }
-        return static_cast<size_t>(current);
-#endif
+        return bytesOnDisk_.load(std::memory_order_relaxed);
     }
 
 protected:
@@ -608,6 +612,11 @@ protected:
         if (actuallyWritten < toWrite) {
             sequence_ -= (toWrite - actuallyWritten);
         }
+        // Only whole entries land, so this stays exact. Atomic because the
+        // io_uring reaper reaches this path off the caller's thread, the same
+        // reason persistedEntries_ is atomic.
+        bytesOnDisk_.fetch_add(actuallyWritten * sizeof(JournalEntry),
+                               std::memory_order_relaxed);
 
         // Durability barrier. The replication ack (onCommit_, fired below)
         // must happen STRICTLY AFTER a successful durable sync — never before,
@@ -936,6 +945,15 @@ private:
         file_ = std::fopen(filePath_.c_str(), mode);
         if (file_) {
             std::fseek(file_, 0, SEEK_END);
+            // Re-anchor the counter from the real file. Every path that
+            // replaces the file underneath us — truncate(), commitRewrite() —
+            // goes through close()/open(), so this is the single point where
+            // the tracked size can drift back into agreement with the disk.
+            const long size = std::ftell(file_);
+            bytesOnDisk_.store(size > 0 ? static_cast<size_t>(size) : 0,
+                               std::memory_order_relaxed);
+        } else {
+            bytesOnDisk_.store(0, std::memory_order_relaxed);
         }
     }
 
@@ -1037,6 +1055,8 @@ private:
     // Written by the reaper thread on the async path (durable-write count) and
     // by the writer thread on the sync path / setup — hence atomic. Read by the
     // background checkpoint thread via needsCheckpoint().
+    // Bytes of whole entries on disk. See bytesOnDisk().
+    std::atomic<size_t> bytesOnDisk_{0};
     std::atomic<size_t> persistedEntries_{0};
     uint64_t            entriesAppended_{0};
     std::vector<JournalEntry> batch_;

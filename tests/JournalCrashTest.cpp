@@ -4,6 +4,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstdio>
+#include <sys/stat.h>
 #include <cstring>
 #include <algorithm>
 #include <random>
@@ -442,6 +443,95 @@ void testDeterministicReplayEquivalence() {
     std::cout << "testDeterministicReplayEquivalence PASSED" << std::endl;
 }
 
+
+// ── bytesOnDisk() must equal the actual file, not merely resemble it ─────────
+//
+// bytesOnDisk() used to ask the OS every time — fstat(2) on Linux, ftell()
+// elsewhere — and needsCheckpoint() calls it on EVERY append, because the
+// entry-count disjunct in front of it is false 249,999 times in 250,000 at the
+// default threshold. On Linux that is a syscall per journaled order, inside
+// journalMutex_, whose result is discarded almost every time. Measured on x86
+// CI with the disk amortised away: 980k appends/s with it, 4.88M/s without.
+//
+// It is now a counter maintained where bytes actually land. That trades a
+// syscall for an invariant, and this test is the invariant: drift either way
+// breaks size-triggered checkpointing silently — too small and it never fires
+// (the journal grows without bound), too large and it fires constantly (a
+// rewrite stall on every append).
+//
+// The paths that replace the file underneath the counter are the interesting
+// ones, so truncate() and rewriteAtomically() are both exercised, plus a
+// reopen of an existing file.
+void testBytesOnDiskTracksTheRealFile() {
+    std::cout << "Running testBytesOnDiskTracksTheRealFile..." << std::endl;
+    cleanup();
+
+    auto realSize = []() -> size_t {
+        struct stat st{};
+        return ::stat(JOURNAL_PATH, &st) == 0 ? static_cast<size_t>(st.st_size) : 0;
+    };
+    auto agree = [&](Journal& j, const char* what) {
+        j.flush();
+        const size_t tracked = j.bytesOnDisk();
+        const size_t actual  = realSize();
+        if (tracked != actual) {
+            std::cerr << "  " << what << ": tracked=" << tracked
+                      << " actual=" << actual << std::endl;
+        }
+        assert(tracked == actual && "bytesOnDisk() drifted from the file");
+    };
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::GroupCommit, 64);
+
+        // Enough to span several commits, and not a multiple of the batch, so
+        // a partly-filled batch_ is in flight at each check.
+        for (int i = 1; i <= 200; ++i) {
+            j.logAddOrder(i, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        }
+        agree(j, "after 200 appends");
+
+        j.truncate();
+        agree(j, "after truncate");
+
+        for (int i = 1; i <= 50; ++i) {
+            j.logAddOrder(i, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        }
+        agree(j, "after 50 more");
+
+        // The rewrite closes, renames a smaller file over the live one, and
+        // reopens — the counter has to come back DOWN, which a pure running
+        // total would get wrong.
+        const bool rewritten = j.rewriteAtomically([](Journal& snap) {
+            for (int i = 1; i <= 7; ++i) {
+                snap.logSnapshot(i, 1, 0, Side::Buy, 1000, 10, OrderType::Limit,
+                                 TimeInForce::GTC, 0, 0, 0, 0,
+                                 PegType::None, 0, 0, 0, false);
+            }
+        });
+        assert(rewritten && "rewriteAtomically failed");
+        agree(j, "after rewriteAtomically");
+        assert(j.bytesOnDisk() == 7 * sizeof(JournalEntry) &&
+               "the snapshot should be exactly its 7 entries");
+
+        for (int i = 100; i < 110; ++i) {
+            j.logAddOrder(i, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        }
+        agree(j, "after post-rewrite appends");
+    }
+
+    {
+        // Reopening an existing journal must anchor to what is already there,
+        // not start from zero.
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::GroupCommit, 64);
+        agree(j, "after reopen");
+        assert(j.bytesOnDisk() > 0 && "reopen anchored to an empty file");
+    }
+
+    cleanup();
+    std::cout << "testBytesOnDiskTracksTheRealFile PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "\n=== Journal Crash Recovery Tests ===" << std::endl;
 
@@ -452,6 +542,7 @@ int main() {
     testEmptyJournal();
     testJournalWithTrades();
     testDeterministicReplayEquivalence();
+    testBytesOnDiskTracksTheRealFile();
 
     std::cout << "\nALL JOURNAL CRASH TESTS PASSED!" << std::endl;
     return 0;

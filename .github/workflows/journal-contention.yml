@@ -1,0 +1,106 @@
+# Journal contention measurement (audit H6) — manual, x86 Linux.
+#
+# WHY THIS IS A SEPARATE, DISPATCH-ONLY WORKFLOW
+#
+# H6 says every journal append serialises on one global mutex. Whether that
+# matters depends entirely on how fast fdatasync is, because the durability
+# barrier runs INSIDE the critical section:
+#
+#   * on the dev box (Apple Silicon / APFS) fdatasync measured ~2.9 ms, so the
+#     disk dominates completely and the mutex is invisible — journal throughput
+#     is flat at ~21k appends/s from 1 thread to 8.
+#   * on x86 Linux with NVMe it is ~50-100 us, which moves the disk ceiling to
+#     roughly 0.6-1.3M/s — the same order as the ~1.05M/s serialised-region
+#     ceiling measured with the disk amortised away.
+#
+# Those two regimes give opposite answers to "is the lock worth removing", and
+# only this one is production-representative. So the measurement has to run
+# here, and a number taken anywhere else should not be quoted.
+#
+# It is workflow_dispatch only, on purpose:
+#   * it is a decision input, not a regression gate — it has no thresholds and
+#     nothing to fail on, and a benchmark that runs on every push while
+#     asserting nothing is noise that teaches people to ignore benchmark output.
+#   * ci.yml's x86 Release lane builds with -DBUILD_BENCHMARKS=OFF, and
+#     benchmark-gate.yml is a BLOCKING PR gate — bolting an unrelated benchmark
+#     onto either one risks a lane that must stay trustworthy.
+#
+# Run it with:  gh workflow run journal-contention.yml
+# Then read:    gh run view <id> --log   (or download the artifact)
+
+name: Journal Contention (H6)
+
+on:
+  workflow_dispatch:
+    inputs:
+      orders:
+        description: "Orders per producer thread"
+        required: false
+        default: "50000"
+      threads:
+        description: "Worker-thread counts to sweep (comma-separated)"
+        required: false
+        default: "1,2,4,8"
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Ubuntu Release — journalMutex_ contention
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Record what the storage actually does, because every number below is
+      # relative to it. If fdatasync here is slow, the run says nothing about
+      # production either — a CI runner's disk is not a venue's NVMe, and this
+      # line is what lets a reader tell the difference.
+      - name: Storage and CPU context
+        run: |
+          echo "--- cpu ---"
+          lscpu | grep -E "Model name|^CPU\(s\)|Thread|Core" || true
+          echo "--- filesystem for the working dir ---"
+          df -T . | tail -1
+          echo "--- fdatasync latency (1000 x 4KiB, O_DSYNC) ---"
+          dd if=/dev/zero of=./fsync_probe bs=4k count=1000 oflag=dsync 2>&1 | tail -2
+          rm -f ./fsync_probe
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_SANITIZERS=OFF
+          -DENABLE_FAULT_INJECTION=OFF
+          -DBUILD_TESTS=OFF
+          -DBUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build --target JournalContentionBenchmark --parallel 4
+
+      # A: end-to-end engine, journal ON vs OFF, across worker counts. The
+      # question is whether the journaled curve scales or flatlines.
+      - name: A — end-to-end engine throughput
+        run: |
+          ./build/benchmarks/JournalContentionBenchmark \
+            --orders ${{ inputs.orders }} \
+            --threads ${{ inputs.threads }} \
+            --only a 2>&1 | tee journal-contention-a.txt
+
+      # B: the critical section alone, sweeping batch size. batch=64 is the
+      # shipped default and includes the fsync; batch=4096 amortises it away so
+      # the lock itself becomes visible. The per-thread arm is the control for
+      # "what would removing the global lock actually buy".
+      - name: B — critical section in isolation
+        run: |
+          ./build/benchmarks/JournalContentionBenchmark \
+            --orders ${{ inputs.orders }} \
+            --threads ${{ inputs.threads }} \
+            --only b 2>&1 | tee journal-contention-b.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-contention-x86
+          path: journal-contention-*.txt

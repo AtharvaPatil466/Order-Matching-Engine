@@ -692,7 +692,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelOrder(req.orderId);
+                journal_->logCancelOrder(req.orderId, req.symbolId);
             }
             maybeTriggerAutoCheckpoint();
         }
@@ -718,7 +718,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (book->modifyOrder(req.orderId, req.newQty, req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logModifyOrder(req.orderId, req.newQty);
+                journal_->logModifyOrder(req.orderId, req.symbolId, req.newQty);
             }
             maybeTriggerAutoCheckpoint();
         }
@@ -733,7 +733,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                                 req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelReplace(req.orderId, req.newPrice, req.newQty);
+                journal_->logCancelReplace(req.orderId, req.symbolId, req.newPrice, req.newQty);
             }
             maybeTriggerAutoCheckpoint();
         }
@@ -766,7 +766,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                     }
                     if (journal_) {
                         std::lock_guard<std::mutex> lock(journalMutex_);
-                        journal_->logCancelOrder(id);
+                        journal_->logCancelOrder(id, book->getSymbolId());
                     }
                 }
             } else {
@@ -779,14 +779,16 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (threadIndex >= symbolsByThread_.size()) {
             return;
         }
-        std::function<void(OrderId)> onExpire;
-        if (journal_) {
-            onExpire = [this](OrderId id) {
-                std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelOrder(id);
-            };
-        }
+        // Built inside the loop: the callback receives only an OrderId, so
+        // the symbol has to be captured per book rather than hoisted.
         for (SymbolId symbolId : symbolsByThread_[threadIndex]) {
+            std::function<void(OrderId)> onExpire;
+            if (journal_) {
+                onExpire = [this, symbolId](OrderId id) {
+                    std::lock_guard<std::mutex> lock(journalMutex_);
+                    journal_->logCancelOrder(id, symbolId);
+                };
+            }
             if (auto* book = getOrderBook(symbolId)) {
                 book->expireOrders(req.expiryTime, onExpire);
             }
@@ -891,7 +893,7 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
                 book->cancelOrder(sib);
                 if (journal_) {
                     std::lock_guard<std::mutex> jl(journalMutex_);
-                    journal_->logCancelOrder(sib);    // replay reproduces the OCO cancel
+                    journal_->logCancelOrder(sib, book->getSymbolId());  // replay reproduces the OCO cancel
                 }
             }
         }
@@ -997,7 +999,7 @@ void MatchingEngine::cancelAllRestingOrders() {
             }
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
-                journal_->logCancelOrder(id);
+                journal_->logCancelOrder(id, book->getSymbolId());
             }
         }
     }
@@ -1029,7 +1031,7 @@ size_t MatchingEngine::cancelDayOrders() {
             }
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
-                journal_->logCancelOrder(id);
+                journal_->logCancelOrder(id, book->getSymbolId());
             }
             ++cancelled;
             // "log at session end" — durable, per-order audit line.
@@ -1517,7 +1519,7 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     if (journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logCancelOrder(orderId);
+            journal_->logCancelOrder(orderId, symbolId);
         }
         maybeTriggerAutoCheckpoint();
     }
@@ -1607,7 +1609,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     if (modified && journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logModifyOrder(orderId, newQty);
+            journal_->logModifyOrder(orderId, symbolId, newQty);
         }
         maybeTriggerAutoCheckpoint();
     }
@@ -1659,7 +1661,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
     if (replaced && journal_) {
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logCancelReplace(orderId, newPrice, newQty);
+            journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
         }
         maybeTriggerAutoCheckpoint();
     }
@@ -1768,14 +1770,14 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     // BEFORE the cancel actually runs. Replay then reproduces these
     // expirations deterministically without needing a virtual clock —
     // the journal entries appear in their original sequence position.
-    std::function<void(OrderId)> onExpire;
-    if (journal_) {
-        onExpire = [this](OrderId id) {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logCancelOrder(id);
-        };
-    }
     for (SymbolId symbolId : symbolIds_) {
+        std::function<void(OrderId)> onExpire;
+        if (journal_) {
+            onExpire = [this, symbolId](OrderId id) {
+                std::lock_guard<std::mutex> lock(journalMutex_);
+                journal_->logCancelOrder(id, symbolId);
+            };
+        }
         if (auto* book = getOrderBook(symbolId)) {
             book->expireOrders(currentTime, onExpire);
         }
@@ -1785,6 +1787,31 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
 void MatchingEngine::enableJournal(const std::string& path) {
     std::lock_guard<std::mutex> lock(journalMutex_);
     journal_ = std::make_unique<Journal>(path, Journal::SyncPolicy::GroupCommit, 64);
+}
+
+// Which book holds `orderId` for a Cancel/Modify/CancelReplace record.
+//
+// `recorded` is the entry's symbolId. Journals written after those records
+// began carrying one name the book directly, which is both correct and O(1).
+// Older journals left the field 0, so fall back to the scan this used to do
+// unconditionally — no worse than before for them, and exact for everything
+// written since.
+//
+// The scan is why duplicate order ids across symbols silently lost orders on
+// recovery: it takes whichever book it reaches first, and nothing enforces
+// global id uniqueness (OrderBook's duplicate check is per-book).
+OrderBook* MatchingEngine::bookHoldingOrder(SymbolId recorded, OrderId orderId) {
+    if (auto* book = getOrderBook(recorded);
+        book && book->getOrder(orderId)) {
+        return book;
+    }
+    for (SymbolId symbolId : symbolIds_) {
+        if (auto* book = getOrderBook(symbolId);
+            book && book->getOrder(orderId)) {
+            return book;
+        }
+    }
+    return nullptr;
 }
 
 size_t MatchingEngine::replayJournal() {
@@ -1833,32 +1860,20 @@ size_t MatchingEngine::replayJournal() {
             break;
         }
         case JournalEntry::Type::CancelOrder: {
-            for (SymbolId symbolId : symbolIds_) {
-                auto* book = getOrderBook(symbolId);
-                if (book && book->getOrder(entry.orderId)) {
-                    book->cancelOrder(entry.orderId);
-                    break;
-                }
+            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
+                book->cancelOrder(entry.orderId);
             }
             break;
         }
         case JournalEntry::Type::ModifyOrder: {
-            for (SymbolId symbolId : symbolIds_) {
-                auto* book = getOrderBook(symbolId);
-                if (book && book->getOrder(entry.orderId)) {
-                    book->modifyOrder(entry.orderId, entry.newQty);
-                    break;
-                }
+            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
+                book->modifyOrder(entry.orderId, entry.newQty);
             }
             break;
         }
         case JournalEntry::Type::CancelReplace: {
-            for (SymbolId symbolId : symbolIds_) {
-                auto* book = getOrderBook(symbolId);
-                if (book && book->getOrder(entry.orderId)) {
-                    book->cancelReplace(entry.orderId, entry.newPrice, entry.newQty);
-                    break;
-                }
+            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
+                book->cancelReplace(entry.orderId, entry.newPrice, entry.newQty);
             }
             break;
         }
@@ -1992,35 +2007,23 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
         break;
     }
     case JournalEntry::Type::CancelOrder: {
-        for (SymbolId sym : symbolIds_) {
-            auto* book = getOrderBook(sym);
-            if (book && book->getOrder(entry.orderId)) {
-                book->cancelOrder(entry.orderId);
-                applied = true;
-                break;
-            }
+        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
+            book->cancelOrder(entry.orderId);
+            applied = true;
         }
         break;
     }
     case JournalEntry::Type::ModifyOrder: {
-        for (SymbolId sym : symbolIds_) {
-            auto* book = getOrderBook(sym);
-            if (book && book->getOrder(entry.orderId)) {
-                book->modifyOrder(entry.orderId, entry.newQty);
-                applied = true;
-                break;
-            }
+        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
+            book->modifyOrder(entry.orderId, entry.newQty);
+            applied = true;
         }
         break;
     }
     case JournalEntry::Type::CancelReplace: {
-        for (SymbolId sym : symbolIds_) {
-            auto* book = getOrderBook(sym);
-            if (book && book->getOrder(entry.orderId)) {
-                book->cancelReplace(entry.orderId, entry.newPrice, entry.newQty);
-                applied = true;
-                break;
-            }
+        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
+            book->cancelReplace(entry.orderId, entry.newPrice, entry.newQty);
+            applied = true;
         }
         break;
     }
@@ -2057,14 +2060,14 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                                   entry.minQty, entry.hidden);
             break;
         case JournalEntry::Type::CancelOrder:
-            journal_->logCancelOrder(entry.orderId);
+            journal_->logCancelOrder(entry.orderId, entry.symbolId);
             break;
         case JournalEntry::Type::ModifyOrder:
-            journal_->logModifyOrder(entry.orderId, entry.newQty);
+            journal_->logModifyOrder(entry.orderId, entry.symbolId, entry.newQty);
             break;
         case JournalEntry::Type::CancelReplace:
-            journal_->logCancelReplace(entry.orderId, entry.newPrice,
-                                       entry.newQty);
+            journal_->logCancelReplace(entry.orderId, entry.symbolId,
+                                       entry.newPrice, entry.newQty);
             break;
         case JournalEntry::Type::Snapshot:
             journal_->logSnapshot(entry.orderId, entry.participantId,

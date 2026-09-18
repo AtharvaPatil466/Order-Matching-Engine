@@ -490,6 +490,8 @@ private:
     void workerLoop(size_t threadIndex);
     void processRequest(size_t threadIndex, const OrderRequest& req);
     void maybeTriggerAutoCheckpoint();
+    // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
+    OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);
     void checkpointInternal(bool alreadyDrained);
     void rebuildThreadSymbolIndex();
 

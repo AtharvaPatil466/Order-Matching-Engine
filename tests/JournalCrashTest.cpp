@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <fstream>
+#include <array>
 #include <cstdio>
 #include <sys/stat.h>
 #include <cstring>
@@ -385,16 +386,47 @@ void testDeterministicReplayEquivalence() {
     constexpr int kSeeds = 20;
     constexpr int kOpsPerSeed = 250;
 
+    // MULTIPLE symbols, none of them 0.
+    //
+    // This swept 20 seeds x 250 ops against a single symbol 0, and every other
+    // journal test in the suite is single-symbol too — JournalReplayProperty,
+    // GTDReplay, GracefulShutdown, CombinedChaos and DurableAck all use one
+    // book, and the two multi-symbol tests in ManualTest never enable the
+    // journal. So the whole journal area was verified against the one shape
+    // where cross-book routing cannot be wrong.
+    //
+    // That is not hypothetical: CancelOrder, ModifyOrder and CancelReplace
+    // records carry no symbolId (Journal::logCancelOrder leaves it 0), and
+    // replay only survives that by scanning every book for the order id. On
+    // one book the scan is trivially right. ResearchHarness, which trusted the
+    // field instead, silently dropped every cancel on any symbol but 0 — a
+    // real bug that lived because nothing here ever used a second book.
+    //
+    // Deliberately not starting at 0: a symbol that equals the records'
+    // zero-filled default is the one value that can pass for the wrong reason.
+    static const std::array<SymbolId, 3> kSymbols{3, 7, 11};
+
     for (int seed = 1; seed <= kSeeds; ++seed) {
         cleanup();
 
         MatchingEngine original;
         original.enableJournal(JOURNAL_PATH);
+        // Symbols BEFORE start(): start() sets booksFrozen_, so a later
+        // addSymbol does not produce a book. The single-symbol version of this
+        // test registered after start() and still worked, because symbol 0 is
+        // auto-registered by the constructor — so addSymbol(0) was a no-op and
+        // the ordering bug was invisible.
+        for (SymbolId sym : kSymbols) {
+            original.addSymbol(sym);
+        }
         original.start();
-        original.addSymbol(0);
 
         std::mt19937 rng(static_cast<uint32_t>(seed));
-        std::vector<OrderId> activeOrders;
+        // Order id -> the symbol it lives on. Replay resolves a CancelOrder
+        // record by scanning every book for the id, because the record does
+        // not carry a symbol; this map is how the test knows which book to
+        // drive, and lets the assertions below be per-symbol.
+        std::vector<std::pair<OrderId, SymbolId>> activeOrders;
         OrderId nextOrderId = 1;
 
         for (int op = 0; op < kOpsPerSeed; ++op) {
@@ -403,24 +435,28 @@ void testDeterministicReplayEquivalence() {
                 : static_cast<int>(rng() % 10);
 
             if (action < 6) {
+                const SymbolId sym = kSymbols[rng() % kSymbols.size()];
                 Side side = (rng() % 2 == 0) ? Side::Buy : Side::Sell;
                 Price base = side == Side::Buy ? toPrice(90.00) : toPrice(110.00);
                 Price price = base + static_cast<Price>((rng() % 500) * 10);
                 Quantity qty = 1 + (rng() % 100);
                 SubmitResult result = original.submitOrder(
-                    0, nextOrderId, 100 + (rng() % 8), side, price, qty, OrderType::Limit);
+                    sym, nextOrderId, 100 + (rng() % 8), side, price, qty,
+                    OrderType::Limit);
                 if (result.isAccepted()) {
-                    activeOrders.push_back(nextOrderId);
+                    activeOrders.emplace_back(nextOrderId, sym);
                 }
                 ++nextOrderId;
             } else if (action < 8) {
                 size_t idx = static_cast<size_t>(rng() % activeOrders.size());
-                original.cancelOrder(0, activeOrders[idx]);
+                const auto [id, sym] = activeOrders[idx];
+                original.cancelOrder(sym, id);
                 activeOrders.erase(activeOrders.begin() + static_cast<std::ptrdiff_t>(idx));
             } else {
                 size_t idx = static_cast<size_t>(rng() % activeOrders.size());
+                const auto [id, sym] = activeOrders[idx];
                 Quantity newQty = 1 + (rng() % 120);
-                original.modifyOrder(0, activeOrders[idx], newQty);
+                original.modifyOrder(sym, id, newQty);
             }
 
             if (op == kOpsPerSeed / 2) {
@@ -433,9 +469,14 @@ void testDeterministicReplayEquivalence() {
 
         MatchingEngine replayed;
         replayed.enableJournal(JOURNAL_PATH);
+        for (SymbolId sym : kSymbols) {
+            replayed.addSymbol(sym);
+        }
         replayed.start();
         (void)replayed.replayJournal();
-        assertSameBookState(original, replayed, 0);
+        for (SymbolId sym : kSymbols) {
+            assertSameBookState(original, replayed, sym);
+        }
         replayed.stop();
     }
 
@@ -532,6 +573,79 @@ void testBytesOnDiskTracksTheRealFile() {
     std::cout << "testBytesOnDiskTracksTheRealFile PASSED" << std::endl;
 }
 
+
+// ── The same order id on two symbols must not lose an order on recovery ─────
+//
+// OrderBook's duplicate-id check is PER BOOK, so two participants trading
+// different symbols with overlapping id ranges — entirely ordinary, ids come
+// from the client — both get accepted. Cancel/Modify/CancelReplace records
+// used to carry no symbol, so replay found the target by scanning every book
+// for the id and taking the first hit. With the id present in two books that
+// is a coin flip, and the loser is a resting order that silently does not come
+// back after a restart.
+//
+// Live and replayed state diverged: A kept its order, replay did not.
+//
+// Note the checkpoint: there deliberately isn't one. A checkpoint rewrites the
+// journal into Snapshot records, which DO carry symbolId, so checkpointing
+// here would mask the very path this test exists to cover — the first version
+// of this test did exactly that and passed for the wrong reason.
+void testDuplicateIdAcrossSymbols() {
+    std::cout << "Running testDuplicateIdAcrossSymbols..." << std::endl;
+    cleanup();
+    constexpr SymbolId kA = 3, kB = 7;
+    constexpr OrderId kId = 5;
+
+    auto depth = [](const MatchingEngine& e, SymbolId sym) {
+        return e.getOrderBook(sym)->getSnapshot(MarketDataSnapshot::MAX_DEPTH).bidCount;
+    };
+
+    size_t liveA = 0, liveB = 0;
+    {
+        MatchingEngine original;
+        original.enableJournal(JOURNAL_PATH);
+        original.addSymbol(kA);
+        original.addSymbol(kB);
+        original.start();
+
+        assert(original.submitOrder(kA, kId, 100, Side::Buy, toPrice(90.0), 10,
+                                    OrderType::Limit).isAccepted());
+        assert(original.submitOrder(kB, kId, 200, Side::Buy, toPrice(95.0), 20,
+                                    OrderType::Limit).isAccepted() &&
+               "per-book duplicate check should admit the same id on another symbol");
+
+        original.cancelOrder(kB, kId);   // cancel B's copy only
+        original.stop();
+
+        liveA = depth(original, kA);
+        liveB = depth(original, kB);
+        // Scoped so the destructor runs here: stop() does NOT flush the
+        // journal, only ~Journal() does, and with the default GroupCommit
+        // batch of 64 these three entries would otherwise still be in memory.
+        // checkpoint() would flush too — but it rewrites the journal into
+        // Snapshot records, which DO carry symbolId, and would mask the
+        // cancel-resolution path this test exists to cover.
+    }
+    assert(liveA == 1 && "A's order should still be resting");
+    assert(liveB == 0 && "B's order was cancelled");
+
+    MatchingEngine replayed;
+    replayed.enableJournal(JOURNAL_PATH);
+    replayed.addSymbol(kA);
+    replayed.addSymbol(kB);
+    replayed.start();
+    (void)replayed.replayJournal();
+
+    assert(depth(replayed, kA) == 1 &&
+           "recovery cancelled the wrong book's order and lost A's");
+    assert(depth(replayed, kB) == 0 &&
+           "recovery resurrected an order that was cancelled");
+    replayed.stop();
+
+    cleanup();
+    std::cout << "testDuplicateIdAcrossSymbols PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "\n=== Journal Crash Recovery Tests ===" << std::endl;
 
@@ -543,6 +657,7 @@ int main() {
     testJournalWithTrades();
     testDeterministicReplayEquivalence();
     testBytesOnDiskTracksTheRealFile();
+    testDuplicateIdAcrossSymbols();
 
     std::cout << "\nALL JOURNAL CRASH TESTS PASSED!" << std::endl;
     return 0;

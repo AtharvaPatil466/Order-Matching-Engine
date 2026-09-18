@@ -204,28 +204,45 @@ public:
         appendEntry(entry);
     }
 
-    void logCancelOrder(OrderId id) {
+    // symbolId is REQUIRED, not defaulted.
+    //
+    // These three records used to carry no symbol at all — the field existed
+    // and stayed zero-filled — so replay could only find the order by scanning
+    // every book for its id. That is correct exactly while order ids are
+    // globally unique, and nothing enforces that: the duplicate check is
+    // per-book (OrderBook::addOrder). Two participants on different symbols
+    // using overlapping id ranges is ordinary, and the scan then cancels
+    // whichever book it reaches first — silently losing a resting order on
+    // recovery. Reproduced in JournalCrashTest::testDuplicateIdAcrossSymbols.
+    //
+    // A default of 0 would hide exactly the omissions that caused this, since
+    // 0 is a legal SymbolId. Required means the compiler names every site.
+    void logCancelOrder(OrderId id, SymbolId symbolId) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::CancelOrder;
         entry.timestamp = now();
         entry.orderId = id;
+        entry.symbolId = symbolId;
         appendEntry(entry);
     }
 
-    void logModifyOrder(OrderId id, Quantity newQty) {
+    void logModifyOrder(OrderId id, SymbolId symbolId, Quantity newQty) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::ModifyOrder;
         entry.timestamp = now();
         entry.orderId = id;
+        entry.symbolId = symbolId;
         entry.newQty = newQty;
         appendEntry(entry);
     }
 
-    void logCancelReplace(OrderId id, Price newPrice, Quantity newQty) {
+    void logCancelReplace(OrderId id, SymbolId symbolId, Price newPrice,
+                          Quantity newQty) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::CancelReplace;
         entry.timestamp = now();
         entry.orderId = id;
+        entry.symbolId = symbolId;
         entry.newPrice = newPrice;
         entry.newQty = newQty;
         appendEntry(entry);
@@ -1112,29 +1129,6 @@ private:
     std::thread reaper_;
     std::atomic<bool> reaperStop_{false};
 #endif
-};
-
-class GroupCommitJournal : public Journal {
-public:
-    explicit GroupCommitJournal(const std::string& filePath, size_t batchSize = 64)
-        : Journal(filePath, SyncPolicy::GroupCommit, batchSize) {}
-
-    void logAddOrderBatched(OrderId id, ParticipantId pid, SymbolId sym, Side side, Price price,
-                            Quantity qty, OrderType type, TimeInForce tif = TimeInForce::GTC,
-                            uint64_t expiry = 0, Price stopPrice = 0, Price stopLimitPrice = 0,
-                            Quantity displayQty = 0, PegType pegType = PegType::None,
-                            Price pegOffset = 0, Price trailAmount = 0, Quantity minQty = 0,
-                            bool hidden = false) {
-        logAddOrder(id, pid, sym, side, price, qty, type, tif, expiry, stopPrice,
-                    stopLimitPrice, displayQty, pegType, pegOffset, trailAmount, minQty,
-                    hidden);
-    }
-
-    void logCancelOrderBatched(OrderId id) { logCancelOrder(id); }
-    void logModifyOrderBatched(OrderId id, Quantity newQty) { logModifyOrder(id, newQty); }
-    void logCancelReplaceBatched(OrderId id, Price newPrice, Quantity newQty) {
-        logCancelReplace(id, newPrice, newQty);
-    }
 };
 
 } // namespace OrderMatcher

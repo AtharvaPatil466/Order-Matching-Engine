@@ -829,6 +829,82 @@ void testPreHeaderJournalStillReads() {
     std::cout << "testPreHeaderJournalStillReads PASSED" << std::endl;
 }
 
+
+// ── Readable is not recoverable: a log that does not start at sequence 1 ────
+//
+// checkRecoverable() decides from a LAX read (CRC checked, sequence not).
+// Recovery does not use that read — replayJournal calls readAll(true, TRUE),
+// and strict mode requires the first record to be sequence 1 and the run to be
+// contiguous. So a file whose records are individually intact but whose
+// numbering starts above 1 yields records to the guard and ZERO to replay: the
+// engine would start with an empty book while a full journal sat beside it.
+//
+// Not reachable today — everything that writes a journal numbers from 1. It
+// becomes reachable the moment anything removes a prefix, which is exactly the
+// change most likely to be made by someone who has not read this file.
+//
+// Forged by dropping the FIRST record of a real journal rather than by
+// hand-assembling bytes, so every surviving record keeps a valid CRC and the
+// only thing wrong is where the numbering begins — which is precisely what a
+// prefix-removing compactor would produce.
+void testLogNotStartingAtSequenceOneIsRefused() {
+    std::cout << "Running testLogNotStartingAtSequenceOneIsRefused..." << std::endl;
+    cleanup();
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        for (int i = 1; i <= 5; ++i) {
+            j.logAddOrder(i, 1, 0, Side::Buy, 1000 + i, 10, OrderType::Limit);
+        }
+        j.flush();
+    }
+
+    const size_t hdr = Journal::headerBytesOf(JOURNAL_PATH);
+    assert(hdr == sizeof(JournalFileHeader));
+
+    std::vector<char> whole;
+    {
+        std::ifstream in(JOURNAL_PATH, std::ios::binary);
+        whole.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    // header + records[1..4]  — records[0] (sequence 1) removed.
+    {
+        std::ofstream out(JOURNAL_PATH, std::ios::binary | std::ios::trunc);
+        out.write(whole.data(), static_cast<std::streamsize>(hdr));
+        out.write(whole.data() + hdr + sizeof(JournalEntry),
+                  static_cast<std::streamsize>(whole.size() - hdr - sizeof(JournalEntry)));
+    }
+
+    struct stat before{};
+    assert(::stat(JOURNAL_PATH, &before) == 0);
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+
+        // The lax read still finds them all — which is why the old guard was
+        // blind to this.
+        assert(j.readAll(/*validateCRC=*/true, /*validateSequence=*/false).size() == 4 &&
+               "the surviving records should still be individually intact");
+        // Strict recovery, the one replay actually uses, gets nothing.
+        assert(j.readAll(/*validateCRC=*/true, /*validateSequence=*/true).empty() &&
+               "strict recovery cannot use a log that does not start at 1");
+
+        assert(j.recoveryFailed() &&
+               "readable-but-unrecoverable must be refused, not started from");
+
+        j.logAddOrder(99, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        j.flush();
+    }
+
+    struct stat after{};
+    assert(::stat(JOURNAL_PATH, &after) == 0);
+    assert(before.st_size == after.st_size &&
+           "an unrecoverable journal was appended to");
+
+    cleanup();
+    std::cout << "testLogNotStartingAtSequenceOneIsRefused PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "\n=== Journal Crash Recovery Tests ===" << std::endl;
 
@@ -845,6 +921,7 @@ int main() {
     testTornFirstRecordStillAppends();
     testFormatVersionMismatchIsRefused();
     testPreHeaderJournalStillReads();
+    testLogNotStartingAtSequenceOneIsRefused();
 
     std::cout << "\nALL JOURNAL CRASH TESTS PASSED!" << std::endl;
     return 0;

@@ -1186,7 +1186,41 @@ private:
     }
 
     void checkRecoverable() {
-        if (persistedEntries_.load(std::memory_order_relaxed) > 0) {
+        const size_t readable = persistedEntries_.load(std::memory_order_relaxed);
+        if (readable > 0) {
+            // Readable is not the same as recoverable, and this is the gap the
+            // first version of this guard had.
+            //
+            // It decided purely on the LAX read — CRC checked, sequence not —
+            // so a file whose records are individually intact but whose
+            // sequence does not start at 1 looked healthy here. Recovery does
+            // not use that read: replayJournal calls readAll(true, TRUE), and
+            // strict mode expects the first record to be sequence 1 and stops
+            // at the first gap. So a file like that yields records here and
+            // ZERO to replay, and the engine starts with an empty book while a
+            // full journal sits beside it — the exact failure this guard was
+            // written to make loud, arriving through the one door it left open.
+            //
+            // Not reachable today: everything that writes a journal numbers
+            // from 1. It becomes reachable the moment anything removes a
+            // prefix — a compactor, a manual splice, a half-applied
+            // migration — which is precisely when nobody would be looking.
+            if (strictPrefixEntries_ == 0) {
+                recoveryFailed_ = true;
+                std::fprintf(stderr,
+                    "[Journal] REFUSING TO APPEND: %s holds %zu readable "
+                    "record(s), but recovery can\n"
+                    "          use none of them: the first record is sequence "
+                    "%llu, and replay\n"
+                    "          requires the log to start at 1 and be "
+                    "contiguous. Starting would\n"
+                    "          serve an EMPTY BOOK from a full journal. Move "
+                    "the file aside, or\n"
+                    "          replay it with a build that understands its "
+                    "numbering.\n",
+                    filePath_.c_str(), readable,
+                    (unsigned long long)firstSequenceOnDisk());
+            }
             return;
         }
         // Record bytes, excluding any file header — a file holding nothing but
@@ -1211,9 +1245,32 @@ private:
             filePath_.c_str(), bytes, sizeof(JournalEntry));
     }
 
+    // First record's sequence number, for diagnostics only.
+    uint64_t firstSequenceOnDisk() const {
+        auto entries = readEntriesFromPath(filePath_, true, false);
+        return entries.empty() ? 0 : entries.front().sequenceNumber;
+    }
+
     uint64_t recoverSequenceFromDisk() {
         auto entries = readEntriesFromPath(filePath_, true, false);
         persistedEntries_.store(entries.size(), std::memory_order_relaxed);
+
+        // How many records a STRICT read would return, computed from the lax
+        // read rather than by reading the file a second time — the sequence
+        // numbers are already in hand, and this runs in the constructor, which
+        // JournalFollower invokes on every poll.
+        //
+        // Mirrors readEntriesFromPath's strict mode exactly: expect 1, then
+        // +1, stop at the first gap.
+        size_t strictPrefix = 0;
+        uint64_t expected = 1;
+        for (const auto& e : entries) {
+            if (e.sequenceNumber != expected) break;
+            ++strictPrefix;
+            ++expected;
+        }
+        strictPrefixEntries_ = strictPrefix;
+
         if (entries.empty()) {
             return 0;
         }
@@ -1267,6 +1324,9 @@ private:
     // by the writer thread on the sync path / setup — hence atomic. Read by the
     // background checkpoint thread via needsCheckpoint().
     bool recoveryFailed_{false};
+    // Records a STRICT read would return: the contiguous-from-1 prefix of what
+    // the lax read found. See checkRecoverable().
+    size_t strictPrefixEntries_{0};
     // Bytes before the first record: header size, or 0 for a pre-header file.
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().

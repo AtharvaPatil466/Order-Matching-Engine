@@ -79,6 +79,34 @@ inline uint32_t computeCRC32(const void* data, size_t length) {
 }
 
 #pragma pack(push, 1)
+// On-disk file header, written once at offset 0.
+//
+// Before this, the file was a bare array of packed structs: no magic, no
+// length prefix, no version. Framing was implicit in sizeof(JournalEntry), so
+// a layout change sliced an existing file on the wrong boundaries, failed
+// every CRC, and read back as empty — indistinguishable from "nothing was
+// ever written here".
+//
+// LEGACY DISCRIMINATION. A pre-header file begins with a JournalEntry, whose
+// first byte is entryType — always 1..5. `magic` begins with 'O' (0x4F), which
+// no entryType can be, so "starts with the magic" separates a headered file
+// from a pre-header one with certainty rather than by probability. Files
+// written before this header are still read, as bare records.
+#pragma pack(push, 1)
+struct JournalFileHeader {
+    char     magic[8];       // "OBJRNL" + NUL padding
+    uint32_t formatVersion;  // bump when the file or record layout changes
+    uint32_t recordSize;     // sizeof(JournalEntry) as the writer saw it
+    uint64_t reserved;       // zero
+};
+#pragma pack(pop)
+
+inline constexpr char     JOURNAL_MAGIC[8]    = {'O','B','J','R','N','L','\0','\0'};
+inline constexpr uint32_t JOURNAL_FORMAT_V1   = 1;
+static_assert(sizeof(JournalFileHeader) == 24,
+              "JournalFileHeader is on disk; changing its size needs a format "
+              "version bump and a migration path");
+
 struct JournalEntry {
     enum class Type : uint8_t {
         AddOrder = 1,
@@ -448,6 +476,21 @@ public:
     // True when the journal opened a file it could not read at all and is
     // therefore refusing to append. See checkRecoverable().
     bool recoveryFailed() const { return recoveryFailed_; }
+
+    // Returns the number of header bytes at the front of `path`: the header
+    // size when one is present, 0 for a pre-header file or one too short to
+    // hold a header. Static so the read paths can use it without an instance.
+    static size_t headerBytesOf(const std::string& path) {
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return 0;
+        JournalFileHeader h{};
+        const bool got = std::fread(&h, sizeof(h), 1, f) == 1;
+        std::fclose(f);
+        if (!got) return 0;
+        return std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) == 0
+                   ? sizeof(JournalFileHeader) : 0;
+    }
+
     const std::string& path() const { return filePath_; }
 
     // Callback fired once per batch immediately after a successful
@@ -718,6 +761,9 @@ protected:
     // and returns WITHOUT waiting. The reaper thread reaps both CQEs and fires
     // onCommit only once the chain is durable. Called on the writer thread.
     void commitBatchAsync() {
+        // The ring appends at EOF, so the header has to be on disk before the
+        // first record goes down this path as well.
+        writePendingHeader();
         // ── Hazard C: single outstanding durability chain ──
         // Block until the previous chain is fully reaped. On return the reaper
         // is idle, so the writer alone owns sequence_/batch_/requeue_. Then
@@ -973,6 +1019,8 @@ private:
         file_ = std::fopen(filePath_.c_str(), mode);
         if (file_) {
             std::fseek(file_, 0, SEEK_END);
+            establishHeader();
+            std::fseek(file_, 0, SEEK_END);
             // Re-anchor the counter from the real file. Every path that
             // replaces the file underneath us — truncate(), commitRewrite() —
             // goes through close()/open(), so this is the single point where
@@ -1000,7 +1048,29 @@ private:
     // SQE-exhaustion fallback). The io_uring write is issued directly by
     // commitBatchAsync() as the first link of the durability chain — it does
     // NOT go through here, so this stays a plain fwrite.
+    // Put the header down before the first record. Called from both write
+    // paths; a no-op after the first time and on pre-header files.
+    void writePendingHeader() {
+        if (!pendingHeader_ || !file_) return;
+        JournalFileHeader h{};
+        std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
+        h.formatVersion = JOURNAL_FORMAT_V1;
+        h.recordSize    = static_cast<uint32_t>(sizeof(JournalEntry));
+        h.reserved      = 0;
+        std::fseek(file_, 0, SEEK_END);
+        if (std::fwrite(&h, sizeof(h), 1, file_) == 1) {
+            // Flushed before any record is written, and before io_uring may
+            // touch the same fd — stdio buffering and the ring must not
+            // interleave.
+            std::fflush(file_);
+            pendingHeader_ = false;
+            bytesOnDisk_.fetch_add(sizeof(JournalFileHeader),
+                                   std::memory_order_relaxed);
+        }
+    }
+
     size_t writeBatch(size_t toWrite) {
+        writePendingHeader();
         size_t w = std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
         std::fflush(file_);
         return w;
@@ -1052,11 +1122,67 @@ private:
     // during the very first write leaves a partial record and no valid
     // entries, which is a legitimate torn write that recovery already
     // tolerates — the existing truncation tests depend on that.
+    // Write the header on a brand-new file; validate it on an existing one.
+    //
+    // A mismatch is refused the same way an unreadable file is — but it can
+    // SAY what is wrong, which is the whole point of having a version and a
+    // record size on disk. "format version 2, this build writes 1" is a
+    // different conversation from "every record failed CRC".
+    void establishHeader() {
+        if (!file_) return;
+        dataOffset_ = 0;
+
+        const long size = std::ftell(file_);
+        if (size <= 0) {
+            // Deferred, NOT written here. Opening must not modify the file:
+            // JournalFollower, ResearchHarness, JournalReplayCLI and
+            // TimeMachine all construct a Journal purely to READ, and writing
+            // a header at construction made a read-only consumer mutate the
+            // file it was tailing — which broke the follower outright. The
+            // header goes down immediately before the first record instead.
+            pendingHeader_ = true;
+            dataOffset_ = sizeof(JournalFileHeader);
+            return;
+        }
+
+        JournalFileHeader h{};
+        std::fseek(file_, 0, SEEK_SET);
+        const bool got = std::fread(&h, sizeof(h), 1, file_) == 1;
+        if (!got || std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) != 0) {
+            // Pre-header file: a bare array of records, still readable. Its
+            // first byte is an entryType (1..5) and the magic starts with 'O',
+            // so this is a definite answer, not a guess.
+            dataOffset_ = 0;
+            return;
+        }
+
+        dataOffset_ = sizeof(JournalFileHeader);
+        if (h.formatVersion != JOURNAL_FORMAT_V1 ||
+            h.recordSize != sizeof(JournalEntry)) {
+            recoveryFailed_ = true;
+            std::fprintf(stderr,
+                "[Journal] REFUSING TO APPEND: %s was written in journal format "
+                "v%u with %u-byte records;\n"
+                "          this build reads v%u with %zu-byte records. Reading it "
+                "would misframe every\n"
+                "          record and start the engine with an EMPTY BOOK, and "
+                "appending would make the\n"
+                "          file permanently unreadable. Replay it with the build "
+                "that wrote it, or\n"
+                "          start from a checkpoint.\n",
+                filePath_.c_str(), h.formatVersion, h.recordSize,
+                JOURNAL_FORMAT_V1, sizeof(JournalEntry));
+        }
+    }
+
     void checkRecoverable() {
         if (persistedEntries_.load(std::memory_order_relaxed) > 0) {
             return;
         }
-        const size_t bytes = bytesOnDisk();
+        // Record bytes, excluding any file header — a file holding nothing but
+        // a header is a fresh journal, not an unreadable one.
+        const size_t total = bytesOnDisk();
+        const size_t bytes = total > dataOffset_ ? total - dataOffset_ : 0;
         if (bytes < sizeof(JournalEntry)) {
             return;   // empty, or a torn first record
         }
@@ -1092,6 +1218,11 @@ private:
         if (!file) {
             return entries;
         }
+        // Skip the file header if there is one. A pre-header journal reports 0
+        // and is read exactly as before.
+        if (const size_t skip = headerBytesOf(path); skip > 0) {
+            std::fseek(file, static_cast<long>(skip), SEEK_SET);
+        }
 
         JournalEntry entry{};
         uint64_t expectedSequence = 1;
@@ -1126,6 +1257,10 @@ private:
     // by the writer thread on the sync path / setup — hence atomic. Read by the
     // background checkpoint thread via needsCheckpoint().
     bool recoveryFailed_{false};
+    // Bytes before the first record: header size, or 0 for a pre-header file.
+    size_t dataOffset_{0};
+    // A header is owed to this file but not yet written. See establishHeader().
+    bool   pendingHeader_{false};
 
     // Bytes of whole entries on disk. See bytesOnDisk().
     std::atomic<size_t> bytesOnDisk_{0};

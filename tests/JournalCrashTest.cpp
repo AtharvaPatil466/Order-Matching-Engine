@@ -213,8 +213,12 @@ void testCorruptedCRC() {
         FILE* f = std::fopen(JOURNAL_PATH, "r+b");
         assert(f != nullptr);
 
-        // Seek to the 4th entry and corrupt a byte in the middle
-        long offset = static_cast<long>(3 * sizeof(JournalEntry) + 20); // somewhere in the data
+        // Seek to the 4th entry and corrupt a byte in the middle. Offset is
+        // measured from the first RECORD, not from the start of the file: the
+        // journal now carries a header, and hard-coding a file offset here
+        // would silently corrupt a different record than intended.
+        long offset = static_cast<long>(Journal::headerBytesOf(JOURNAL_PATH) +
+                                        3 * sizeof(JournalEntry) + 20);
         std::fseek(f, offset, SEEK_SET);
         uint8_t byte;
         std::fread(&byte, 1, 1, f);
@@ -552,8 +556,9 @@ void testBytesOnDiskTracksTheRealFile() {
         });
         assert(rewritten && "rewriteAtomically failed");
         agree(j, "after rewriteAtomically");
-        assert(j.bytesOnDisk() == 7 * sizeof(JournalEntry) &&
-               "the snapshot should be exactly its 7 entries");
+        assert(j.bytesOnDisk() ==
+                   sizeof(JournalFileHeader) + 7 * sizeof(JournalEntry) &&
+               "the snapshot should be exactly its header plus 7 entries");
 
         for (int i = 100; i < 110; ++i) {
             j.logAddOrder(i, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
@@ -724,6 +729,106 @@ void testTornFirstRecordStillAppends() {
     std::cout << "testTornFirstRecordStillAppends PASSED" << std::endl;
 }
 
+
+// ── A format mismatch is NAMED, and a pre-header journal still reads ────────
+//
+// The previous guard made "we could not read this at all" loud. The header
+// makes it specific: a version or record-size mismatch can say so, instead of
+// leaving the operator to infer it from every record failing CRC at once.
+void testFormatVersionMismatchIsRefused() {
+    std::cout << "Running testFormatVersionMismatchIsRefused..." << std::endl;
+    cleanup();
+
+    // A well-formed header from a hypothetical future build, then a record.
+    {
+        JournalFileHeader h{};
+        std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
+        h.formatVersion = JOURNAL_FORMAT_V1 + 1;         // written by a newer build
+        h.recordSize    = sizeof(JournalEntry);
+        std::ofstream out(JOURNAL_PATH, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(&h), sizeof(h));
+        std::vector<char> rec(sizeof(JournalEntry), '\x11');
+        out.write(rec.data(), static_cast<std::streamsize>(rec.size()));
+    }
+
+    struct stat before{};
+    assert(::stat(JOURNAL_PATH, &before) == 0);
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        assert(j.recoveryFailed() && "a newer format version must be refused");
+        j.logAddOrder(1, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        j.flush();
+    }
+    struct stat after{};
+    assert(::stat(JOURNAL_PATH, &after) == 0);
+    assert(before.st_size == after.st_size &&
+           "a journal in an unknown format was appended to");
+
+    // Same again for a record-size change at the SAME version — the case a
+    // version bump alone would miss, and the one a struct edit actually causes.
+    cleanup();
+    {
+        JournalFileHeader h{};
+        std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
+        h.formatVersion = JOURNAL_FORMAT_V1;
+        h.recordSize    = sizeof(JournalEntry) + 8;      // a field was added
+        std::ofstream out(JOURNAL_PATH, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(&h), sizeof(h));
+        std::vector<char> rec(sizeof(JournalEntry), '\x22');
+        out.write(rec.data(), static_cast<std::streamsize>(rec.size()));
+    }
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        assert(j.recoveryFailed() && "a changed record size must be refused");
+    }
+
+    cleanup();
+    std::cout << "testFormatVersionMismatchIsRefused PASSED" << std::endl;
+}
+
+// Journals written before the header existed are a bare array of records.
+// They must still read: their first byte is an entryType (1..5) and the magic
+// starts with 'O', so the two are told apart with certainty, not by guessing.
+void testPreHeaderJournalStillReads() {
+    std::cout << "Running testPreHeaderJournalStillReads..." << std::endl;
+    cleanup();
+
+    // Build a legitimate journal, then strip its header to forge a pre-header
+    // file — so the records are real rather than hand-assembled.
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        for (int i = 1; i <= 4; ++i) {
+            j.logAddOrder(i, 1, 0, Side::Buy, 1000 + i, 10, OrderType::Limit);
+        }
+        j.flush();
+    }
+    const size_t hdr = Journal::headerBytesOf(JOURNAL_PATH);
+    assert(hdr == sizeof(JournalFileHeader) && "a fresh journal should carry a header");
+
+    std::vector<char> body;
+    {
+        std::ifstream in(JOURNAL_PATH, std::ios::binary);
+        in.seekg(static_cast<std::streamoff>(hdr));
+        body.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    {
+        std::ofstream out(JOURNAL_PATH, std::ios::binary | std::ios::trunc);
+        out.write(body.data(), static_cast<std::streamsize>(body.size()));
+    }
+    assert(Journal::headerBytesOf(JOURNAL_PATH) == 0 && "forged file should look pre-header");
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        assert(!j.recoveryFailed() && "a pre-header journal must still be readable");
+        auto entries = j.readAll(true, false);
+        assert(entries.size() == 4 && "all four pre-header records should read back");
+        assert(entries[0].orderId == 1 && entries[3].orderId == 4);
+    }
+
+    cleanup();
+    std::cout << "testPreHeaderJournalStillReads PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "\n=== Journal Crash Recovery Tests ===" << std::endl;
 
@@ -738,6 +843,8 @@ int main() {
     testDuplicateIdAcrossSymbols();
     testUnreadableJournalRefusesToAppend();
     testTornFirstRecordStillAppends();
+    testFormatVersionMismatchIsRefused();
+    testPreHeaderJournalStillReads();
 
     std::cout << "\nALL JOURNAL CRASH TESTS PASSED!" << std::endl;
     return 0;

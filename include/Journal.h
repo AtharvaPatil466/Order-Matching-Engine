@@ -135,6 +135,7 @@ public:
 
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
+        checkRecoverable();
 
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
         // io_uring_queue_init(entries, ring, flags) returns 0 on success or
@@ -443,6 +444,10 @@ public:
     size_t maxSizeMb() const { return maxSizeMb_; }
 
     uint64_t getSequence() const { return sequence_; }
+
+    // True when the journal opened a file it could not read at all and is
+    // therefore refusing to append. See checkRecoverable().
+    bool recoveryFailed() const { return recoveryFailed_; }
     const std::string& path() const { return filePath_; }
 
     // Callback fired once per batch immediately after a successful
@@ -518,6 +523,12 @@ protected:
     //     numbers are leaked into a recovery view of the world.
     void appendEntry(JournalEntry& entry) {
         if (!file_) {
+            return;
+        }
+        // Refuse to extend a file we could not read. See checkRecoverable():
+        // appending here is what turns an unreadable journal into a
+        // permanently unreadable one.
+        if (recoveryFailed_) {
             return;
         }
         batch_.push_back(entry);
@@ -1022,6 +1033,48 @@ private:
 #endif
     }
 
+    // A journal that is at least one whole record long but yields ZERO valid
+    // records did not merely fail to recover — it was not understood at all.
+    //
+    // Records carry no magic number, no length prefix and no version field:
+    // the file is a bare array of packed structs and framing is implicit in
+    // sizeof(JournalEntry). So a layout change slices an existing file on the
+    // wrong boundaries, every record fails CRC, readEntriesFromPath returns
+    // empty, and the engine starts with an EMPTY BOOK — then appends new
+    // records to the same file, because it is opened "ab+". Silent, total,
+    // and on the upgrade path: no error, no log line, exit code 0.
+    //
+    // This does not add framing. It makes the signature of that failure loud
+    // and stops the second half of it: the journal refuses to append, so an
+    // unreadable file is not also destroyed.
+    //
+    // Deliberately NOT tripped by a file shorter than one record. A crash
+    // during the very first write leaves a partial record and no valid
+    // entries, which is a legitimate torn write that recovery already
+    // tolerates — the existing truncation tests depend on that.
+    void checkRecoverable() {
+        if (persistedEntries_.load(std::memory_order_relaxed) > 0) {
+            return;
+        }
+        const size_t bytes = bytesOnDisk();
+        if (bytes < sizeof(JournalEntry)) {
+            return;   // empty, or a torn first record
+        }
+        recoveryFailed_ = true;
+        std::fprintf(stderr,
+            "[Journal] REFUSING TO APPEND: %s is %zu bytes (>= %zu, one whole\n"
+            "          record) but no valid record could be read from it.\n"
+            "          Every record failing at once is the signature of a\n"
+            "          format mismatch, not of corruption: this file was most\n"
+            "          likely written by a build with a different\n"
+            "          JournalEntry layout. Recovering from it would start the\n"
+            "          engine with an EMPTY BOOK, and appending to it would\n"
+            "          make it permanently unreadable, so appends are now\n"
+            "          refused. Move the file aside and start from a\n"
+            "          checkpoint, or replay it with the build that wrote it.\n",
+            filePath_.c_str(), bytes, sizeof(JournalEntry));
+    }
+
     uint64_t recoverSequenceFromDisk() {
         auto entries = readEntriesFromPath(filePath_, true, false);
         persistedEntries_.store(entries.size(), std::memory_order_relaxed);
@@ -1072,6 +1125,8 @@ private:
     // Written by the reaper thread on the async path (durable-write count) and
     // by the writer thread on the sync path / setup — hence atomic. Read by the
     // background checkpoint thread via needsCheckpoint().
+    bool recoveryFailed_{false};
+
     // Bytes of whole entries on disk. See bytesOnDisk().
     std::atomic<size_t> bytesOnDisk_{0};
     std::atomic<size_t> persistedEntries_{0};

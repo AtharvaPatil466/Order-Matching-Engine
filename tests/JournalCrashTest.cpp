@@ -646,6 +646,84 @@ void testDuplicateIdAcrossSymbols() {
     std::cout << "testDuplicateIdAcrossSymbols PASSED" << std::endl;
 }
 
+
+// ── An unreadable journal must fail loudly, not start empty and overwrite ───
+//
+// Records carry no magic, no length prefix and no version: the file is a bare
+// array of packed structs and framing is implicit in sizeof(JournalEntry). A
+// layout change therefore slices an existing file on the wrong boundaries,
+// every record fails CRC, the replay returns nothing, and the engine starts
+// with an EMPTY BOOK — then appends to that same file, because it is opened
+// "ab+". Silent, total, and on the upgrade path.
+//
+// Simulated here by writing a file of the right length but the wrong content,
+// which is what a layout change looks like from the reader's side.
+void testUnreadableJournalRefusesToAppend() {
+    std::cout << "Running testUnreadableJournalRefusesToAppend..." << std::endl;
+    cleanup();
+
+    // Several whole records' worth of bytes that decode as no valid record.
+    const size_t bogusBytes = sizeof(JournalEntry) * 4;
+    {
+        std::ofstream out(JOURNAL_PATH, std::ios::binary);
+        std::vector<char> junk(bogusBytes, '\x5A');
+        out.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+    }
+
+    struct stat before{};
+    assert(::stat(JOURNAL_PATH, &before) == 0);
+    assert(static_cast<size_t>(before.st_size) == bogusBytes);
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        assert(j.recoveryFailed() &&
+               "a file of whole records yielding none must be reported, not ignored");
+
+        // The second half of the old failure: appending would make the file
+        // permanently unreadable. It must be refused.
+        j.logAddOrder(1, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        j.flush();
+    }
+
+    struct stat after{};
+    assert(::stat(JOURNAL_PATH, &after) == 0);
+    assert(static_cast<size_t>(after.st_size) == bogusBytes &&
+           "the unreadable journal was appended to");
+
+    cleanup();
+    std::cout << "testUnreadableJournalRefusesToAppend PASSED" << std::endl;
+}
+
+// A torn FIRST write — a crash partway through record one — leaves a
+// non-empty file with no valid records too, and that is legitimate. Recovery
+// has always tolerated it, so the guard above must not fire on it.
+void testTornFirstRecordStillAppends() {
+    std::cout << "Running testTornFirstRecordStillAppends..." << std::endl;
+    cleanup();
+
+    {
+        std::ofstream out(JOURNAL_PATH, std::ios::binary);
+        std::vector<char> partial(sizeof(JournalEntry) / 2, '\x00');
+        out.write(partial.data(), static_cast<std::streamsize>(partial.size()));
+    }
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        assert(!j.recoveryFailed() &&
+               "a partial first record is a torn write, not a format mismatch");
+        j.logAddOrder(1, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        j.flush();
+    }
+
+    struct stat st{};
+    assert(::stat(JOURNAL_PATH, &st) == 0);
+    assert(static_cast<size_t>(st.st_size) > sizeof(JournalEntry) / 2 &&
+           "a torn first write must not block recovery from continuing");
+
+    cleanup();
+    std::cout << "testTornFirstRecordStillAppends PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "\n=== Journal Crash Recovery Tests ===" << std::endl;
 
@@ -658,6 +736,8 @@ int main() {
     testDeterministicReplayEquivalence();
     testBytesOnDiskTracksTheRealFile();
     testDuplicateIdAcrossSymbols();
+    testUnreadableJournalRefusesToAppend();
+    testTornFirstRecordStillAppends();
 
     std::cout << "\nALL JOURNAL CRASH TESTS PASSED!" << std::endl;
     return 0;

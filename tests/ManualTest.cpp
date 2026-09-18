@@ -969,9 +969,9 @@ void testJournal() {
         Journal journal(journalPath);
         journal.logAddOrder(1, 10, 0, Side::Buy, 1000000, 100, OrderType::Limit);
         journal.logAddOrder(2, 20, 0, Side::Sell, 1010000, 50, OrderType::Limit);
-        journal.logCancelOrder(2);
-        journal.logModifyOrder(1, 50);
-        journal.logCancelReplace(1, 1020000, 80);
+        journal.logCancelOrder(2, 0);
+        journal.logModifyOrder(1, 0, 50);
+        journal.logCancelReplace(1, 0, 1020000, 80);
         journal.flush();
     }
 
@@ -1008,7 +1008,7 @@ void testJournalReplay() {
         journal.logAddOrder(1, 10, 0, Side::Sell, 1000000, 100, OrderType::Limit);
         journal.logAddOrder(2, 20, 0, Side::Buy, 1000000, 50, OrderType::Limit);
         journal.logAddOrder(3, 30, 0, Side::Buy, 990000, 200, OrderType::Limit);
-        journal.logCancelOrder(3);
+        journal.logCancelOrder(3, 0);
         journal.flush();
     }
 

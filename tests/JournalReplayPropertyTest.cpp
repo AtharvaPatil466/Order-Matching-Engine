@@ -190,7 +190,7 @@ void runSeed(uint64_t seed) {
             OrderId id = liveIds[i];
             if (live.getOrder(id) != nullptr) {
                 live.cancelOrder(id);
-                journal.logCancelOrder(id);
+                journal.logCancelOrder(id, kSym);
             }
             liveIds.erase(liveIds.begin() + i);
         } else if (kind == 2 && !liveIds.empty()) {
@@ -202,7 +202,7 @@ void runSeed(uint64_t seed) {
                 Quantity newQty = pickQty();
                 if (newQty < o->remainingQty) {
                     if (live.modifyOrder(id, newQty)) {
-                        journal.logModifyOrder(id, newQty);
+                        journal.logModifyOrder(id, kSym, newQty);
                     }
                 }
             }
@@ -215,7 +215,7 @@ void runSeed(uint64_t seed) {
                 Price newPrice = pickPrice();
                 Quantity newQty = pickQty();
                 if (live.cancelReplace(id, newPrice, newQty)) {
-                    journal.logCancelReplace(id, newPrice, newQty);
+                    journal.logCancelReplace(id, kSym, newPrice, newQty);
                 }
             }
         }

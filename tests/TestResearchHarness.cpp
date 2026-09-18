@@ -306,8 +306,8 @@ TEST(ResearchHarnessCancelRouting, CancelAppliesToTheBookHoldingTheOrder) {
         Journal j(path, Journal::SyncPolicy::GroupCommit, 64);
         j.logAddOrder(101, 10, kA, Side::Buy,  toPrice(100.0), 50, OrderType::Limit);
         j.logAddOrder(202, 10, kB, Side::Sell, toPrice(101.0), 40, OrderType::Limit);
-        j.logCancelOrder(101);              // kA's order
-        j.logModifyOrder(202, 25);          // kB's order, shrink
+        j.logCancelOrder(101, kA);              // kA's order
+        j.logModifyOrder(202, kB, 25);          // kB's order, shrink
         j.flush();
     }
 

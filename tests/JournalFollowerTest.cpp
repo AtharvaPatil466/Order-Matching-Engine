@@ -103,7 +103,7 @@ void driveLeader(Journal& j, OrderBook& leader, uint64_t seed,
             OrderId id = liveIds[i];
             if (leader.getOrder(id)) {
                 leader.cancelOrder(id);
-                j.logCancelOrder(id);
+                j.logCancelOrder(id, 0);
             }
             liveIds.erase(liveIds.begin() + i);
         } else if (kind == 2 && !liveIds.empty()) {
@@ -114,7 +114,7 @@ void driveLeader(Journal& j, OrderBook& leader, uint64_t seed,
                 Quantity newQty = Quantity(1 + int(rng() % o->remainingQty));
                 if (newQty < o->remainingQty &&
                     leader.modifyOrder(id, newQty)) {
-                    j.logModifyOrder(id, newQty);
+                    j.logModifyOrder(id, 0, newQty);
                 }
             }
         } else if (kind == 3 && !liveIds.empty()) {
@@ -124,7 +124,7 @@ void driveLeader(Journal& j, OrderBook& leader, uint64_t seed,
                 Price np = Price(990 + int(rng() % 21));
                 Quantity nq = Quantity(1 + int(rng() % 10));
                 if (leader.cancelReplace(id, np, nq)) {
-                    j.logCancelReplace(id, np, nq);
+                    j.logCancelReplace(id, 0, np, nq);
                 }
             }
         }

@@ -1,6 +1,6 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **C++20 Order Matching Engine** | 90 headers | 14 source files | 88 test files | 448 CTest targets
+> **C++20 Order Matching Engine** | 93 headers | 14 source files | 102 test files | 522 CTest targets
 >
 > A C++20 low-latency matching engine drawing on institutional exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
 
@@ -14,10 +14,10 @@ This is a C++20 low-latency order matching engine with institutional-grade archi
 
 | Metric | Count |
 |--------|-------|
-| Header files (`include/`) | 90 |
+| Header files (`include/`) | 93 |
 | Source files (`src/`) | 14 |
-| Test files | 88 |
-| Individual test cases | 448 CTest targets |
+| Test files | 102 |
+| Individual test cases | 522 CTest targets |
 | TLA+ specifications | 12 (171M distinct states — matching + replication layers) |
 | Documentation files | 8 in `docs/` (plus architecture/benchmark docs) |
 
@@ -128,6 +128,25 @@ A two-host OUCH-over-TCP harness — `tools/WireLatencySender` (instance A) and 
 | **Queue Backpressure** | Rejects orders when queue exceeds configurable threshold (default 80%) |
 | **LMM/DMM Privileges** | `ParticipantRole` enum; ProRata 40% floor guarantee to LMM/DMM orders; remainder priority |
 
+### Order-Entry Authentication & Authorisation
+
+Every gateway previously took the participant identity straight off the wire
+and trusted it, so anyone who could reach the port could trade as any
+participant, evade the per-participant rate limiter by rotating ids, and trip
+another participant's kill switch.
+
+| Layer | Implementation |
+|-------|---------------|
+| **Credential store** | `ParticipantAuth` — constant-time secret comparison, one credential may cover several participant ids (a firm running multiple desks). Loaded from a dedicated file, not `engine.conf`, so secrets do not travel with a config that gets pasted into tickets. A malformed line fails the whole load rather than silently dropping a firm's credential |
+| **Per-protocol logon** | FIX at Logon (tags 553/554), OUCH at SoupBinTCP Login, and the binary gateway via a login frame carried in the V2 header's previously-reserved `flags` word — so existing clients, which always sent zero, are unaffected and no version bump was needed. Unknown flag bits are rejected rather than ignored |
+| **Required by default** | `GatewayServer` refuses to start unless credentials are configured or `--no-participant-auth` / `OB_NO_PARTICIPANT_AUTH=1` is passed deliberately, matching the bar `AdminServer` already held. The check runs before the engine, publisher or listen socket exist |
+| **Authorisation** | A session may only act as a participant its credential covers — including `KillSwitch`, which acts directly on the participant id in the request |
+| **Order ownership** | Cancel/Modify/CancelReplace are checked against the resting order's owner inside the book lock. The denial is reported to the client as `OrderNotFound`, deliberately indistinguishable from a missing order: a distinct code would turn cancel into an order-id oracle |
+
+Enforcement follows verification — with authentication disabled the claimed
+participant id is an unchecked assertion, so ownership is not enforced against
+it either.
+
 ---
 
 ## 5. Microstructure Research Infrastructure
@@ -177,6 +196,9 @@ Two results are stated as conditional rather than calibrated. The calibrated ren
 - Atomic checkpoint: snapshots active book state, rewrites journal.
 - Deterministic replay via virtual clock (`setExpiryClock(ClockFn)`).
 - Auto-rotation: `OB_JOURNAL_MAX_SIZE_MB` env var triggers `engine.checkpoint()` from the main loop when `Journal::needsCheckpoint()` fires.
+- Cancel/Modify/CancelReplace records carry `symbolId`. They previously did not, so replay located the target by scanning every book for the order id and taking the first hit — correct only while order ids are globally unique, which nothing enforces (the duplicate check is per-book). Two participants on different symbols with overlapping client-supplied id ranges caused a resting order to silently vanish on recovery. The field already existed and was zero-filled, so `sizeof(JournalEntry)`, the CRC range and the replication wire length are all unchanged; replay prefers the recorded symbol and falls back to the scan for journals written before it.
+- Checkpointing no longer stalls appends. Building the snapshot — every resting order, plus a durability barrier — used to run with the journal's append lock held. It now runs outside it, with the append counter rechecked before the swap: unchanged means commit with no worker having waited, changed means rebuild under the lock exactly as before.
+- `bytesOnDisk()` is tracked at write time rather than asked for. It is consulted on every append (the entry-count threshold in front of it is false 249,999 times in 250,000), and on Linux that was an `fstat(2)` per order inside the global lock.
 
 ### Cross-Host Log Replication (wired end-to-end)
 - `ReplicationCoordinator` — TCP log-shipping from primary to backup, instantiated in `src/main.cpp` driven by `OB_NODE_ROLE` / `OB_PRIMARY_HOST` / `OB_JOURNAL_PATH` env vars.
@@ -206,6 +228,14 @@ Two results are stated as conditional rather than calibrated. The calibrated ren
 | `GET /prometheus` | Prometheus text exposition |
 | `GET /book?symbolId=0` | L2 order book snapshot |
 | `GET /otr?participantId=1` | Order-to-trade ratio |
+| `GET /journal/head` | Last committed journal sequence — the chaos suite's no-committed-loss comparison |
+
+`AdminServer::start()` reports whether it actually bound. It used to return
+`void` and give up on a failed bind with a line on stderr, so the engine went
+on to announce "Ready for traffic" with no admin port listening — the k8s
+liveness probe then hit nothing and the pod looked dead for an unrelated
+reason. A failed bind is now fatal at startup, and `port()` reports the bound
+port so callers can pass 0 and let the OS choose one.
 
 ---
 
@@ -263,13 +293,15 @@ Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reorder
 
 ## 9. Verification & Testing
 
-### Test Suite — 88 Executables, 448 CTest Targets
+### Test Suite — 101 Executables, 522 CTest Targets
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 88 test executables and 448 CTest targets. Key mechanisms:
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 101 test executables and 522 CTest targets. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.
 - **Sanitizers**: ASan, UBSan, and TSan checks integrated into CI/CD.
+- **Multi-symbol journal coverage**: replay equivalence is swept over 20 seeds × 250 ops across three symbols. Every journal test was previously single-symbol — the one shape in which cross-book routing cannot be wrong — which is how the cancel-routing defect above survived.
+- **Journal contention measurement**: `JournalContentionBenchmark` reports append throughput against worker count with journaling on and off, and against batch size so the durability barrier can be amortised away and the lock itself becomes visible. Run on x86 via the `Journal Contention (H6)` workflow, which records CPU, filesystem and measured `fdatasync` latency first, because every number is relative to those.
 
 ### Formal Verification (TLA+)
 
@@ -284,11 +316,11 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ## 10. File Structure
 
 ```
-include/              90 header files — core logic and networking
+include/              93 header files — core logic and networking
 src/                  14 source files — thin compilation units
-tests/                88 test files, 448 CTest targets
-benchmarks/           9 benchmark binaries
-fuzz/                 9 files — coverage-guided fuzzing harnesses
+tests/                102 test files, 522 CTest targets
+benchmarks/           11 benchmark binaries
+fuzz/                 3 libFuzzer harnesses + standalone driver
 spec/                 TLA+ formal specifications (12 specs)
 tools/                CLI tools and data utilities
 config/               Example configuration files
@@ -307,7 +339,18 @@ The system is architecturally complete. The remaining items are AWS validation s
 - **BCS Study — Market-Maker Enrichment**: ⏳ open. The environment calibration (§5) is complete and the full experimental grid has been re-run at fitted parameters, but the model still has a single market maker. That is why the calibrated rent is reported as an upper bound rather than an estimate, and adding competing makers with heterogeneous latencies is the single change that would most improve the study's external validity. A second open item is the Hawkes diagnostic's real-data leg, which needs a depth-depletion gap definition for books that never empty.
 - **Wire-to-Wire Latency Validation**: 🟡 partially complete — baseline measured, DPDK comparison pending. The `WireLatencySender`/`WireLatencyReceiver` harness (`SO_TIMESTAMPING` hardware timestamps with `CLOCK_MONOTONIC` software fallback, round-trip/2 one-way estimate — see §3) is validated on AWS: a two-instance run (two `c6in.metal`, same AZ, kernel TCP, 10,000 OUCH orders, software timestamps on `CLOCK_MONOTONIC`) measured **P50 RTT 48.2 µs / P99 RTT 55.3 µs**, i.e. a **P50 one-way estimate of 24.1 µs**. The remaining step is the DPDK-vs-kernel-TCP comparison (**Session 2**) via `scripts/wire_latency_aws.sh`.
 
+### Open engineering items
+
+Distinct from the AWS validation steps above: these came out of an adversarial
+audit of the codebase and are tracked as code work.
+
+- **Durable client acknowledgements on the async path** — open, and the one item that needs a protocol decision rather than an implementation. `enableDurableClientAcks` refuses in async mode outright, so "acknowledged" does not imply "durable" there. The choice is between a single ack deferred until the journal entry is durable (simpler, slower for clients) and an OUCH-style fast accept followed by a separate durable confirmation (what real venues do, and a second message type).
+- **Checkpoint as a log record** — open. The checkpoint replaces the journal rather than appending to it, so an entry committed between the snapshot gather and the swap is discarded. The append-counter check added above narrows this to a detected, logged fallback rather than a silent loss, but closing it properly means writing the snapshot as a record *in* the log and replaying forward from it, the way a WAL checkpoint works. That is a format change, not a locking change.
+- **Journal record framing** — open. Records carry no magic number, length prefix or version field; the file is a bare array of packed structs and framing is implicit in `sizeof(JournalEntry)`. A layout change therefore slices an existing file on the wrong boundaries, fails every CRC, returns an empty replay, and — because the file is opened `"ab+"` — appends new records to it anyway. Silent, total, and on the upgrade path.
+- **Journal append serialisation** — measured, largely resolved. All appends serialise on one mutex, but at the shipped batch size the binding constraint is the `fdatasync` executed inside the critical section, which caps throughput at roughly 165–190k appends/s on x86 CI regardless of worker count. The per-append syscall has been removed; the remaining lever is batch size and outstanding-chain depth in `Journal`, not resharding the log.
+- **Alerting components not wired in** — open. `AlertDispatcher`, `CapacityMonitor` and `IncidentLogger` are implemented and tested but constructed in no production binary. Wiring them needs deployment decisions (webhook targets, thresholds, incident sink) rather than code.
+
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · 88 test executables · 448 CTest targets · 19 multi-container chaos scenarios · 171M distinct TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · 101 test executables · 522 CTest targets · 19 multi-container chaos scenarios · 171M distinct TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*

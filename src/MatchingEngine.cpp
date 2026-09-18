@@ -2095,94 +2095,118 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained) {
         waitForDrain();
     }
 
-    // Two phases, deliberately NOT nested, to keep the lock order acyclic.
-    // The expiry path takes book->bookLock_ then journalMutex_ (onExpire logs
-    // under journalMutex_ while the book lock is held). Holding journalMutex_
-    // here and then reaching for a book lock (which forEachOrderLocked does)
-    // would invert that order and could deadlock a concurrent worker
-    // ExpireCheck. So: phase 1 copies a point-in-time snapshot of every resting
-    // order under each book's own lock (under bookMutex_ for a consistent
-    // symbol set, never holding journalMutex_); phase 2 writes the gathered
-    // copy under journalMutex_ alone (no book lock held). Order copies are
-    // read-only value snapshots — the intrusive next/prev are never deref'd.
-    std::vector<std::pair<SymbolId, Order>> resting;
-    {
-        std::lock_guard<std::mutex> booksLock(bookMutex_);
-        for (SymbolId symbolId : symbolIds_) {
-            const OrderBook* book = getOrderBook(symbolId);
-            if (!book) {
-                continue;
+    // A checkpoint REPLACES the journal, so every record it discards must be
+    // represented in the snapshot it replaces them with. The whole correctness
+    // argument is about that one property.
+    //
+    // The previous version read the append counter AFTER gathering the book,
+    // which made it a detector wired to a no-op:
+    //
+    //   1. An order journaled between the gather and the counter read was
+    //      already counted by the time the counter was read, so the equality
+    //      held and the rename discarded it WITH NO WARNING. It had been
+    //      fsynced and the client had been acked.
+    //   2. When the counter DID differ, the fallback called rewriteAtomically
+    //      with the same lambda over the same stale `resting` vector — so it
+    //      renamed anyway, from pre-gather state. Both branches destroyed the
+    //      record; one of them logged about it.
+    //
+    // Reading the counter FIRST is what makes the check sound, and it works
+    // because of an ordering that already exists: processOrder mutates the
+    // book before it journals. So any append counted here had already landed
+    // in the book before the gather ran, and is therefore in the snapshot.
+    // Anything appended after the counter read changes it, and is detected.
+    //
+    // On a mismatch the snapshot is simply thrown away and re-gathered. It is
+    // never renamed from stale state — losing an acked order is worse than not
+    // checkpointing, and a checkpoint that does not happen is visible in the
+    // journal's size while a lost order is visible nowhere.
+    constexpr int kMaxAttempts = 3;
+
+    for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+        uint64_t appendsBefore = 0;
+        {
+            std::lock_guard<std::mutex> lock(journalMutex_);
+            if (!journal_) {
+                return;
             }
-            book->forEachOrderLocked([&](const Order& order) {
-                resting.emplace_back(symbolId, order);
-            });
+            appendsBefore = journal_->entriesAppended();
         }
-    }
 
-    const auto writeSnapshot = [&](Journal& snapshotJournal) {
-        for (const auto& [symbolId, order] : resting) {
-            snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
-                                        order.side, order.price, order.remainingQty,
-                                        order.type, order.timeInForce, order.expiryTime,
-                                        order.stopPrice, order.stopLimitPrice,
-                                        order.displayQty, order.pegType,
-                                        order.pegOffset, order.trailAmount,
-                                        order.minQty, order.isHidden);
+        // Phase 1: a point-in-time copy of every resting order, under each
+        // book's own lock and never holding journalMutex_. The lock order is
+        // bookMutex_ -> bookLock_ -> journalMutex_ because the expiry path
+        // takes it that way; inverting it here would deadlock a concurrent
+        // ExpireCheck. Order copies are read-only value snapshots — the
+        // intrusive next/prev are never dereferenced.
+        std::vector<std::pair<SymbolId, Order>> resting;
+        {
+            std::lock_guard<std::mutex> booksLock(bookMutex_);
+            for (SymbolId symbolId : symbolIds_) {
+                const OrderBook* book = getOrderBook(symbolId);
+                if (!book) {
+                    continue;
+                }
+                book->forEachOrderLocked([&](const Order& order) {
+                    resting.emplace_back(symbolId, order);
+                });
+            }
         }
-    };
 
-    // Phase 3: build the replacement OUTSIDE journalMutex_, then swap under it.
-    //
-    // Writing the snapshot is the expensive part — every resting order, plus a
-    // durability barrier — and it used to run with journalMutex_ held, so every
-    // worker's append stalled for its whole duration. Nothing in that build
-    // touches the live journal, so it does not need the lock.
-    //
-    // What DOES need the lock is the correctness question the split exposes:
-    // the snapshot describes the book as of `resting`, so any entry appended
-    // after that point would be destroyed by the rename. That window is not
-    // new — the gather has always run outside journalMutex_ — but moving the
-    // build out widens it from the rename to the whole write, which would turn
-    // a rare silent loss into a common one.
-    //
-    // So the append counter is checked under the lock before swapping. Nothing
-    // appended: swap, and no worker ever waited. Something appended: throw the
-    // prepared snapshot away and rebuild it under the lock, which is exactly
-    // what this function did before — correct, and slow only when it has to be.
-    //
-    // Note what this does NOT fix: the fallback path still carries the original
-    // window between the gather and the rewrite. Closing that properly means
-    // not replacing the log at all — writing the snapshot as a record IN the
-    // journal and replaying forward from it, the way a WAL checkpoint works —
-    // which is a format change, not a locking change.
-    uint64_t appendsBefore = 0;
-    {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        if (!journal_) {
+        const auto writeSnapshot = [&](Journal& snapshotJournal) {
+            for (const auto& [symbolId, order] : resting) {
+                snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
+                                            order.side, order.price, order.remainingQty,
+                                            order.type, order.timeInForce, order.expiryTime,
+                                            order.stopPrice, order.stopLimitPrice,
+                                            order.displayQty, order.pegType,
+                                            order.pegOffset, order.trailAmount,
+                                            order.minQty, order.isHidden);
+            }
+        };
+
+        // Phase 2: build the replacement OUTSIDE journalMutex_. Writing every
+        // resting order plus a durability barrier is the expensive part, and
+        // it touches nothing the live journal owns.
+        if (!journal_->prepareRewrite(writeSnapshot)) {
+            obSink().log(obEvent("checkpoint_prepare_failed", LogSeverity::Error)
+                             .kv("orders", (unsigned long long)resting.size()));
             return;
         }
-        appendsBefore = journal_->entriesAppended();
+
+        // Phase 3: swap, but only if nothing was appended since the counter
+        // read above.
+        {
+            std::lock_guard<std::mutex> lock(journalMutex_);
+            if (!journal_) {
+                return;
+            }
+            if (journal_->entriesAppended() == appendsBefore) {
+                if (!journal_->commitRewrite()) {
+                    // Previously discarded. A failed rename leaves the old
+                    // journal in place, which is safe — but it means the
+                    // checkpoint silently did not happen, and the journal goes
+                    // on growing with nobody aware of it.
+                    obSink().log(obEvent("checkpoint_commit_failed", LogSeverity::Error)
+                                     .kv("orders", (unsigned long long)resting.size()));
+                }
+                return;
+            }
+        }
+
+        obSink().log(obEvent("checkpoint_raced_appends", LogSeverity::Warn)
+                         .kv("attempt", (long long)attempt)
+                         .kv("appends_before", (unsigned long long)appendsBefore)
+                         .kv("orders", (unsigned long long)resting.size()));
     }
 
-    const bool prepared = journal_->prepareRewrite(writeSnapshot);
-
-    std::lock_guard<std::mutex> lock(journalMutex_);
-    if (!journal_) {
-        return;
-    }
-
-    if (prepared && journal_->entriesAppended() == appendsBefore) {
-        journal_->commitRewrite();
-        return;
-    }
-
-    obSink().log(obEvent("checkpoint_raced_appends", LogSeverity::Warn)
-                     .kv("appends_before", (unsigned long long)appendsBefore)
-                     .kv("appends_now",
-                         (unsigned long long)journal_->entriesAppended())
-                     .kv("prepared", prepared ? 1LL : 0LL));
-    journal_->rewriteAtomically(writeSnapshot);
+    // Out of attempts. Under sustained load a quiet moment may simply not
+    // occur; the journal keeps growing, which is recoverable and observable.
+    // Renaming stale state instead would not be either.
+    obSink().log(obEvent("checkpoint_abandoned", LogSeverity::Error)
+                     .kv("attempts", (long long)kMaxAttempts));
 }
+
 
 void MatchingEngine::checkpoint() {
     checkpointInternal(async_ ? false : true);

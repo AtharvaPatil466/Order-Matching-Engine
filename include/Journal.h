@@ -154,12 +154,17 @@ public:
                      size_t batchSize = 64)
         : filePath_(filePath), syncPolicy_(syncPolicy),
           batchSize_(batchSize == 0 ? 1 : batchSize) {
-        // A previous rewriteAtomically() that crashed between close()
-        // and rename() can leave a stale "<path>.tmp" sibling. Remove
-        // it on startup so it does not accumulate across restarts and
-        // so a half-written checkpoint cannot be picked up by any
-        // future tool that lists the directory.
-        std::remove((filePath_ + ".tmp").c_str());
+        // NOTE: the stale-".tmp" cleanup deliberately does NOT live here.
+        // Constructing a Journal must not modify anything on disk, because
+        // several consumers construct one purely to READ — JournalFollower
+        // does it on every poll (1ms by default), and ResearchHarness and the
+        // CLI tools do it once. Removing the sibling here meant a follower
+        // tailing a live leader DELETED the leader's in-progress checkpoint:
+        // the leader went on writing to an unlinked inode, its rename failed
+        // with ENOENT, and the checkpoint silently never happened.
+        // The cleanup now runs in prepareRewrite(), which is the only place
+        // that is about to create a .tmp and therefore the only place that
+        // has any business removing a stale one.
 
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
@@ -380,6 +385,11 @@ public:
     // journal; safe to call without the caller's append lock held.
     bool prepareRewrite(const std::function<void(Journal&)>& writer) {
         const std::string tmpPath = filePath_ + ".tmp";
+        // A previous rewrite that crashed between close() and rename() can
+        // leave a stale sibling. Clear it here — the one place that is about
+        // to write a new one — rather than in the constructor, where it made
+        // every read-only consumer destructive.
+        std::remove(tmpPath.c_str());
         bool snapshotComplete = false;
         {
             // GroupCommit, NOT Immediate-with-batch-1.

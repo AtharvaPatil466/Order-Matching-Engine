@@ -289,7 +289,17 @@ public:
     void expireOrders(uint64_t currentTime);
 
     // Journal/Persistence
-    void enableJournal(const std::string& path);
+    // False when the journal opened a file it could not read: a format
+    // mismatch, or every record failing at once. The Journal already refuses
+    // to APPEND in that state, so the file is safe — but recovery still yields
+    // nothing, and starting anyway means serving an EMPTY BOOK while the real
+    // resting orders sit unreadable on disk. The caller decides; src/main.cpp
+    // treats it as fatal.
+    //
+    // Not [[nodiscard]]: 45 of the 46 call sites are tests that legitimately
+    // do not care, and making them all churn to silence a warning would be
+    // noise. The one production call site checks it.
+    bool enableJournal(const std::string& path);
 
     // Access the underlying Journal (null if enableJournal not called).
     // Used by the replication coordinator wiring to attach an onCommit

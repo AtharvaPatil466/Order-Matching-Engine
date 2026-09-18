@@ -134,6 +134,17 @@ set_tests_properties(GatewayRequiresAuthTest PROPERTIES
     LABELS "project;security"
     ENVIRONMENT "OB_PARTICIPANT_CREDENTIALS=;OB_NO_PARTICIPANT_AUTH=;OB_ENGINE_HOST=;OB_ENGINE_PORT=")
 
+# The engine must refuse to start on a journal it cannot read, rather than
+# serving an empty book while the real orders sit unreadable on disk. Driven
+# against the real binary because the decision lives in src/main.cpp; the
+# script also checks the file was left byte-identical.
+add_test(NAME EngineRefusesUnreadableJournalTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/refuses_unreadable_journal.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRefusesUnreadableJournalTest PROPERTIES
+    TIMEOUT 60
+    LABELS "project;recovery")
+
 # Durable client acknowledgements (C4). No GTest dependency.
 add_executable(DurableAckTest DurableAckTest.cpp)
 target_link_libraries(DurableAckTest PRIVATE OrderMatcher)

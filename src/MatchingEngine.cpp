@@ -1784,9 +1784,10 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     }
 }
 
-void MatchingEngine::enableJournal(const std::string& path) {
+bool MatchingEngine::enableJournal(const std::string& path) {
     std::lock_guard<std::mutex> lock(journalMutex_);
     journal_ = std::make_unique<Journal>(path, Journal::SyncPolicy::GroupCommit, 64);
+    return !journal_->recoveryFailed();
 }
 
 // Which book holds `orderId` for a Cancel/Modify/CancelReplace record.

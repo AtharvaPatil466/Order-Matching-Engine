@@ -493,12 +493,100 @@ public:
     static size_t headerBytesOf(const std::string& path) {
         FILE* f = std::fopen(path.c_str(), "rb");
         if (!f) return 0;
-        JournalFileHeader h{};
-        const bool got = std::fread(&h, sizeof(h), 1, f) == 1;
+        const size_t bytes = headerBytesOfStream(f);
         std::fclose(f);
-        if (!got) return 0;
-        return std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) == 0
-                   ? sizeof(JournalFileHeader) : 0;
+        return bytes;
+    }
+
+    // Result of readTailFromPath(): the anchors a tailing reader needs to
+    // decide WHICH file it is looking at, plus the records it has not seen yet,
+    // all taken from ONE fopen.
+    //
+    // WHY ONE OPEN. A reader that tails a live journal has to answer two
+    // questions per poll — "is this still the file I was following?" and "what
+    // is new in it?" — and a checkpoint can rename(2) a fresh file over the
+    // path between them. Asking them through two separate opens pairs one
+    // file's identity with another file's contents, which is the same window
+    // that made st_ino useless here (see JournalFollower::classify). Both
+    // answers come off the same handle, so what is checked IS what is read.
+    struct TailRead {
+        JournalEntry first{};          // record 1, the file-identity anchor
+        bool         hasFirst{false};  // false: empty/unreadable/invalid first
+        JournalEntry beforeTail{};     // the record at startIndex-1
+        bool         hasBeforeTail{false};  // false: the file is shorter than that
+        std::vector<JournalEntry> tail;     // records [startIndex, end)
+        // Whole records pulled off the disk by this call — the cost of the
+        // read, independent of how many records were kept. Lets a caller assert
+        // that polling a large unchanging file stays cheap.
+        size_t recordsRead{0};
+    };
+
+    // Reads `path` from `startIndex` onward WITHOUT re-reading (or re-CRCing)
+    // the prefix, and returns the two identity anchors alongside the tail.
+    //
+    // Validation is per-record and identical to readEntriesFromPath's: a short,
+    // CRC-invalid or out-of-sequence record ends the read and is not returned.
+    // Because records are numbered contiguously from 1, the tail's expected
+    // sequence is seeded at startIndex+1 — exactly the number a full strict
+    // read would have reached by then.
+    //
+    // WHAT SKIPPING THE PREFIX GIVES UP: corruption STRICTLY INSIDE the already
+    // consumed prefix — not at record 1, not at startIndex-1 — is no longer
+    // seen, because those bytes are never read again. Both anchors are still
+    // CRC- and sequence-checked, so a caller still detects a replaced file and
+    // a prefix that lost records; what it no longer detects is a record it
+    // already consumed rotting afterwards, which it could not have un-applied
+    // anyway. Corruption at or after startIndex ends the tail exactly as
+    // before.
+    //
+    // Returns false only when the file could not be opened.
+    static bool readTailFromPath(const std::string& path, size_t startIndex,
+                                 bool validateCRC, bool validateSequence,
+                                 TailRead& out) {
+        out = TailRead{};
+        FILE* file = std::fopen(path.c_str(), "rb");
+        if (!file) return false;
+
+        const long dataOffset = static_cast<long>(headerBytesOfStream(file));
+        const long recordSize = static_cast<long>(sizeof(JournalEntry));
+        auto offsetOf = [&](size_t index) {
+            return dataOffset + static_cast<long>(index) * recordSize;
+        };
+
+        // One record at a known index, validated the same way the streaming
+        // loop validates it. A record that is absent, torn, CRC-invalid or
+        // misnumbered reports false — the same thing a full read would show by
+        // stopping short of it.
+        auto readAt = [&](size_t index, JournalEntry& entry) {
+            if (std::fseek(file, offsetOf(index), SEEK_SET) != 0) return false;
+            if (std::fread(&entry, sizeof(entry), 1, file) != 1) return false;
+            ++out.recordsRead;
+            if (validateCRC &&
+                entry.checksum !=
+                    computeCRC32(&entry, offsetof(JournalEntry, checksum))) {
+                return false;
+            }
+            return !validateSequence || entry.sequenceNumber == index + 1;
+        };
+
+        if (startIndex > 0) {
+            out.hasFirst = readAt(0, out.first);
+            out.hasBeforeTail = readAt(startIndex - 1, out.beforeTail);
+        }
+        if (std::fseek(file, offsetOf(startIndex), SEEK_SET) == 0) {
+            out.recordsRead +=
+                readRecords(file, validateCRC, validateSequence,
+                            static_cast<uint64_t>(startIndex) + 1, out.tail);
+        }
+        // From record 1 the tail already carries the identity anchor; no
+        // second read for it.
+        if (startIndex == 0 && !out.tail.empty()) {
+            out.first = out.tail.front();
+            out.hasFirst = true;
+        }
+
+        std::fclose(file);
+        return true;
     }
 
     const std::string& path() const { return filePath_; }
@@ -1277,23 +1365,38 @@ private:
         return entries.back().sequenceNumber;
     }
 
-    static std::vector<JournalEntry> readEntriesFromPath(const std::string& path,
-                                                         bool validateCRC,
-                                                         bool validateSequence) {
-        std::vector<JournalEntry> entries;
-        FILE* file = std::fopen(path.c_str(), "rb");
-        if (!file) {
-            return entries;
-        }
-        // Skip the file header if there is one. A pre-header journal reports 0
-        // and is read exactly as before.
-        if (const size_t skip = headerBytesOf(path); skip > 0) {
-            std::fseek(file, static_cast<long>(skip), SEEK_SET);
-        }
+    // Header probe on an ALREADY-OPEN handle, leaving the position undefined
+    // (every caller seeks before reading records).
+    //
+    // The probe used to be headerBytesOf(path), a SECOND fopen of a file the
+    // caller already had open. A rename(2) landing between the two paired the
+    // old inode's bytes with the new file's framing offset, misframed every
+    // record and read back as empty — a phantom "the journal is empty" for any
+    // reader tailing a journal across a checkpoint. Framing now comes off the
+    // same handle as the records it frames.
+    static size_t headerBytesOfStream(FILE* f) {
+        if (std::fseek(f, 0, SEEK_SET) != 0) return 0;
+        JournalFileHeader h{};
+        if (std::fread(&h, sizeof(h), 1, f) != 1) return 0;
+        return std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) == 0
+                   ? sizeof(JournalFileHeader) : 0;
+    }
 
+    // The record loop, shared by readEntriesFromPath and readTailFromPath so
+    // the two cannot drift on what counts as a valid record. Reads whole
+    // records from an already-positioned handle and stops at the first one that
+    // is short, CRC-invalid or out of sequence; that record is not appended.
+    // `expectedSequence` is the number the NEXT record must carry.
+    //
+    // Returns the number of whole records pulled off the disk, the rejected one
+    // included — it cost a read whether or not it was kept.
+    static size_t readRecords(FILE* file, bool validateCRC,
+                              bool validateSequence, uint64_t expectedSequence,
+                              std::vector<JournalEntry>& out) {
+        size_t recordsRead = 0;
         JournalEntry entry{};
-        uint64_t expectedSequence = 1;
         while (std::fread(&entry, sizeof(JournalEntry), 1, file) == 1) {
+            ++recordsRead;
             if (validateCRC) {
                 uint32_t expected = computeCRC32(&entry, offsetof(JournalEntry, checksum));
                 if (entry.checksum != expected) {
@@ -1308,9 +1411,24 @@ private:
                 ++expectedSequence;
             }
 
-            entries.push_back(entry);
+            out.push_back(entry);
         }
+        return recordsRead;
+    }
 
+    static std::vector<JournalEntry> readEntriesFromPath(const std::string& path,
+                                                         bool validateCRC,
+                                                         bool validateSequence) {
+        std::vector<JournalEntry> entries;
+        FILE* file = std::fopen(path.c_str(), "rb");
+        if (!file) {
+            return entries;
+        }
+        // Skip the file header if there is one. A pre-header journal reports 0
+        // and is read exactly as before. Probed on THIS handle — see
+        // headerBytesOfStream for the window that closes.
+        std::fseek(file, static_cast<long>(headerBytesOfStream(file)), SEEK_SET);
+        readRecords(file, validateCRC, validateSequence, 1, entries);
         std::fclose(file);
         return entries;
     }

@@ -26,6 +26,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace OrderMatcher;
@@ -169,7 +170,7 @@ void testSequential(uint64_t seed) {
         driveLeader(j, leader, seed, /*numOps=*/200);
     }  // journal closed — all entries persisted
 
-    JournalFollower f(path, follower);
+    JournalFollower f(path, SymbolId{0}, follower);
     f.poll();  // single-shot catch-up
 
     auto leaderSnap = snapshotBook(leader);
@@ -190,7 +191,7 @@ void testConcurrent(uint64_t seed) {
     OrderBook leader(0);
     OrderBook follower(0);
 
-    JournalFollower f(path, follower, /*pollIntervalMs=*/1);
+    JournalFollower f(path, SymbolId{0}, follower, /*pollIntervalMs=*/1);
     f.start();
 
     {
@@ -233,7 +234,7 @@ void testPromotion() {
 
     OrderBook leader(0);
     OrderBook standby(0);
-    JournalFollower f(path, standby, /*pollIntervalMs=*/1);
+    JournalFollower f(path, SymbolId{0}, standby, /*pollIntervalMs=*/1);
     f.start();
 
     // ---- Phase 1: leader writes ------------------------------------------
@@ -316,7 +317,7 @@ void testTornTrailingRecord() {
             std::fclose(f);
         }
 
-        JournalFollower f(path, follower);
+        JournalFollower f(path, SymbolId{0}, follower);
         f.poll();
         assert(f.appliedCount() == 3 &&
                "short torn trailing record must not be counted/applied");
@@ -359,7 +360,7 @@ void testTornTrailingRecord() {
             std::fclose(f);
         }
 
-        JournalFollower f(path, follower);
+        JournalFollower f(path, SymbolId{0}, follower);
         f.poll();
         assert(f.appliedCount() == 3 &&
                "CRC-corrupt trailing record must not be counted/applied");
@@ -419,7 +420,7 @@ void testCheckpointCaughtUp() {
     OrderBook follower(0);
 
     Journal j(path, Journal::SyncPolicy::Immediate, 1);
-    JournalFollower f(path, follower);
+    JournalFollower f(path, SymbolId{0}, follower);
 
     for (OrderId id = 1; id <= 5; ++id) {
         addBoth(j, leader, id, Side::Buy, Price(990 + int(id)), 10);
@@ -471,7 +472,7 @@ void testCheckpointWhileBehind() {
     OrderBook follower(0);
 
     Journal j(path, Journal::SyncPolicy::Immediate, 1);
-    JournalFollower f(path, follower);
+    JournalFollower f(path, SymbolId{0}, follower);
 
     for (OrderId id = 1; id <= 3; ++id) {
         addBoth(j, leader, id, Side::Buy, Price(990 + int(id)), 10);
@@ -517,7 +518,7 @@ void testSnapshotFieldFidelity() {
 
     constexpr uint64_t kExpiry = 4'000'000'000'000'000'000ULL;  // far future
     Journal j(path, Journal::SyncPolicy::Immediate, 1);
-    JournalFollower f(path, follower);
+    JournalFollower f(path, SymbolId{0}, follower);
 
     // GTD iceberg with a minimum execution quantity.
     auto r1 = leader.addOrder(1, 7, Side::Buy, 1000, 100, OrderType::Limit,
@@ -579,6 +580,292 @@ void testSnapshotFieldFidelity() {
     fs::remove(path);
 }
 
+// ─── Multi-symbol journals ──────────────────────────────────────────────────
+//
+// A leader running N symbols writes them all interleaved into ONE journal, and
+// every record names the symbol it belongs to. A follower that applies records
+// without looking at that field collapses all N books into one.
+
+// Writes two symbols' traffic, interleaved, leaving b1 and b2 holding exactly
+// what a correct follower of each symbol must converge to. Returns the record
+// count.
+//
+// Two of these records are the ones that actually catch a symbol-blind
+// follower; the rest is ordinary traffic around them:
+//   * order 20 (symbol 2, Sell 999) CROSSES the resting symbol-1 Buy 1000 if it
+//     is misrouted — a fill the leader never had, on a book that should not
+//     have seen the order at all. Both symbols trade around 1000 on purpose: a
+//     misrouted order must be ACCEPTED by the wrong book for the divergence to
+//     appear, and a symbol parked a few percent away is rejected on arrival by
+//     the venue's volatility collar, which would green this test against a
+//     follower that routes nothing.
+//   * order id 5 exists on BOTH symbols. Ids are unique per book, not globally
+//     (OrderBook::addOrder's duplicate check is per-book and nothing above it
+//     enforces more), so the symbol-2 cancel of id 5 destroys the symbol-1
+//     order of the same id if it is misrouted.
+size_t writeTwoSymbolJournal(Journal& j, OrderBook& b1, OrderBook& b2) {
+    // Each symbol is traded by its own participant. Not decoration: with one
+    // participant on both sides, self-trade prevention cancels the misrouted
+    // aggressor instead of letting it match, the resting order survives
+    // untouched, and the crossing assertion below goes green against a follower
+    // that routes nothing.
+    auto add = [&](OrderBook& book, SymbolId sym, OrderId id, Side side,
+                   Price px, Quantity qty) {
+        const ParticipantId pid = ParticipantId(sym);
+        auto r = book.addOrder(id, pid, side, px, qty, OrderType::Limit);
+        assert(std::holds_alternative<OrderId>(r));
+        j.logAddOrder(id, pid, sym, side, px, qty, OrderType::Limit);
+    };
+
+    add(b1, 1, 10, Side::Buy, 1000, 50);
+    add(b2, 2, 20, Side::Sell, 999, 30);   // would cross id 10 if misrouted
+    add(b1, 1, 5, Side::Sell, 1010, 10);
+    add(b2, 2, 5, Side::Buy, 995, 7);      // same id, different symbol
+    b2.cancelOrder(5);
+    j.logCancelOrder(5, 2);                // would kill symbol 1's id 5
+    add(b1, 1, 11, Side::Buy, 996, 20);
+    assert(b2.modifyOrder(20, 15));
+    j.logModifyOrder(20, 2, 15);
+    assert(b1.cancelReplace(11, 997, 25));
+    j.logCancelReplace(11, 1, 997, 25);
+    j.flush();
+    return 8;
+}
+
+// A follower hosting ONE symbol out of a two-symbol journal.
+void testMultiSymbolSingleFollower() {
+    auto path = tmpJournalPath("multisym_single");
+    OrderBook leader1(1);
+    OrderBook leader2(2);
+    OrderBook follower1(1);
+
+    size_t records = 0;
+    {
+        Journal j(path, Journal::SyncPolicy::Immediate, 1);
+        records = writeTwoSymbolJournal(j, leader1, leader2);
+    }
+
+    JournalFollower f(path, SymbolId{1}, follower1);
+    f.poll();
+
+    // The assertion that catches the bug: symbol 2's sell at 990 must not have
+    // traded against symbol 1's buy at 1000. A symbol-blind follower fills 30
+    // of the 50 here and reports a trade the leader never printed.
+    const Order* resting = follower1.getOrder(10);
+    assert(resting && resting->remainingQty == 50 &&
+           "a symbol-2 sell crossed a symbol-1 buy: follower invented a fill");
+    assert(follower1.getOrder(5) != nullptr &&
+           "a symbol-2 cancel removed the symbol-1 order sharing its id");
+    assert(follower1.getOrder(20) == nullptr &&
+           "a symbol-2 order rests in the symbol-1 follower book");
+    assert(snapshotBook(leader1) == snapshotBook(follower1) &&
+           "symbol-1 follower did not converge to the leader's symbol-1 book");
+    assert(f.appliedCount() == records &&
+           "the cursor is a file position: skipped records still advance it");
+
+    std::printf("multi-symbol/single: %zu records in, symbol-1 book converged "
+                "to %zu orders (position=%llu)\n",
+                records, snapshotBook(follower1).size(),
+                (unsigned long long)f.appliedCount());
+
+    fs::remove(path);
+}
+
+// A follower hosting BOTH symbols through a resolver: two books, each
+// converging to its own leader book from the one interleaved journal.
+void testMultiSymbolResolverFollower() {
+    auto path = tmpJournalPath("multisym_resolver");
+    OrderBook leader1(1);
+    OrderBook leader2(2);
+    OrderBook follower1(1);
+    OrderBook follower2(2);
+
+    size_t records = 0;
+    {
+        Journal j(path, Journal::SyncPolicy::Immediate, 1);
+        records = writeTwoSymbolJournal(j, leader1, leader2);
+    }
+
+    JournalFollower f(path, [&](SymbolId sym) -> OrderBook* {
+        if (sym == 1) return &follower1;
+        if (sym == 2) return &follower2;
+        return nullptr;  // not hosted here
+    });
+    f.poll();
+
+    assert(snapshotBook(leader1) == snapshotBook(follower1) &&
+           "symbol-1 book diverged under the resolver follower");
+    assert(snapshotBook(leader2) == snapshotBook(follower2) &&
+           "symbol-2 book diverged under the resolver follower");
+    assert(follower1.isReplayMode() && follower2.isReplayMode() &&
+           "a resolved book must be put into replay mode");
+    assert(f.appliedCount() == records);
+
+    std::printf("multi-symbol/resolver: %zu records routed to 2 books — both "
+                "converged (applied=%llu)\n",
+                records, (unsigned long long)f.appliedCount());
+
+    fs::remove(path);
+}
+
+// Mirrors checkpointLeader, but snapshots TWO books into one journal — what a
+// multi-symbol leader's checkpoint actually writes.
+bool checkpointTwoSymbols(Journal& j, const OrderBook& b1, const OrderBook& b2) {
+    std::vector<std::pair<SymbolId, Order>> resting;
+    b1.forEachOrderLocked([&](const Order& o) { resting.emplace_back(1, o); });
+    b2.forEachOrderLocked([&](const Order& o) { resting.emplace_back(2, o); });
+    return j.rewriteAtomically([&resting](Journal& snap) {
+        for (const auto& [sym, o] : resting) {
+            snap.logSnapshot(o.id, o.participantId, sym, o.side, o.price,
+                             o.remainingQty, o.type, o.timeInForce, o.expiryTime,
+                             o.stopPrice, o.stopLimitPrice, o.displayQty,
+                             o.pegType, o.pegOffset, o.trailAmount, o.minQty,
+                             o.isHidden);
+        }
+    });
+}
+
+// Filtering must not move the cursor off the file.
+//
+// appliedCount_ is a POSITION in the journal, not a count of mutations, so a
+// skipped record has to advance it exactly like an applied one. Hold it back
+// and the next poll's anchors are read at the wrong offsets: classify() then
+// compares the wrong record and either misses a replacement or invents one.
+// This drives the follower across a checkpoint with skipped records on both
+// sides of it — before, inside the snapshot, and after — and pins the position
+// at every step.
+void testSkippedEntriesKeepCursorAligned() {
+    auto path = tmpJournalPath("multisym_cursor");
+    OrderBook leader1(1);
+    OrderBook leader2(2);
+    OrderBook follower1(1);
+
+    Journal j(path, Journal::SyncPolicy::Immediate, 1);
+    JournalFollower f(path, SymbolId{1}, follower1);
+
+    auto add = [&](OrderBook& book, SymbolId sym, OrderId id, Side side,
+                   Price px, Quantity qty) {
+        // One participant per symbol — see writeTwoSymbolJournal.
+        const ParticipantId pid = ParticipantId(sym);
+        auto r = book.addOrder(id, pid, side, px, qty, OrderType::Limit);
+        assert(std::holds_alternative<OrderId>(r));
+        j.logAddOrder(id, pid, sym, side, px, qty, OrderType::Limit);
+    };
+
+    // 5 records, 2 of them skipped by this follower.
+    //
+    // Both symbols trade around 1000 ON PURPOSE. A misrouted order has to be
+    // ACCEPTED by the wrong book for the divergence to show; park symbol 2 a
+    // few percent away and the venue's volatility collar rejects it on
+    // arrival, and the test goes green against a follower that routes nothing.
+    // Symbol 2's sell at 1002 crosses symbol 1's bid at 1003 if misrouted,
+    // while resting harmlessly above its own book's bid at 1000.
+    add(leader1, 1, 1, Side::Buy, 1001, 10);
+    add(leader2, 2, 101, Side::Buy, 1000, 10);
+    add(leader1, 1, 2, Side::Buy, 1002, 10);
+    add(leader2, 2, 102, Side::Sell, 1002, 10);
+    add(leader1, 1, 3, Side::Buy, 1003, 10);
+    j.flush();
+
+    f.poll();
+    assert(f.appliedCount() == 5 &&
+           "cursor must count the 2 skipped records, not just the 3 applied");
+    assert(snapshotBook(leader1) == snapshotBook(follower1) &&
+           "symbol-1 follower diverged before the checkpoint");
+
+    // --- the follower is asleep from here ---
+    leader1.cancelOrder(2);
+    j.logCancelOrder(2, 1);
+    add(leader2, 2, 103, Side::Sell, 1003, 10);
+    j.flush();
+    // Snapshot: 2 symbol-1 orders + 3 symbol-2 orders = 5 records, renumbered
+    // from 1, so record 1 of the new file is a symbol-1 Snapshot.
+    assert(checkpointTwoSymbols(j, leader1, leader2) && "checkpoint must commit");
+    add(leader2, 2, 104, Side::Buy, 999, 10);
+    add(leader1, 1, 4, Side::Buy, 1004, 10);
+    j.flush();
+    // --- follower wakes up ---
+
+    f.poll();
+    assert(f.appliedCount() == 7 &&
+           "position in the REPLACEMENT file: 5 snapshot records + 2 appends, "
+           "skipped ones included");
+    assert(follower1.getOrder(2) == nullptr &&
+           "stale symbol-1 order survived a checkpoint taken while behind");
+    assert(follower1.getOrder(4) != nullptr &&
+           "post-checkpoint symbol-1 entry never applied");
+    assert(follower1.getOrder(101) == nullptr &&
+           "a symbol-2 snapshot record landed in the symbol-1 book");
+    assert(snapshotBook(leader1) == snapshotBook(follower1) &&
+           "symbol-1 follower diverged across a multi-symbol checkpoint");
+
+    std::printf("multi-symbol/cursor: checkpoint detected across skipped "
+                "records, position=%llu\n",
+                (unsigned long long)f.appliedCount());
+
+    fs::remove(path);
+}
+
+// A poll reads only the NEW tail, not the whole file.
+//
+// Deterministic by construction rather than by clock: the follower counts the
+// whole records it pulls off the disk, and this asserts a CONSTANT bound per
+// poll on a large unchanging file. That is a statement about the algorithm —
+// a wall-clock version would be flaky in CI and would prove less, since a fast
+// machine re-reading megabytes still looks quick.
+void testIncrementalRead() {
+    auto path = tmpJournalPath("incremental");
+    constexpr int kRecords = 1000;
+    constexpr int kPolls = 20;
+    OrderBook leader(7);
+    OrderBook follower(7);
+
+    {
+        // GroupCommit: this is a bulk write, and 1000 fsyncs is time spent
+        // proving nothing this test is about.
+        Journal j(path, Journal::SyncPolicy::GroupCommit, 256);
+        for (int i = 1; i <= kRecords; ++i) {
+            // All buys across 20 levels well below any ask: nothing crosses, so
+            // every record leaves a resting order and the file is all history.
+            const OrderId id = OrderId(i);
+            const Price px = Price(900 + (i % 20));
+            auto r = leader.addOrder(id, 1, Side::Buy, px, 10, OrderType::Limit);
+            assert(std::holds_alternative<OrderId>(r));
+            j.logAddOrder(id, 1, /*sym=*/7, Side::Buy, px, 10, OrderType::Limit);
+        }
+        j.flush();
+    }
+
+    JournalFollower f(path, SymbolId{7}, follower);
+    f.poll();
+    const uint64_t afterColdRead = f.recordsReadFromDisk();
+    assert(f.appliedCount() == uint64_t(kRecords));
+    assert(afterColdRead >= uint64_t(kRecords) &&
+           "the cold catch-up really did walk the whole file — without this the "
+           "bound below could pass on a follower that read nothing at all");
+
+    for (int i = 0; i < kPolls; ++i) f.poll();
+
+    // Per poll on an unchanging file: record 1 and the record before the
+    // cursor. The budget is a CONSTANT — it must not scale with kRecords.
+    constexpr uint64_t kPerPollBudget = 4;
+    const uint64_t steadyState = f.recordsReadFromDisk() - afterColdRead;
+    assert(steadyState <= kPerPollBudget * kPolls &&
+           "poll re-reads the whole journal instead of just the new tail");
+    assert(f.appliedCount() == uint64_t(kRecords) &&
+           "repeated polls of an unchanging file moved the cursor");
+    assert(snapshotBook(leader) == snapshotBook(follower) &&
+           "follower diverged while polling an unchanging file");
+
+    std::printf("incremental: %d-record file, cold read %llu records, then "
+                "%llu records over %d polls (budget %llu)\n",
+                kRecords, (unsigned long long)afterColdRead,
+                (unsigned long long)steadyState, kPolls,
+                (unsigned long long)(kPerPollBudget * kPolls));
+
+    fs::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -591,6 +878,10 @@ int main() {
     testCheckpointCaughtUp();
     testCheckpointWhileBehind();
     testSnapshotFieldFidelity();
+    testMultiSymbolSingleFollower();
+    testMultiSymbolResolverFollower();
+    testSkippedEntriesKeepCursorAligned();
+    testIncrementalRead();
     std::puts("JournalFollowerTest passed");
     return 0;
 }

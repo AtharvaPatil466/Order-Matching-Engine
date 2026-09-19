@@ -3,7 +3,11 @@
 #include "Utils.h"  // OrderMatcher::Utils::rdtsc / calibrateTsc / tscTicksToNs
 #include "Metrics.h"
 #include "StructuredLog.h"
+#include <algorithm>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+#include <system_error>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -321,6 +325,90 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
                      .kv("symbols", (unsigned long long)symbolIds_.size())
                      .kv("threads", (unsigned long long)numThreads_)
                      .kv("queue_size", (unsigned long long)queueSize));
+
+    // capacityMonitor_ was a constructed member with no callbacks and no
+    // thread: it could not observe anything and never ran. Both happen here,
+    // in this order — the callbacks read requestQueues_, which is rebuilt
+    // just above and torn down in stopAsync(), so the monitor thread must
+    // exist only between those two points.
+    installCapacityCallbacks();
+    capacityMonitor_.start();
+}
+
+// Resource queries only — each one reads a counter the engine already keeps,
+// and none of them decides anything. What to DO about a breach (a webhook, a
+// pager, an incident file) needs an endpoint and a path that only the
+// deployment knows; the breach itself reaching obSink() does not.
+void MatchingEngine::installCapacityCallbacks() {
+    // Worst queue, not the average: one saturated worker is a stalled symbol
+    // even when the other rings are empty, and averaging hides exactly that.
+    // approxSize()/capacity() are atomic loads on the same queues the
+    // backpressure check in enqueueSafe() already reads.
+    capacityMonitor_.setQueueDepthCallback([this]() -> double {
+        double worst = 0.0;
+        for (const auto& queue : requestQueues_) {
+            const size_t cap = queue->capacity();
+            if (cap == 0) continue;
+            worst = std::max(worst, static_cast<double>(queue->approxSize()) /
+                                        static_cast<double>(cap));
+        }
+        return worst;
+    });
+
+    // Journal disk. The path is resolved once, here, and captured by value:
+    // journal_ lives under journalMutex_ and is also held across checkpoint
+    // rewrites, so taking that lock once a second from a monitoring thread
+    // would put a background poller in the way of the commit path.
+    //
+    // Consequence of resolving it once: enableJournal() after startAsync()
+    // gets no disk monitoring. main.cpp enables the journal first, which is
+    // also the only order that lets the journal be replayed into the books.
+    std::string journalDir;
+    {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        if (journal_) {
+            journalDir = std::filesystem::path(journal_->path()).parent_path().string();
+            if (journalDir.empty()) journalDir = ".";
+        }
+    }
+    if (!journalDir.empty()) {
+        // One report, not one per second: a filesystem that cannot be
+        // statted stays that way, and 1 Hz of identical warnings is how an
+        // operator learns to filter out the channel this monitor reports on.
+        auto reportedFailure = std::make_shared<std::atomic<bool>>(false);
+        capacityMonitor_.setDiskUsageCallback([journalDir, reportedFailure]() -> double {
+            std::error_code ec;
+            const std::filesystem::space_info space =
+                std::filesystem::space(journalDir, ec);
+            if (ec || space.capacity == 0) {
+                // Returning 0.0 reads as "disk empty" — never let that pass
+                // silently, because it is indistinguishable from healthy.
+                if (!reportedFailure->exchange(true)) {
+                    obSink().log(obEvent("capacity_probe_failed", LogSeverity::Warn)
+                                     .kv("resource", "journal_disk")
+                                     .kv("path",     journalDir)
+                                     .kv("error",    ec ? ec.message() : "zero capacity"));
+                }
+                return 0.0;
+            }
+            // `available` rather than `free`: the reserved-for-root blocks are
+            // not space this process can journal into.
+            return static_cast<double>(space.capacity - space.available) /
+                   static_cast<double>(space.capacity);
+        });
+    }
+
+    // Deliberately NOT installed, both blocked on a decision this code cannot
+    // make:
+    //   * memory — CapacityThresholds.memoryUsagePct is a fraction of a
+    //     limit, and no limit exists anywhere in the config or the code. RSS
+    //     over total host RAM is not it (the engine shares the host); the
+    //     real ceiling is the container/cgroup limit the deployment sets.
+    //   * replication lag — the ReplicationCoordinator is owned by main.cpp
+    //     and constructed after startAsync(), so there is nothing to read
+    //     here, and installing the callback later would race the running
+    //     monitor thread. Moving coordinator setup ahead of startAsync() is
+    //     the fix, and it is a change to startup ordering, not to this.
 }
 
 void MatchingEngine::startExpiryTimer(uint64_t intervalMs) {
@@ -385,6 +473,15 @@ void MatchingEngine::stopAsync() {
     if (!async_) {
         return;
     }
+
+    // First, before anything is torn down. The monitor's callbacks hold
+    // `this` and read requestQueues_, which this function clears — so a
+    // monitor thread that outlived the queues would be reading freed memory
+    // during shutdown, the one moment nobody is watching. stop() joins, and
+    // the join is bounded by CapacityMonitor::kSleepSliceMs rather than by
+    // the check interval, so it does not add to the shutdown watchdog's
+    // reporting window.
+    capacityMonitor_.stop();
 
     stopExpiryTimer();
 

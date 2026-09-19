@@ -10,11 +10,20 @@
 //   - Journal disk usage > 90%
 //   - Replication lag > 100ms
 //
-// Each alert triggers a webhook with configurable severity.
-// Integrates with the existing AlertDispatcher.
+// Every breach is emitted as a `capacity_alert` event on the structured log
+// sink (StructuredLog.h), which needs no configuration and is where the rest
+// of the engine already reports. An AlertDispatcher (webhooks) and an
+// IncidentLogger (NDJSON file) are additionally notified when one has been
+// attached; both need a deployment decision first, so neither is required for
+// a breach to be visible.
+//
+// MatchingEngine::startAsync() installs the queue-depth and journal-disk
+// callbacks and starts this monitor; stopAsync() stops it.
 
 #include "AlertDispatcher.h"
 #include "IncidentLogger.h"
+#include "StructuredLog.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -78,11 +87,25 @@ public:
     }
 
 private:
+    // stop() joins this thread on the engine's shutdown path, so the sleep
+    // between checks is also the worst case for how long shutdown blocks.
+    // Sleeping the full checkIntervalMs in one call made that a whole second
+    // per engine teardown. Sleeping in slices bounds the join at
+    // kSleepSliceMs instead; if the check interval ever needs sub-10ms
+    // shutdown latency, swap the slices for a condition_variable with a
+    // deadline.
+    static constexpr uint64_t kSleepSliceMs = 10;
+
     void monitorLoop() {
-        while (running_.load()) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(thresholds_.checkIntervalMs));
-            if (!running_.load()) break;
+        while (running_.load(std::memory_order_acquire)) {
+            for (uint64_t slept = 0;
+                 slept < thresholds_.checkIntervalMs &&
+                     running_.load(std::memory_order_acquire);
+                 slept += kSleepSliceMs) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    std::min(kSleepSliceMs, thresholds_.checkIntervalMs - slept)));
+            }
+            if (!running_.load(std::memory_order_acquire)) break;
             checkAllResources();
         }
     }
@@ -135,6 +158,19 @@ private:
 
     void raiseAlert(const std::string& resource, const std::string& message,
                     AlertLevel level, double usagePct) {
+        // The structured sink is the only output that is always there. A
+        // webhook needs an endpoint and the incident log needs a path, and
+        // both are deployment decisions — so for most of this monitor's life
+        // both pointers were null and a breach produced nothing at all except
+        // a counter increment. obSink() is the seam the rest of the engine
+        // already reports through (engine_start, checkpoint_abandoned,
+        // shutdown_worker_still_running), so an operator who has turned
+        // logging on sees capacity breaches without configuring anything new.
+        obSink().log(obEvent("capacity_alert", severityOf(level))
+                         .kv("resource",  resource)
+                         .kv("level",     alertLevelStr(level))
+                         .kv("usage_pct", usagePct * 100.0)
+                         .kv("detail",    message));
         if (alertDispatcher_) {
             alertDispatcher_->fire(level, "capacity_monitor", message);
         }
@@ -142,6 +178,16 @@ private:
             incidentLogger_->logCapacityAlert(resource, usagePct * 100.0);
         }
         alertsRaised_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    static LogSeverity severityOf(AlertLevel level) {
+        switch (level) {
+            case AlertLevel::Info:     return LogSeverity::Info;
+            case AlertLevel::Warning:  return LogSeverity::Warn;
+            case AlertLevel::Critical:
+            case AlertLevel::Fatal:    return LogSeverity::Error;
+        }
+        return LogSeverity::Warn;
     }
 
     static std::string pctStr(double fraction) {

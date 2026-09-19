@@ -507,6 +507,10 @@ public:
     bool enableIncidentLog(const std::string& path) { return incidentLogger_.open(path); }
 
     // ─── Phase 4: Capacity Monitor ──────────────────────────────────
+    // Live in async mode: startAsync() installs the resource-query callbacks
+    // and starts the monitor thread, stopAsync() stops it. Configure it
+    // (thresholds, an AlertDispatcher, an IncidentLogger) BEFORE startAsync —
+    // every setter here writes state the monitor thread reads unsynchronised.
     CapacityMonitor& getCapacityMonitor() { return capacityMonitor_; }
 
     // The legacy single-symbol interface (processOrder/cancelOrder/uncross/
@@ -536,6 +540,11 @@ private:
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);
     void checkpointInternal(bool alreadyDrained);
     void rebuildThreadSymbolIndex();
+    // Point capacityMonitor_ at the engine's real resource counters. Called
+    // from startAsync() once the queues exist and BEFORE the monitor thread
+    // starts, because installing a std::function under a running monitor
+    // would race with the thread reading it.
+    void installCapacityCallbacks();
 
     FlatHashMap<SymbolId, std::unique_ptr<OrderBook>> books_{64};
     std::vector<SymbolId> symbolIds_;

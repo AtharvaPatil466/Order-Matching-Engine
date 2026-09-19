@@ -608,6 +608,16 @@ add_test(NAME AlertDispatcherTest COMMAND AlertDispatcherTest)
 set_tests_properties(AlertDispatcherTest PROPERTIES TIMEOUT 30
                      LABELS "project;ops")
 
+# H18 — the capacity monitor is wired into a real engine, not just unit-tested
+# in isolation: startAsync installs the resource callbacks and runs the
+# monitor, a breach reaches the structured sink, stopAsync joins promptly.
+add_executable(CapacityMonitorIntegrationTest CapacityMonitorIntegrationTest.cpp)
+target_link_libraries(CapacityMonitorIntegrationTest PRIVATE OrderMatcher)
+enable_assertions(CapacityMonitorIntegrationTest)
+add_test(NAME CapacityMonitorIntegrationTest COMMAND CapacityMonitorIntegrationTest)
+set_tests_properties(CapacityMonitorIntegrationTest PROPERTIES TIMEOUT 60
+                     LABELS "project;ops")
+
 # Replication protocol HA tests
 add_executable(ReplicationProtocolTest ReplicationProtocolTest.cpp)
 target_link_libraries(ReplicationProtocolTest PRIVATE OrderMatcher)

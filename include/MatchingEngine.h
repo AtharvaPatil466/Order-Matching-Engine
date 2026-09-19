@@ -78,8 +78,40 @@ struct OrderRequest {
 };
 #pragma pack(pop)
 
+// WHAT "ACCEPTED" MEANS, AND WHERE IT DOES NOT MEAN DURABLE
+//
+// Accepted means different things on the two paths, and the difference is a
+// client-visible guarantee rather than an implementation detail:
+//
+//   SYNC  (start())      — the order has been matched. If durable client acks
+//                          are enabled (enableDurableClientAcks), the fills it
+//                          produced are additionally withheld until the journal
+//                          entry behind them is fsync-durable, so acting on
+//                          them is safe across a kill -9.
+//
+//   ASYNC (startAsync()) — the order has been QUEUED. Nothing has matched yet,
+//                          nothing has been journalled, and nothing is durable.
+//                          submitOrder returns at enqueue.
+//
+// So on the async path this type is an admission receipt, not a promise about
+// the order's fate. A client that treats it as one can act on an order a crash
+// erases. enableDurableClientAcks() REFUSES in async mode for exactly this
+// reason — rather than gating the fills while leaving this ack as undurable as
+// it was, which would advertise a guarantee that is not there.
+//
+// Closing that needs one DurabilityGate per concurrently-processing thread
+// (its capture model holds a single in-flight order, so N workers corrupt each
+// other's groups — a lock serialises that rather than preventing it) plus a
+// drain that runs when the engine is idle, because durability becomes true at
+// moments when no order is being processed: an explicit flush(), a later order
+// filling the batch, a checkpoint.
+//
+// Until then the honest statement is the one above: async Accepted == queued.
+// Venues that need a durable ack should run the sync path and accept its P50.
 struct SubmitResult {
     enum class Status : uint8_t {
+        // Sync: matched. Async: QUEUED — see the note above. Not "durable" on
+        // either path unless durable client acks are enabled (sync only).
         Accepted,
         Rejected
     };

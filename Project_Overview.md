@@ -1,6 +1,6 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **C++20 Order Matching Engine** | 93 headers | 14 source files | 102 test files | 522 CTest targets
+> **C++20 Order Matching Engine** | 93 headers | 14 source files | 103 test files | 524 CTest targets
 >
 > A C++20 low-latency matching engine drawing on institutional exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
 
@@ -17,7 +17,7 @@ This is a C++20 low-latency order matching engine with institutional-grade archi
 | Header files (`include/`) | 93 |
 | Source files (`src/`) | 14 |
 | Test files | 102 |
-| Individual test cases | 522 CTest targets |
+| Individual test cases | 524 CTest targets |
 | TLA+ specifications | 12 (171M distinct states — matching + replication layers) |
 | Documentation files | 8 in `docs/` (plus architecture/benchmark docs) |
 
@@ -200,6 +200,8 @@ Two results are stated as conditional rather than calibrated. The calibrated ren
 - The file carries a 24-byte header (magic, format version, record size). A version or record-size mismatch is refused with a message naming both sides, and the journal declines to append rather than extending a file it could not read.
 - Checkpointing no longer stalls appends. Building the snapshot — every resting order, plus a durability barrier — used to run with the journal's append lock held. It now runs outside it, with the append counter rechecked before the swap: unchanged means commit with no worker having waited, changed means rebuild under the lock exactly as before.
 - `bytesOnDisk()` is tracked at write time rather than asked for. It is consulted on every append (the entry-count threshold in front of it is false 249,999 times in 250,000), and on Linux that was an `fstat(2)` per order inside the global lock.
+- A standby following the journal survives a checkpoint. `JournalFollower` tracked its position as an index into a re-read vector, on the premise — stated in its own comment — that "the journal is append-only and entries are immutable once written." True of `appendEntry`, false of `commitRewrite`, which `rename(2)`s a *smaller* file over the same path: a checkpoint writes one record per resting order, far fewer than the history it replaces. The index then pointed past the end, the cursor froze permanently, and `appliedCount()` went on reporting a plausible number while the standby followed nothing. Checkpoints fire automatically at 250k entries, so nobody had to call `checkpoint()` for this to happen. Detection is now by content: the follower remembers record 1 (which file is this) and its last applied record (has the prefix shifted), and `memcmp`s them — sequence numbers cannot work, because the snapshot is built in a truncated temp journal and renumbered from 1. Detection is only half: a checkpoint contains no deletions, so the book is emptied and rebuilt from the snapshot rather than replayed on top of stale state.
+- The same path was dropping ten fields. The follower's `Snapshot` branch called the 6-argument `addOrder`, so a checkpoint turned an iceberg, GTD, pegged or stop-limit order into a plain GTC limit on the standby — `displayQty=0` fails iceberg admission outright, `stopPrice=0` makes a stop fire on the first trade at any price, and GTD loss is invisible until promotion. The test comparator was blind to exactly those fields, so widening the call alone would have gone green while changing nothing; it now compares all sixteen.
 
 ### Cross-Host Log Replication (wired end-to-end)
 - `ReplicationCoordinator` — TCP log-shipping from primary to backup, instantiated in `src/main.cpp` driven by `OB_NODE_ROLE` / `OB_PRIMARY_HOST` / `OB_JOURNAL_PATH` env vars.
@@ -294,15 +296,17 @@ Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reorder
 
 ## 9. Verification & Testing
 
-### Test Suite — 101 Executables, 522 CTest Targets
+### Test Suite — 102 Executables, 524 CTest Targets
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 101 test executables and 522 CTest targets. Key mechanisms:
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 102 test executables and 524 CTest targets. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.
 - **Sanitizers**: ASan, UBSan, and TSan checks integrated into CI/CD.
 - **Multi-symbol journal coverage**: replay equivalence is swept over 20 seeds × 250 ops across three symbols. Every journal test was previously single-symbol — the one shape in which cross-book routing cannot be wrong — which is how the cancel-routing defect above survived.
 - **Journal contention measurement**: `JournalContentionBenchmark` reports append throughput against worker count with journaling on and off, and against batch size so the durability barrier can be amortised away and the lock itself becomes visible. Run on x86 via the `Journal Contention (H6)` workflow, which records CPU, filesystem and measured `fdatasync` latency first, because every number is relative to those.
+- **Local Linux reproduction**: `scripts/verify_linux.sh` runs a CI lane in an `ubuntu:24.04` container (`sanitizers` | `tsan` | `release` | `faultinject`). macOS misses `-Werror`, uses kqueue rather than epoll, links libc++ rather than libstdc++, and cannot compile the io_uring path at all — so a clean local build has never been evidence, and every one of those differences has been found by CI rather than before the push. The tree is mounted read-only and the build lands inside the container, so a Linux build cannot leave objects behind for a later macOS build to link against.
+- **Checkpoint soak exercises both directions**: `CheckpointChaosTest` previously ran 90 rewrites that all GREW the file, so the shape a real checkpoint produces — one record per resting order, replacing a far longer history — was never tested. Rewrite targets now alternate, and the test asserts that a shrink actually occurred, because the alternation is otherwise silently removable. That gap is why a consumer tracking its position as a positional index went unnoticed.
 
 ### Formal Verification (TLA+)
 
@@ -319,7 +323,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ```
 include/              93 header files — core logic and networking
 src/                  14 source files — thin compilation units
-tests/                102 test files, 522 CTest targets
+tests/                103 test files, 524 CTest targets
 benchmarks/           11 benchmark binaries
 fuzz/                 3 libFuzzer harnesses + standalone driver
 spec/                 TLA+ formal specifications (12 specs)
@@ -348,12 +352,18 @@ audit of the codebase and are tracked as code work.
 - **Durable client acknowledgements on the async path** — open, and documented rather than built. On the sync path an order is matched before it is acknowledged, and with `enableDurableClientAcks` the resulting fills are withheld until the journal entry behind them is fsync-durable. On the **async** path `submitOrder` returns at enqueue: the order has been QUEUED, nothing has matched, nothing is journalled. `enableDurableClientAcks` refuses in async mode rather than gating the fills while leaving that ack as undurable as it was — advertising a guarantee that is not there would be worse than declining to offer it. This is stated on `SubmitResult` itself so a caller meets it where they use it.
 
   It is not, as previously recorded here, a protocol decision. Closing it needs one `DurabilityGate` per concurrently-processing thread — the gate's capture model holds a single in-flight order, so N workers overwrite each other's groups and a lock serialises that rather than preventing it — plus a drain that runs when the engine is idle, because durability becomes true at moments when no order is being processed (an explicit flush, a later order filling the batch, a checkpoint). That is a few hundred lines touching the event-dispatch path on every book, and it is worth doing only if real order flow runs through the async path; the sync path is already correct for a venue that needs the guarantee.
-- **Checkpoint as a log record** — open. The checkpoint replaces the journal rather than appending to it, so an entry committed between the snapshot gather and the swap is discarded. The append-counter check added above narrows this to a detected, logged fallback rather than a silent loss, but closing it properly means writing the snapshot as a record *in* the log and replaying forward from it, the way a WAL checkpoint works. That is a format change, not a locking change.
+- **Checkpoint as a log record** — open, and scoped to *don't build*. The checkpoint replaces the journal rather than appending to it, so an entry committed between the snapshot gather and the swap is discarded. The append-counter check added above narrows this to a detected, logged fallback rather than a silent loss, but closing it properly means writing the snapshot as a record *in* the log and replaying forward from it, the way a WAL checkpoint works. That is a format change, not a locking change.
 - **Journal record framing** — resolved. The file previously had no magic number, length prefix or version field: framing was implicit in `sizeof(JournalEntry)`, so a layout change sliced an existing file on the wrong boundaries, failed every CRC, returned an empty replay, and — because the file is opened `"ab+"` — appended to it anyway. Silent, total, and on the upgrade path. A 24-byte header now carries a magic, a format version and the record size, and a mismatch is refused by name rather than inferred from every record failing at once. Journals written before the header are still read as bare records: their first byte is an `entryType` (1–5) and the magic begins with `'O'`, so the two are distinguished with certainty rather than by probability. The header is written lazily, immediately before the first record, so that constructing a `Journal` purely to read — as `JournalFollower`, `ResearchHarness` and the CLI tools do — still does not modify the file.
 - **Journal append serialisation** — measured, largely resolved. All appends serialise on one mutex, but at the shipped batch size the binding constraint is the `fdatasync` executed inside the critical section, which caps throughput at roughly 165–190k appends/s on x86 CI regardless of worker count. The per-append syscall has been removed; the remaining lever is batch size and outstanding-chain depth in `Journal`, not resharding the log.
-- **Alerting components not wired in** — open. `AlertDispatcher`, `CapacityMonitor` and `IncidentLogger` are implemented and tested but constructed in no production binary. Wiring them needs deployment decisions (webhook targets, thresholds, incident sink) rather than code.
+- **Alerting components not wired in** — half closed. `CapacityMonitor` now runs inside the real engine: `startAsync()` installs the resource callbacks and starts it, `stopAsync()` stops it first so it cannot outlive the queues its callbacks read, and a breach emits `capacity_alert` to the same structured sink that already carries `checkpoint_abandoned`. Previously a breach with no dispatcher attached produced nothing at all but a counter increment. Two probes need no policy and are live — worst-of queue depth across the request rings, and journal-filesystem usage (`capacity - available`, since root-reserved blocks are not usable; the path is resolved once at install so the monitor thread never takes the journal lock). A probe failure reports once rather than at 1 Hz, because returning 0.0 silently reads as "disk empty", which is indistinguishable from healthy.
+
+  What remains needs decisions, not effort. **Memory**: the threshold is a fraction *of a limit* and no memory ceiling exists anywhere in config, flags or code — RSS over host RAM is the wrong denominator for a process sharing a box. **Replication lag**: `ReplicationCoordinator` is constructed after `startAsync()`, so there is nothing to read at install time; closing it is a startup-ordering change. **`IncidentLogger`**: no config knob exists, and inventing a path is worse than leaving it shut. **`AlertDispatcher`**: beyond the webhook target being a deployment choice, it has no TLS client — `addWebhook()` returns `false` for any `https://` URL, and both usage examples in its own header (Slack, PagerDuty) are https. Wiring the config keys today would register webhooks that provably cannot deliver; it needs a linked TLS client or a local HTTP sidecar first.
+
+  Two shipped thresholds look wrong and are flagged rather than quietly edited, since they are policy: `checkIntervalMs = 1000` against an 8192-slot ring that fills in roughly 80 ms at 100k msg/s makes the queue-depth alert a saturation detector rather than a burst detector, and `replicationLagMs = 100` is exactly `heartbeat_interval_ms` in the example config.
+- **Standby symbol routing** — resolved. `JournalFollower` ignored `symbolId` on every branch, so a multi-symbol leader collapsed into one follower book where order ids from different symbols crossed against each other and the standby printed fills the leader never had. It now takes either an explicit `SymbolId` or a resolver; the symbol argument sits before the book so the old two-argument call fails to compile rather than silently binding the poll interval as a symbol. A skipped record still advances the cursor, since the counter is a position in the file rather than a count of mutations. Two traps had to be cleared before the test could catch the bug at all — the volatility collar rejected the misrouted order, and self-trade prevention cancelled the crossing one, each making the test pass for the wrong reason.
+- **Follower poll cost** — resolved. The follower re-read and re-CRCed the entire journal on every 1 ms poll, which at the 250k-entry checkpoint threshold is tens of MB per millisecond. It now reads record 1, the prefix anchor and the new tail through a **single** `fopen`, so nothing can straddle a `rename(2)` between "which file is this" and "what is in it" — the window that ruled out an `st_ino` check. Measured at 2 records per poll against a 1000-record file, flat in file size. Constructing a `Journal` per poll is gone too; that opened the file `"ab+"` and re-walked it to recover the sequence, so a read-only follower was scanning the log twice per poll and opening it for append.
 
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · 101 test executables · 522 CTest targets · 19 multi-container chaos scenarios · 171M distinct TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · 102 test executables · 524 CTest targets · 19 multi-container chaos scenarios · 171M distinct TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*

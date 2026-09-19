@@ -240,6 +240,17 @@ int main(int argc, char* argv[]) {
     uint64_t seed = 42;
     bool runJournal = true;
 
+    // --only <a|b|c>: run exactly one path.
+    //
+    // THIS EXISTS SO `perf stat` CAN BE SCOPED. Wrapping perf around the whole
+    // process and dividing by the order count charges every path's work to
+    // whichever one you happen to label the output — which is how this
+    // benchmark's published counters came to attribute Path C's fdatasync
+    // traffic to Path A core matching (see BENCHMARKS.md). A counter gathered
+    // over three paths cannot be attributed to one of them after the fact, so
+    // the isolation has to happen at run time.
+    char onlyPath = 0;
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--orders") == 0 && i + 1 < argc)
             orderCount = std::stoull(argv[++i]);
@@ -249,9 +260,25 @@ int main(int argc, char* argv[]) {
             seed = std::stoull(argv[++i]);
         else if (std::strcmp(argv[i], "--no-journal") == 0)
             runJournal = false;
+        else if (std::strcmp(argv[i], "--only") == 0 && i + 1 < argc) {
+            const char* v = argv[++i];
+            if (v[0] == '\0' || v[1] != '\0' || (v[0] != 'a' && v[0] != 'b' && v[0] != 'c')) {
+                std::fprintf(stderr, "--only takes exactly one of: a, b, c (got \"%s\")\n", v);
+                return 2;
+            }
+            onlyPath = v[0];
+        }
         else if (std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: HonestBenchmark [--orders N] [--warmup N] [--seed S] [--no-journal]\n");
+            std::printf("Usage: HonestBenchmark [--orders N] [--warmup N] [--seed S]\n"
+                        "                       [--no-journal] [--only a|b|c]\n\n"
+                        "  --only a|b|c  Run exactly ONE path. Use this when wrapping the\n"
+                        "                run in `perf stat`: counters taken over all three\n"
+                        "                paths cannot afterwards be attributed to one.\n");
             return 0;
+        }
+        else {
+            std::fprintf(stderr, "unknown argument: \"%s\" (try --help)\n", argv[i]);
+            return 2;
         }
     }
 
@@ -283,15 +310,21 @@ int main(int argc, char* argv[]) {
     const auto& orders = gen.orders();
 
     // Path A
-    auto resultA = runPathA(orders, warmup);
-    printResult(resultA);
+    PathResult resultA{};
+    if (!onlyPath || onlyPath == 'a') {
+        resultA = runPathA(orders, warmup);
+        printResult(resultA);
+    }
 
     // Path B
-    auto resultB = runPathB(orders, warmup);
-    printResult(resultB);
+    PathResult resultB{};
+    if (!onlyPath || onlyPath == 'b') {
+        resultB = runPathB(orders, warmup);
+        printResult(resultB);
+    }
 
     // Path C (optional)
-    if (runJournal) {
+    if (runJournal && (!onlyPath || onlyPath == 'c')) {
         auto resultC = runPathC(orders, warmup);
         printResult(resultC);
 
@@ -305,6 +338,19 @@ int main(int argc, char* argv[]) {
         std::printf("    2. Larger batch: batch=256 reduces fdatasync frequency 4x\n");
         std::printf("    3. Page-cache only: skip fdatasync (accept data loss on crash)\n");
 
+        // Every line below is a DIFFERENCE between two paths, so it is
+        // meaningless unless both ran. Under --only the skipped path's result
+        // is value-initialised and the subtraction would print a confident
+        // number computed from a zero — the same shape of error that put Path
+        // C's fdatasync cost into Path A's published counters.
+        if (onlyPath) {
+            std::printf("\n── Overhead Breakdown (P50) ──\n");
+            std::printf("  suppressed: --only %c ran a single path; the breakdown\n",
+                        onlyPath);
+            std::printf("  is a difference between paths and needs all of them.\n");
+            std::printf("\n=======================================================\n");
+            return 0;
+        }
         std::printf("\n── Overhead Breakdown (P50) ──\n");
         int64_t complianceOverhead = static_cast<int64_t>(resultA.tracker.getP50());
         int64_t engineOverhead = static_cast<int64_t>(resultB.tracker.getP50()) -
@@ -320,6 +366,12 @@ int main(int argc, char* argv[]) {
         std::printf("  Total full-stack P50:          %lld ns\n",
                     (long long)resultC.tracker.getP50());
     } else {
+        if (onlyPath) {
+            std::printf("\n── Overhead Breakdown (P50) ──\n");
+            std::printf("  suppressed: --only %c ran a single path.\n", onlyPath);
+            std::printf("\n=======================================================\n");
+            return 0;
+        }
         std::printf("\n── Overhead Breakdown (P50) ──\n");
         int64_t complianceP50 = static_cast<int64_t>(resultA.tracker.getP50());
         int64_t engineOverhead = static_cast<int64_t>(resultB.tracker.getP50()) -

@@ -258,7 +258,26 @@ Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosm
 
 **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42 HonestBenchmark workload) takes Path A core matching to **P50 237 ns / P99 910 ns / 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO) Release build.
 
-`perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8 branch-misses/order · 152 L1-dcache-misses/order · 12,638 instructions/order.
+**`perf` counters — WITHDRAWN pending a correctly-scoped rerun.** This line
+previously read "`perf` (Path A, 50K orders seed=42): IPC 1.34 · 17.8
+branch-misses/order · 152 L1-dcache-misses/order · 12,638 instructions/order",
+and that attribution was wrong.
+
+`scripts/aws_benchmark.sh` wraps `perf stat` around the **whole HonestBenchmark
+process** and divides by the order count — its own echo line says "counters are
+whole-run totals". The profiled run passes only `--orders 50000 --seed 42`, with
+no path filter and without `--no-journal`, so a single process generates 50,000
+orders and then runs warmup plus measured passes of Path A, Path B **and Path C,
+including Path C's `fdatasync`**. Dividing that total by 50,000 and labelling it
+"Path A" charges the journal path's syscalls and cache traffic to core matching.
+
+The arithmetic gives it away: 12,638 instructions at IPC 1.34 is ~9,430 cycles,
+~3.25 µs on a 2.90 GHz part — more than twelve times the 261 ns P50 reported
+directly above. 152 L1d misses alone exceed that P50 even if every one hit L2.
+
+The counters are not restated here until they are gathered around the measured
+region alone. `HonestBenchmark --only a` now exists for that purpose; the rerun
+needs x86 Linux (the dev box is Apple Silicon and has no `perf`).
 
 ### Apple Silicon (M-series dev machine, reference)
 
@@ -272,11 +291,11 @@ The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider out-of-o
 
 ### Where the 261 ns goes (and what doesn't move it)
 
-The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change** — the P50 is **structurally bound**, not instruction-bound (17.8 branch-misses/order, 152 L1-dcache-misses/order). This cycle's branchless price-cross *did* move it, shaving 10 ns P50 / 62 ns P99 to reach 261 ns (see Optimization History in BENCHMARKS.md); next-order prefetch and the price-level arena allocator were both implemented and reverted as net-negative on this 100%-fill flow.
+The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change**. The conclusion drawn from that — that the P50 is structurally bound rather than instruction-bound — was supported by the per-order counters above, which are now withdrawn as mis-scoped. The *observation* stands (four changes, 0 ns); the *mechanism* is unproven until the counters are regathered. This cycle's branchless price-cross *did* move it, shaving 10 ns P50 / 62 ns P99 to reach 261 ns (see Optimization History in BENCHMARKS.md); next-order prefetch and the price-level arena allocator were both implemented and reverted as net-negative on this 100%-fill flow.
 
 | Cost | ns | Driver | Lever (estimated) |
 | :--- | --: | :--- | :--- |
-| Pointer chasing (intrusive list) | 80–100 | 152 L1-dcache misses/order | arena allocator (reverted — net-negative) |
+| Pointer chasing (intrusive list) | 80–100 | ~~152 L1-dcache misses/order~~ — evidence withdrawn, see the `perf` note above | arena allocator (reverted — net-negative **on a 100%-fill flow**, and on a mis-scoped counter; see BENCHMARKS.md) |
 | Branch mispredicts | 60–80 | 17.8/order, data-dependent | branchless price-cross (shipped, −10 ns P50) |
 | Irreducible work | 50–60 | price/qty math, STP, compliance | — |
 | Spectre mitigation (eIBRS) | 30–40 | kernel-enforced on this instance | not disableable here |

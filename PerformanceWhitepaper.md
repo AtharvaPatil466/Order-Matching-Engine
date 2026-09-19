@@ -68,7 +68,7 @@ Clang IR-based PGO, profiled on this same seed=42 flow, takes Path A to
 **237 ns P50 / 910 ns P99 / 3.10M ops/s** — the headline figure; the table above
 is the standard non-PGO Release build.
 
-`perf` (Path A, 50K orders seed=42):
+`perf` (**mis-scoped — see the correction below**, 50K orders seed=42):
 
 | Counter | Per-order mean |
 |---|---:|
@@ -77,17 +77,31 @@ is the standard non-PGO Release build.
 | L1-dcache-misses / order | 152 |
 | Instructions / order | 12,638 |
 
-These figures are measured across the full benchmark harness — including loop
-overhead, timer calls, and the order-flow generator — and reflect per-order
-means across all 50,000 orders. They are not P50 measurements. The apparent
-contradiction with the 261 ns P50 resolves as follows: the P50 captures the
-common case of a single-level match with predictable cache state, while the
-per-order mean instruction count and miss rate include the tail of multi-level
-sweep events. Those events are infrequent but expensive — each touching
-additional `FlatPriceMap` slots and `IntrusiveList` nodes — and pull the mean
-above what the P50 alone implies. The statement that "the P50 is structurally
-bound by L1 misses and branch mispredicts" refers to the miss and mispredict
-patterns observed across the distribution, not to the P50 order specifically.
+**These figures are withdrawn. The table above is retained only so the
+correction has something to point at; do not cite the numbers.**
+
+They were labelled "Path A" and they are not Path A. `scripts/aws_benchmark.sh`
+runs `perf stat` around the **entire HonestBenchmark process** — its own echo
+line says "counters are whole-run totals" — passing only `--orders 50000
+--seed 42`. No path filter, and no `--no-journal`. So one process generates
+50,000 orders and then runs warmup plus measured passes of Path A, Path B **and
+Path C, including Path C's `fdatasync`**. Dividing that by 50,000 charges the
+journal path's syscalls and cache traffic to core matching.
+
+THE PREVIOUS PARAGRAPH HERE WAS A RATIONALISATION, AND IT IS WORTH RECORDING
+RATHER THAN DELETING. It explained the gap as the per-order mean being pulled
+above the P50 by "the tail of multi-level sweep events" — infrequent but
+expensive matches touching extra `FlatPriceMap` slots and `IntrusiveList`
+nodes. That is a real phenomenon and it is not the cause here. It cannot be:
+12,638 instructions at IPC 1.34 is ~9,430 cycles, ~3.25 µs at 2.90 GHz, against
+a 261 ns P50 — more than twelvefold. No plausible tail mass moves a mean twelve
+times its median. The honest reading is that the explanation was reasoned
+backwards from a number that had already been accepted, which is exactly the
+failure mode the rest of this document exists to avoid.
+
+A correctly-scoped rerun needs `perf stat` around the measured region alone.
+`HonestBenchmark --only a` now exists for that, and the run needs x86 Linux —
+the dev box is Apple Silicon and has no `perf`.
 
 The 261 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
 branch mispredicts + Spectre eIBRS), not instruction-bound. Note that on x86 the

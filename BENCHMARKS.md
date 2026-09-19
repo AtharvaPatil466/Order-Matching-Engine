@@ -87,7 +87,7 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 > 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO)
 > Release build.
 
-`perf` (Path A, 50K orders seed=42):
+`perf` (**mis-scoped — see the correction below**, 50K orders seed=42):
 
 | Counter | Per-order mean |
 |---|---:|
@@ -96,17 +96,31 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 | L1-dcache-misses / order | 152 |
 | Instructions / order | 12,638 |
 
-These figures are measured across the full benchmark harness — including loop
-overhead, timer calls, and the order-flow generator — and reflect per-order
-means across all 50,000 orders. They are not P50 measurements. The apparent
-contradiction with the 261 ns P50 resolves as follows: the P50 captures the
-common case of a single-level match with predictable cache state, while the
-per-order mean instruction count and miss rate include the tail of multi-level
-sweep events. Those events are infrequent but expensive — each touching
-additional `FlatPriceMap` slots and `IntrusiveList` nodes — and pull the mean
-above what the P50 alone implies. The statement that "the P50 is structurally
-bound by L1 misses and branch mispredicts" refers to the miss and mispredict
-patterns observed across the distribution, not to the P50 order specifically.
+**These figures are withdrawn. The table above is retained only so the
+correction has something to point at; do not cite the numbers.**
+
+They were labelled "Path A" and they are not Path A. `scripts/aws_benchmark.sh`
+runs `perf stat` around the **entire HonestBenchmark process** — its own echo
+line says "counters are whole-run totals" — passing only `--orders 50000
+--seed 42`. No path filter, and no `--no-journal`. So one process generates
+50,000 orders and then runs warmup plus measured passes of Path A, Path B **and
+Path C, including Path C's `fdatasync`**. Dividing that by 50,000 charges the
+journal path's syscalls and cache traffic to core matching.
+
+THE PREVIOUS PARAGRAPH HERE WAS A RATIONALISATION, AND IT IS WORTH RECORDING
+RATHER THAN DELETING. It explained the gap as the per-order mean being pulled
+above the P50 by "the tail of multi-level sweep events" — infrequent but
+expensive matches touching extra `FlatPriceMap` slots and `IntrusiveList`
+nodes. That is a real phenomenon and it is not the cause here. It cannot be:
+12,638 instructions at IPC 1.34 is ~9,430 cycles, ~3.25 µs at 2.90 GHz, against
+a 261 ns P50 — more than twelvefold. No plausible tail mass moves a mean twelve
+times its median. The honest reading is that the explanation was reasoned
+backwards from a number that had already been accepted, which is exactly the
+failure mode the rest of this document exists to avoid.
+
+A correctly-scoped rerun needs `perf stat` around the measured region alone.
+`HonestBenchmark --only a` now exists for that, and the run needs x86 Linux —
+the dev box is Apple Silicon and has no `perf`.
 
 The 261 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
 branch mispredicts + Spectre eIBRS), not instruction-bound. This cycle's
@@ -133,7 +147,7 @@ Validated on AWS c6in.metal against the same 50K/seed=42 flow:
 | Change | Result |
 |--------|--------|
 | **Branchless price-cross** | Path A −10 ns P50, −62 ns P99 |
-| **Next-order prefetch** | Implemented and **reverted** — net-negative on the 100%-fill flow (L1-dcache-misses 47→152/order): the matching loop terminates right after each fill, so the prefetched next-node cache line is never consumed |
+| **Next-order prefetch** | Implemented and **reverted** — reasoning now in doubt. The stated basis was L1-dcache-misses going 47→152/order, but that counter is the whole-process figure corrected above, dominated by Path C's journal I/O rather than by the matching loop. The mechanism given (the loop terminates right after each fill, so the prefetched line is never consumed) is plausible on a 100%-fill flow and untested on a cancel-heavy one, which is where prefetch would pay. **Re-evaluate against a scoped counter and a realistic add/cancel mix before treating this revert as settled.** |
 | **io_uring async ack (Option 1)** | Path C P99 **−32.8%** (5,312 → 3,568 ns); Path C P50 **+167 ns** — expected, since `submitOrder()` now returns before durability and the completion-reaper thread's overhead surfaces in P50 |
 | **Price-level arena allocator** | Implemented and **reverted** — net-negative on the 100%-fill benchmark flow; concept remains sound for workloads with persistent resting orders |
 

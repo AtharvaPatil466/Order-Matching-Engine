@@ -73,12 +73,32 @@ else
 fi
 
 # ─── Step 2: perf stat (L1 misses / branch misses / IPC) ────────────────────
-banner "STEP 2/4 — perf stat on HonestBenchmark"
-echo "(counters are whole-run totals over ${BENCH_ARGS[*]}; divide by 50000 for per-order)"
-"${NUMA[@]}" perf stat \
-    -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles \
-    "$BUILD_DIR/$BENCH_REL" "${BENCH_ARGS[@]}" \
-    || warn "perf stat failed (check /proc/sys/kernel/perf_event_paranoid; needs <=2 or CAP_PERFMON)"
+banner "STEP 2/4 — perf stat on HonestBenchmark (per path)"
+#
+# ONE perf RUN PER PATH, NOT ONE RUN OVER ALL OF THEM.
+#
+# This step used to wrap perf stat around a single invocation carrying no path
+# filter and no --no-journal, so one process generated the orders and then ran
+# warmup plus measured passes of Path A, Path B AND Path C — fdatasync included
+# — and the totals were divided by the order count and published as "Path A".
+# That put the journal path's syscalls and cache traffic into the core-matching
+# figures, and the resulting 12,638 instructions/order at IPC 1.34 implied
+# ~3.25us per order against a measured 261ns P50. A counter taken over three
+# paths cannot be attributed to one of them afterwards, so the paths are
+# separated here at run time.
+#
+# Counters are still whole-PROCESS totals for the path that ran: order
+# generation, the timing loop and teardown are all included. Treat them as an
+# upper bound on that path, not as its cost.
+for _p in a b c; do
+    echo ""
+    echo "--- perf stat: path ${_p} (whole-process totals for THIS path only;"
+    echo "    divide by the order count for a per-order upper bound) ---"
+    "${NUMA[@]}" perf stat \
+        -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles \
+        "$BUILD_DIR/$BENCH_REL" "${BENCH_ARGS[@]}" --only "${_p}" \
+        || warn "perf stat failed for path ${_p} (check /proc/sys/kernel/perf_event_paranoid; needs <=2 or CAP_PERFMON)"
+done
 
 # ─── Step 3: five NUMA-pinned runs, all three paths ─────────────────────────
 banner "STEP 3/4 — five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, paths A/B/C)"

@@ -97,12 +97,30 @@ int main() {
         size_t failures = 0;
         size_t curExpectedEntries = entriesBefore;
 
+        size_t shrinkingRewrites = 0;
+
         for (int run = 0; run < kRewritesPerSeed; ++run) {
-            // Each rewrite creates a fresh journal at the same path,
-            // populated with run+kEntriesPerRewrite entries (so each
-            // successful rewrite produces a distinguishably-different
-            // file than the prior state).
-            int targetCount = kEntriesPerRewrite + run + 1;
+            // Each rewrite creates a fresh journal at the same path with a
+            // record count that differs from the prior state, so a successful
+            // rewrite is always distinguishable from a rolled-back one.
+            //
+            // THE COUNT ALTERNATES BECAUSE A REAL CHECKPOINT SHRINKS THE FILE.
+            // prepareRewrite writes one Snapshot record per RESTING order,
+            // which is almost always far fewer records than the history it
+            // replaces — a book that has been trading all morning has orders
+            // in the hundreds and a journal in the hundreds of thousands. This
+            // soak previously used a monotonically increasing target, so all
+            // 90 rewrites GREW the file and the shrink case — the production
+            // shape — was never once exercised.
+            //
+            // That gap is not hypothetical. JournalFollower tracked its
+            // position as an index into a re-read vector, which is correct for
+            // every replacement that grows and silently freezes forever on one
+            // that shrinks (fixed in 7832e89). A rewrite soak that only ever
+            // grows cannot catch that class of bug in any consumer.
+            int targetCount = (run % 2 == 0)
+                                  ? (kEntriesPerRewrite / 4) + run  // shrink
+                                  : kEntriesPerRewrite + run + 1;   // grow
 
             // Capture the pre-call state so we can verify rollback if
             // the call fails.
@@ -118,10 +136,14 @@ int main() {
 
             if (ok) {
                 ++successes;
-                // After success the file should reflect the new content.
+                // After success the file should reflect the new content —
+                // including when that content is SMALLER than what it replaced.
                 size_t n = countValidEntries(path);
                 assert(n == static_cast<size_t>(targetCount) &&
                        "successful rewrite must leave new content on disk");
+                if (static_cast<size_t>(targetCount) < curExpectedEntries) {
+                    ++shrinkingRewrites;
+                }
                 curExpectedEntries = static_cast<size_t>(targetCount);
             } else {
                 ++failures;
@@ -148,12 +170,23 @@ int main() {
                    "temp file leaked after rewriteAtomically");
         }
 
+        // The point of the alternating target: prove the soak actually
+        // produced the production shape rather than only ever growing. Without
+        // this the alternation could be edited away — or defeated by an
+        // unlucky failure run — and nothing would notice, which is exactly how
+        // the coverage was lost the first time. Generous lower bound: under
+        // fault injection a shrink only counts when the rewrite BEFORE it also
+        // succeeded, so the expected count is a fraction of the even runs.
+        assert(shrinkingRewrites > 0 &&
+               "no rewrite ever shrank the file — the soak is not exercising "
+               "the shape a real checkpoint produces");
+
 #ifdef OB_ENABLE_FAULT_INJECTION
         uint64_t renameFires = fi.activations("journal.checkpoint.rename_fail");
-        std::printf("seed=0x%llx: rewrites=%d ok=%zu failed=%zu "
+        std::printf("seed=0x%llx: rewrites=%d ok=%zu failed=%zu shrank=%zu "
                     "rename_fail fires=%llu\n",
                     static_cast<unsigned long long>(seed),
-                    kRewritesPerSeed, successes, failures,
+                    kRewritesPerSeed, successes, failures, shrinkingRewrites,
                     static_cast<unsigned long long>(renameFires));
         // 40% × 30 trials ≈ 12 expected fires; lower-bound generously.
         assert(renameFires > 3 && "rename_fail never fired — wiring broken");

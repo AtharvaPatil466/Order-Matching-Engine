@@ -2,13 +2,13 @@
 
 > **C++20 Order Matching Engine** | 93 headers | 14 source files | 103 test files | 524 CTest targets
 >
-> A C++20 low-latency matching engine drawing on institutional exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon) — with horizontal scalability.
+> A C++20 low-latency matching engine drawing on exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon). Thread-per-symbol partitioning is designed for horizontal scaling; **no scaling curve has been measured**, so treat that as an architectural property rather than a demonstrated one.
 
 ---
 
 ## 1. Executive Summary
 
-This is a C++20 low-latency order matching engine with institutional-grade architecture drawing on exchange design principles. It implements O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants, cross-host log replication, and a complete operational stack including config management, webhook alerting, Prometheus metrics, and Docker deployment.
+This is a C++20 low-latency order matching engine drawing on exchange design principles. It implements O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants, cross-host log replication, and an operational stack including config management, Prometheus metrics, and Docker deployment. (Webhook alerting is implemented but **cannot deliver**: `AlertDispatcher` has no TLS client, so `addWebhook()` refuses any `https://` URL — which is every endpoint worth configuring. See §11.)
 
 ### Codebase Statistics
 
@@ -170,7 +170,7 @@ A self-contained quantitative research layer that runs against the live matching
 
 ### BCS Latency-Arms-Race Study (`bcs_research/`)
 
-A separate Python research layer that drives the verified C++ engine through a pybind11 bridge (`bcs_engine`) to test the Budish–Cramton–Shim theory of the HFT arms race experimentally. Because the matching core is TLA+-verified, emergent arms-race dynamics are attributable to agent incentives rather than to matcher error.
+A separate Python research layer that drives the verified C++ engine through a pybind11 bridge (`bcs_engine`) to test the Budish–Cramton–Shim theory of the HFT arms race experimentally. The engine is the same one specified in TLA+, but that is **not** a guarantee that observed dynamics are free of matcher error: TLA+ checks the *model*, and the C++ is not the model. Without a refinement mapping or trace validation — logging the implementation's state transitions and checking them against the spec — model-checking says nothing about the binary the experiments actually run. What supports the results instead is ordinary and weaker: the engine's own differential and property tests, and the fact that every qualitative finding survives recalibration. An earlier version of this line claimed the dynamics were "attributable to agent incentives rather than to matcher error" on the strength of the TLA+ work alone; that inference does not hold.
 
 | Component | Purpose |
 |-----------|---------|
@@ -180,9 +180,9 @@ A separate Python research layer that drives the verified C++ engine through a p
 | `experiments/` | Exps 1–4: welfare transfer, latency sweep, HFT-count sweep, batch-auction remedy — plus `run_calibrated.py` |
 | `calibration/` | Gap-safe moment extraction from live BTCUSDT-perp order flow and method-of-moments inversion with fill-rate correction |
 | `analysis/` | Figure generation and the Hawkes endogeneity diagnostic |
-| `paper/bcs_paper_draft.md` | The write-up (31 pp., 17.4k words — published on SSRN #6994722) |
+| `paper/bcs_paper_draft.md` | The write-up (31 pp., 17.4k words — **preprint** posted to SSRN #6994722; not peer reviewed) |
 
-Each experiment is reported twice: at a pre-registered operating point chosen for mechanism clarity, and re-run at environment parameters fitted to 27 days of Binance BTCUSDT-perpetual order flow (37.0M trades, 4.16M book snapshots). Every qualitative finding survives calibration. The calibration also supplies the study's only external check on magnitude: normalised by traded notional, HFT rent is 0.125 bp at the operating point and 4.42 bp calibrated, bracketing the ≈0.4 bp latency-arbitrage tax Aquilina, Budish and O'Neill (2022) measure on real exchange message data.
+Each experiment is reported twice: at a pre-registered operating point chosen for mechanism clarity, and re-run at environment parameters fitted to 27 days of Binance BTCUSDT-perpetual order flow (37.0M trades, 4.16M book snapshots). Every qualitative finding survives calibration. The calibration also supplies the study's only external check on magnitude: normalised by traded notional, HFT rent is 0.125 bp at the operating point and 4.42 bp calibrated, spanning the ≈0.4 bp latency-arbitrage tax Aquilina, Budish and O'Neill (2022) measure on real exchange message data. This is **consistent with, but not a discriminating test of**, that figure: 0.125–4.42 bp is a 35× interval, and a wide interval containing the target is weak evidence — a model predicting 0.05–40 bp would "bracket" it too. It is reported because it is the only external magnitude check available, not because it is a strong one.
 
 Two results are stated as conditional rather than calibrated. The calibrated rent is an upper bound, because a single latency-disadvantaged maker has no competitor to replenish a cleared quote and so absorbs the entire race. And the *incidence* of the transfer turns on a snipe-to-quote size ratio no public feed identifies: at the operating point's ratio the maker bears the loss, while at a ratio of 0.024 the maker's PnL delta is positive for small HFT counts and noise traders bear it instead.
 
@@ -311,13 +311,30 @@ Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reorder
 | **SBE** | **NewOrderV1 encode (32B)** | **1.0** | **1015** |
 | **SBE** | **NewOrderV1 decode (32B)** | **0.5** | **2128** |
 
+**Read these as throughput ceilings, not per-message costs.** 0.5 ns is ~1.45
+cycles at 2.9 GHz, which is not the latency of decoding a message — it is what
+a tight loop achieves over an L1-resident buffer when the CPU can overlap
+successive iterations. The work is real (`benchmarks/BinaryCodecBenchmark.cpp`
+applies `doNotOptimize`/`clobber` inside every loop, so nothing is eliminated),
+but a decode of a message that just arrived from the network — cold line,
+unpredictable branch — will not hit this figure.
+
+The OUCH row is ~325 cycles for 49 bytes and looks anomalous next to the
+others. It is not: OUCH carries **ASCII-decimal** fields on the wire, so its
+encode cost includes integer-to-string formatting, while SBE uses native-endian
+binary and does none. The benchmark prints this in its own notes. The table
+compares three protocols doing genuinely different work, not one implementation
+outperforming another.
+
 ---
 
 ## 9. Verification & Testing
 
 ### Test Suite — 102 Executables, 524 CTest Targets
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 102 test executables and 524 CTest targets. Key mechanisms:
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 102 test executables and 524 CTest targets.
+
+**The count is not the claim, and it should not be read as one.** There are no line- or branch-coverage figures here and no mutation testing, so the number measures how many test binaries exist, not how much behaviour they pin. This project has repeated evidence that the two diverge: every journal test was single-symbol, which is precisely how the cancel-routing defect survived; a follower comparator checked 6 of 16 order fields, so a fix that dropped ten of them would have gone green; the checkpoint soak ran 90 rewrites that all *grew* the file, never once producing the shape a real checkpoint makes; and eight test functions were defined and never called. All four are fixed, and all four were inside that count while it was being quoted. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
 - **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.

@@ -1444,8 +1444,12 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         // policy, or a full batch), in which case releaseThrough has already
         // run for this ordinal and commitOrder releases immediately.
         durabilityGate_.commitOrder(appendOrdinal);
-        if (durabilityGate_.enabled() && durableEntries_ >= appendOrdinal)
-            durabilityGate_.releaseThrough(durableEntries_);
+        if (durabilityGate_.enabled()) {
+            const uint64_t durable = durableEntries_.load(std::memory_order_acquire);
+            if (durable >= appendOrdinal) {
+                durabilityGate_.releaseThrough(durable);
+            }
+        }
         maybeTriggerAutoCheckpoint();
     } else {
         // No journal entry — a reject, or journalling is off. There is nothing
@@ -1560,10 +1564,28 @@ bool MatchingEngine::enableDurableClientAcks(bool on) {
         }
     });
 
-    durableEntries_ = journal_->entriesAppended();
+    durableEntries_.store(journal_->entriesAppended(), std::memory_order_relaxed);
+    // The counter is atomic because Journal's io_uring path reaps completions
+    // on its own thread and fires onDurable_ from there — independently of
+    // async_, since the ring is selected by SyncPolicy, not by engine mode. The
+    // previous non-atomic `durableEntries_ += n` was therefore a genuine race
+    // against processOrder's read, reachable today.
+    //
+    // The drain stays HERE rather than moving to the order-processing thread.
+    // I tried moving it and DurableAckTest caught the reason within seconds:
+    // durability becomes true at moments when no order is being processed — an
+    // explicit flush(), a later order filling the batch, a checkpoint — and a
+    // drain that only runs inside processOrder leaves those events held until
+    // some unrelated order happens to arrive. On an idle book, that is forever.
+    //
+    // Which is the real shape of the async problem: a deferred drain needs a
+    // thread that notices durability with nothing else going on. That, plus
+    // one gate per concurrently-processing thread (the capture model holds a
+    // single in-flight order), is what enabling async actually requires.
     journal_->setOnDurable([this](size_t n) {
-        durableEntries_ += n;
-        durabilityGate_.releaseThrough(durableEntries_);
+        durableEntries_.fetch_add(n, std::memory_order_release);
+        durabilityGate_.releaseThrough(
+            durableEntries_.load(std::memory_order_acquire));
     });
     durabilityGate_.setEnabled(true);
     return true;

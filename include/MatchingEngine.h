@@ -511,7 +511,10 @@ private:
     std::atomic<bool> running_{false};
     std::unique_ptr<Journal> journal_;
     DurabilityGate           durabilityGate_;
-    uint64_t                 durableEntries_{0};  // running total reported durable
+    // Atomic because Journal's io_uring path fires onDurable_ from its reaper
+    // thread. The callback now only publishes here; draining the gate is the
+    // order-processing thread's job. See enableDurableClientAcks.
+    std::atomic<uint64_t>    durableEntries_{0};  // running total reported durable
     std::atomic<bool> booksFrozen_{false};
     // P3-6: set by gracefulShutdown() to refuse NEW orders while draining.
     // Reset on start()/startAsync() so an engine can be restarted in-process.

@@ -4,6 +4,73 @@
 **Branch:** bcs-research-phase1
 **Type:** Read-only audit — no code was modified.
 
+> ## ⚠️ STATUS: HISTORICAL SNAPSHOT — DO NOT READ THE TABLES BELOW AS CURRENT STATE
+>
+> **Last reconciled against the tree: 2026-09-19.**
+>
+> Everything from "## Method" down is the audit exactly as it was written on
+> 2026-06-27 and has deliberately NOT been edited, so the original findings stay
+> quotable. Much of it has since been fixed. A stale audit read as a live one is
+> worse than no audit: it sends people to re-fix closed findings and, worse,
+> lends false confidence that anything *absent* from it is fine.
+>
+> **All 7 Criticals are closed.** Verified individually against the tree on the
+> reconcile date, not taken on trust:
+>
+> | # | Finding | Now |
+> |---|---------|-----|
+> | 1 | Notional overflow bypasses the risk limit | Fixed — `orderNotional()` (`Types.h:204`) returns `__int128`; `OrderBook.cpp:237` and `HierarchicalRiskManager.cpp:53` both compare in that width |
+> | 2 | Trailing-stop underflow | Fixed — guarded at both sites: `OrderBook.cpp:723` and `:2129` clamp to 0 when `trailAmount > trailRefPrice` |
+> | 3 | Ack-before-fsync | Fixed — `onCommit_` fires only under `if (durable && ...)` (`Journal.h:737`), after the durability barrier |
+> | 4 | MIT-cancel use-after-free | Fixed — `untrackOrder()` (`OrderBook.cpp:1674`) handles `MIT` alongside `Stop`/`StopLimit`; regression test in `tests/CriticalFixesTest.cpp` |
+> | 5 | Per-fill virtual dispatch | Mitigated — fills are batched and flushed once (`OrderBook.cpp:1030-1045`) behind a `hasTradeListener_` guard, instead of two vtable calls per fill |
+> | 6 | MoldUDP64 infinite re-request loop | Fixed — retransmits now route through `feedPacket`, which advances `nextExpectedSeq_` (`MoldUDP64.h:299`) |
+> | 7 | `shared_mutex` write-lock per order | Fixed — `bookLock_` is a plain `std::mutex` (`OrderBook.h:721`), with the rationale recorded at the declaration |
+>
+> **The Highs, Mediums and Lows have NOT been re-verified one by one.** Many are
+> closed; assume none of them are until you check the specific line. Treat every
+> table below as a lead, not a status.
+>
+> ### One finding below is actively wrong, not merely stale
+>
+> Section 1(c) grades `include/JournalFollower.h:127-141` **Medium**, for reading
+> a partially-written final entry. That was the one thing in that file that was
+> already correct: `readAll` reads whole fixed-size records and drops a short or
+> CRC-failing tail, and it is covered by `testTornTailRead`.
+>
+> Two real defects in the same file went unfound, both worse than the one
+> reported — which is the useful lesson here, and the reason this banner exists
+> rather than a quiet edit to that row:
+>
+> * **The follower went permanently deaf at the first checkpoint.** It tracked
+>   progress as a positional index into a re-read vector, on the stated premise
+>   that "the journal is append-only". True of `appendEntry`, false of
+>   `commitRewrite`, which `rename(2)`s a *smaller* file over the same path. The
+>   cursor then pointed past the end and froze forever, while `appliedCount()`
+>   went on reporting a plausible number. Checkpoints fire automatically at 250k
+>   entries. Fixed in `7832e89` by content-based stream identity.
+> * **The `Snapshot` branch called the 6-argument `addOrder`,** dropping ten
+>   fields the journal records faithfully — so a checkpoint turned an iceberg,
+>   GTD, pegged or stop-limit order into a plain GTC limit on the standby. Not
+>   degradation; corruption, and mostly invisible until promotion. Fixed in the
+>   same commit.
+>
+> Both sat in a file the audit had already looked at and graded. The audit's own
+> stated method — reviewers scoped by dimension — is the likeliest reason: nobody
+> owned "does this file's own claimed contract hold against the rest of the
+> codebase".
+>
+> ### Known-open, found after this audit and not in it
+>
+> * `JournalFollower` ignores `symbolId` on every branch, so a multi-symbol
+>   leader collapses into a single follower book.
+> * `JournalFollower::tickOnce` re-reads and re-CRCs the entire file on every
+>   1 ms poll.
+> * H18: `AlertDispatcher`, `CapacityMonitor` and `IncidentLogger` are
+>   unit-tested and constructed in zero production paths.
+> * C4 async durable acks: documented as queued, deliberately not built — see
+>   `docs/` and commit `8a2982c`.
+
 ## Method
 
 Five parallel read-only reviewers across the four audit dimensions (correctness split
@@ -63,7 +130,7 @@ re-request loop (`MoldUDP64.h:283`).
 | `include/ReplicationProtocol.h:815-822` | High | Live `JournalEntry` messages in flight before the backup processes `SnapshotStart` can apply ahead of the snapshot (Cancel-before-Insert); the `inSnapshot_` guard only closes the window after `SnapshotStart` is processed. |
 | `include/ReplicationProtocol.h:700-705` | High | Backup computes lease validity against its **own** clock (`grantedAtMs = nowMs()` at accept); clock skew > `leaseDurationMs` lets it promote while the primary is alive → split-brain. |
 | `include/ReplicationProtocol.h:393-399` | Medium | `sendSeq_` `fetch_add` happens before `sendMu_`, so wire `sequenceNum` can go out of order and is useless for gap detection. |
-| `include/JournalFollower.h:127-141` | Medium | Follower re-reads via a fresh `Journal(path).readAll` with no advisory lock; can read a partially-written final entry (CRC-stops, silently truncating the view) — untested under fault injection. |
+| `include/JournalFollower.h:127-141` | Medium | Follower re-reads via a fresh `Journal(path).readAll` with no advisory lock; can read a partially-written final entry (CRC-stops, silently truncating the view) — untested under fault injection. **⚠️ INCORRECT — see the status banner at the top. This behaviour was already safe and tested; two worse defects in this same file went unfound.** |
 | `include/ReplicationProtocol.h:628-682` | Low | `startAsPrimary` leaks heartbeat + receive threads if `lease_.tryAcquire()` returns false after they're started. |
 
 ### (d) Order-type edge cases with no test

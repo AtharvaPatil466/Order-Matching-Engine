@@ -23,8 +23,30 @@ add_executable(UnitTests
     RejectReasonContractTest.cpp)
 target_link_libraries(UnitTests PRIVATE OrderMatcher gtest_main)
 
+# DISCOVERY_TIMEOUT 60 on every gtest_discover_tests call below (CMake's
+# default is 5s). Discovery runs the test binary with --gtest_list_tests AT
+# BUILD TIME, and under a parallel build that competes with 8 compiler
+# processes for CPU. When it times out the build FAILS — and it fails looking
+# nothing like a timeout:
+#
+#     CMake Error ... GoogleTestAddTests.cmake:381 (message):
+#       Error running test executable.
+#       Result: Process terminated due to timeout
+#     make[2]: *** [tests/CalibrationPipelineTest] Error 1
+#
+# no "error:" anywhere in the log, and the target deleted so the next build
+# recompiles it. Observed on three different targets in one afternoon
+# (CalibrationPipelineTest, SignalGeneratorTest, OptimalExecutionTest), which
+# is what identifies it as load-dependent rather than one hanging binary: a
+# bare re-run of the identical command succeeds.
+#
+# 60s is generous because the cost of being wrong is asymmetric. A slow
+# discovery costs seconds; a spurious failure reddens a CI lane for reasons
+# unrelated to the change under test, and a lane that goes red at random is
+# a lane people stop reading.
 include(GoogleTest)
 gtest_discover_tests(UnitTests
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
 
@@ -59,6 +81,7 @@ set_tests_properties(StressTest PROPERTIES TIMEOUT 120 LABELS "project;stress")
 add_executable(BenchmarkRegression BenchmarkRegression.cpp)
 target_link_libraries(BenchmarkRegression PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(BenchmarkRegression
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     # RUN_SERIAL: latency thresholds are calibrated single-threaded/uncontended,
     # so these must not run concurrently with other ctest tests under -j — CPU
@@ -186,6 +209,7 @@ add_executable(RiskControlsTest RiskControlsTest.cpp)
 target_link_libraries(RiskControlsTest PRIVATE OrderMatcher gtest_main)
 enable_assertions(RiskControlsTest)
 gtest_discover_tests(RiskControlsTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;risk")
 
@@ -616,12 +640,14 @@ set_tests_properties(AuctionSessionTest PROPERTIES TIMEOUT 30
 add_executable(StpSemanticsTest StpSemanticsTest.cpp)
 target_link_libraries(StpSemanticsTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(StpSemanticsTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;matching\;stp")
 
 add_executable(CriticalFixesTest CriticalFixesTest.cpp)
 target_link_libraries(CriticalFixesTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(CriticalFixesTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;correctness")
 
@@ -700,6 +726,7 @@ set_tests_properties(ProtocolVersioningTest PROPERTIES TIMEOUT 30
 add_executable(ShadowModeTest ShadowModeTest.cpp)
 target_link_libraries(ShadowModeTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ShadowModeTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;shadow\;integration")
 
@@ -708,6 +735,7 @@ gtest_discover_tests(ShadowModeTest
 add_executable(FixValidationTest FixValidationTest.cpp)
 target_link_libraries(FixValidationTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(FixValidationTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;fix\;validation")
 
@@ -723,6 +751,7 @@ set_tests_properties(ContingencyManagerTest PROPERTIES TIMEOUT 30
 add_executable(ImpactModelTest TestImpactModel.cpp)
 target_link_libraries(ImpactModelTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ImpactModelTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;impact")
 
@@ -730,6 +759,7 @@ gtest_discover_tests(ImpactModelTest
 add_executable(SimulationTest TestSimulation.cpp)
 target_link_libraries(SimulationTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(SimulationTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;simulation")
 
@@ -737,6 +767,7 @@ gtest_discover_tests(SimulationTest
 add_executable(TestResearchHarness TestResearchHarness.cpp)
 target_link_libraries(TestResearchHarness PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(TestResearchHarness
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;research\;unit")
 
@@ -744,6 +775,7 @@ gtest_discover_tests(TestResearchHarness
 add_executable(TestMicrostructureMetrics TestMicrostructureMetrics.cpp)
 target_link_libraries(TestMicrostructureMetrics PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(TestMicrostructureMetrics
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;research\;unit")
 
@@ -751,6 +783,7 @@ gtest_discover_tests(TestMicrostructureMetrics
 add_executable(OptimalExecutionTest TestOptimalExecution.cpp)
 target_link_libraries(OptimalExecutionTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(OptimalExecutionTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;execution")
 
@@ -758,18 +791,21 @@ gtest_discover_tests(OptimalExecutionTest
 add_executable(ExecutionAnalyticsTest TestExecutionAnalytics.cpp)
 target_link_libraries(ExecutionAnalyticsTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ExecutionAnalyticsTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;execution")
 
 add_executable(OrderFlowAnalyticsTest TestOrderFlowAnalytics.cpp)
 target_link_libraries(OrderFlowAnalyticsTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(OrderFlowAnalyticsTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(ResearchSerializerTest TestResearchSerializer.cpp)
 target_link_libraries(ResearchSerializerTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ResearchSerializerTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;serializer")
 
@@ -777,36 +813,42 @@ gtest_discover_tests(ResearchSerializerTest
 add_executable(VPINTest TestVPINCalculator.cpp)
 target_link_libraries(VPINTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(VPINTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(SpreadDecompositionTest TestSpreadDecomposition.cpp)
 target_link_libraries(SpreadDecompositionTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(SpreadDecompositionTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(CalibrationPipelineTest TestCalibrationPipeline.cpp)
 target_link_libraries(CalibrationPipelineTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(CalibrationPipelineTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;backtest")
 
 add_executable(BacktestEngineTest TestBacktestEngine.cpp)
 target_link_libraries(BacktestEngineTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(BacktestEngineTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;backtest")
 
 add_executable(SignalGeneratorTest TestSignalGenerator.cpp)
 target_link_libraries(SignalGeneratorTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(SignalGeneratorTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;signals")
 
 add_executable(ResearchDashboardTest TestResearchDashboard.cpp)
 target_link_libraries(ResearchDashboardTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(ResearchDashboardTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;dashboard")
 
@@ -815,6 +857,7 @@ add_executable(PaperTraderTest TestPaperTrader.cpp)
 target_link_libraries(PaperTraderTest PRIVATE OrderMatcher gtest_main)
 target_include_directories(PaperTraderTest PRIVATE include)
 gtest_discover_tests(PaperTraderTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;quant\;paper-trading")
 
@@ -822,6 +865,7 @@ gtest_discover_tests(PaperTraderTest
 add_executable(MocLocTest TestMocLocOrders.cpp)
 target_link_libraries(MocLocTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(MocLocTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;auction\;moc\;loc")
 
@@ -829,6 +873,7 @@ gtest_discover_tests(MocLocTest
 add_executable(LmmDmmTest TestLmmDmmAllocation.cpp)
 target_link_libraries(LmmDmmTest PRIVATE OrderMatcher gtest_main)
 gtest_discover_tests(LmmDmmTest
+    DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;allocation\;dmm")
 

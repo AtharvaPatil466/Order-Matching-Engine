@@ -14,7 +14,14 @@
 //
 // The primary journals operations locally, then ships the journal entries
 // to backup(s) via TCP. On primary failure, a backup that holds the latest
-// epoch + lease can promote itself via JournalFollower::promote().
+// epoch + lease promotes itself by firing promotionCallback_ (see the
+// skew-robust gate below); src/main.cpp wires that to
+// MatchingEngine::setReplayModeAllBooks(false).
+//
+// NOT JournalFollower::promote(), which this comment used to name. That is a
+// different mechanism — a standby tailing the journal FILE rather than
+// receiving entries over this wire — and nothing in src/ or tools/ constructs
+// one, so it is not reachable from any shipped binary.
 //
 // Wire format for replication:
 //   [ReplicationHeader (25B)] [payload (variable)]

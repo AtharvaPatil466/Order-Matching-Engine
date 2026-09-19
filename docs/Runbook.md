@@ -208,8 +208,21 @@ kill -USR1 <pid>  # triggers checkpoint if wired
 If the primary fails and a backup is running:
 1. The backup's `HeartbeatMonitor` detects the failure (within `heartbeat_timeout_ms`)
 2. The backup acquires a new `LeaderLease` with a higher epoch
-3. The backup calls `JournalFollower::promote()` to become writable
+3. The backup promotes **itself** — no operator action. `ReplicationCoordinator`
+   fires its promotion callback, which `src/main.cpp` wires to
+   `engine.setReplayModeAllBooks(false)`, and the process logs
+   `[Replication] PROMOTED to primary — exiting replay mode`. That log line is
+   what to grep for to confirm promotion happened.
 4. Clients reconnect to the backup's gateway port
+
+> This step previously said "the backup calls `JournalFollower::promote()`".
+> That was wrong in two ways, and both matter during an incident: no shipped
+> binary constructs a `JournalFollower` at all (it is tailed-file replication,
+> a separate mechanism from the TCP log shipping that `OB_NODE_ROLE=backup`
+> actually starts), and promotion here is automatic rather than something an
+> operator invokes. Anyone following the old text would have gone looking for
+> a method they could not reach, while the thing they needed had already
+> happened.
 
 ---
 

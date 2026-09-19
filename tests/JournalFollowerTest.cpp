@@ -33,6 +33,14 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// Field-complete by design. This used to compare six fields — id,
+// participantId, side, price, remainingQty, type — which made it blind to
+// exactly the ten the journal's Snapshot record carries and the follower used
+// to drop on restore (timeInForce, expiryTime, stopPrice, stopLimitPrice,
+// displayQty, pegType, pegOffset, trailAmount, minQty, hidden). A GTD iceberg
+// coming back as a plain GTC limit compared EQUAL. Every convergence assertion
+// in this file runs through here, so the comparator has to see everything a
+// JournalEntry can carry, or "converged" means less than it claims.
 struct OrderSnapshot {
     OrderId id;
     ParticipantId participantId;
@@ -40,10 +48,26 @@ struct OrderSnapshot {
     Price price;
     Quantity remainingQty;
     OrderType type;
+    TimeInForce timeInForce;
+    uint64_t expiryTime;
+    Price stopPrice;
+    Price stopLimitPrice;
+    Quantity displayQty;
+    PegType pegType;
+    Price pegOffset;
+    Price trailAmount;
+    Quantity minQty;
+    bool hidden;
+
     bool operator==(const OrderSnapshot& o) const {
         return id == o.id && participantId == o.participantId &&
                side == o.side && price == o.price &&
-               remainingQty == o.remainingQty && type == o.type;
+               remainingQty == o.remainingQty && type == o.type &&
+               timeInForce == o.timeInForce && expiryTime == o.expiryTime &&
+               stopPrice == o.stopPrice && stopLimitPrice == o.stopLimitPrice &&
+               displayQty == o.displayQty && pegType == o.pegType &&
+               pegOffset == o.pegOffset && trailAmount == o.trailAmount &&
+               minQty == o.minQty && hidden == o.hidden;
     }
 };
 
@@ -56,7 +80,10 @@ std::vector<OrderSnapshot> snapshotBook(const OrderBook& book) {
     for (size_t i = 0; i < n; ++i) {
         const Order* o = ptrs[i];
         out.push_back({o->id, o->participantId, o->side, o->price,
-                       o->remainingQty, o->type});
+                       o->remainingQty, o->type, o->timeInForce, o->expiryTime,
+                       o->stopPrice, o->stopLimitPrice, o->displayQty,
+                       o->pegType, o->pegOffset, o->trailAmount, o->minQty,
+                       o->isHidden});
     }
     std::sort(out.begin(), out.end(),
               [](auto& a, auto& b) { return a.id < b.id; });
@@ -347,6 +374,213 @@ void testTornTrailingRecord() {
                 "dropped; only intact entries applied\n");
 }
 
+// ─── Checkpoint (journal replacement) ───────────────────────────────────────
+//
+// A checkpoint REPLACES the journal: one Snapshot record per resting order,
+// renamed over the old file and renumbered from sequence 1. Everything below
+// exercises the follower across that event.
+
+namespace {
+
+// Mirrors MatchingEngine::checkpointInternal's snapshot writer, through the
+// same Journal::rewriteAtomically (prepare .tmp -> rename) path the engine
+// uses, so the follower sees exactly the file swap production produces.
+bool checkpointLeader(Journal& j, const OrderBook& leader) {
+    std::vector<Order> resting;
+    leader.forEachOrderLocked([&](const Order& o) { resting.push_back(o); });
+    return j.rewriteAtomically([&resting](Journal& snap) {
+        for (const auto& o : resting) {
+            snap.logSnapshot(o.id, o.participantId, /*sym=*/0, o.side, o.price,
+                             o.remainingQty, o.type, o.timeInForce, o.expiryTime,
+                             o.stopPrice, o.stopLimitPrice, o.displayQty,
+                             o.pegType, o.pegOffset, o.trailAmount, o.minQty,
+                             o.isHidden);
+        }
+    });
+}
+
+void addBoth(Journal& j, OrderBook& leader, OrderId id, Side side, Price px,
+             Quantity qty) {
+    auto r = leader.addOrder(id, 1, side, px, qty, OrderType::Limit);
+    assert(std::holds_alternative<OrderId>(r));
+    j.logAddOrder(id, 1, 0, side, px, qty, OrderType::Limit);
+}
+
+// A caught-up follower must keep following after a checkpoint.
+//
+// The journal here holds MORE records than the book holds resting orders (5
+// adds + 2 cancels = 7 records, 3 resting), so the snapshot that replaces it is
+// strictly shorter than the follower's position. That is the shape that stalled
+// the positional-index follower forever: entries.size() (3, then 4) never
+// exceeded appliedCount_ (7), so it applied nothing and never moved again.
+void testCheckpointCaughtUp() {
+    auto path = tmpJournalPath("ckpt_caught_up");
+    OrderBook leader(0);
+    OrderBook follower(0);
+
+    Journal j(path, Journal::SyncPolicy::Immediate, 1);
+    JournalFollower f(path, follower);
+
+    for (OrderId id = 1; id <= 5; ++id) {
+        addBoth(j, leader, id, Side::Buy, Price(990 + int(id)), 10);
+    }
+    for (OrderId id : {OrderId{4}, OrderId{5}}) {
+        leader.cancelOrder(id);
+        j.logCancelOrder(id, 0);
+    }
+    j.flush();
+
+    f.poll();
+    assert(snapshotBook(leader) == snapshotBook(follower) &&
+           "follower must converge before the checkpoint");
+    const uint64_t appliedBefore = f.appliedCount();
+    assert(appliedBefore == 7 && "7 records written pre-checkpoint");
+
+    assert(checkpointLeader(j, leader) && "checkpoint must commit");
+
+    // Post-checkpoint traffic the follower has to pick up.
+    addBoth(j, leader, 6, Side::Sell, 1010, 7);
+    j.flush();
+
+    f.poll();
+    assert(follower.getOrder(6) != nullptr &&
+           "follower stalled: post-checkpoint entry never applied");
+    assert(snapshotBook(leader) == snapshotBook(follower) &&
+           "follower diverged across a checkpoint");
+    assert(f.appliedCount() == 4 &&
+           "position is relative to the current file: 3 snapshots + 1 add");
+
+    std::printf("checkpoint/caught-up: applied %llu pre-checkpoint, converged on "
+                "a %llu-record replacement\n",
+                (unsigned long long)appliedBefore,
+                (unsigned long long)f.appliedCount());
+
+    fs::remove(path);
+}
+
+// A follower that is BEHIND when the checkpoint happens must not keep stale
+// state. The leader cancels an order the follower is still holding, then
+// checkpoints, all between two polls. The snapshot describes the book AFTER
+// that cancel, so an idempotent "add what's missing" apply would fix nothing:
+// order 2 is absent from the snapshot precisely because it is gone, and the
+// follower would hold it forever. Only discarding local state and rebuilding
+// from the snapshot converges.
+void testCheckpointWhileBehind() {
+    auto path = tmpJournalPath("ckpt_behind");
+    OrderBook leader(0);
+    OrderBook follower(0);
+
+    Journal j(path, Journal::SyncPolicy::Immediate, 1);
+    JournalFollower f(path, follower);
+
+    for (OrderId id = 1; id <= 3; ++id) {
+        addBoth(j, leader, id, Side::Buy, Price(990 + int(id)), 10);
+    }
+    j.flush();
+    f.poll();
+    assert(follower.getOrder(2) != nullptr && "follower holds order 2");
+
+    // --- the follower is asleep from here ---
+    leader.cancelOrder(2);
+    j.logCancelOrder(2, 0);
+    addBoth(j, leader, 4, Side::Buy, 995, 10);
+    j.flush();
+
+    assert(checkpointLeader(j, leader) && "checkpoint must commit");
+
+    addBoth(j, leader, 5, Side::Sell, 1010, 4);
+    j.flush();
+    // --- follower wakes up ---
+
+    f.poll();
+    assert(follower.getOrder(2) == nullptr &&
+           "follower kept an order the leader cancelled before the checkpoint");
+    assert(follower.getOrder(5) != nullptr && "post-checkpoint entry missing");
+    assert(snapshotBook(leader) == snapshotBook(follower) &&
+           "follower diverged: checkpoint arrived while it was behind");
+
+    std::printf("checkpoint/behind: stale order dropped, follower rebuilt from "
+                "the snapshot (%llu records)\n",
+                (unsigned long long)f.appliedCount());
+
+    fs::remove(path);
+}
+
+// A Snapshot record carries the full order, not just the six fields a plain
+// limit needs. Restoring it through the 6-argument addOrder silently turned a
+// GTD iceberg into a plain GTC limit — no error, no reject, just an order that
+// never expires and shows its full size.
+void testSnapshotFieldFidelity() {
+    auto path = tmpJournalPath("ckpt_fidelity");
+    OrderBook leader(0);
+    OrderBook follower(0);
+
+    constexpr uint64_t kExpiry = 4'000'000'000'000'000'000ULL;  // far future
+    Journal j(path, Journal::SyncPolicy::Immediate, 1);
+    JournalFollower f(path, follower);
+
+    // GTD iceberg with a minimum execution quantity.
+    auto r1 = leader.addOrder(1, 7, Side::Buy, 1000, 100, OrderType::Limit,
+                              /*stopPrice=*/0, /*displayQty=*/10,
+                              TimeInForce::GTD, kExpiry);
+    assert(std::holds_alternative<OrderId>(r1));
+    j.logAddOrder(1, 7, 0, Side::Buy, 1000, 100, OrderType::Limit,
+                  TimeInForce::GTD, kExpiry, /*stopPrice=*/0,
+                  /*stopLimitPrice=*/0, /*displayQty=*/10);
+
+    // Hidden pegged order with a minQty.
+    auto r2 = leader.addOrder(2, 7, Side::Sell, 1010, 50, OrderType::Pegged,
+                              /*stopPrice=*/0, /*displayQty=*/0,
+                              TimeInForce::GTC, /*expiryTime=*/0,
+                              /*stopLimitPrice=*/0, PegType::PrimaryPeg,
+                              /*pegOffset=*/2, /*trailAmount=*/0,
+                              /*minQty=*/5, /*hidden=*/true);
+    assert(std::holds_alternative<OrderId>(r2));
+    j.logAddOrder(2, 7, 0, Side::Sell, 1010, 50, OrderType::Pegged,
+                  TimeInForce::GTC, 0, 0, 0, /*displayQty=*/0,
+                  PegType::PrimaryPeg, /*pegOffset=*/2, /*trailAmount=*/0,
+                  /*minQty=*/5, /*hidden=*/true);
+    j.flush();
+
+    // Replace the journal with a pure snapshot, then make the follower take a
+    // COLD path through it: it has applied nothing, so every order it ends up
+    // with came from a Snapshot record.
+    assert(checkpointLeader(j, leader) && "checkpoint must commit");
+    f.poll();
+
+    for (OrderId id : {OrderId{1}, OrderId{2}}) {
+        const Order* want = leader.getOrder(id);
+        const Order* got = follower.getOrder(id);
+        assert(want && got && "snapshot-restored order missing on the follower");
+        assert(got->timeInForce == want->timeInForce && "TIF lost");
+        assert(got->expiryTime == want->expiryTime && "expiry lost");
+        assert(got->displayQty == want->displayQty && "iceberg displayQty lost");
+        assert(got->pegType == want->pegType && "pegType lost");
+        assert(got->pegOffset == want->pegOffset && "pegOffset lost");
+        assert(got->stopPrice == want->stopPrice && "stopPrice lost");
+        assert(got->stopLimitPrice == want->stopLimitPrice &&
+               "stopLimitPrice lost");
+        assert(got->trailAmount == want->trailAmount && "trailAmount lost");
+        assert(got->minQty == want->minQty && "minQty lost");
+        assert(got->isHidden == want->isHidden && "hidden flag lost");
+        assert(got->participantId == want->participantId && "participant lost");
+        assert(got->type == want->type && "order type lost");
+        assert(got->remainingQty == want->remainingQty && "quantity lost");
+    }
+
+    // Re-applying the same snapshot must be a no-op, not a DuplicateOrderId.
+    f.poll();
+    assert(snapshotBook(leader) == snapshotBook(follower) &&
+           "re-reading an unchanged snapshot file changed the follower book");
+
+    std::printf("checkpoint/fidelity: GTD iceberg + hidden peg restored with "
+                "every field intact\n");
+
+    fs::remove(path);
+}
+
+}  // namespace
+
 int main() {
     for (uint64_t seed : {uint64_t{1}, uint64_t{0xC0FFEE}, uint64_t{0xDEADBEEF}}) {
         testSequential(seed);
@@ -354,6 +588,9 @@ int main() {
     }
     testPromotion();
     testTornTrailingRecord();
+    testCheckpointCaughtUp();
+    testCheckpointWhileBehind();
+    testSnapshotFieldFidelity();
     std::puts("JournalFollowerTest passed");
     return 0;
 }

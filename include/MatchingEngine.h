@@ -596,9 +596,58 @@ private:
     // Wait for every worker to leave workerLoop(), reporting what is still
     // running each interval. Returns once they are all out.
     void awaitWorkerExit();
+    // FALSE SHARING BETWEEN PRODUCERS AND WORKERS.
+    //
+    // These three were declared consecutively as bare 8-byte atomics, so all
+    // three landed in one 64-byte cache line — and the threads hitting them are
+    // DIFFERENT populations. Every submit does a fetch_add on submittedTotal_
+    // and nextSubmitSequence_ from a producer; every completion does a fetch_add
+    // on processedTotal_ from a worker. So each order dirties a line that the
+    // other population is also RMW-ing, on every single order.
+    //
+    // ThreadStats immediately above is already alignas(64) for exactly this
+    // reason; these three were missed.
+    //
+    // ScalingBenchmark shows dispatch cost growing ~20x from one producer to
+    // eight while aggregate dispatch throughput falls BELOW its own
+    // single-threaded value, and a starved control (2 producers, 8 workers)
+    // beating the fully-fed arm outright. That is producer-side contention, and
+    // this is the most obvious candidate for it.
+    //
+    // THE PADDING IS OFF BY DEFAULT AND THAT IS DELIBERATE. Build with
+    // -DOB_PAD_SUBMIT_COUNTERS=1 to enable it.
+    //
+    // The false sharing above is real by inspection. The BENEFIT is not
+    // measured. An A/B on this machine was inconclusive: repeated trials of the
+    // identical configuration ranged 4.7M-6.1M orders/s, so the effect is well
+    // inside run-to-run variance on an 11-core Apple Silicon box with a 41 ns
+    // clock. Dispatch P50 looked better padded (833 -> 375 ns at N=8) but
+    // aggregate throughput did not move, and the N=1 arm came out WORSE padded,
+    // which has no mechanism and marks the whole comparison as noise.
+    //
+    // Shipping it on would mean defaulting to an unmeasured performance change,
+    // which is the exact habit the rest of this cycle was spent removing — and
+    // this codebase's own history is four "obviously correct" micro-fixes that
+    // measured 0 ns. It stays off until x86 says otherwise: run
+    // ScalingBenchmark both ways on the scaling.yml runner, where the clock is
+    // ~120x finer and the core count is real.
+    //
+    // Note the scaling PLATEAU is not in doubt — that effect is 100% -> 15%
+    // efficiency, far outside this variance, and reproduced across two seeds.
+    // Only the attribution to these three counters is unresolved.
+#if defined(OB_PAD_SUBMIT_COUNTERS) && OB_PAD_SUBMIT_COUNTERS
+    alignas(64) std::atomic<uint64_t> submittedTotal_{0};
+    alignas(64) std::atomic<uint64_t> processedTotal_{0};
+    // Each of the three starts its own 64-byte line. What follows
+    // nextSubmitSequence_ may share its line, which is fine: the next member is
+    // a std::function, not something RMW'd per order. An explicit trailing pad
+    // would be dead storage and -Wunused-private-field rejects it under -Werror.
+    alignas(64) std::atomic<uint64_t> nextSubmitSequence_{1};
+#else
     std::atomic<uint64_t> submittedTotal_{0};
     std::atomic<uint64_t> processedTotal_{0};
     std::atomic<uint64_t> nextSubmitSequence_{1};
+#endif
 
     // Backpressure (Gap 7)
     BackpressureCallback backpressureCb_;

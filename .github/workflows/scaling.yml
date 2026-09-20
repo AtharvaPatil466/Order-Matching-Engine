@@ -1,0 +1,124 @@
+# Thread-scaling curve for the thread-per-symbol path — manual, x86 Linux.
+#
+# WHY THIS IS A SEPARATE, DISPATCH-ONLY WORKFLOW
+#
+# Project_Overview.md claimed "horizontal scalability" and nothing measured it.
+# ScalingBenchmark measures it. Whether the curve means anything depends
+# entirely on the machine it ran on, because scaling is a property of the
+# hardware at least as much as the code:
+#
+#   * the dev box (Apple Silicon, 11 cores, no SMT, one memory domain) runs
+#     producers and workers on the same small core pool — at N workers the
+#     benchmark has 2N live threads, so it is already oversubscribed past
+#     N=5 and every point beyond that is contending for cores, not scaling.
+#   * an x86 server has more cores, SMT siblings that are NOT independent
+#     cores, and on a multi-socket box cross-NUMA coherence traffic that the
+#     dev box has no equivalent of. The same code can show a clean linear
+#     curve on one and a knee at the socket boundary on the other.
+#
+# Those two regimes give different answers to "does this engine scale", and
+# only a real multi-core server is representative of a venue deployment. So the
+# measurement has to run here, and a number taken anywhere else should carry
+# its machine with it.
+#
+# It is workflow_dispatch only, on purpose — the same reasoning as
+# journal-contention.yml:
+#   * it is a decision input, not a regression gate — it has no thresholds and
+#     nothing to fail on, and a benchmark that runs on every push while
+#     asserting nothing is noise that teaches people to ignore benchmark output.
+#   * ci.yml's x86 Release lane builds with -DBUILD_BENCHMARKS=OFF, and
+#     benchmark-gate.yml is a BLOCKING PR gate — bolting an unrelated benchmark
+#     onto either one risks a lane that must stay trustworthy.
+#   * a scaling sweep is minutes of saturating multi-thread load; on a shared
+#     CI runner that is both slow and noisy, which is another reason it should
+#     be asked for deliberately rather than run by default.
+#
+# Run it with:  gh workflow run scaling.yml
+# Then read:    gh run view <id> --log   (or download the artifact)
+
+name: Thread Scaling (thread-per-symbol)
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_orders:
+        description: "New orders per replayed stream (cancels are extra)"
+        required: false
+        default: "200000"
+      threads:
+        description: "Worker counts to sweep (comma-separated)"
+        required: false
+        default: "1,2,4,8,16"
+      symbols_per_worker:
+        description: "Symbols owned by each worker (held constant across the sweep)"
+        required: false
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Ubuntu Release — thread-per-symbol scaling curve
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Record what the CPU actually is, because every number below is relative
+      # to it. Core count, SMT siblings and socket/NUMA layout are the whole
+      # story for a scaling curve: a sweep to 16 workers on a 4-core runner is
+      # measuring the scheduler, and this is the section that lets a reader tell
+      # the difference. Filesystem is recorded too — the journal is OFF in this
+      # benchmark, but a reader comparing against journal-contention.yml needs
+      # to know whether it was even the same class of machine.
+      - name: CPU and filesystem context
+        run: |
+          echo "--- cpu ---"
+          lscpu | grep -E "Model name|^CPU\(s\)|Thread|Core|Socket|NUMA|MHz" || true
+          echo "--- nproc ---"
+          nproc
+          echo "--- memory ---"
+          free -g | head -2 || true
+          echo "--- filesystem for the working dir ---"
+          df -T . | tail -1
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_SANITIZERS=OFF
+          -DENABLE_FAULT_INJECTION=OFF
+          -DBUILD_TESTS=OFF
+          -DBUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build --target ScalingBenchmark --parallel 4
+
+      # S: the real curve. Symbols-per-worker is held constant, so symbol count
+      # grows with worker count and no worker is ever idle for lack of work.
+      # This is the arm the "horizontal scalability" claim stands or falls on.
+      - name: S — scaled symbols (symbols grow with workers)
+        run: |
+          ./build/benchmarks/ScalingBenchmark \
+            --new-orders ${{ inputs.new_orders }} \
+            --threads ${{ inputs.threads }} \
+            --symbols-per-worker ${{ inputs.symbols_per_worker }} \
+            --only s 2>&1 | tee scaling-scaled.txt
+
+      # P: the pathological control — symbol count pinned while workers grow, so
+      # the surplus workers own nothing and park. Not a scaling result; it is
+      # what proves the S curve is measuring work and not idleness.
+      - name: P — starved symbols (PATHOLOGICAL control)
+        run: |
+          ./build/benchmarks/ScalingBenchmark \
+            --new-orders ${{ inputs.new_orders }} \
+            --threads ${{ inputs.threads }} \
+            --starved-symbols 2 \
+            --only p 2>&1 | tee scaling-starved.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: thread-scaling-x86
+          path: scaling-*.txt

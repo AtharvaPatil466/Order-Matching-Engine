@@ -46,3 +46,7 @@ target_link_libraries(ColdCacheBenchmark PRIVATE OrderMatcher)
 # H6 audit: journalMutex_ contention — engine end-to-end + critical section alone
 add_executable(JournalContentionBenchmark JournalContentionBenchmark.cpp)
 target_link_libraries(JournalContentionBenchmark PRIVATE OrderMatcher)
+
+# Thread-scaling curve — MatchingEngine async thread-per-symbol path, worker sweep
+add_executable(ScalingBenchmark ScalingBenchmark.cpp)
+target_link_libraries(ScalingBenchmark PRIVATE OrderMatcher)

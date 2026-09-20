@@ -102,19 +102,22 @@ Measured using `HonestBenchmark` — a single deterministic order flow (50K orde
 > 
 > These are **per-order processing latencies** on the matching thread. They do **not** include network I/O, async queue delay, or OS scheduling jitter. See [BENCHMARKS.md](./BENCHMARKS.md) for full methodology and caveats.
 
-### Two benchmarks, two workload regimes
+### Four benchmarks, four workload regimes
 
-Two benchmarks characterize the engine, and they are complementary rather than competing:
+Four benchmarks characterize the engine and are complementary rather than competing. The two below cover the closed-loop latency floor and venue-shaped flow; `CoordinatedOmissionBenchmark` (open-loop, reports CO-naive *and* CO-corrected latency at a fixed offered rate) and `ColdCacheBenchmark` (working set evicted before each timed op) cover the two regimes a closed-loop steady-state benchmark structurally cannot see. Results for all four, with the ARM measurement-floor caveats, are in [BENCHMARKS.md](./BENCHMARKS.md).
 
-| Benchmark | Workload | P50 | P99 | Ratio |
-| :--- | :--- | ---: | ---: | ---: |
-| **HonestBenchmark** | 50K orders, seed=42, ~100% fill — dense resting book, predictable clustering | **237 ns** (PGO) | 910 ns | 3.8× |
-| **RealisticFlowBenchmark** | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify, mean resting depth 2,418 | **208 ns** combined | 750 ns | 3.6× |
+| Benchmark | Platform | Workload | P50 | P99 | Ratio |
+| :--- | :--- | :--- | ---: | ---: | ---: |
+| **HonestBenchmark** | x86, PGO | 50K orders, seed=42, **100% fill** — dense resting book, predictable clustering | **237 ns** | 910 ns | 3.8× |
+| **RealisticFlowBenchmark** | **ARM, indicative** | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify, mean resting depth 2,418 | 208 ns combined | 709 ns | 3.4× |
 
-`HonestBenchmark` is the controlled reproducible baseline — the floor on matching latency under favourable conditions, and the flow every three-path figure below is measured on. `RealisticFlowBenchmark` models venue-shaped flow against a sustaining resting book, with no empty-book cancels (0 of 217,256); its cancel P50 falls below ARM timer resolution (~42 ns), and x86 TSC resolves it. It was rewritten from a prior version whose cancel fraction exceeded its new-order fraction, draining the resting pool to empty and measuring an empty book at venue-shaped labels.
+> [!WARNING]
+> **These two rows are measured on different machines and must not be compared to each other.** The 208 ns ARM figure is *not* evidence that realistic flow is faster than the 237 ns x86 floor — it is a different CPU with a coarser clock. `RealisticFlowBenchmark` has never been run on x86.
+
+`HonestBenchmark` is the controlled reproducible baseline — the floor on matching latency under favourable conditions, and the flow every three-path figure below is measured on. It is **closed-loop and 100%-fill**, so it is a floor rather than an expected operating number. `RealisticFlowBenchmark` models venue-shaped flow against a sustaining resting book, with no empty-book cancels (0 of 217,256); its cancel P50 sits *at* the ~42 ns ARM clock tick and is therefore not a measurement on this box (26.4% of cancels finished inside one tick and were dropped from the histogram entirely), and x86 TSC resolves it. It was rewritten from a prior version whose cancel fraction exceeded its new-order fraction, draining the resting pool to empty and measuring an empty book at venue-shaped labels.
 
 > [!NOTE]
-> Neither benchmark represents a **cancel-heavy sparse-book regime** (cancel-to-trade ratios north of 20:1, price levels churn, book depth near zero). That regime stresses `FlatPriceMap` traversal over sparse slots, cancel-path hash lookups on recently-consumed IDs, and object pool churn. It is the planned next workload addition. See [BENCHMARKS.md](./BENCHMARKS.md).
+> None of the four benchmarks represents a **cancel-heavy sparse-book regime** (cancel-to-trade ratios north of 20:1, price levels churn, book depth near zero). That regime stresses `FlatPriceMap` traversal over sparse slots, cancel-path hash lookups on recently-consumed IDs, and object pool churn. It is the planned next workload addition. See [BENCHMARKS.md](./BENCHMARKS.md).
 
 ### Three-Path Latency (identical order flow, x86 AWS c6in.metal)
 

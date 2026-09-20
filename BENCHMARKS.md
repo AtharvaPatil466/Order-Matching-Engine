@@ -19,34 +19,67 @@
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
 | **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |
+| Coordinated omission is corrected, not ignored | `CoordinatedOmissionBenchmark` runs open-loop at a fixed offered rate and reports CO-naive *and* CO-corrected | ✅ Measured (ARM only) |
+| Cold-path cost ≈ 10× warm at P50 | `ColdCacheBenchmark`, working set evicted before each timed op | ✅ Measured (ARM only) |
+| Sustained per-window latency | `SustainedLoadTest` latency columns are cumulative, not per-window — harness defect | ❌ Unmeasured |
 
-## The two benchmarks
+## The four benchmarks
 
-Two benchmarks characterize the engine under different workload regimes. They
-are complementary, not competing: one establishes a floor under favourable
-conditions, the other measures a sustained venue-shaped book.
+Four benchmarks characterize the engine. They measure different things and are
+expected to disagree; quoting any one of them alone misrepresents the engine.
 
-**`HonestBenchmark`** (seed=42, 50K orders, ~100% fill rate) is the controlled
-reproducible baseline. It measures the best-case hot path — a dense resting
-book, predictable price clustering, near-certain fill on every new order.
-**P50 237 ns (PGO), P99 910 ns, ratio 3.8×.** This is the floor on matching
-latency under favourable conditions, and it is the flow every figure in the
-Results section below is measured on.
+| Benchmark | Question | Load model | Workload |
+|---|---|---|---|
+| `HonestBenchmark` | Floor on the matching path under favourable conditions | Closed-loop | 50K orders, seed=42, **100% fill**, no cancels |
+| `RealisticFlowBenchmark` | Cost on venue-shaped flow | Closed-loop | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify |
+| `CoordinatedOmissionBenchmark` | What a client sees when arrivals do not wait for us | **Open-loop**, paced | `RealisticWorkload` New+Cancel stream at a fixed offered rate |
+| `ColdCacheBenchmark` | First-touch cost after an idle gap | Closed-loop | Same `RealisticWorkload` stream, working set evicted before each timed op |
 
-**`RealisticFlowBenchmark`** (500K events, 44% cancel / 46% new / 8% IOC / 2%
-modify, mean resting depth 2,418 orders) models venue-shaped order flow with a
-sustaining resting book. No empty-book cancels (0 of 217,256). **P50 208 ns
-combined, P99 750 ns, ratio 3.6×.** The cancel P50 is below ARM timer
-resolution (~42 ns); x86 TSC resolves it. This benchmark was rewritten from a
-prior version that had a structural defect — the cancel fraction exceeded the
-new-order fraction, draining the resting pool to empty and measuring an empty
-book at venue-shaped labels.
+The last two share `benchmarks/RealisticWorkload.h` — a New+Cancel-only stream
+(15% marketable, 65% of resting orders scheduled for cancel, power-law sizes,
+20 participants). That is **not** `RealisticFlowBenchmark`'s workload, which
+uses its own inline generator with IOC and modify events and 8 participants.
+The four benchmarks' absolute numbers are not directly comparable to each other.
 
-Neither benchmark represents a cancel-heavy sparse-book regime (cancel-to-trade
-ratios north of 20:1, price levels churn, book depth near zero). That regime
-stresses `FlatPriceMap` traversal over sparse slots, cancel-path hash lookups on
-recently-consumed IDs, and object pool churn. It is the planned next workload
-addition.
+**`HonestBenchmark`** (seed=42, 50K orders, **100.0% fill rate — 50,000 of
+50,000, confirmed in its own output**) is the controlled reproducible baseline.
+It measures the best-case hot path — a dense resting book, predictable price
+clustering, a fill on every new order — under a **closed-loop** harness that
+issues the next order only after the previous one returns. **P50 237 ns (PGO),
+P99 910 ns, ratio 3.8× on x86.** This is a *floor*, not an expected operating
+number: 100% fill is the least cancel-like order flow that exists, and a
+closed-loop harness cannot see coordinated omission. It is legitimate and
+reproducible, and it is the flow every figure in the Results section and all
+optimization history are measured on.
+
+**`RealisticFlowBenchmark`** (500K events, realized 43.9% cancel / 46.2% new /
+7.9% IOC / 2.0% modify, mean resting depth 2,418 orders) models venue-shaped
+order flow with a sustaining resting book. No empty-book cancels (0 of
+217,256). **P50 208 ns combined, P99 709 ns on ARM** (see the ARM section for
+the sample-loss caveat that makes both an upper bound). The cancel P50 is *at*
+ARM timer resolution and is not a measurement; x86 TSC resolves it. This
+benchmark was rewritten from a prior version that had a structural defect — the
+cancel fraction exceeded the new-order fraction, draining the resting pool to
+empty and measuring an empty book at venue-shaped labels.
+
+**`CoordinatedOmissionBenchmark`** is the answer to the standard objection that
+the two above are closed-loop. It runs **open-loop**: it pins an intended start
+time per operation at a fixed offered rate and reports both
+`completion − actual_start` (CO-naive, what a closed-loop harness sees) and
+`completion − intended_start` (CO-corrected, what a client experiences).
+Corrected is the honest number. Results in the ARM section below; **it has never
+been run on x86.**
+
+**`ColdCacheBenchmark`** evicts the working set through a 64 MB buffer before
+each timed op and reports warm and cold side by side. Results in the ARM
+section; **also never run on x86.**
+
+None of the four represents a cancel-heavy **sparse**-book regime
+(cancel-to-trade ratios north of 20:1, price levels churn, book depth near
+zero). `RealisticFlowBenchmark` is cancel-heavy but its book *sustains* at depth
+2,418 by construction. The sparse regime stresses `FlatPriceMap` traversal over
+sparse slots, cancel-path hash lookups on recently-consumed IDs, and object pool
+churn. It is the planned next workload addition.
 
 ## Methodology
 
@@ -130,14 +163,176 @@ implemented and reverted as net-negative on this 100%-fill flow.
 
 ### Reference — Apple Silicon ARM64 (M3 Pro dev machine, NOT an SLA)
 
-| Path | P50 | Note |
-|------|----:|------|
-| A Core matching | ~125 ns | ~42 ns clock granularity quantizes per-path P50; Path A/B read equal or swap run-to-run (Path B can show ~84 ns) — these are *dev-machine reference* figures only |
-| B Engine wrapper | ~125 ns | |
-| C Full-stack journal | ~1,400 ns | macOS/APFS `fdatasync` artifact — NOT structural (the same path is 615 ns on Linux x86, async io_uring ack) |
+All figures below are from a from-scratch Release build (`-O3 -march=native`,
+`-DBUILD_BENCHMARKS=ON`) on macOS 26.6 / Apple M3 Pro. They are **indicative
+only**; x86 is the source of truth.
 
-The ~2.2× ARM-vs-x86 gap on core matching is microarchitectural (wider OoO window
-+ stronger branch prediction on pointer-chasing code), not a build-flag or
+#### Measurement floor — read this before any ARM number
+
+`bench::nowNs()` is `std::chrono::steady_clock`, which on this M3 Pro ticks at
+**41 ns (smallest non-zero delta; 42 ns median)**. Measured directly: of
+2,000,000 back-to-back `nowNs()` calls, **41.7% returned the same value as their
+predecessor**. Two consequences apply to every ARM figure here:
+
+1. **Every ARM latency is quantized to a ~41.67 ns grid.** A reported 208 ns is
+   5 ticks, ±1 tick (±20%). A reported 42 ns is *one* tick — not a measurement,
+   only a statement that the op finished inside one clock period.
+2. **Sub-tick ops are dropped, not recorded as zero.**
+   `BenchLatencyRecorder::recordInterval()` ignores intervals where
+   `end <= start`, so an op faster than one tick leaves no sample. Percentiles
+   are computed over the surviving slower ops and are **biased upward**. Sample
+   counts are quoted below so the size of the loss is visible.
+
+An x86 TSC tick on a 2.9 GHz part is ~0.34 ns — roughly 120× finer than this
+box's 41.67 ns — so neither problem arises there. Any ARM number within a small
+multiple of 42 ns should be read as quantization, not measurement.
+
+#### `HonestBenchmark` — closed-loop, 100% fill, seed=42, 50K orders
+
+| Path | P50 | P90 | P99 | P99.9 | Max | Throughput |
+|------|----:|----:|----:|------:|----:|-----------:|
+| A Core matching | 250 ns | 542 ns | 1,166 ns | 1,709 ns | 91,917 ns | 2.76M ops/s |
+| B Engine wrapper | 250 ns | 500 ns | 791 ns | 1,208 ns | 43,292 ns | 2.95M ops/s |
+| C Full-stack journal | 1,750 ns | 4,096 ns | 1,761,280 ns | 3,899,392 ns | 10,773,458 ns | 24,603 ops/s |
+
+Fill rate **100.0% on all three paths (50,000 of 50,000)**. Paths A and B report
+an identical 250 ns P50 (6 ticks) because the wrapper overhead is smaller than
+one tick here; x86 measures it at 8 ns (269 − 261). Path C is a macOS/APFS
+`fdatasync` artifact, **not structural** — 615 ns on Linux x86 with the async
+io_uring ack.
+
+A previous revision of this table reported ~125 ns for Paths A and B. That
+figure did not reproduce and is not retained.
+
+#### `RealisticFlowBenchmark` — closed-loop, cancel-heavy, 500K events, seed=42
+
+Realized mix over 495,000 timed ops: **43.9% cancel (217,256) / 46.2% new
+(228,697) / 7.9% IOC (39,328, 41.3% of them filled) / 2.0% modify (9,719)**.
+Mean resting depth **2,418 orders**, **0 empty-book no-op cancels**.
+
+| Path | Samples / timed | P50 | P90 | P99 | P99.9 | Max |
+|---|---|----:|----:|----:|------:|----:|
+| Cancel | 159,827 / 217,256 | *42 ns — one tick, at the floor* | 375 ns | 667 ns | 792 ns | 18,208 ns |
+| New | 228,693 / 228,697 | 208 ns | 583 ns | 708 ns | 1,416 ns | 8,583 ns |
+| IOC | 38,389 / 39,328 | 208 ns | 375 ns | 791 ns | 1,792 ns | 4,792 ns |
+| Modify | 9,719 / 9,719 | 292 ns | 667 ns | 1,125 ns | 1,750 ns | 2,625 ns |
+| **Combined** | 436,628 / 495,000 | **208 ns** | 458 ns | 709 ns | 1,250 ns | 18,208 ns |
+
+**The cancel P50 of 42 ns is not a measurement** — it is exactly one tick, and
+means only that the median cancel completes in under 42 ns. **26.4% of cancels
+(57,429 of 217,256) finished inside one tick and were dropped from the
+histogram**, so the cancel percentiles cover the slower 73.6% and are biased
+upward. The same loss costs the combined row 58,372 of 495,000 samples (11.8%),
+making the combined P50 of 208 ns an upper bound rather than a centre. Cancel is
+the fastest path in the engine and the one this box is least able to measure.
+
+The 18 µs cancel maximum against a 792 ns P99.9 is macOS scheduler preemption,
+not engine work — no `isolcpus`, no core pinning.
+
+#### `CoordinatedOmissionBenchmark` — open-loop rate sweep
+
+A closed-loop harness issues its next request only after the previous returns,
+so when the system stalls the harness stalls with it and the stall is never
+charged to any sample: the requests that should show the worst latency are the
+ones never issued. This benchmark runs open-loop at a fixed offered rate,
+pinning `intended[i] = t0 + i / rate`, and reports both **CO-naive**
+(`completion − actual_start`) and **CO-corrected**
+(`completion − intended_start`). **Corrected is the honest number** — a client
+sends at its own cadence and does not wait for the engine, so time an order
+spends queued behind a late predecessor is latency the client really pays and
+the naive number discards.
+
+200K new orders → 305,758 measured ops, seed=7:
+
+| Offered rate | Backlogged | Naive P99 | Corrected P99 | Naive P99.9 | Corrected P99.9 |
+|---|---:|---:|---:|---:|---:|
+| 100K/s | 0.0% (131) | 1,166 ns | 1,250 ns | 4,192 ns | 5,280 ns |
+| 500K/s | 0.2% (616) | 834 ns | 1,000 ns | 2,334 ns | 5,536 ns |
+| 1M/s | 0.4% (1,261) | 750 ns | 1,000 ns | 1,958 ns | 6,016 ns |
+| 2M/s | 6.6% – 54% | — | *unstable* | — | — |
+| 3M/s | 5.5% – 99.9% | — | *unstable* | — | — |
+| 4M/s | 42.7% | 583 ns | **27,136 ns** | 1,458 ns | **56,576 ns** |
+| 6M/s | 100.0% | 500 ns | **16,777,216 ns** | 1,333 ns | **17,039,360 ns** |
+
+**Below capacity (100K–1M/s)** the two tables nearly coincide at P50 and P99;
+divergence is confined to P99.9 and beyond, where corrected already exceeds
+naive by **1.26× at 100K/s, 2.37× at 500K/s and 3.07× at 1M/s** — the
+understatement grows with load. Reproducible: three repeats at 1M/s gave
+0.2%/0.5%/0.6% backlog, naive P99 666/792/834 ns, corrected P99
+750/1,208/1,208 ns.
+
+**At and past capacity the corrected tail explodes while the naive tail does
+not.** At 6M/s naive P99 *improves* to 500 ns while corrected P99 is 16.8 ms — a
+factor of 33,000, with 100% of samples backlogged. A closed-loop harness on a
+saturated engine reports its best-looking numbers precisely because it has
+stopped measuring anything but service time.
+
+**The 2M–3M/s knee is not reproducible on this box and is not reported as a
+number.** Three repeats at 2M/s gave 42.0%/48.5%/54.2% backlog with corrected
+P99 from 2.6 ms to 10.4 ms; three at 3M/s gave 83.4%/90.1%/99.9%; initial runs
+at each gave 6.6% and 5.5%. Near capacity on a non-isolated macOS box the
+run-to-run variance exceeds the effect. **Locating the knee needs x86 with
+`isolcpus` and core pinning — unmeasured.** This box establishes only that it
+lies between 1M/s (stable, 0.4%) and 4M/s (42.7%).
+
+#### `ColdCacheBenchmark` — warm vs cold, 20K orders → 30,965 ops, seed=7
+
+64 MB eviction buffer streamed before each timed op; the eviction is not timed.
+
+| | Samples | P50 | P90 | P99 | P99.9 | Max | Mean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Warm | 28,258 | 250 ns | 500 ns | 958 ns | 4,832 ns | 36,542 ns | 302 ns |
+| Cold | 28,808 | **2,625 ns** | 7,648 ns | 12,416 ns | 34,560 ns | 3,531,875 ns | 3,855 ns |
+| Penalty | | +2,375 ns | +7,148 ns | +11,458 ns | +29,728 ns | | |
+
+**Cold costs ≈10× warm at P50.** Both are well clear of the 41 ns floor, so this
+comparison is resolvable here even though the magnitudes are not authoritative.
+A production tail SLA must budget for the cold number — warm 250 ns applies only
+to a continuously busy engine, and the first order after a quiet period is the
+one that matters most at a market open or after a halt.
+
+#### `SustainedLoadTest` — throughput and memory only
+
+A 30 s run completed. **Throughput and memory are reported; the latency columns
+are defective and are not reproduced.**
+
+- 30,172,625 orders in 30.2 s → **999,987 orders/sec** sustained, 0 rejected
+- Resident memory 843,520 KB → 1,186,016 KB (+40.6%)
+- Exit code **1** — its own regression gate fired
+
+Two harness defects, not engine defects:
+
+1. **"Per-window" latency is cumulative since engine start.** The test calls
+   `engine.getAggregateE2ELatency()` per window; that merges per-thread
+   `LatencyTracker`s which are never reset (`src/MatchingEngine.cpp:2361`). The
+   tell is a P50 that *decays* monotonically from ~780 ms (window 4) to ~48 µs
+   (window 29) — a cumulative histogram diluted by later samples, not a system
+   speeding up. Reported P99s sit on exact powers of two (1,073,741,824 ns =
+   2³⁰), which are log-linear bucket edges in the second range.
+2. **Offered rate is double the requested rate.** `interOrderNs` derives once
+   from the global `--rate`, but each of `max(1, numThreads/2)` producers paces
+   at that full rate. Defaults (`--threads 4 --rate 500000`) offer 1M/s — which
+   is exactly the 999,987/s observed.
+
+The exit-1 verdict is therefore also meaningless: the gate compares the
+cumulative aggregate, so one bad early window latches it to failing.
+**Sustained per-window latency and degradation over time are unmeasured.**
+
+#### Not yet measured (needs x86)
+
+| Gap | Why |
+|---|---|
+| True cancel-path P50 | Below the 41 ns ARM tick; needs x86 TSC |
+| Engine-wrapper overhead on ARM | Smaller than one tick; x86 measures 8 ns |
+| CO knee (saturation rate) | 2M–3M/s not reproducible without `isolcpus`/pinning |
+| CO-corrected tail on x86, any rate | `CoordinatedOmissionBenchmark` has never run on x86 |
+| `RealisticFlowBenchmark` on x86 | Never run there; all realistic-flow numbers are ARM |
+| `ColdCacheBenchmark` on x86 | Never run there |
+| instructions/order, IPC, L1d misses | No `perf`/HW counters on Apple Silicon (see withdrawal above) |
+| Sustained per-window latency | Harness defective — see above |
+
+The ARM-vs-x86 gap on core matching is microarchitectural (wider OoO window +
+stronger branch prediction on pointer-chasing code), not a build-flag or
 field-ordering effect.
 
 ## Optimization History (latest cycle)

@@ -16,10 +16,28 @@
 //
 // ORDER FLOW:
 //   All three paths process the IDENTICAL order stream: same IDs, same
-//   prices, same quantities, same sequence. Prices are clustered around
-//   a moving midpoint (±100 ticks of random walk) to force realistic
-//   matching. 50% buys, 50% sells, clustered within ±50 ticks of mid
-//   to ensure ~30–40% fill rate.
+//   prices, same quantities, same sequence. 50% buys, 50% sells, priced
+//   around a midpoint that random-walks by walkDist(-200, 200) per order,
+//   with an offset of spreadDist(-5000, 5000).
+//
+//   THIS FLOW FILLS 100% OF THE TIME. Measured: 50,000 of 50,000. Every
+//   submission crosses, nothing rests, and there are no cancels at all — the
+//   least cancel-like order flow that exists, against a venue reality that is
+//   roughly 44% cancels (see RealisticFlowBenchmark).
+//
+//   That is not a defect in this benchmark, which exists to be a reproducible
+//   FLOOR on matching latency under favourable conditions, and is the flow the
+//   three-path decomposition and the whole optimization history are measured
+//   on. It is a defect only if the number is quoted as an expected operating
+//   latency. It is not one.
+//
+//   This comment block previously claimed "±100 ticks of random walk",
+//   "clustered within ±50 ticks of mid" and "~30-40% fill rate". All three
+//   were wrong — the constants above are 4x and 100x larger respectively, and
+//   the fill rate is not 30-40% but 100%. Worth recording rather than quietly
+//   correcting: two external reviewers criticised this benchmark for being a
+//   100%-fill workload, and they were right, while this header is precisely
+//   what would have told a reader they were wrong.
 //
 // METHODOLOGY:
 //   - Warm-up: 5000 orders (excluded from measurement)

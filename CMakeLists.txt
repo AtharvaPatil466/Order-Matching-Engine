@@ -112,6 +112,18 @@ if(ENABLE_PGO)
 endif()
 
 # Lean Mode Option
+# ─── Perf experiments (default OFF — the shipped binary is byte-identical) ───
+# Both of these were implemented, then reverted as "net-negative" on the
+# 100%-fill HonestBenchmark flow using a perf counter that was wrapped around
+# the whole process rather than the matching loop (see 156acb3). They are kept
+# here behind flags so the question can be re-measured on venue-shaped flow
+# (RealisticFlowBenchmark) and on x86 with perf, instead of re-litigated.
+option(ENABLE_MATCH_PREFETCH "Prefetch the next order node in the matching loops" OFF)
+if(ENABLE_MATCH_PREFETCH)
+    message(STATUS "OB_MATCH_PREFETCH Enabled: matching loops prefetch the next node")
+    add_compile_definitions(OB_MATCH_PREFETCH)
+endif()
+
 option(USE_LEAN_MODE "Build with enterprise features disabled for raw speed" OFF)
 if(USE_LEAN_MODE)
     message(STATUS "OB_LEAN_MODE Enabled: Compiling without risk/stats features")

@@ -13,6 +13,21 @@ namespace OrderMatcher {
 
 constexpr size_t INITIAL_CAPACITY = 200000;
 
+// Next-order prefetch in the matching loops (opt-in, -DENABLE_MATCH_PREFETCH=ON).
+// Pulls the node the loop reaches next into L1 while the current fill computes,
+// instead of stalling on the pointer chase. Hint only — __builtin_prefetch
+// cannot fault and changes no result, so matching semantics are identical
+// either way. Compiles to nothing when the flag is off.
+// `o` is non-null at all three call sites (loop condition / front() of a level
+// the caller is about to dereference), so only ->next needs the guard — as in
+// the original e3a1b56, no extra branch.
+#ifdef OB_MATCH_PREFETCH
+#define OB_PREFETCH_NEXT(o) \
+    do { if ((o)->next) __builtin_prefetch((o)->next, 0, 3); } while (0)
+#else
+#define OB_PREFETCH_NEXT(o) ((void)0)
+#endif
+
 OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCapacity)
     : bids_(Side::Buy, 200001), asks_(Side::Sell, 200001),
       orderLookup_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
@@ -1100,6 +1115,7 @@ void OrderBook::match(Order* incoming) {
 
         OrderList* level = opposite.bestLevel();
         Order* bookOrder = level->front();
+        OB_PREFETCH_NEXT(bookOrder);
 
         // Past every break: this level is about to change, by a fill or an STP
         // removal. Recorded after the cross-check so a non-crossing order —
@@ -1356,6 +1372,7 @@ void OrderBook::matchProRata(Order* incoming) {
         // Calculate total quantity at this level
         Quantity totalLevelQty = 0;
         for (Order* o = level.front(); o; o = o->next) {
+            OB_PREFETCH_NEXT(o);
             totalLevelQty += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
         }
         if (totalLevelQty == 0) {
@@ -1371,6 +1388,7 @@ void OrderBook::matchProRata(Order* incoming) {
         Quantity allocated = 0;
 
         for (Order* o = level.front(); o && allocCount < MAX_LEVEL_ORDERS; o = o->next) {
+            OB_PREFETCH_NEXT(o);
             // Self-crossing orders are already resolved by the pre-pass above.
             Quantity avail = (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
             Quantity share = (totalLevelQty > 0)

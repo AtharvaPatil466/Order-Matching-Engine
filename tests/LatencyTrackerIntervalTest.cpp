@@ -109,6 +109,42 @@ int main() {
                a.getCount() == 0 && "reset left stale counters behind");
     }
 
+    // ── deltaFrom gives the WINDOW, not the run so far ──────────────────────
+    //
+    // The engine's per-thread trackers are never reset, so a per-window sample
+    // of the aggregate is cumulative-since-start. SustainedLoadTest reported
+    // exactly that and the artifact looked like warmup: percentiles decaying
+    // monotonically as the population grew.
+    {
+        LatencyTracker t;
+        t.recordInterval(0, 100);
+        t.recordInterval(0, 100);
+        LatencyTracker snapshot = t;      // window boundary
+
+        t.recordInterval(0, 900);         // only this belongs to the window
+        LatencyTracker window = t.deltaFrom(snapshot);
+
+        assert(window.getCount() == 1 &&
+               "delta must contain only what was recorded after the snapshot");
+        assert(window.getP50() >= 512 &&
+               "window percentile must reflect the 900ns sample, not the 100ns "
+               "ones that preceded the snapshot");
+        assert(t.getCount() == 3 && "deltaFrom must not mutate the source");
+        // min/max cannot be recovered by subtraction and must not pretend to be.
+        assert(window.getMax() == 0 && "delta max is not recoverable — must be 0");
+    }
+
+    // A delta against a mismatched snapshot saturates at zero rather than
+    // wrapping the unsigned subtraction into an enormous phantom count.
+    {
+        LatencyTracker small, big;
+        small.recordInterval(0, 100);
+        big.recordInterval(0, 100);
+        big.recordInterval(0, 100);
+        LatencyTracker d = small.deltaFrom(big);
+        assert(d.getCount() == 0 && "unsigned underflow was not guarded");
+    }
+
     std::puts("LatencyTrackerIntervalTest passed");
     return 0;
 }

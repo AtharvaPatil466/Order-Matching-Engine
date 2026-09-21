@@ -115,6 +115,43 @@ public:
         clockAnomalies_ += other.clockAnomalies_;
     }
 
+    // This tracker MINUS an earlier snapshot of itself — the distribution of
+    // whatever was recorded between the two.
+    //
+    // WHY THIS EXISTS. The engine's per-thread trackers are never reset, so
+    // getAggregateE2ELatency() always returns the distribution since process
+    // start. Sampling it once per window and calling the result "this window"
+    // is wrong in a way that looks plausible: the reported percentiles decay
+    // monotonically across a run as the cumulative population grows, which
+    // reads like the system warming up when it is really just an average over
+    // an ever-longer history. SustainedLoadTest did exactly this.
+    //
+    // Bucket counts subtract cleanly, so count and every percentile on the
+    // result are exact for the interval.
+    //
+    // min/max DO NOT subtract — knowing the all-time min tells you nothing
+    // about the window's min — so they are deliberately left cleared rather
+    // than carrying a misleading value through. Use the percentiles and the
+    // count; getMin()/getMax() on a delta are meaningless and return 0.
+    LatencyTracker deltaFrom(const LatencyTracker& earlier) const {
+        LatencyTracker d;
+        for (size_t i = 0; i < NUM_BUCKETS; ++i) {
+            // Guard rather than assume: `earlier` must be a snapshot of THIS
+            // tracker, and if a caller passes something else, saturate at zero
+            // instead of wrapping the unsigned subtraction into a huge count.
+            d.buckets_[i] = buckets_[i] >= earlier.buckets_[i]
+                                ? buckets_[i] - earlier.buckets_[i] : 0;
+            d.count_ += d.buckets_[i];
+        }
+        d.sum_ = sum_ >= earlier.sum_ ? sum_ - earlier.sum_ : 0;
+        d.subTick_ = subTick_ >= earlier.subTick_ ? subTick_ - earlier.subTick_ : 0;
+        d.clockAnomalies_ = clockAnomalies_ >= earlier.clockAnomalies_
+                                ? clockAnomalies_ - earlier.clockAnomalies_ : 0;
+        d.min_ = 0;   // not recoverable by subtraction — see above
+        d.max_ = 0;
+        return d;
+    }
+
     void reset() {
         std::memset(buckets_, 0, sizeof(buckets_));
         count_ = 0;

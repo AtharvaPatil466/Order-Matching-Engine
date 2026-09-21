@@ -352,6 +352,53 @@ Validated on AWS c6in.metal against the same 50K/seed=42 flow:
 | **io_uring async ack (Option 1)** | Path C P99 **−32.8%** (5,312 → 3,568 ns); Path C P50 **+167 ns** — expected, since `submitOrder()` now returns before durability and the completion-reaper thread's overhead surfaces in P50 |
 | **Price-level arena allocator** | **Stays reverted — and now measured, not assumed.** Judged on the cancel-heavy flow it was supposed to win on it is 2.5-3.6% WORSE on mean latency (p~0.002) with no tail benefit; on 100%-fill it is +16% mean, -13% throughput, +33% P99, +62% P99.9 (p < 1e-5 throughout). Those effects are 5-400x the clock noise floor, so the verdict does not rest on ARM timer resolution. It is *correct* (523/523 with it on) — just slower. **Also found:** a repeatable ~185us hot-path stall that GROWS with cumulative orders (9.9us at 5K -> 240us at 200K, while the pooled baseline stays flat at ~10us). `OrderArena::activePriceToSlab_` is claimed to be sized so no rehash hits the hot path, but entries are not bounded by slab count: re-affiliating a slab to a new price orphans every earlier price still mapped to it, so orphans accumulate and the map periodically rehashes mid-match. Not carried in the tree — recoverable from `ff55338` (+ `c9e2260` for the SLAB_SIZE override), and that defect is the first thing to fix if anyone revisits. |
 
+## Sustained Load — per-window, measured
+
+`SustainedLoadTest` had two defects that made its latency columns unusable, both
+now fixed:
+
+* **Windows were cumulative.** It sampled `getAggregateE2ELatency()` once per
+  window, but the engine's per-thread trackers are never reset, so every window
+  reported the distribution since process start. The artifact looked like
+  warmup — P50 decaying monotonically (780 ms → 48 µs across 30 windows in one
+  recorded run) purely because the population kept growing, with P99s landing
+  on exact powers of two. `LatencyTracker::deltaFrom` now subtracts the previous
+  boundary's snapshot, so each window reports what was actually recorded during
+  it. Bucket counts subtract exactly; min/max cannot be recovered that way and
+  are cleared rather than carrying a misleading value.
+* **The offered rate was multiplied by the producer count.** `interOrderNs` came
+  from the full `--rate`, and each of `max(1, threads/2)` producers paced itself
+  at it, so the run offered `producers × rate`. At defaults that meant 1M/s
+  offered while the header printed 250k/s — and the measured throughput came
+  back at ~1M/s, which read as agreement. Now divided by the producer count:
+  a 400k/s target measures 400,000/s.
+
+**What sustained load actually looks like** (400k/s, 4 workers, 20 × 1 s
+windows, Apple Silicon — indicative, not authoritative):
+
+| Phase | Windows | P50 | P99 | RSS |
+| :--- | :--- | --: | --: | :--- |
+| Warmup | 0–5 | 2,160 → 10,688 ns | up to 10.4 ms | flat 953 MB |
+| Steady | 6–16 | **~790 ns** | 7–11 µs | 953 MB → 1,186 MB, then flat |
+| Steady + excursions | 17–19 | ~850 ns | 330–415 µs | flat |
+
+Throughput is flat at 402k/s in every window. **There is no degradation**: the
+first ~6 s is allocator and page-fault warmup, after which P50 settles and RSS
+stops growing. Periodic P99 excursions into the hundreds of microseconds
+continue in steady state and are the real open question here.
+
+**Latency is lower at high offered rate than at low.** ~790 ns P50 at 400k/s
+versus ~4,500 ns at 50k/s. At low rate the queues drain between orders and each
+one pays cold-cache cost; at saturation the structures stay resident. So any
+threshold is only meaningful next to the rate it was measured at, and "slower
+under light load" is the expected shape rather than a fault.
+
+These are **end-to-end ingress→completion** figures, dominated by queue
+residency rather than service time — not comparable to the Path A service-time
+numbers above, and not an SLA. The tool's default `--p99-threshold` of 5 µs is
+uncalibrated for this and fires on every window; it is a measurement tool, not
+a pass/fail gate, until someone picks a threshold against a stated rate.
+
 ## GroupCommit Explained
 
 Path C uses `SyncPolicy::GroupCommit` with `batch_size=64`:

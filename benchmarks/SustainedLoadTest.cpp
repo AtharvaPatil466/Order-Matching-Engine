@@ -11,8 +11,29 @@
 //
 // Exit code 0 if all P99 windows are under the specified threshold.
 // Exit code 1 if any window exceeds the threshold (regression detected).
+//
+// THE DEFAULT --p99-threshold IS NOT CALIBRATED, and this is a measurement
+// tool rather than a pass/fail gate until it is. What the latency columns
+// report is END-TO-END time from ingress to completion, which under sustained
+// offered load is dominated by QUEUE RESIDENCY, not by service time. Measured
+// here: ~790 ns P50 at 400k/s and 25-37 us P99, so the 5 us default fires on
+// every window and exit 1 carries no information at these rates.
+//
+// Two observations worth having before anyone picks a real threshold:
+//
+//   * Throughput is flat and latency IMPROVES over the first ~6 seconds
+//     (P50 2,160 -> 790 ns at 400k/s) while RSS climbs ~24% and then stops.
+//     That is warmup — allocator and page-fault settling — not degradation.
+//     A threshold applied from window 0 measures warmup.
+//   * Latency is LOWER at high offered rate than at low. 790 ns P50 at
+//     400k/s versus ~4,500 ns at 50k/s. At low rate the queues drain between
+//     orders and each one pays cold-cache cost; at high rate the structures
+//     stay resident. So a threshold is only meaningful alongside the rate it
+//     was measured at, and "slower under light load" is the expected shape
+//     rather than a fault.
 
 #include "MatchingEngine.h"
+#include "LatencyTracker.h"
 #include "Utils.h"
 #include <algorithm>
 #include <atomic>
@@ -87,7 +108,8 @@ int main(int argc, char* argv[]) {
     std::printf("=== Sustained Load Test ===\n");
     std::printf("Duration:      %d sec\n", durationSec);
     std::printf("Window:        %d sec\n", windowSec);
-    std::printf("Target rate:   %d orders/sec\n", targetRate);
+    std::printf("Target rate:   %d orders/sec (aggregate across producers)\n",
+                targetRate);
     std::printf("Threads:       %d\n", numThreads);
     std::printf("Symbols:       %d\n", numSymbols);
     std::printf("P99 threshold: %.0f ns\n", p99ThresholdNs);
@@ -120,8 +142,18 @@ int main(int argc, char* argv[]) {
     std::vector<WindowStats> windows;
     std::mutex windowMu;
 
-    // Compute inter-order delay for target rate
-    double interOrderNs = 1e9 / static_cast<double>(targetRate);
+    // Compute inter-order delay for the target rate.
+    //
+    // DIVIDED BY THE PRODUCER COUNT, because every producer paces itself with
+    // this same interval. Previously this was the whole target rate and each of
+    // the producerCount threads offered it independently, so the run offered
+    // producerCount x targetRate and the "Target rate" line printed above was
+    // simply not the rate being applied. At the defaults that meant 1M/s
+    // offered while the header claimed 250k/s — and the measured throughput
+    // duly came back at ~1M/s, which looked like agreement.
+    const int producerCount = std::max(1, numThreads / 2);
+    double interOrderNs =
+        1e9 / (static_cast<double>(targetRate) / static_cast<double>(producerCount));
 
     auto producerFn = [&](int threadId) {
         std::mt19937_64 rng(42 + threadId);
@@ -175,7 +207,6 @@ int main(int argc, char* argv[]) {
 
     // Start producer threads
     std::vector<std::thread> producers;
-    int producerCount = std::max(1, numThreads / 2);
     for (int i = 0; i < producerCount; ++i) {
         producers.emplace_back(producerFn, i);
     }
@@ -183,6 +214,9 @@ int main(int argc, char* argv[]) {
     // Monitor thread: collect window stats
     auto monitorStart = std::chrono::steady_clock::now();
     uint64_t prevProcessed = 0;
+    // Snapshot of the cumulative latency histogram at the previous window
+    // boundary; each window reports the delta against it.
+    LatencyTracker prevLatency;
     bool regressionDetected = false;
 
     for (int w = 0; w < durationSec / windowSec; ++w) {
@@ -192,8 +226,19 @@ int main(int argc, char* argv[]) {
         uint64_t windowProcessed = nowProcessed - prevProcessed;
         prevProcessed = nowProcessed;
 
-        // Get E2E latency for this window
-        auto e2e = engine.getAggregateE2ELatency();
+        // PER-WINDOW latency, not cumulative.
+        //
+        // getAggregateE2ELatency() merges per-thread trackers that are never
+        // reset, so it always reports the distribution since process start.
+        // Sampling it once per window and labelling the result "this window"
+        // made the reported P50 decay monotonically across a run (780 ms -> 48
+        // us over 30 windows in one recorded run) purely because the
+        // cumulative population kept growing. Subtracting the previous
+        // snapshot gives the distribution of what was actually recorded during
+        // this window.
+        auto cumulative = engine.getAggregateE2ELatency();
+        auto e2e = cumulative.deltaFrom(prevLatency);
+        prevLatency = cumulative;
 
         WindowStats ws;
         ws.windowNum = static_cast<uint64_t>(w);
@@ -201,7 +246,8 @@ int main(int argc, char* argv[]) {
         ws.p50Ns = static_cast<double>(e2e.getP50());
         ws.p99Ns = static_cast<double>(e2e.getP99());
         ws.p999Ns = static_cast<double>(e2e.getP999());
-        ws.maxNs = static_cast<double>(e2e.getMax());
+        // Not recoverable from a histogram delta — see LatencyTracker::deltaFrom.
+        ws.maxNs = 0.0;
         ws.throughput = static_cast<double>(windowProcessed) / static_cast<double>(windowSec);
         ws.memoryKB = getCurrentMemoryKB();
 

@@ -558,12 +558,30 @@ caused by build flags, field ordering, branch hints, or branchless selection.
 
 The four earlier micro-fixes (listener-dispatch guard, `shared_mutex`→plain `mutex`, OCO scratch-buffer reuse, rehash guard) produced **no measurable x86 latency change**. The conclusion drawn from that — that the P50 is structurally bound rather than instruction-bound — was supported by the per-order counters above, which are now withdrawn as mis-scoped. The *observation* stands (four changes, 0 ns); the *mechanism* is unproven until the counters are regathered. This cycle's branchless price-cross *did* move it, shaving 10 ns P50 / 62 ns P99 to reach 261 ns (see Optimization History in BENCHMARKS.md); next-order prefetch and the price-level arena allocator were both implemented and reverted as net-negative on this 100%-fill flow.
 
-| Cost | ns | Driver | Lever (estimated) |
+> **THIS ENTIRE TABLE IS WITHDRAWN, NOT JUST ITS FIRST ROW.** An earlier edit
+> struck the `152 L1-dcache misses/order` citation and left `17.8
+> branch-misses/order` standing one row below — the *same* mis-scoped counter,
+> from the *same* `perf` run. And the `ns` column is not an independent
+> measurement at all: that split was apportioned *from* those counters, so
+> withdrawing them withdraws the attribution built on top of them. Striking one
+> cell and leaving its siblings is a worse state than striking none, because it
+> reads as though the rest survived review.
+>
+> The table is kept, struck, because the levers in the right-hand column were
+> measured independently of the counters and are still good: the branchless
+> price-cross A/B is a real shipped −10 ns P50 / −62 ns P99, and the arena and
+> prefetch verdicts were re-measured properly (see BENCHMARKS.md). What is gone
+> is any claim about *where* the 261 ns goes.
+>
+> Closing this needs the scoped x86 re-run: `HonestBenchmark --only a` under
+> `perf stat`, one path per run — the mechanism `aws_benchmark.sh` now uses.
+
+| ~~Cost~~ | ~~ns~~ | ~~Driver~~ | Lever (independently measured) |
 | :--- | --: | :--- | :--- |
-| Pointer chasing (intrusive list) | 80–100 | ~~152 L1-dcache misses/order~~ — evidence withdrawn, see the `perf` note above | arena allocator (reverted — net-negative **on a 100%-fill flow**, and on a mis-scoped counter; see BENCHMARKS.md) |
-| Branch mispredicts | 60–80 | 17.8/order, data-dependent | branchless price-cross (shipped, −10 ns P50) |
-| Irreducible work | 50–60 | price/qty math, STP, compliance | — |
-| Spectre mitigation (eIBRS) | 30–40 | kernel-enforced on this instance | not disableable here |
+| ~~Pointer chasing (intrusive list)~~ | ~~80–100~~ | ~~152 L1-dcache misses/order~~ | arena allocator — **re-measured and still reverted**: 2.5–3.6% worse on cancel-heavy flow (p≈0.002), +16% mean / −13% throughput on 100%-fill (p<1e-5) |
+| ~~Branch mispredicts~~ | ~~60–80~~ | ~~17.8/order, data-dependent~~ | branchless price-cross — shipped, −10 ns P50 / −62 ns P99 (a real A/B, not derived from the withdrawn counters) |
+| ~~Irreducible work~~ | ~~50–60~~ | ~~price/qty math, STP, compliance~~ | — |
+| ~~Spectre mitigation (eIBRS)~~ | ~~30–40~~ | ~~kernel-enforced on this instance~~ | not disableable on this instance type |
 
 Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reordering, `[[likely]]`/`[[unlikely]]` hints, branchless `isBuy` book selection. Shipped this cycle: branchless price-cross (−10 ns P50 / −62 ns P99) and io_uring async journal ack (Path C P99 5,312→3,568 ns); next-order prefetch and the price-level arena allocator were both reverted as net-negative. Clang IR-based PGO then took Path A to 237 ns P50 (the headline figure). The journal P99 (~3.6 µs) is the `fdatasync`/EBS flush; NVMe/RAM-backed storage would be materially lower.
 

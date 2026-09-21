@@ -73,6 +73,37 @@ constexpr double kCancelCum = 0.44;
 constexpr double kNewCum    = 0.90;  // 0.44..0.90 -> 46% new
 constexpr double kIocCum    = 0.98;  // 0.90..0.98 -> 8% IOC; remainder -> 2% modify
 
+// ── --sparse: the cancel-heavy SPARSE-book regime ───────────────────────────
+//
+// BENCHMARKS.md records that none of the four benchmarks covered this: a
+// cancel-to-trade ratio north of 20:1, price levels churning, depth near zero.
+// The default mix above is cancel-heavy but its book SUSTAINS at depth ~2,418
+// by construction, so it never stresses what this one does — FlatPriceMap
+// traversal across sparse slots, cancel-path hash lookups on recently-consumed
+// ids, and object-pool churn.
+//
+// THE TRAP, which this file already fell into once. Its own header records that
+// an earlier 65/25 version drained the resting pool to empty, so ~2 of every 3
+// cancels no-op'd against an empty book and the run measured an EMPTY BOOK
+// wearing venue-shaped labels. "Sparse" has to mean shallow-but-LIVE, not
+// empty: cancels must keep hitting real orders.
+//
+// So cancel stays just below new, exactly as the default mix does — the
+// shallowness comes from the two being nearly equal rather than from cancel
+// exceeding new. What actually creates sparsity is PRICE DISPERSION: passive
+// orders are spread over a far wider band, so few slots are occupied across a
+// large price range. That is the FlatPriceMap stress, and it is independent of
+// depth.
+//
+// Trades are throttled to 2% IOC (~40% of which fill) against 48% cancels,
+// which realizes a cancel-to-trade ratio well north of 20:1. The realized
+// ratio, the no-op count and the mean depth are all printed, so the run proves
+// it reached the regime instead of asserting it.
+constexpr double kSparseCancelCum = 0.48;
+constexpr double kSparseNewCum    = 0.97;  // 49% new — still above cancel
+constexpr double kSparseIocCum    = 0.99;  // 2% IOC; remainder 1% modify
+constexpr Price  kSparsePassiveMax = 400;  // vs 20 — this is what makes it sparse
+
 constexpr Price     kStartMid    = 100000;  // mid in ticks
 constexpr int       kWalkTicks   = 5;       // +/- ticks of random walk per event
 constexpr Price     kMidFloor    = 1000;    // keep the mid (and prices) positive
@@ -87,6 +118,8 @@ int main(int argc, char* argv[]) {
     uint64_t seed   = 42;
     size_t   warmup = 5000;
 
+    bool sparse = false;
+
     for (int i = 1; i < argc; ++i) {
         if ((std::strcmp(argv[i], "--events") == 0 ||
              std::strcmp(argv[i], "--orders") == 0) && i + 1 < argc)
@@ -95,8 +128,14 @@ int main(int argc, char* argv[]) {
             warmup = std::stoull(argv[++i]);
         else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
             seed = std::stoull(argv[++i]);
+        else if (std::strcmp(argv[i], "--sparse") == 0)
+            sparse = true;
         else if (std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: RealisticFlowBenchmark [--events N] [--warmup N] [--seed S]\n");
+            std::printf("Usage: RealisticFlowBenchmark [--events N] [--warmup N] [--seed S]\n"
+                        "                              [--sparse]\n\n"
+                        "  --sparse  cancel-heavy SPARSE-book regime: >20:1 cancel-to-trade,\n"
+                        "            wide price dispersion, depth near zero. Stresses\n"
+                        "            FlatPriceMap traversal over sparse slots and pool churn.\n");
             return 0;
         }
     }
@@ -105,7 +144,12 @@ int main(int argc, char* argv[]) {
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> u01(0.0, 1.0);
     std::uniform_int_distribution<int>     walk(-kWalkTicks, kWalkTicks);
-    std::uniform_int_distribution<Price>   passiveOff(1, 20);   // rest away from mid
+    // Mode-selected thresholds and dispersion. See the kSparse* block above for
+    // why sparsity comes from the price band rather than from out-cancelling.
+    const double cancelCum = sparse ? kSparseCancelCum : kCancelCum;
+    const double newCum    = sparse ? kSparseNewCum    : kNewCum;
+    const double iocCum    = sparse ? kSparseIocCum    : kIocCum;
+    std::uniform_int_distribution<Price>   passiveOff(1, sparse ? kSparsePassiveMax : 20);
     std::uniform_int_distribution<Price>   iocAggr(20, 60);     // cross deep enough to sweep
     std::uniform_int_distribution<uint64_t> pidPick(1, kParticipants);
 
@@ -130,6 +174,7 @@ int main(int argc, char* argv[]) {
     BenchLatencyRecorder recCancel, recNew, recIoc, recModify, recAll;
     uint64_t nCancel = 0, nNew = 0, nIoc = 0, nModify = 0;
     uint64_t noopCancel = 0, noopModify = 0, iocFilled = 0;
+    uint64_t levelSum = 0;
     uint64_t depthSum = 0, poolSum = 0, depthSamples = 0;
 
     OrderId  nextId = 1;
@@ -142,11 +187,19 @@ int main(int argc, char* argv[]) {
         // True live depth is the pool the book actually holds. `resting` is only
         // our tracking superset — it never shrinks when an IOC consumes an order,
         // so reporting its size would overstate depth. Both are printed below.
-        if (warm) { depthSum += book.poolInUse(); poolSum += resting.size(); ++depthSamples; }
+        if (warm) {
+            depthSum += book.poolInUse(); poolSum += resting.size(); ++depthSamples;
+            // OCCUPANCY PER LEVEL is the number that decides whether this run is
+            // actually sparse. Depth alone does not: a shallow book packed onto
+            // a handful of prices exercises FlatPriceMap exactly like a deep
+            // one. Sparsity means few orders spread across MANY slots, which is
+            // what makes the directory walk and the bitmap scan work.
+            levelSum += book.getBidLevelsCount() + book.getAskLevelsCount();
+        }
 
         const double r = u01(rng);
 
-        if (r < kCancelCum) {
+        if (r < cancelCum) {
             // ── 44% CANCEL a randomly selected resting order ──────────────────
             if (resting.empty()) { if (warm) ++noopCancel; continue; }
             const size_t idx = static_cast<size_t>(rng() % resting.size());
@@ -159,7 +212,7 @@ int main(int argc, char* argv[]) {
             const uint64_t t1 = bench::nowNs();
             if (warm) { recCancel.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nCancel; }
 
-        } else if (r < kNewCum) {
+        } else if (r < newCum) {
             // ── 46% NEW passive limit that rests (never aggressive) ───────────
             const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
             const Price off = passiveOff(rng);
@@ -175,7 +228,7 @@ int main(int argc, char* argv[]) {
             resting.push_back(id);
             if (warm) { recNew.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nNew; }
 
-        } else if (r < kIocCum) {
+        } else if (r < iocCum) {
             // ── 8% aggressive IOC that may sweep multiple levels ──────────────
             const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
             const Price aggr = iocAggr(rng);
@@ -247,6 +300,22 @@ int main(int argc, char* argv[]) {
                 nIoc ? 100.0 * (double)iocFilled / (double)nIoc : 0.0);
     std::printf("  Modify:  %8llu (%.1f%%)   [no-op empty-book: %llu]\n",
                 (unsigned long long)nModify, pct(nModify), (unsigned long long)noopModify);
+    const double meanLevels = depthSamples ? (double)levelSum / (double)depthSamples : 0.0;
+    const double meanDepth  = depthSamples ? (double)depthSum  / (double)depthSamples : 0.0;
+    const double perLevel   = meanLevels > 0 ? meanDepth / meanLevels : 0.0;
+    const double cancelPerTrade = iocFilled ? (double)nCancel / (double)iocFilled : 0.0;
+    // Orders-per-level does NOT discriminate the two modes and is reported
+    // without a verdict for that reason: measured 2.85 in the default mix and
+    // 2.02 under --sparse, so a "(SPARSE)" tag keyed on it would fire for both
+    // and mean nothing. What --sparse actually moves is the DIRECTORY SPAN —
+    // occupied levels 278 -> 716 at 300k events, so FlatPriceMap walks ~2.6x as
+    // many slots for a comparable order count — and the cancel-to-trade ratio.
+    std::printf("  Occupied price levels: %.1f  ->  %.2f orders/level\n",
+                meanLevels, perLevel);
+    std::printf("  Cancel-to-trade ratio: %.1f:1%s\n", cancelPerTrade,
+                cancelPerTrade > 20.0
+                    ? "   (>20:1 — sparse-regime target met)"
+                    : "   (below the 20:1 sparse-regime target)");
     std::printf("  Mean resting depth: %.1f orders (tracked-id pool: %.1f)\n",
                 depthSamples ? (double)depthSum / (double)depthSamples : 0.0,
                 depthSamples ? (double)poolSum  / (double)depthSamples : 0.0);

@@ -74,12 +74,42 @@ been run on x86.**
 each timed op and reports warm and cold side by side. Results in the ARM
 section; **also never run on x86.**
 
-None of the four represents a cancel-heavy **sparse**-book regime
-(cancel-to-trade ratios north of 20:1, price levels churn, book depth near
-zero). `RealisticFlowBenchmark` is cancel-heavy but its book *sustains* at depth
-2,418 by construction. The sparse regime stresses `FlatPriceMap` traversal over
-sparse slots, cancel-path hash lookups on recently-consumed IDs, and object pool
-churn. It is the planned next workload addition.
+**`RealisticFlowBenchmark --sparse`** covers the cancel-heavy **sparse**-book
+regime that none of the four reached: a cancel-to-trade ratio north of 20:1 with
+the price directory spread wide, which stresses `FlatPriceMap` traversal across
+sparse slots, cancel-path hash lookups on recently-consumed ids, and object-pool
+churn. The default mix is cancel-heavy but its book *sustains* — it never gets
+there.
+
+Measured at 300k events, seed 42 (ARM, indicative):
+
+| | default | `--sparse` |
+|---|---:|---:|
+| cancel-to-trade | 9.1:1 | **42.5:1** |
+| occupied price levels | 277.6 | **716.1** |
+| orders per level | 2.85 | 2.02 |
+| mean resting depth | 792 | 1,446 |
+| no-op cancels | 0 | **0** |
+
+Two honest notes about what this does and does not show.
+
+**Sparsity here is directory SPAN, not depth.** Orders-per-level barely moves
+(2.85 → 2.02) and is reported without a verdict for that reason — a "(sparse)"
+label keyed on it would fire for both modes and mean nothing. What `--sparse`
+actually changes is that `FlatPriceMap` walks ~2.6× as many occupied slots for a
+comparable order count. Book depth is *not* near zero, which the original
+description of this regime assumed it would be.
+
+**The shallowness does not come from out-cancelling.** Cancel stays just below
+new (48% vs 49%), exactly as the default does. This file's own header records
+why: an earlier 65/25 version drained the pool so ~2 of 3 cancels no-op'd
+against an empty book, and the run measured an empty book wearing venue-shaped
+labels. Sparse means shallow-but-live. The **0 no-op cancels** above is the
+evidence that it stayed live; it is printed on every run rather than assumed.
+
+Cancel latency in this regime: P50 250 ns, P99 375 ns, P99.9 417 ns, mean 227 ns
+over 141,183 samples, 10.4% of which completed inside one clock tick and are
+counted rather than dropped.
 
 ## Methodology
 

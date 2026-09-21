@@ -1657,10 +1657,24 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     }
 
     auto* book = getOrderBook(symbolId);
-    if (!book || !book->getOrder(orderId)) {
-        return rejectedAsync(book ? RejectReason::OrderNotFound
-                                           : RejectReason::SymbolNotFound);
+    if (!book) {
+        return rejectedAsync(RejectReason::SymbolNotFound);
     }
+    // THE EXISTENCE CHECK IS cancelOrderReleasing's, NOT A PRE-CHECK HERE.
+    //
+    // This used to call book->getOrder(orderId) first, purely to decide between
+    // OrderNotFound and SymbolNotFound. OrderBook::getOrder does NOT take
+    // bookLock_, so that read raced any concurrent erase of orderLookup_ —
+    // ThreadSanitizer on Linux caught it in ShutdownCancelRaceTest, where
+    // gracefulShutdown's cancelDayOrders sweep erases while a client cancel
+    // reads.
+    //
+    // It is the same getOrder()-then-cancel() pattern that cancelOrderReleasing
+    // was introduced to replace (see its declaration): H1 moved the exposure
+    // READ inside the lock but left this existence LOOKUP outside it. The
+    // OrderExposure already reports `found` from inside the critical section,
+    // so the pre-check was both racy and redundant — and dropping it removes a
+    // lookup from the cancel path rather than adding one.
     // P2-9: release the cancelled order's working exposure before it leaves the
     // book (read remaining qty while the order still exists).
     // H1: read the exposure inside cancelOrderReleasing's own critical
@@ -1673,6 +1687,9 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     const auto exposure = book->cancelOrderReleasing(orderId, requester);
     if (exposure.denied) [[unlikely]] {
         return rejectedAsync(RejectReason::NotOrderOwner);
+    }
+    if (!exposure.found) [[unlikely]] {
+        return rejectedAsync(RejectReason::OrderNotFound);
     }
     if (positionLimitsActive_.load(std::memory_order_relaxed)) {
         releasePosition(exposure);

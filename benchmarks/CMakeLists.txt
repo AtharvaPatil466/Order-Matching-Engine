@@ -31,7 +31,7 @@ target_link_libraries(BinaryCodecBenchmark PRIVATE OrderMatcher)
 # and shared bench::WorkloadGenerator (RealisticWorkload.h) under benchmarks/.
 # ZERO external dependencies — no HdrHistogram, no FetchContent.
 
-# P2-18: realistic flow (Poisson arrivals, power-law sizes, ~65% cancel, ~15% fill)
+# P2-18: realistic flow (power-law sizes, 44% cancel / 46% new / 8% IOC / 2% modify)
 add_executable(RealisticFlowBenchmark RealisticFlowBenchmark.cpp)
 target_link_libraries(RealisticFlowBenchmark PRIVATE OrderMatcher)
 

@@ -147,7 +147,7 @@ int main(int argc, char* argv[]) {
         const double r = u01(rng);
 
         if (r < kCancelCum) {
-            // ── 65% CANCEL a randomly selected resting order ──────────────────
+            // ── 44% CANCEL a randomly selected resting order ──────────────────
             if (resting.empty()) { if (warm) ++noopCancel; continue; }
             const size_t idx = static_cast<size_t>(rng() % resting.size());
             const OrderId id = resting[idx];
@@ -160,7 +160,7 @@ int main(int argc, char* argv[]) {
             if (warm) { recCancel.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nCancel; }
 
         } else if (r < kNewCum) {
-            // ── 25% NEW passive limit that rests (never aggressive) ───────────
+            // ── 46% NEW passive limit that rests (never aggressive) ───────────
             const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
             const Price off = passiveOff(rng);
             Price px = (side == Side::Buy) ? mid - off : mid + off;

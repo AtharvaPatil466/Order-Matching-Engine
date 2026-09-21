@@ -617,6 +617,16 @@ add_test(NAME LatencyTrackerIntervalTest COMMAND LatencyTrackerIntervalTest)
 set_tests_properties(LatencyTrackerIntervalTest PROPERTIES TIMEOUT 30
                      LABELS "project;unit")
 
+# Sequence ids are now handed out in per-thread BLOCKS to remove a contended
+# global fetch_add. Uniqueness across threads is the property that change could
+# break, and SubmitResultTest only covers the single-threaded case.
+add_executable(SequenceIdBlockTest SequenceIdBlockTest.cpp)
+target_link_libraries(SequenceIdBlockTest PRIVATE OrderMatcher)
+enable_assertions(SequenceIdBlockTest)
+add_test(NAME SequenceIdBlockTest COMMAND SequenceIdBlockTest)
+set_tests_properties(SequenceIdBlockTest PROPERTIES TIMEOUT 60
+                     LABELS "project;unit")
+
 # H18 — the capacity monitor is wired into a real engine, not just unit-tested
 # in isolation: startAsync installs the resource callbacks and runs the
 # monitor, a breach reaches the structured sink, stopAsync joins promptly.

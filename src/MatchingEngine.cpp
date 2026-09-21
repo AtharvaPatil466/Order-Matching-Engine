@@ -34,6 +34,37 @@ inline void cpuRelax() {
 #endif
 }
 
+// Sequence ids for SubmitResult. They must be UNIQUE and must INCREASE for a
+// given caller; nothing consumes a dense global order — the gateway echoes the
+// id straight back to the client (GatewayProtocol.h:234) and AdminServer prints
+// it. This used to be one engine-wide fetch_add on the submit path, contended
+// by every producer on every order.
+//
+// So hand them out in per-thread blocks: one contended RMW per kSeqBlock
+// orders instead of one per order. Still unique, still monotonic per thread,
+// still never 0 (0 means "rejected"). The counter is process-wide rather than
+// per-engine, which only means a second engine in the same process starts
+// partway up the number line — no consumer cares where it starts.
+constexpr uint64_t kSeqBlock = 1024;
+std::atomic<uint64_t> g_seqBlockBase{0};
+thread_local uint64_t t_seqNext = 0;
+thread_local uint64_t t_seqEnd  = 0;
+
+inline uint64_t nextSequenceId() {
+    if (t_seqNext == t_seqEnd) [[unlikely]] {
+        const uint64_t base = g_seqBlockBase.fetch_add(kSeqBlock, std::memory_order_relaxed);
+        t_seqNext = base + 1;
+        t_seqEnd  = base + kSeqBlock + 1;
+    }
+    return t_seqNext++;
+}
+
+// waitForDrain's escalation ladder: spin, then yield, then sleep. See
+// waitForDrain for why it polls at all.
+constexpr uint64_t kDrainSpins  = 2048;
+constexpr uint64_t kDrainYields = 2048;
+constexpr auto     kDrainPollSleep = std::chrono::microseconds(50);
+
 void pinCurrentThreadToCore(size_t threadIndex) {
 #if defined(__linux__)
     cpu_set_t cpuset;
@@ -82,7 +113,6 @@ bool MatchingEngine::enqueueSafe(size_t threadIndex, const OrderRequest& req) {
     for (uint32_t i = 0; i < maxPushRetries_; ++i) {
         if (requestQueues_[threadIndex]->push(req)) {
             threadStats_[threadIndex].submitted.fetch_add(1, std::memory_order_relaxed);
-            submittedTotal_.fetch_add(1, std::memory_order_release);
             queueWakeups_[threadIndex].fetch_add(1, std::memory_order_release);
             queueWakeups_[threadIndex].notify_one();
             return true;
@@ -108,7 +138,6 @@ bool MatchingEngine::tryEnqueueControl(size_t threadIndex, const OrderRequest& r
     for (uint64_t spins = 0; spins < maxSpins; ++spins) {
         if (requestQueues_[threadIndex]->push(req)) {
             threadStats_[threadIndex].submitted.fetch_add(1, std::memory_order_relaxed);
-            submittedTotal_.fetch_add(1, std::memory_order_release);
             queueWakeups_[threadIndex].fetch_add(1, std::memory_order_release);
             queueWakeups_[threadIndex].notify_one();
             return true;
@@ -135,12 +164,11 @@ void MatchingEngine::enqueueControl(size_t threadIndex, const OrderRequest& req)
                 .kv("spins", (long long)spins));
         }
     }
-    // Same bookkeeping enqueueSafe does on success. submittedTotal_ in
+    // Same bookkeeping enqueueSafe does on success. The submitted counter in
     // particular is what makes the subsequent waitForDrain() actually wait for
     // this message: a dropped enqueue never bumped it, so waitForDrain returned
     // immediately and the caller believed a sweep had run that never did.
     threadStats_[threadIndex].submitted.fetch_add(1, std::memory_order_relaxed);
-    submittedTotal_.fetch_add(1, std::memory_order_release);
     queueWakeups_[threadIndex].fetch_add(1, std::memory_order_release);
     queueWakeups_[threadIndex].notify_one();
 }
@@ -236,12 +264,30 @@ size_t MatchingEngine::getThreadIndex(SymbolId symbolId) const {
     return std::hash<SymbolId>{}(symbolId) % numThreads_;
 }
 
+// Both counts are summed from threadStats_ at read time instead of being
+// maintained as engine-wide atomics: see the note by threadStats_ in the
+// header. Cold callers only (admin stats, drain, checkpoint trigger), so an
+// O(numThreads) sum is free and the hot path loses a contended RMW per order.
+// Sync mode never allocates threadStats_, and reported 0 before this change
+// too, because nothing on the sync path ever incremented the old totals.
 uint64_t MatchingEngine::getSubmittedCount() const {
-    return submittedTotal_.load(std::memory_order_acquire);
+    const ThreadStats* stats = threadStats_.get();
+    if (!stats) return 0;
+    uint64_t total = 0;
+    for (size_t i = 0; i < numThreads_; ++i) {
+        total += stats[i].submitted.load(std::memory_order_acquire);
+    }
+    return total;
 }
 
 uint64_t MatchingEngine::getProcessedCount() const {
-    return processedTotal_.load(std::memory_order_acquire);
+    const ThreadStats* stats = threadStats_.get();
+    if (!stats) return 0;
+    uint64_t total = 0;
+    for (size_t i = 0; i < numThreads_; ++i) {
+        total += stats[i].processed.load(std::memory_order_acquire);
+    }
+    return total;
 }
 
 void MatchingEngine::ensureDefaultSymbol() {
@@ -294,11 +340,11 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     numThreads_ = numThreads > 0 ? numThreads : 1;
     rebuildThreadSymbolIndex();
 
+    // Fresh ThreadStats zero the submitted/processed counters, which is what
+    // resetting the old engine-wide totals used to do here.
     threadStats_ = std::make_unique<ThreadStats[]>(numThreads_);
     e2eLatency_ = std::make_unique<LatencyTracker[]>(numThreads_);
     queueWakeups_ = std::make_unique<std::atomic<uint64_t>[]>(numThreads_);
-    submittedTotal_.store(0, std::memory_order_release);
-    processedTotal_.store(0, std::memory_order_release);
 
     requestQueues_.clear();
     workerThreads_.clear();
@@ -534,10 +580,26 @@ void MatchingEngine::waitForDrain() {
         return;
     }
 
-    uint64_t target = submittedTotal_.load(std::memory_order_acquire);
-    while (processedTotal_.load(std::memory_order_acquire) < target) {
-        uint64_t observed = processedTotal_.load(std::memory_order_relaxed);
-        processedTotal_.wait(observed, std::memory_order_relaxed);
+    // Poll, rather than have every worker notify a condition variable on every
+    // message it completes. The waiters are all cold — shutdown, checkpoint, a
+    // research harness between orders — and the old form paid a notify_all()
+    // per processed order to serve a waiter that is usually not there.
+    //
+    // ponytail: spin covers the common case (a few in-flight orders, tens of
+    // microseconds); the sleep keeps a genuinely long drain, e.g. a final
+    // checkpoint fsync, off the CPU. Ceiling: a waiter can be up to
+    // kDrainPollSleep late. If a caller ever needs tighter drain latency, add a
+    // waiter count the workers test before notifying — do NOT put the
+    // unconditional notify back.
+    const uint64_t target = getSubmittedCount();
+    for (uint64_t spins = 0; getProcessedCount() < target; ++spins) {
+        if (spins < kDrainSpins) {
+            cpuRelax();
+        } else if (spins < kDrainSpins + kDrainYields) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(kDrainPollSleep);
+        }
     }
 
     if (checkpointPending_.exchange(false, std::memory_order_acq_rel)) {
@@ -559,8 +621,6 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
 
             if (req.type == OrderRequest::Type::Shutdown) {
                 threadStats_[threadIndex].processed.fetch_add(1, std::memory_order_release);
-                processedTotal_.fetch_add(1, std::memory_order_release);
-                processedTotal_.notify_all();
                 break;
             }
 
@@ -576,13 +636,13 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             }
 
             threadStats_[threadIndex].processed.fetch_add(1, std::memory_order_release);
-            processedTotal_.fetch_add(1, std::memory_order_release);
-            processedTotal_.notify_all();
 
+            // The two sums walk every thread's stats, so the pending flag is
+            // tested FIRST and short-circuits them away on every ordinary
+            // order. This is the only hot-path reader of the aggregates.
             if (threadIndex == 0 &&
                 checkpointPending_.load(std::memory_order_acquire) &&
-                processedTotal_.load(std::memory_order_acquire) >=
-                    submittedTotal_.load(std::memory_order_acquire)) {
+                getProcessedCount() >= getSubmittedCount()) {
                 checkpointPending_.store(false, std::memory_order_release);
                 checkpointInternal(true);
             }
@@ -1458,7 +1518,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
-    uint64_t sequenceId = nextSubmitSequence_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t sequenceId = nextSequenceId();
 
     if (rateLimiter_.isEnabled() && !rateLimiter_.allow(participantId)) {
         rateLimitedCount_.fetch_add(1, std::memory_order_relaxed);
@@ -1575,7 +1635,7 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
-    uint64_t sequenceId = nextSubmitSequence_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t sequenceId = nextSequenceId();
 
     if (async_) {
         if (!getOrderBook(symbolId)) {
@@ -1699,7 +1759,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
-    uint64_t sequenceId = nextSubmitSequence_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t sequenceId = nextSequenceId();
 
     if (async_) {
         if (!getOrderBook(symbolId)) {
@@ -1748,7 +1808,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
-    uint64_t sequenceId = nextSubmitSequence_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t sequenceId = nextSequenceId();
 
     if (async_) {
         if (!getOrderBook(symbolId)) {

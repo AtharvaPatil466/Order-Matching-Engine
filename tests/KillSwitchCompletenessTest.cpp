@@ -6,7 +6,8 @@
 // maxPushRetries_ and drops the message (MatchingEngine.cpp:89-93). Under load
 // that produced the worst state a safety control can reach: new orders rejected
 // by the flag, every resting order still live. Worse, the drop also skipped the
-// submittedTotal_ increment, so the waitForDrain() that followed had nothing to
+// submitted-counter increment (then a global submittedTotal_, now the
+// per-thread threadStats_[]), so the waitForDrain() that followed had nothing to
 // wait for and returned immediately — the caller believed a sweep had run.
 //
 // The invariant under test: after setKillSwitch(true) returns, ZERO resting

@@ -56,9 +56,18 @@ IntrusiveList contains **no atomic operations**. Protected by `bookLock_`. No ch
 |----------|-----------|----------|--------|
 | `running_` | load/store | `acquire/release` | ✅ Correct — controls shutdown visibility |
 | `booksFrozen_` | load/store | `acquire/release` | ✅ Correct — prevents symbol mutation |
-| `submittedTotal_` | `fetch_add` / `load` | `release/acquire` | ✅ Correct — drain synchronization |
-| `processedTotal_` | `fetch_add` / `load` + `notify_all` | `release/acquire` | ✅ Correct — drain barrier |
-| `nextSubmitSequence_` | `fetch_add` | `relaxed` | ✅ Correct — uniqueness only, no ordering |
+| ~~`submittedTotal_`~~ | — | — | **REMOVED.** Was an engine-wide `fetch_add` per order. Its consumers (`getSubmittedCount`, `waitForDrain`) now sum the already-`alignas(64)` per-thread `threadStats_[]` at read time. |
+| ~~`processedTotal_`~~ | — | — | **REMOVED**, together with its per-completion `notify_all()`. Waking a condition on every processed message served a waiter that only exists at shutdown; `waitForDrain` now polls its own sums. |
+| ~~`nextSubmitSequence_`~~ | — | — | **REPLACED** by a per-thread block allocator: one relaxed `fetch_add` per block of ids rather than per order. Still globally unique, still non-zero, still monotonic within a thread — pinned by `tests/SequenceIdBlockTest.cpp`. No longer densely ordered across threads, and nothing consumes that. |
+
+> The three rows above were all marked "✅ Correct", and they were — each
+> individual ordering was sound. Being correct per-member is not the same as
+> being right in aggregate: all three were global lines RMW'd on the hot path by
+> every producer or every worker, which is what pinned aggregate throughput flat
+> past two workers. Removing them raised end-to-end throughput 1.46x at 4
+> workers and 1.51x at 8, ranges non-overlapping across five runs each. A
+> memory-ordering audit checks that each atomic is correct; it does not ask
+> whether the atomic should be there at all.
 | `droppedCount_` | `fetch_add` / `load` | `relaxed` | ✅ Correct — stats only |
 | `rateLimitedCount_` | `fetch_add` / `load` | `relaxed` | ✅ Correct — stats only |
 | `bpRejectCount_` | `fetch_add` / `load` | `relaxed` | ✅ Correct — stats only |

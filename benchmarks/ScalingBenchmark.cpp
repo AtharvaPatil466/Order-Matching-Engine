@@ -14,9 +14,9 @@
 // MatchingEngine::startAsync(N) spawns N workers, each owning the symbols that
 // hash to it (getThreadIndex = hash(symbolId) % numThreads). Every submission
 // crosses one routing prologue — kill switch, running flag, a GLOBAL
-// nextSubmitSequence_ fetch_add, rate/risk gates, book lookup — and then an
+// sequence-id allocation, rate/risk gates, book lookup — and then an
 // enqueueSafe onto that worker's MPSC queue (another global fetch_add on
-// submittedTotal_, plus a wakeup notify). That prologue is shared by every
+// per-thread counters, plus a wakeup notify). That prologue is shared by every
 // producer and is the obvious serialisation point.
 //
 // So two throughputs are reported per worker count, not one:

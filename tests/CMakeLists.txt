@@ -608,6 +608,15 @@ add_test(NAME AlertDispatcherTest COMMAND AlertDispatcherTest)
 set_tests_properties(AlertDispatcherTest PROPERTIES TIMEOUT 30
                      LABELS "project;ops")
 
+# recordInterval must COUNT a sub-tick op, not drop it. The old guard threw away
+# the fastest samples, biasing every published percentile upward.
+add_executable(LatencyTrackerIntervalTest LatencyTrackerIntervalTest.cpp)
+target_link_libraries(LatencyTrackerIntervalTest PRIVATE OrderMatcher)
+enable_assertions(LatencyTrackerIntervalTest)
+add_test(NAME LatencyTrackerIntervalTest COMMAND LatencyTrackerIntervalTest)
+set_tests_properties(LatencyTrackerIntervalTest PROPERTIES TIMEOUT 30
+                     LABELS "project;unit")
+
 # H18 — the capacity monitor is wired into a real engine, not just unit-tested
 # in isolation: startAsync installs the resource callbacks and runs the
 # monitor, a breach reaches the structured sink, stopAsync joins promptly.

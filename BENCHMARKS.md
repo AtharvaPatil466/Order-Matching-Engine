@@ -177,11 +177,17 @@ predecessor**. Two consequences apply to every ARM figure here:
 1. **Every ARM latency is quantized to a ~41.67 ns grid.** A reported 208 ns is
    5 ticks, ±1 tick (±20%). A reported 42 ns is *one* tick — not a measurement,
    only a statement that the op finished inside one clock period.
-2. **Sub-tick ops are dropped, not recorded as zero.**
-   `BenchLatencyRecorder::recordInterval()` ignores intervals where
-   `end <= start`, so an op faster than one tick leaves no sample. Percentiles
-   are computed over the surviving slower ops and are **biased upward**. Sample
-   counts are quoted below so the size of the loss is visible.
+2. **Sub-tick ops are counted — FIXED; the ARM tables below predate it.**
+   `recordInterval()` used to read `if (end > start) record(...)`, so an op
+   faster than one tick left no sample and every percentile was biased upward —
+   the fastest samples are exactly the ones that vanished (22-32% on cancel).
+   Both recorders now record a sub-tick span as 0 and report the count, and a
+   percentile inside that band prints `<tick` rather than a number. `end <
+   start` stays unrecorded and is counted separately as a clock anomaly.
+   Pinned by `tests/LatencyTrackerIntervalTest.cpp`. The tables below were
+   measured before the fix and are left as measured; a like-for-like re-run
+   recovered 19,426 cancel samples at 200K events and moved the cancel mean
+   from 174 ns to 135 ns.
 
 An x86 TSC tick on a 2.9 GHz part is ~0.34 ns — roughly 120× finer than this
 box's 41.67 ns — so neither problem arises there. Any ARM number within a small

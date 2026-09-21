@@ -60,10 +60,50 @@ public:
         if (latencyNs > max_) max_ = latencyNs;
     }
 
-    // Record an interval; ignores non-positive spans (clock went backwards or
-    // sub-tick resolution).
+    // Record an interval.
+    //
+    // A SUB-TICK OPERATION IS COUNTED, NOT DISCARDED. This used to read
+    // `if (endNs > startNs) record(...)`, so an operation that completed inside
+    // one clock tick left NO SAMPLE AT ALL. That silently biases every
+    // percentile upward, because the fastest operations are exactly the ones
+    // that vanish: measured on this project's own cancel path, 26-32% of
+    // samples were being dropped, which made the reported "P50" closer to a
+    // true P66 of the real distribution.
+    //
+    // The recorded value is 0 because that is the only thing actually known —
+    // the true duration lies somewhere in [0, tick) and the clock cannot say
+    // where. That choice is deliberately unimportant: sub-tick samples are the
+    // smallest in the distribution, so they occupy the lowest ranks whatever
+    // value they are given, and every percentile ABOVE the sub-tick band is
+    // correctly ranked either way. What was broken was the COUNT, not the
+    // value. Percentiles that fall INSIDE the band are unresolvable, and
+    // printTable now says so rather than printing one tick as though it were a
+    // measurement.
+    //
+    // endNs < startNs is a different thing and is still not recorded: nowNs()
+    // is a steady_clock, so time running backwards is a broken measurement
+    // rather than a fast one. It is counted separately so it cannot hide.
     void recordInterval(uint64_t startNs, uint64_t endNs) {
-        if (endNs > startNs) record(endNs - startNs);
+        if (endNs > startNs) { record(endNs - startNs); return; }
+        if (endNs == startNs) { ++subTick_; record(0); return; }
+        ++clockAnomalies_;
+    }
+
+    // Samples that completed within one clock tick. Recorded, but their value
+    // is not resolvable by this clock.
+    uint64_t getSubTickCount() const { return subTick_; }
+    // Intervals where the clock ran backwards. Should be 0 on a steady clock;
+    // anything else means the timing source is untrustworthy.
+    uint64_t getClockAnomalies() const { return clockAnomalies_; }
+
+    // Is the value at percentile p resolvable, or does it fall inside the
+    // sub-tick band? Sub-tick samples hold the lowest ranks, so a percentile is
+    // resolvable exactly when its rank is past them.
+    bool isResolved(double p) const {
+        if (count_ == 0) return false;
+        uint64_t rank = static_cast<uint64_t>(std::ceil(p * static_cast<double>(count_)));
+        if (rank == 0) rank = 1;
+        return rank > subTick_;
     }
 
     // RAII scope timer for ad-hoc measurement.
@@ -111,6 +151,8 @@ public:
         sum_ += other.sum_;
         min_ = std::min(min_, other.min_);
         max_ = std::max(max_, other.max_);
+        subTick_ += other.subTick_;
+        clockAnomalies_ += other.clockAnomalies_;
     }
 
     void reset() {
@@ -119,6 +161,8 @@ public:
         sum_ = 0;
         min_ = UINT64_MAX;
         max_ = 0;
+        subTick_ = 0;
+        clockAnomalies_ = 0;
     }
 
     // Print the standard percentile table. `label` names the measured path.
@@ -126,14 +170,38 @@ public:
     // across the whole harness (P2-21).
     void printTable(const char* label) const {
         std::printf("  %-14s samples=%llu\n", label, (unsigned long long)count_);
-        std::printf("    Min:     %10llu ns\n", (unsigned long long)getMin());
-        std::printf("    P50:     %10llu ns\n", (unsigned long long)getP50());
-        std::printf("    P90:     %10llu ns\n", (unsigned long long)getP90());
-        std::printf("    P99:     %10llu ns\n", (unsigned long long)getP99());
-        std::printf("    P99.9:   %10llu ns\n", (unsigned long long)getP999());
-        std::printf("    P99.99:  %10llu ns\n", (unsigned long long)getP9999());
+        // A percentile inside the sub-tick band is not a number this clock can
+        // produce. Printing it as though it were is how "cancel P50 = 42 ns"
+        // came to be quoted as a measurement when it was one clock tick.
+        auto row = [this](const char* name, double p, uint64_t v) {
+            if (isResolved(p)) {
+                std::printf("    %-8s %10llu ns\n", name, (unsigned long long)v);
+            } else {
+                std::printf("    %-8s %10s    (below clock resolution)\n", name, "<tick");
+            }
+        };
+        std::printf("    Min:     %10llu ns%s\n", (unsigned long long)getMin(),
+                    subTick_ > 0 ? "   (sub-tick sample)" : "");
+        row("P50:",    0.50,   getP50());
+        row("P90:",    0.90,   getP90());
+        row("P99:",    0.99,   getP99());
+        row("P99.9:",  0.999,  getP999());
+        row("P99.99:", 0.9999, getP9999());
         std::printf("    Max:     %10llu ns\n", (unsigned long long)getMax());
-        std::printf("    Mean:    %10.0f ns\n", getMean());
+        std::printf("    Mean:    %10.0f ns%s\n", getMean(),
+                    subTick_ > 0 ? "   (sub-tick samples counted as 0)" : "");
+        if (subTick_ > 0) {
+            std::printf("    sub-tick: %9llu (%.1f%%) completed within one clock "
+                        "tick — counted, value unresolvable\n",
+                        (unsigned long long)subTick_,
+                        100.0 * static_cast<double>(subTick_) /
+                            static_cast<double>(count_));
+        }
+        if (clockAnomalies_ > 0) {
+            std::printf("    WARNING: %llu interval(s) had end < start on a "
+                        "steady clock — timing source is suspect\n",
+                        (unsigned long long)clockAnomalies_);
+        }
     }
 
 private:
@@ -162,6 +230,8 @@ private:
     uint64_t sum_{0};
     uint64_t min_{UINT64_MAX};
     uint64_t max_{0};
+    uint64_t subTick_{0};
+    uint64_t clockAnomalies_{0};
 };
 
 } // namespace bench

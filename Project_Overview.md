@@ -292,12 +292,26 @@ consequences, both of which apply to every ARM number below:
    5 ticks and carries ±1 tick (±20%); a reported 42 ns is *one* tick and is not
    a measurement at all, only a statement that the operation finished inside one
    clock period.
-2. **Sub-tick operations are dropped, not recorded as zero.**
-   `BenchLatencyRecorder::recordInterval()` ignores any interval where
-   `end <= start`. An operation faster than one tick therefore leaves no sample,
-   so the reported percentiles are computed over the surviving slower ops and
-   are **biased upward**. The size of that bias is visible in the sample counts
-   quoted below and is largest on the cancel path.
+2. **Sub-tick operations are counted — FIXED; ARM tables below predate it.**
+   `recordInterval()` used to read `if (end > start) record(...)`, so an
+   operation completing inside one tick left **no sample at all**. That biases
+   every percentile upward, because the discarded samples are exactly the
+   fastest ones: the left tail vanishes and the survivors are renumbered.
+   Measured at 22-32% of samples on the cancel path.
+
+   Both recorders now record a sub-tick span as 0 and report the count. The
+   value is not the point — the true duration is somewhere in `[0, tick)` and
+   the clock cannot say where — but sub-tick samples hold the lowest ranks
+   whatever value they carry, so counting them is what makes every percentile
+   *above* the band correctly ranked. A percentile falling *inside* the band
+   now prints `<tick  (below clock resolution)` instead of a number.
+   `end < start` remains unrecorded and is counted separately: on a monotonic
+   clock that is a broken measurement, not a fast one.
+
+   **The ARM tables in this section were measured before the fix**, so their
+   sample counts still exclude the sub-tick ops and their percentiles still
+   carry the upward bias described there. They are left as measured rather
+   than retro-adjusted; re-running them is part of the x86 work below.
 
 An x86 TSC tick on a 2.9 GHz part is ~0.34 ns — roughly 120× finer than this
 box's 41.67 ns — so neither problem arises there. This is why the x86 box is the
@@ -384,11 +398,16 @@ live orders rather than missing an empty book.
 and it means only that the median cancel completes in under 42 ns — the true
 value is somewhere below the floor and this box cannot say where.
 **26.4% of cancels (57,429 of 217,256) completed inside a single tick and were
-dropped from the histogram entirely**, so the cancel percentiles are computed
-over the slower 73.6% and every one of them is biased upward. The same effect
-costs the combined row 58,372 of 495,000 samples (11.8%), which means the
-combined P50 of 208 ns is also an upper bound rather than a centre. An x86 TSC
-resolves all of this; this box cannot. Cancel is the fastest path in the engine
+dropped from the histogram entirely** in the run tabulated here, so those
+cancel percentiles are computed over the slower 73.6% and every one of them is
+biased upward. The same effect costs the combined row 58,372 of 495,000 samples
+(11.8%), so the combined P50 of 208 ns shown above is an upper bound rather than
+a centre. **That drop is now fixed** (see the measurement-floor note earlier in
+this section) — these figures are retained as measured at the time rather than
+retro-adjusted, and a re-run is listed below. For scale, a like-for-like re-run
+after the fix recovered 19,426 previously-invisible cancel samples at 200K
+events and moved the cancel mean from 174 ns to 135 ns. An x86 TSC resolves the
+underlying resolution problem; this box cannot. Cancel is the fastest path in the engine
 and is therefore the one the dev box is least able to measure.
 
 The `Max` column is worth reading alongside the percentiles: an 18 µs cancel

@@ -33,10 +33,32 @@ public:
         if (latencyNs > max_) max_ = latencyNs;
     }
 
-    // Record using start/end timestamps
+    // Record using start/end timestamps.
+    //
+    // A SUB-TICK OPERATION IS COUNTED, NOT DISCARDED. This used to read
+    // `if (endNs > startNs) record(...)`, so anything completing inside one
+    // clock tick left no sample, which biases every percentile upward — the
+    // fastest operations are precisely the ones that disappear. On a coarse
+    // clock that is not a rounding detail: the same defect in the benchmark
+    // harness was dropping 26-32% of cancel samples.
+    //
+    // 0 is recorded because it is the only thing known: the true duration is
+    // somewhere in [0, tick). The value matters little — sub-tick samples take
+    // the lowest ranks regardless, so percentiles above the band are correctly
+    // ranked either way. The COUNT is what was broken.
+    //
+    // endNs < startNs is still not recorded. nowNs() is monotonic, so that is a
+    // broken measurement rather than a fast one; it is counted separately.
     void recordInterval(uint64_t startNs, uint64_t endNs) {
-        if (endNs > startNs) record(endNs - startNs);
+        if (endNs > startNs) { record(endNs - startNs); return; }
+        if (endNs == startNs) { ++subTick_; record(0); return; }
+        ++clockAnomalies_;
     }
+
+    // Samples completing within one clock tick — counted, value unresolvable.
+    uint64_t getSubTickCount() const { return subTick_; }
+    // Intervals where the clock ran backwards; should be 0.
+    uint64_t getClockAnomalies() const { return clockAnomalies_; }
 
     // RAII scope timer
     class ScopeTimer {
@@ -89,6 +111,8 @@ public:
         sum_ += other.sum_;
         min_ = std::min(min_, other.min_);
         max_ = std::max(max_, other.max_);
+        subTick_ += other.subTick_;
+        clockAnomalies_ += other.clockAnomalies_;
     }
 
     void reset() {
@@ -97,6 +121,8 @@ public:
         sum_ = 0;
         min_ = UINT64_MAX;
         max_ = 0;
+        subTick_ = 0;
+        clockAnomalies_ = 0;
     }
 
 private:
@@ -124,6 +150,8 @@ private:
     uint64_t sum_;
     uint64_t min_;
     uint64_t max_;
+    uint64_t subTick_{0};
+    uint64_t clockAnomalies_{0};
 };
 
 } // namespace OrderMatcher

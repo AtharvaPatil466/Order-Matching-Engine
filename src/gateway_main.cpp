@@ -370,9 +370,73 @@ client_done:
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
+namespace {
+
+// std::stoi THROWS on anything non-numeric, and an uncaught exception out of
+// main aborts. This binary used to call it straight on argv[1], so:
+//
+//   GatewayServer --help                          -> abort
+//   GatewayServer --participant-credentials FILE  -> abort
+//
+// The second one is the damaging case. When no credentials are configured the
+// startup FATAL tells the operator to pass exactly that flag — and doing so
+// crashed, because argv[1] was unconditionally read as a port number. The
+// security posture was right and the documented way to satisfy it was
+// unreachable.
+bool parsePort(const char* text, uint16_t& out, const char* what) {
+    try {
+        const int v = std::stoi(text);
+        if (v < 1 || v > 65535) {
+            std::cerr << "[Gateway] FATAL: " << what << " must be 1-65535, got "
+                      << v << "\n";
+            return false;
+        }
+        out = static_cast<uint16_t>(v);
+        return true;
+    } catch (const std::exception&) {
+        std::cerr << "[Gateway] FATAL: " << what << " is not a number: \""
+                  << text << "\"\n";
+        return false;
+    }
+}
+
+void printUsage() {
+    std::cout <<
+        "Usage: GatewayServer [PORT] [options]\n"
+        "\n"
+        "  PORT                            listen port (default 9876)\n"
+        "  --participant-credentials FILE  credential store, one per line as\n"
+        "                                  user:secret:id[,id...]\n"
+        "  --no-participant-auth           accept every claimed identity\n"
+        "                                  (explicit opt-out; see below)\n"
+        "  --help                          this message\n"
+        "\n"
+        "Environment: OB_PARTICIPANT_CREDENTIALS, OB_NO_PARTICIPANT_AUTH,\n"
+        "             OB_ENGINE_HOST + OB_ENGINE_PORT (forwarding mode).\n"
+        "\n"
+        "The gateway REFUSES TO START with no credentials unless\n"
+        "--no-participant-auth is passed, because every identity on this port\n"
+        "would otherwise be an unchecked claim.\n";
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
     uint16_t port = 9876;
-    if (argc > 1) port = static_cast<uint16_t>(std::stoi(argv[1]));
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
+            printUsage();
+            return 0;
+        }
+    }
+
+    // A leading positional PORT is optional. Only consume argv[1] as one when
+    // it actually looks like a number — otherwise it is a flag, and parsing it
+    // as a port is what caused the aborts described above.
+    if (argc > 1 && argv[1][0] != '-') {
+        if (!parsePort(argv[1], port, "PORT")) return 1;
+    }
 
     std::signal(SIGINT,  signalHandler);
     std::signal(SIGTERM, signalHandler);
@@ -387,7 +451,8 @@ int main(int argc, char* argv[]) {
         // ----------------------------------------------------------------
         // FORWARDING MODE: proxy all client frames to the remote engine.
         // ----------------------------------------------------------------
-        uint16_t enginePort = static_cast<uint16_t>(std::stoi(enginePortStr));
+        uint16_t enginePort = 0;
+        if (!parsePort(enginePortStr, enginePort, "OB_ENGINE_PORT")) return 1;
 
         std::cout << "[Gateway] Forwarding mode: orders -> "
                   << engineHost << ":" << enginePort << std::endl;

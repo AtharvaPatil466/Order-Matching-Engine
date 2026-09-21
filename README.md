@@ -5,18 +5,18 @@
 [![Latency](https://img.shields.io/badge/Matching_P50_PGO-237ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-3.10M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
-[![Tests](https://img.shields.io/badge/Tests-426_CTest_targets-brightgreen.svg)](#verification)
+[![Tests](https://img.shields.io/badge/Tests-525_CTest_targets-brightgreen.svg)](#verification)
 [![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
 [![TLA+](https://img.shields.io/badge/TLA%2B-171M_distinct_states_verified-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocols-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine with institutional-grade architecture drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (171M distinct states on the matching-inclusive `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and a complete operational stack (config management, webhook alerting, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment). **46.5K LOC, 77 test executables, 426 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
+A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants (171M distinct states on the matching-inclusive `MatchingEngine.tla` + lease-propagation model on `Replication.tla`), **live multi-container chaos suite (19 scenarios) empirically verifying NoCommittedLoss, no-split-brain under partition/loss/clock-skew, snapshot catchup, and rolling restart**, end-to-end wired primary-backup replication with token-authenticated chaos injection endpoint, and an operational stack (config management, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **39.4K LOC (engine) / 73.5K with tests, 103 test executables, 525 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
 
 ## 🔬 Research
 
 This engine served as the experimental substrate for a published market microstructure paper testing the **Budish–Cramton–Shim (BCS) theory of the HFT arms race** — the argument that continuous limit-order-book markets structurally incentivize a socially-wasteful race for speed. Read it on SSRN: [**Experimental Evidence for the HFT Arms Race: Welfare Decomposition and Market Fragility on a Formally Verified Limit Order Book**](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6994722).
 
-The experiment code lives in [`bcs_research/`](./bcs_research/). Because the matching core is [TLA+-verified](#formal-verification) (171M distinct states, zero invariant violations), the emergent dynamics observed in the experiments cannot be attributed to engine artifacts — what's being measured is the market's microstructure, not the simulator's bugs.
+The experiment code lives in [`bcs_research/`](./bcs_research/). The matching core's FIFO and conservation invariants are [model-checked](#formal-verification) at small bounds, and the engine passes 525 tests including property and shadow-mode divergence checks. That is **not** a proof that the experiments are artifact-free, and an earlier version of this line claimed it was: the verified configuration is `MaxOrders=4`, two participants, two prices, with no STP, icebergs, pro-rata, auctions, pegs or stops — while the experiments drive millions of orders through market-maker and HFT agents, latency models and batch auctions, essentially none of which is in the model. What supports the results is the test suite and the finding that every qualitative result survives recalibration, not the state count.
 
 ## 🚀 Key Features
 
@@ -337,7 +337,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 
 ## 🧪 Verification
 
-**77 test executables** covering **426 CTest targets**[^1] across 11 categories:
+**103 test executables** covering **525 CTest targets**[^1] across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -353,7 +353,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
 | **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
 
-[^1]: *CTest targets map to individual executables and GTest cases. The 426 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
+[^1]: *CTest targets map to individual executables and GTest cases. The 525 targets encompass several hundred underlying assertions and scenarios; e.g. `OuchSessionTest` alone runs 25 internal cases.*
 
 ### Formal Verification (TLA+)
 
@@ -438,4 +438,4 @@ Most of the original wire-protocol gap (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, Mo
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 46.5K LOC · 77 test executables · 426 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 171M distinct states verified on the matching-inclusive MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*
+*C++20 · 39.4K LOC engine (73.5K with tests) · 103 test executables · 525 CTest targets · 19 chaos scenarios · 12 TLA+ specifications · 171M distinct states verified on the matching-inclusive MatchingEngine.tla · Replication.tla verified under realistic lease-propagation model · TSan-clean replication transport*

@@ -124,6 +124,55 @@ jobs:
         # which is how it became a dead letter the first time.
         run: ctest --test-dir build --output-on-failure -L benchmark-regression --repeat until-pass:2
 
+  lean-mode:
+    name: Ubuntu Lean Mode
+    # USE_LEAN_MODE=ON had been broken in the CMake build and nobody noticed,
+    # because no job here ever built it: two -Werror,-Wunused-parameter errors
+    # from OB_LEAN_MODE compiling out the only consumers of those parameters.
+    #
+    # It is not an obscure option. README quotes a lean build command,
+    # docs/CapacityPlanning.md has a "Throughput (lean)" column, and roadmap.md
+    # frames a 13x lean-vs-full gap as a headline. A configuration that is cited
+    # as a performance baseline has to be one the build system can actually
+    # produce, so it gets a lane.
+    #
+    # THIS LANE IS BUILD-ONLY, AND THAT IS A DELIBERATE LIMIT, NOT AN OVERSIGHT.
+    #
+    # 48 of 519 tests fail under USE_LEAN_MODE=ON, concentrated in exactly the
+    # features it compiles out: self-trade prevention (14), risk limits and
+    # circuit breakers, MOC/LOC, and the audit path. That is not a regression —
+    # those tests assert behaviour lean mode deliberately removes.
+    #
+    # The real gap is that LEAN MODE HAS NO DEFINED BEHAVIOURAL CONTRACT. Nobody
+    # has written down which invariants it must still hold, so there is no
+    # honest subset to run here, and inventing an exclusion list would assert a
+    # contract that was never agreed. Gating on compilation catches the defect
+    # this lane exists for; claiming more would be the kind of unearned
+    # assurance the rest of this repo has been removing.
+    #
+    # Defining that contract — "lean preserves price-time priority, conservation
+    # and FIFO; it does not preserve STP, risk limits or circuit breakers" — is
+    # the follow-up, and then this lane runs that subset.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DUSE_LEAN_MODE=ON
+          -DBUILD_TESTS=OFF
+          -DBUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Smoke — the engine binary starts and exits cleanly
+        # The weakest useful check beyond compilation: the lean binary links and
+        # runs. Not a behavioural gate — see the note above.
+        run: ./build/OrderEngine --help > /dev/null
+
   fault-injection:
     name: Ubuntu Fault Injection
     runs-on: ubuntu-latest

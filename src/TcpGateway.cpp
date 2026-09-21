@@ -623,11 +623,17 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
     // connection that reaches this port could trade on another firm's account
     // or, through Type::KillSwitch below, halt their trading outright.
     //
-    // Still open: Cancel/Modify/CancelReplace address an order by id alone and
-    // the engine does not check who owns it, so a logged-in session can still
-    // act on another participant's resting order. Closing that needs the
-    // requesting participant threaded into MatchingEngine's cancel path; the
-    // check below does not cover it.
+    // Order ownership on Cancel/Modify/CancelReplace IS enforced, ~30 lines
+    // below: `requester` is threaded into submitCancel/submitModify/
+    // submitCancelReplace and OrderBook::ownedBy compares it against the
+    // resting order's participantId.
+    //
+    // This comment used to say that was "still open". It was accurate when
+    // written and became false when the requester was threaded through, and a
+    // comment confidently announcing an open vulnerability in the security
+    // surface is the worst place in a codebase to leave one: it sends an
+    // auditor chasing a closed finding and spends the credibility every other
+    // comment here is relying on.
     if (auth_ && auth_->enabled()) {
         const char* denial = nullptr;
         if (!state.identity.valid()) {

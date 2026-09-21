@@ -279,9 +279,15 @@ bool OrderBook::checkCircuitBreaker(Price price) {
     return deviation <= cbThreshold_;
 }
 
+// qty and riskChecksBypassed are [[maybe_unused]] because OB_LEAN_MODE compiles
+// out the risk-limit block that is their only consumer. Without the attribute a
+// lean build dies on -Werror,-Wunused-parameter — which it silently did, because
+// no CI job ever built USE_LEAN_MODE=ON while README and CapacityPlanning.md
+// both quote lean-mode figures.
 RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
-                                       Price price, Quantity qty, OrderType type,
-                                       bool riskChecksBypassed) {
+                                       Price price, [[maybe_unused]] Quantity qty,
+                                       OrderType type,
+                                       [[maybe_unused]] bool riskChecksBypassed) {
     // Trading state. A replace is a new admission decision, so the same states
     // that refuse new orders refuse a replace.
     if (tradingState_ == TradingState::Halted)    return RejectReason::MarketHalted;
@@ -381,7 +387,8 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                           Quantity qty, OrderType type, Price stopPrice, Quantity displayQty,
                           TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
                           PegType pegType, Price pegOffset, Price trailAmount,
-                          Quantity minQty, bool hidden, bool riskChecksBypassed) {
+                          Quantity minQty, bool hidden,
+                          [[maybe_unused]] bool riskChecksBypassed) {
     std::unique_lock<std::mutex> lock(bookLock_);
 
     // --- Trading-state admission ---

@@ -34,29 +34,58 @@ if(ENABLE_THREAD_SANITIZER)
     endif()
 endif()
 
+# ─── Release architecture target ────────────────────────────────────────────
+# "native" compiles for the CPU doing the build. That is right for local
+# benchmarking (and every latency number in BENCHMARKS.md / Project_Overview.md
+# was measured with it, so it stays the default) and WRONG for anything that
+# gets shipped — a container built on a newer host SIGILLs on an older one.
+# Deployment builds pin a baseline instead; see Dockerfile.
+#   native        compile for this machine (default; benchmarking)
+#   <arch>        any -march= value, e.g. x86-64-v3 for a portable x86 image
+#   <empty>       emit no -march/-mtune at all
+set(OB_ARCH "native" CACHE STRING
+    "Release -march target: 'native' (build host), a baseline like x86-64-v3, or empty for none")
+
 # Aggressive Optimizations for HFT
 if(CMAKE_BUILD_TYPE MATCHES "Release")
-    message(STATUS "Enabling HFT Optimizations: -O3 -march=native -mtune=native")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -Wall -Wextra -Werror")
-    # Warnings that depend on the HOST (compiler version or CPU) rather than on
-    # our code must not be fatal: -march=native means the same source produces
-    # different diagnostics on different machines, so -Werror turns any of these
-    # into a build that fails only on some runners.
-    #   character-conversion         only exists in newer Clang (Apple clang has
-    #                                it; clang-18 in the chaos image does not,
-    #                                and rejects the unknown flag as an error
-    #                                under -Werror — this silently killed the
-    #                                chaos image build for weeks).
-    #   invalid-feature-combination  -march=native on an AVX10.1-capable runner
-    #                                expands to +avx10.1-256, which Clang warns
-    #                                it will promote to -512. GitHub's runner
-    #                                pool is heterogeneous, so this failed the
-    #                                chaos build only on the days it happened to
-    #                                land on newer Intel silicon.
-    # Each is demoted only where the compiler knows the warning; where it
-    # doesn't, the warning can't fire so no demotion is needed.
+    if(OB_ARCH STREQUAL "native")
+        set(_ob_arch_flags "-march=native -mtune=native")
+    elseif(OB_ARCH STREQUAL "")
+        set(_ob_arch_flags "")
+    else()
+        # No -mtune: not every -march value is a legal -mtune name (GCC/Clang
+        # reject x86-64-v3 there), and tuning for a baseline is a no-op anyway.
+        set(_ob_arch_flags "-march=${OB_ARCH}")
+    endif()
+    message(STATUS "Enabling HFT Optimizations: -O3 ${_ob_arch_flags} (OB_ARCH=${OB_ARCH})")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 ${_ob_arch_flags} -Wall -Wextra -Werror")
+    # Warnings that depend on the HOST rather than on our code must not be
+    # fatal, because -Werror would turn them into a build that fails only on
+    # some machines.
+    #   character-conversion         COMPILER-version dependent: only exists in
+    #                                newer Clang (Apple clang has it; clang-18
+    #                                does not). Pinning OB_ARCH does not pin the
+    #                                compiler, so this demotion always applies.
+    #                                It is added only where the flag is
+    #                                recognised — clang-18 rejects the unknown
+    #                                flag itself under -Werror, which silently
+    #                                killed the chaos image build for weeks.
+    #   invalid-feature-combination  CPU dependent, and ONLY under OB_ARCH=native:
+    #                                native on an AVX10.1-capable host expands to
+    #                                +avx10.1-256, which Clang warns it will
+    #                                promote to -512. GitHub's runner pool is
+    #                                heterogeneous, so this failed the chaos
+    #                                build only on the days it landed on newer
+    #                                Intel silicon. A pinned OB_ARCH expands the
+    #                                same way everywhere, so there is nothing
+    #                                host-dependent left to forgive and -Werror
+    #                                stays absolute there.
     include(CheckCXXCompilerFlag)
-    foreach(_host_warn character-conversion invalid-feature-combination)
+    set(_host_warns character-conversion)
+    if(OB_ARCH STREQUAL "native")
+        list(APPEND _host_warns invalid-feature-combination)
+    endif()
+    foreach(_host_warn IN LISTS _host_warns)
         string(MAKE_C_IDENTIFIER "HAS_WNO_ERROR_${_host_warn}" _host_warn_var)
         check_cxx_compiler_flag("-Wno-error=${_host_warn}" ${_host_warn_var})
         if(${_host_warn_var})

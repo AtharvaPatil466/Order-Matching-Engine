@@ -12,10 +12,30 @@ ENV CXX=clang++-18
 WORKDIR /src
 COPY . .
 
-# Build in release mode
-RUN cmake -S . -B build -G Ninja \
+# Build in release mode against a PORTABLE baseline, never -march=native.
+# This image is a deployment artifact: native pins it to whatever CPU happened
+# to build it, and running it on an older host is a SIGILL, not a slow path.
+#   x86-64-v3 = AVX2/BMI2/FMA, Haswell/Excavator 2013-2015 onward. Covers the
+#               GitHub ubuntu-latest runners the chaos suite builds on and any
+#               realistic deployment target, while still giving the vectorised
+#               codegen the engine wants.
+# Override for an older floor (or a specific known host) at build time:
+#   docker build --build-arg OB_ARCH=x86-64-v2 .
+# Empty picks the baseline for the architecture actually being built, so an
+# arm64 build (a dev box running docker compose) does not try an x86 -march.
+ARG OB_ARCH=
+RUN ARCH="$OB_ARCH"; \
+    if [ -z "$ARCH" ]; then \
+        case "$(uname -m)" in \
+            aarch64|arm64) ARCH=armv8-a ;; \
+            *)             ARCH=x86-64-v3 ;; \
+        esac; \
+    fi; \
+    echo "Building for -march=${ARCH}" \
+    && cmake -S . -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_COMPILER=clang++-18 \
+    -DOB_ARCH="${ARCH}" \
     && cmake --build build --parallel
 
 # ── Stage 2: Runtime ──

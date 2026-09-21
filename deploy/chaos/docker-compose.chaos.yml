@@ -7,6 +7,15 @@
 #   * Using shorter heartbeats via env (when supported) so failover RTO
 #     measurements aren't dominated by the conservative 500ms default.
 #
+# It builds the SAME root Dockerfile, so it inherits that file's portable
+# -march baseline (OB_ARCH, x86-64-v3 on x86) rather than -march=native. That
+# is deliberate and not duplicated here: the chaos runners are a heterogeneous
+# pool, and a native build there produced images whose diagnostics — and
+# instruction set — depended on which machine picked up the job. To pin a
+# different floor, pass it to the Dockerfile, not to one compose file:
+#   docker compose -f deploy/chaos/docker-compose.chaos.yml build \
+#     --build-arg OB_ARCH=x86-64-v2
+#
 # Usage (from repo root):
 #   docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build
 #   pytest deploy/chaos/ -v

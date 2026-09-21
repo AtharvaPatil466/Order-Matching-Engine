@@ -218,8 +218,14 @@ private:
 class OrderBook {
 public:
     // orderPoolCapacity: number of Order slots to pre-allocate. 0 = engine
-    // default (INITIAL_CAPACITY). A smaller pool is used by pool-pressure tests
-    // to exercise the degradation thresholds without allocating 200k orders.
+    // default, which is the `order_pool_capacity` config key (env
+    // OB_ORDER_POOL_CAPACITY), 10,000 slots if unset. A caller-supplied value
+    // always wins over config — pool-pressure tests pass a tiny pool to reach
+    // the degradation thresholds in a handful of orders.
+    //
+    // This number decides how many symbols fit on a box: every slot is
+    // constructed at startup, so it is resident whether or not an order ever
+    // arrives. See "Per-book memory footprint" below.
     explicit OrderBook(SymbolId symbolId = 0, MatchAlgorithm algo = MatchAlgorithm::PriceTime,
                        size_t orderPoolCapacity = 0);
 
@@ -703,6 +709,33 @@ private:
         return pid < kStpMaxParticipants && stpResting_[pid] == 0;
     }
 
+    // ─── Per-book memory footprint ────────────────────────────────────
+    //
+    // Every member below is allocated AND touched at construction (the pool
+    // constructs each Order, the maps memset their storage), so an empty book
+    // is fully resident from the moment it exists. This is what caps the
+    // symbol count per process, so it is worth being able to compute:
+    //
+    //   orderPool_      P x 192 B          (P = order_pool_capacity)
+    //   orderLookup_    2P(rounded to a power of 2) x 24 B
+    //   tradeHistory_   T x 80 B           (T = trade_history_capacity)
+    //   bids_ + asks_   ~1.7 MiB           (2 x 200,001-tick directory + bitmaps)
+    //   FixedVectors    0.75 MiB           (6 x 16,384 slots + stpResting_)
+    //
+    // Measured with mach_task_basic_info over 10 books, empty (macOS, Release):
+    //
+    //   P = 200,000  57.9 MiB/book      P = 10,000  10.3 MiB/book
+    //   P = 100,000  32.8 MiB/book      P =  1,000   7.9 MiB/book
+    //
+    // The default P is 10,000 (`order_pool_capacity`); T is 65,536
+    // (`trade_history_capacity`). At the default, 100 symbols ≈ 1 GB. Raising
+    // P to 200,000 makes the same 100 symbols ≈ 5.8 GB, so size it from the
+    // symbol's real peak resting-order count, not from the biggest number that
+    // fits — the pool sheds new orders at 95% (see the P3-8 path in
+    // OrderBook.cpp), so the headroom above that peak is what buys safety.
+    // The floor (everything but the pool, its lookup and the ring) is ~2.5 MiB
+    // per book and is not currently configurable.
+
     // Mutex protecting the book's mutable state. Writers (addOrder,
     // cancelOrder, modifyOrder, cancelReplace, expireOrders,
     // cancelAllForParticipant, uncross) and the snapshot/auction readers
@@ -730,10 +763,10 @@ private:
     uint32_t stpResting_[kStpMaxParticipants]{};
 
     // Pending orders by type — pre-allocated fixed vectors (no heap allocation).
-    // Memory note: each `FixedVector<Order*, 16384>` is 128 KiB; the four
-    // members below total ~512 KiB per OrderBook regardless of utilization.
-    // Acceptable for a few dozen symbols; if scaling to a large universe,
-    // consider chunked / lazy-allocated alternatives.
+    // Memory note: each `FixedVector<Order*, 16384>` is 128 KiB; the members
+    // below total ~0.75 MiB per OrderBook regardless of utilization. That is
+    // the smallest term in the footprint above (the pool and its lookup
+    // dominate), so it is not where to start if a symbol budget is tight.
     FixedVector<Order*, 16384> stopOrders_;
     FixedVector<Order*, 16384> trailingStopOrders_;
     FixedVector<Order*, 16384> peggedOrders_;
@@ -750,9 +783,19 @@ private:
     // cancelled after uncross() completes.
     FixedVector<OrderId, 16384> locActiveIds_;
 
-    // O(1) Lookup — open-addressing hash map (replaces std::unordered_map)
-    FlatHashMap<OrderId, Order*> orderLookup_;
+    // Pre-allocated Order storage. `order_pool_capacity` slots x 192 B, all
+    // constructed (and therefore resident) at construction.
+    //
+    // DECLARED BEFORE orderLookup_ ON PURPOSE: the ctor sizes the lookup from
+    // orderPool_.capacity(), which is only well-defined if the pool is
+    // initialized first. Members initialize in declaration order, so this line
+    // is what makes "the lookup can never be smaller than its own pool" a
+    // property of the code rather than of a comment. Do not reorder.
     ObjectPool<Order> orderPool_;
+    // O(1) Lookup — open-addressing hash map (replaces std::unordered_map).
+    // Sized from orderPool_ and frozen (disallowRehash) so matching never
+    // allocates; see the ctor in OrderBook.cpp.
+    FlatHashMap<OrderId, Order*> orderLookup_;
 
     // ─── P3-8 pool-pressure state (owning worker thread only) ─────────
     // Per-symbol utilization gauge in the global MetricsRegistry (set in ctor).
@@ -810,8 +853,10 @@ private:
     // Per-participant tracking — open-addressing hash maps
     FlatHashMap<OTRKey, ParticipantRiskState, OTRKeyHash> participantRisk_;
 
-    // Trade history — bounded ring buffer (streams out, never reallocates)
-    RingBuffer<Trade> tradeHistory_{65536};
+    // Trade history — bounded ring buffer (streams out, never reallocates).
+    // Sized in the ctor from `trade_history_capacity` (default 65,536 x 80 B =
+    // 5 MiB, resident); rounded up to a power of two, which RingBuffer requires.
+    RingBuffer<Trade> tradeHistory_;
 
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     FlatHashMap<ParticipantId, STPMode> stpModes_{1024};

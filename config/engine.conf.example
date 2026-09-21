@@ -9,6 +9,23 @@ threads         = 4
 symbols         = 4
 lean_mode       = false
 
+# ── Per-symbol memory ────────────────────────────────────────────────────────
+# Both are allocated AND touched when a book is created, so they are resident
+# per symbol whether or not an order ever arrives. Measured empty, 10 books:
+# 10,000 slots = 10.3 MiB/book; 100,000 = 32.8 MiB; 200,000 = 57.9 MiB.
+# Budget: symbols x MiB-per-book must fit in RAM before anything trades.
+#
+# order_pool_capacity is the max number of LIVE orders a symbol can hold
+# (192 B each). The book warns at 80% utilization and sheds new orders at 95%,
+# so size it above the symbol's peak resting-order count, not at it. The
+# order-id lookup map is sized from this value automatically — it has no key of
+# its own, so it can never be configured smaller than the pool it indexes.
+order_pool_capacity    = 10000
+# Trades retained in the in-memory ring (80 B each). Rounded up to a power of
+# two. Only affects getTradeHistory(); the journal/market-data feeds are
+# unaffected.
+trade_history_capacity = 65536
+
 # ── Networking ───────────────────────────────────────────────────────────────
 admin_port      = 8080
 gateway_port    = 9001

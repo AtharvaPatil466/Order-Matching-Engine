@@ -11,8 +11,11 @@
 //   * 100% utilization behaves like the kill switch: no new orders + a critical
 //     alert event (order_pool_exhausted).
 //
+//   * The default pool size comes from config (order_pool_capacity /
+//     OB_ORDER_POOL_CAPACITY), and an explicit ctor argument overrides it.
+//
 // Uses a small pool (via the OrderBook orderPoolCapacity ctor arg) so the
-// thresholds are reached in a handful of orders rather than 200k.
+// thresholds are reached in a handful of orders rather than a full pool.
 
 #include "Metrics.h"
 #include "OrderBook.h"
@@ -20,6 +23,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>   // setenv/unsetenv — the config keys are env-overridable
 #include <string>
 #include <variant>
 
@@ -143,15 +147,46 @@ void test_exhaustion_alert_at_100pct() {
 }
 
 // ─── Test 5: default pool is unaffected (no false shedding) ──────────────────
-
+//
+// The requirement is "a book on the engine default sheds nothing under a load
+// that is light FOR THAT DEFAULT" — not "the default is 200,000". The default
+// is configurable (order_pool_capacity / OB_ORDER_POOL_CAPACITY), so both the
+// load and the bound are expressed relative to the capacity this book actually
+// got. Filling a tenth of the pool must stay below the 80% warn band, and far
+// below the 95% shed band.
 void test_default_pool_no_false_reject() {
     SECTION("Default-capacity book sheds nothing under light load");
-    OrderBook book(46);  // default pool (200k)
-    for (OrderId i = 1; i <= 1000; ++i) {
+    OrderBook book(46);  // engine default pool
+    const OrderId light = static_cast<OrderId>(book.poolCapacity() / 10);
+    assert(light > 0 && "the default pool must have room for a light load");
+    for (OrderId i = 1; i <= light; ++i) {
         assert(std::holds_alternative<OrderId>(addResting(book, i)));
     }
     assert(book.getPoolRejectCount() == 0);
-    assert(book.poolUtilization() < 0.01);
+    assert(book.poolUtilization() < 0.80);
+    PASS();
+}
+
+// ─── Test 6: the engine default is config-driven ────────────────────────────
+//
+// The pool is the dominant term in a book's resident footprint (~192 B per
+// slot, all touched at construction), so an operator has to be able to size it
+// per deployment instead of recompiling. It comes from `order_pool_capacity` /
+// OB_ORDER_POOL_CAPACITY, and an explicit ctor argument still overrides it.
+void test_default_pool_capacity_is_configurable() {
+    SECTION("OB_ORDER_POOL_CAPACITY sizes the default pool; ctor arg still wins");
+
+    ::setenv("OB_ORDER_POOL_CAPACITY", "4096", /*overwrite=*/1);
+    OrderBook configured(47);
+    assert(configured.poolCapacity() == 4096);
+
+    OrderBook explicitCap(48, MatchAlgorithm::PriceTime, /*orderPoolCapacity=*/512);
+    assert(explicitCap.poolCapacity() == 512 && "ctor argument beats config");
+
+    ::unsetenv("OB_ORDER_POOL_CAPACITY");
+    OrderBook fallback(49);
+    assert(fallback.poolCapacity() == 10000 && "built-in default when unconfigured");
+
     PASS();
 }
 
@@ -163,6 +198,7 @@ int main() {
     test_reject_at_95pct();
     test_exhaustion_alert_at_100pct();
     test_default_pool_no_false_reject();
+    test_default_pool_capacity_is_configurable();
 
     std::printf("\n─── Results: %d passed ───\n", passed);
     std::puts("\nAll pool capacity tests passed.\n");

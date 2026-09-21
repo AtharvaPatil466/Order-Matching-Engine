@@ -213,7 +213,10 @@ TEST(PerfFixes, ConcurrentSnapshotStaysConsistentUnderWriter) {
 // can never rehash mid-addOrder. disallowRehash() makes that invariant a hard,
 // asserted contract; rehashCount() lets us prove no allocation occurred.
 TEST(PerfFixes, FlatHashMapDoesNotRehashWhenPreSizedAndFrozen) {
-    // Sized like orderLookup_(INITIAL_CAPACITY = 200000).
+    // Sized like orderLookup_ is: from a pool capacity. 200,000 is an
+    // arbitrary large one — the property under test is "a map pre-sized to N
+    // absorbs N inserts without rehashing", which must hold for whatever
+    // order_pool_capacity is configured to, not for one particular default.
     FlatHashMap<uint64_t, uint64_t> map(200000);
     const size_t cap = map.capacity();
     map.disallowRehash();
@@ -809,16 +812,17 @@ TEST(AuditFixes, FatFingerNotionalCapAgreesWithOrderBookNotionalCap) {
 
 // ─── H12: a custom pool capacity must not overflow the frozen lookup map ────
 //
-// orderLookup_ was pinned at INITIAL_CAPACITY (200,000 -> 524,288 buckets,
-// rehash threshold 262,144) while orderPoolCapacity was a caller-supplied
-// parameter with no upper bound. Ask for a pool bigger than that and the pool
-// happily hands out orders past the frozen map's threshold: with assertions
-// compiled in (the shipped configuration) the matching thread aborts, and
-// without them it silently rehashes — an allocation on the hot path that
-// reallocates storage under any concurrent reader. Both sizings now come from
-// the same expression, so the map cannot be under-sized for its own pool.
+// orderLookup_ was pinned at a fixed 200,000 (-> 524,288 buckets, rehash
+// threshold 262,144) while orderPoolCapacity was a caller-supplied parameter
+// with no upper bound. Ask for a pool bigger than that and the pool happily
+// hands out orders past the frozen map's threshold: with assertions compiled
+// in (the shipped configuration) the matching thread aborts, and without them
+// it silently rehashes — an allocation on the hot path that reallocates
+// storage under any concurrent reader. The lookup is now sized from
+// orderPool_.capacity() itself, so it cannot be under-sized for its own pool
+// whatever the ctor argument or the order_pool_capacity config says.
 TEST(AuditFixes, CustomOrderPoolCapacityDoesNotOverflowFrozenLookup) {
-    constexpr size_t kPool = 300'000;              // > INITIAL_CAPACITY
+    constexpr size_t kPool = 300'000;              // > any plausible default
     constexpr OrderId kCount = 262'200;            // > old threshold (262,144)
 
     OrderBook book(1, MatchAlgorithm::PriceTime, kPool);

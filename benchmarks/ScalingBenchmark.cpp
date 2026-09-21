@@ -139,7 +139,9 @@ struct ArmResult {
     size_t   producers{0};
     size_t   symbols{0};
     uint64_t submitted{0};      // submitOrder/submitCancel calls made
-    uint64_t rejected{0};       // any non-Accepted SubmitResult
+    uint64_t rejected{0};       // any non-Accepted SubmitResult (ENQUEUE only)
+    double   peakPoolUtilPct{0.0};  // worst per-book pool utilisation after the run
+    uint64_t peakPoolSymbol{0};
     uint64_t processed{0};      // engine-side completions
     double   producerSec{0};    // go -> last producer joined
     double   totalSec{0};       // go -> waitForDrain returned
@@ -157,6 +159,25 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
     ArmResult r;
     r.workers = numWorkers;
     r.producers = numWorkers;
+
+    // THE BENCHMARK PINS ITS OWN WORKING SET.
+    //
+    // Order-pool capacity is deployment config (OB_ORDER_POOL_CAPACITY, default
+    // 10,000 slots per book). This benchmark builds a deep resting book on
+    // purpose — measured peak is ~9,500 live orders on a single symbol — so at
+    // the default it runs at 95% pool utilisation, inside the shed band, and
+    // the throughput it plots becomes partly the reject path.
+    //
+    // Nothing warned about that. In async mode submitOrder returns at enqueue,
+    // so SubmitResult never sees a worker-side pool rejection: with the pool
+    // forced to 64 slots this benchmark still reported rejected=0.
+    //
+    // 200,000 was the hardcoded pool size when the scaling figures currently in
+    // BENCHMARKS.md were taken, so pinning it here keeps those numbers
+    // comparable AND makes this benchmark immune to a config default changing
+    // underneath it. overwrite=0: an explicit OB_ORDER_POOL_CAPACITY from the
+    // caller still wins, and the utilisation check below still audits it.
+    ::setenv("OB_ORDER_POOL_CAPACITY", "200000", /*overwrite=*/0);
 
     MatchingEngine engine;
 
@@ -237,6 +258,20 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
     r.totalSec = std::chrono::duration<double>(drainEnd - wallStart).count();
     r.submitted = submitted.load();
     r.rejected = rejected.load();
+
+    // Sample every book the run touched. Done after waitForDrain so the numbers
+    // reflect the settled state rather than a mid-flight snapshot.
+    for (const auto& syms : perWorker) {
+        for (SymbolId sym : syms) {
+            if (const OrderBook* b = engine.getOrderBook(sym)) {
+                const double pct = b->poolUtilization() * 100.0;
+                if (pct > r.peakPoolUtilPct) {
+                    r.peakPoolUtilPct = pct;
+                    r.peakPoolSymbol = static_cast<uint64_t>(sym);
+                }
+            }
+        }
+    }
     r.processed = engine.getProcessedCount();
     r.dispatchRate = r.producerSec > 0 ? static_cast<double>(r.submitted) / r.producerSec : 0.0;
     r.e2eRate = r.totalSec > 0 ? static_cast<double>(r.processed) / r.totalSec : 0.0;
@@ -329,6 +364,39 @@ void printDetail(const ArmResult& r) {
     std::printf("  submitted=%llu processed=%llu rejected=%llu  producer=%.3fs total=%.3fs\n",
                 (unsigned long long)r.submitted, (unsigned long long)r.processed,
                 (unsigned long long)r.rejected, r.producerSec, r.totalSec);
+    // r.rejected CANNOT SEE POOL EXHAUSTION, and that is the trap this block
+    // exists for.
+    //
+    // In async mode submitOrder returns at ENQUEUE (MatchingEngine.h:92), so a
+    // non-Accepted SubmitResult here means the request queue was full. Order-
+    // pool exhaustion happens later, on the worker, during actual matching —
+    // long after this benchmark recorded "Accepted". So a run that sheds every
+    // order in the 95% pressure band still reports rejected=0 and plots a
+    // throughput number that is partly the reject path.
+    //
+    // That matters now that the pool is configurable (OB_ORDER_POOL_CAPACITY,
+    // default 10,000 slots per book, was a hardcoded 200,000). Verified: with
+    // the pool forced to 64 slots and 310k ops submitted, rejected stayed 0.
+    //
+    // So peak pool utilisation is read from the books themselves instead.
+    if (r.rejected > 0) {
+        std::printf("  *** INVALID POINT: %llu ENQUEUE rejects (request queue "
+                    "full).\n      Do not quote this row.\n",
+                    (unsigned long long)r.rejected);
+    }
+    if (r.peakPoolUtilPct >= 80.0) {
+        std::printf("  *** INVALID POINT: peak order-pool utilisation %.1f%% on "
+                    "symbol %llu.\n"
+                    "      The 95%% band sheds orders on the WORKER, which "
+                    "rejected= cannot see,\n"
+                    "      so this row may be measuring the reject path. Re-run "
+                    "with\n      OB_ORDER_POOL_CAPACITY above the peak live-order "
+                    "count per symbol.\n",
+                    r.peakPoolUtilPct, (unsigned long long)r.peakPoolSymbol);
+    } else {
+        std::printf("  peak order-pool utilisation %.1f%% (headroom OK)\n",
+                    r.peakPoolUtilPct);
+    }
     std::printf("  DISPATCH (route + MPSC enqueue, no matching) — bench::BenchLatencyRecorder\n");
     r.dispatch.printTable("dispatch");
     std::printf("  END-TO-END (ingress -> completion) — engine LatencyTracker, stops at P99.9\n");

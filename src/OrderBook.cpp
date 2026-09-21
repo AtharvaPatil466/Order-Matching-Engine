@@ -1,17 +1,78 @@
 #include "OrderBook.h"
+#include "Config.h"          // for the per-symbol sizing keys (see below)
 #include "FaultInjector.h"
 #include "LatencyTracker.h"  // for nowNs()
 #include "Metrics.h"         // for the per-symbol pool-utilization gauge (P3-8)
 #include "StructuredLog.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <set>
 #include <string>
 
 namespace OrderMatcher {
 
-constexpr size_t INITIAL_CAPACITY = 200000;
+// ─── Per-symbol sizing (config-driven) ──────────────────────────────────────
+//
+// These sizes are RESIDENT, not reserved: the pool constructs every Order up
+// front, and the hash map / price map memset their storage, so an empty book
+// faults in its whole footprint at construction. They are therefore the number
+// that decides how many symbols fit on a box — see OrderBook.h for the
+// per-book arithmetic.
+//
+// Keys follow the convention every other engine setting uses (Config.h): a
+// key=value line in the config file, overridden by OB_<UPPER_KEY> in the
+// environment — the same shape as journal_path / OB_JOURNAL_PATH. They are
+// documented in config/engine.conf.example.
+//
+//   order_pool_capacity     OB_ORDER_POOL_CAPACITY      default 10000 slots
+//   trade_history_capacity  OB_TRADE_HISTORY_CAPACITY   default 65536 trades
+//
+// There is deliberately NO key for orderLookup_: it is derived from the pool
+// object itself so it cannot be sized independently of it (see the ctor).
+constexpr size_t DEFAULT_ORDER_POOL_CAPACITY = 10000;
+constexpr size_t DEFAULT_TRADE_HISTORY_CAPACITY = 65536;
+
+// The config a book sizes itself from. OrderBook is constructed by
+// MatchingEngine, which takes no config object, so the values are read the way
+// the rest of the engine's OB_* settings are: the file named by OB_CONFIG_PATH
+// (the environment spelling of main.cpp's `--config`), plus the OB_<KEY>
+// environment override Config applies on every get. Parsed once per process;
+// env overrides are still re-read per book, so a test can set one and build a
+// book.
+static const Config& sizingConfig() {
+    static Config cfg;
+    static const bool loaded = [] {
+        if (const char* path = std::getenv("OB_CONFIG_PATH")) cfg.loadFile(path);
+        return true;
+    }();
+    (void)loaded;
+    return cfg;
+}
+
+// A positive size from config, else the built-in default. Zero/negative/garbage
+// means "not configured" rather than "size this book to nothing".
+static size_t configuredSize(const char* key, size_t fallback) {
+    const int64_t v = sizingConfig().getInt64(key, static_cast<int64_t>(fallback));
+    return v > 0 ? static_cast<size_t>(v) : fallback;
+}
+
+// requested == 0 keeps the documented ctor semantics: "engine default".
+static size_t resolveOrderPoolCapacity(size_t requested) {
+    return requested ? requested
+                     : configuredSize("order_pool_capacity", DEFAULT_ORDER_POOL_CAPACITY);
+}
+
+// RingBuffer asserts a power-of-two size (it masks instead of dividing), so an
+// operator's round number is rounded UP rather than rejected at startup. Floor
+// of 2 because a 1-slot ring can hold nothing.
+static size_t resolveTradeHistoryCapacity() {
+    const size_t want = configuredSize("trade_history_capacity",
+                                       DEFAULT_TRADE_HISTORY_CAPACITY);
+    return std::bit_ceil(want < 2 ? size_t(2) : want);
+}
 
 // Next-order prefetch in the matching loops (opt-in, -DENABLE_MATCH_PREFETCH=ON).
 // Pulls the node the loop reaches next into L1 while the current fill computes,
@@ -30,19 +91,22 @@ constexpr size_t INITIAL_CAPACITY = 200000;
 
 OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCapacity)
     : bids_(Side::Buy, 200001), asks_(Side::Sell, 200001),
-      orderLookup_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
-      orderPool_(orderPoolCapacity ? orderPoolCapacity : INITIAL_CAPACITY),
+      orderPool_(resolveOrderPoolCapacity(orderPoolCapacity)),
+      orderLookup_(orderPool_.capacity()),
       symbolId_(symbolId), matchAlgorithm_(algo),
-      participantRisk_(1024) {
-    // orderLookup_ is sized from the SAME expression as the pool, so it holds
-    // every order the pool can hand out with room to spare (50% load factor) and
-    // can never rehash during matching. It used to be pinned at INITIAL_CAPACITY
-    // while orderPoolCapacity was a caller-supplied parameter with no upper
-    // bound: any caller asking for a pool larger than INITIAL_CAPACITY got a
-    // frozen map it could overflow, which is a stop-the-world rehash — an
-    // allocation on the matching thread, and reallocated storage under any
-    // concurrent reader. The invariant was stated in this comment and enforced
-    // nowhere; tying the two sizings together makes it true by construction.
+      participantRisk_(1024),
+      tradeHistory_(resolveTradeHistoryCapacity()) {
+    // orderLookup_ is sized FROM THE POOL ITSELF — orderPool_ is declared
+    // before it in OrderBook.h precisely so this read is well-defined — so it
+    // holds every order the pool can hand out with room to spare (50% load
+    // factor) and can never rehash during matching. It used to be pinned at a
+    // fixed 200,000 while orderPoolCapacity was a caller-supplied parameter
+    // with no upper bound: any caller asking for a bigger pool got a frozen map
+    // it could overflow, which is a stop-the-world rehash — an allocation on
+    // the matching thread, and reallocated storage under any concurrent reader.
+    // The invariant was stated in a comment and enforced nowhere. Deriving one
+    // from the other makes it true by construction, and keeps it true now that
+    // the pool size is config-driven: there is no second knob to get wrong.
     // The freeze below then catches a future sizing regression instead of
     // silently paying for it on the hot path.
     orderLookup_.disallowRehash();

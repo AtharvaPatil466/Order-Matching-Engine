@@ -15,9 +15,26 @@
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <variant>
 #include <cstdint>
 #include <limits>
+
+// addOrder's step helpers (declared far below) are an extraction for
+// readability only — addOrder was a single ~510-line function and is the
+// engine's hot path, so the steps on its always-executed route have to end up
+// as the same straight-line code they came out of. Clang's inliner costs
+// several of them at 180–1630 against a 45–250 threshold and declines
+// (visible with -Rpass-missed=inline), which measured as a reproducible ~2%
+// throughput loss on HonestBenchmark Path A. So those steps say so explicitly.
+// The steps that are genuinely cold — rejectOrder, parkOnCloseOrder,
+// restPeggedOrder — deliberately do NOT carry this: leaving them out of line
+// keeps the hot path's instruction footprint small.
+#if defined(__GNUC__) || defined(__clang__)
+#define OB_ALWAYS_INLINE [[gnu::always_inline]] inline
+#else
+#define OB_ALWAYS_INLINE inline
+#endif
 
 namespace OrderMatcher {
 
@@ -656,6 +673,62 @@ private:
     RejectReason checkAdmission(ParticipantId participantId, Side side,
                                 Price price, Quantity qty, OrderType type,
                                 bool riskChecksBypassed);
+
+    // ── addOrder decomposition ───────────────────────────────────────────────
+    // addOrder takes bookLock_ ONCE at the top and holds it to the end; every
+    // helper below is one step of that sequence and therefore shares a single
+    // precondition: bookLock_ is ALREADY HELD by the caller. bookLock_ is a
+    // plain std::mutex and is NOT recursive — a helper that re-takes it
+    // deadlocks on the spot. All of them are defined in OrderBook.cpp directly
+    // above their only call site, so the compiler can fold them back into the
+    // hot path they were split out of.
+    //
+    // Two signalling conventions, both preserving addOrder's original
+    // early-return shape exactly:
+    //   * admit* / validate* / screen* -> std::optional<...>: nullopt means
+    //     "passed, keep going"; a value means "addOrder returns this, now".
+    //   * park*                        -> std::optional<AddOrderResult>:
+    //     nullopt means "not handled here, keep going"; a value is the finished
+    //     result (an OrderId for a parked order, or a reject reason).
+    // See the matching section header in OrderBook.cpp for the details.
+    RejectReason rejectOrder(OrderId orderId, ParticipantId participantId,
+                             Quantity qty, RejectReason reason);
+    std::optional<RejectReason> admitForTradingState(OrderId orderId, ParticipantId participantId,
+                                                     Quantity qty, OrderType type);
+    OB_ALWAYS_INLINE std::optional<RejectReason> validateOrderRequest(OrderId orderId, ParticipantId participantId,
+                                                     Price price, Quantity qty, OrderType type,
+                                                     Quantity& displayQty);
+    std::optional<RejectReason> admitPoolPressure(OrderId orderId, ParticipantId participantId,
+                                                  Quantity qty);
+    OB_ALWAYS_INLINE std::optional<RejectReason> admitPriceBand(OrderId orderId, ParticipantId participantId,
+                                               Price price, Quantity qty, OrderType type);
+#ifndef OB_LEAN_MODE
+    OB_ALWAYS_INLINE std::optional<RejectReason> admitCircuitBreaker(OrderId orderId, Price price, Quantity qty,
+                                                    OrderType type);
+#endif
+    std::optional<RejectReason> admitPostOnly(OrderId orderId, ParticipantId participantId,
+                                              Side side, Price price, Quantity qty, OrderType type);
+    OB_ALWAYS_INLINE Order* allocateAndRegisterOrder(OrderId orderId, ParticipantId participantId, Side side,
+                                    Price price, Quantity qty, OrderType type, Price stopPrice,
+                                    Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                                    Price stopLimitPrice, PegType pegType, Price pegOffset,
+                                    Price trailAmount, Quantity minQty, bool hidden);
+    std::optional<AddOrderResult> parkOnCloseOrder(OrderId orderId, ParticipantId participantId,
+                                                   Side side, Price price, Quantity qty,
+                                                   OrderType type, TimeInForce tif,
+                                                   uint64_t expiryTime);
+    void restPeggedOrder(Order* order, OrderId orderId, Side side, Price price, Quantity qty,
+                         PegType pegType, Price pegOffset);
+    OB_ALWAYS_INLINE std::optional<OrderId> parkNonMatchingOrder(Order* order, OrderId orderId, Side side,
+                                                Price price, Quantity qty, OrderType type,
+                                                PegType pegType, Price pegOffset,
+                                                Price trailAmount);
+    OB_ALWAYS_INLINE std::optional<RejectReason> screenFOK(Order* order, OrderId orderId, Side side, Price price,
+                                          Quantity qty, OrderType type);
+    OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Side side, Price price,
+                                        Quantity qty, OrderType type, Quantity minQty);
+    OB_ALWAYS_INLINE void finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
+                              OrderType type);
     bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
 
     // C1: finalize an order that STP removed mid-match. True => deallocated,

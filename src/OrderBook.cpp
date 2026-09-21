@@ -447,62 +447,80 @@ bool OrderBook::checkMinQty(Side side, Price price, Quantity minQty) const {
 
 // ─── addOrder ────────────────────────────────────────────────────────────────
 
-AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId, Side side, Price price,
-                          Quantity qty, OrderType type, Price stopPrice, Quantity displayQty,
-                          TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
-                          PegType pegType, Price pegOffset, Price trailAmount,
-                          Quantity minQty, bool hidden,
-                          [[maybe_unused]] bool riskChecksBypassed) {
-    std::unique_lock<std::mutex> lock(bookLock_);
+// ─── addOrder: admission / allocation / park / finalize steps ────────────────
+//
+// addOrder takes bookLock_ ONCE at the top and then runs a sequence of guards
+// before matching. Every helper in this section is one step of that sequence,
+// so they all share a single precondition: bookLock_ is ALREADY HELD by the
+// caller. bookLock_ is a plain std::mutex and is NOT recursive — a helper that
+// re-takes it deadlocks on the spot. They are defined here, in the same TU and
+// immediately above their only call site, so the compiler folds them straight
+// back into the hot path they were split out of.
+//
+// Two signalling conventions, chosen to preserve addOrder's early-return shape
+// exactly rather than to flatten it into nested conditionals or flags:
+//   * admit* / validate* / screen* -> std::optional<...>: nullopt means
+//     "passed, keep going"; a value means "addOrder returns this, now".
+//   * park*                        -> std::optional<AddOrderResult>: nullopt
+//     means "this order type is not handled here, keep going"; a value is the
+//     finished result (an OrderId for a parked order, or a reject reason).
 
-    // --- Trading-state admission ---
+// The reject tail shared by every admission failure that counts against the
+// participant: bump the reject counter (full mode only), publish the Rejected
+// update, hand the reason back so the caller can `return` it.
+// Precondition: bookLock_ held.
+RejectReason OrderBook::rejectOrder(OrderId orderId,
+                                    [[maybe_unused]] ParticipantId participantId,
+                                    Quantity qty, RejectReason reason) {
+#ifndef OB_LEAN_MODE
+    participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
+#endif
+    notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, reason);
+    return reason;
+}
+
+// --- Trading-state admission ---  Precondition: bookLock_ held.
+std::optional<RejectReason> OrderBook::admitForTradingState(OrderId orderId,
+                                                            ParticipantId participantId,
+                                                            Quantity qty, OrderType type) {
     // Halted: regulator/auto halt; reject new orders, cancels still flow
     // through cancelOrder() which has no state gate.
-    if (tradingState_ == TradingState::Halted) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::MarketHalted);
-        return RejectReason::MarketHalted;
-    }
+    if (tradingState_ == TradingState::Halted) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::MarketHalted);
+
     // PostClose: scheduled session end. Same effect as Halted but a
     // different reject reason for client clarity.
-    if (tradingState_ == TradingState::PostClose) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::MarketClosed);
-        return RejectReason::MarketClosed;
-    }
+    if (tradingState_ == TradingState::PostClose) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::MarketClosed);
 
     // PreOpen / AuctionOpen / AuctionClose: orders accumulate without
     // continuous matching. IOC/FOK are still rejected — they require
     // immediate fills, which are unavailable until the uncross runs.
     // Market orders ARE accepted here: they get parked in
     // auctionMarketOrders_ and participate in the uncross at the
-    // discovered price (see below + uncross()).
+    // discovered price (see parkNonMatchingOrder + uncross()).
     if (tradingState_ == TradingState::PreOpen           ||
         tradingState_ == TradingState::AuctionOpen       ||
         tradingState_ == TradingState::AuctionClose      ||
         tradingState_ == TradingState::VolatilityAuction) [[unlikely]] {
-        if (type == OrderType::IOC || type == OrderType::FOK) {
-#ifndef OB_LEAN_MODE
-            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
-                              RejectReason::OrderTypeNotAllowedInState);
-            return RejectReason::OrderTypeNotAllowedInState;
-        }
+        if (type == OrderType::IOC || type == OrderType::FOK)
+            return rejectOrder(orderId, participantId, qty,
+                               RejectReason::OrderTypeNotAllowedInState);
     }
+    return std::nullopt;
+}
 
-    // --- Input validation ---
-    if (qty == 0) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, 0, 0, RejectReason::InvalidQuantity);
-        return RejectReason::InvalidQuantity;
-    }
+// --- Input validation + duplicate orderId ---  Precondition: bookLock_ held.
+// `displayQty` is in/out: an Iceberg's display size is clamped here, at exactly
+// the point the original inline block clamped it, and the clamped value is what
+// the caller goes on to store on the Order.
+std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
+                                                            ParticipantId participantId,
+                                                            Price price, Quantity qty,
+                                                            OrderType type,
+                                                            Quantity& displayQty) {
+    if (qty == 0) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
 
     // An Iceberg with displayQty == 0 rests with visibleQty == 0. match() then
     // computes available == 0 -> fillQty == 0, emits a zero-quantity trade, and
@@ -513,89 +531,69 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // already takes min(remainingQty, displayQty)); clamp it so the stored
     // field satisfies displayQty <= initialQty like every other path assumes.
     if (type == OrderType::Iceberg) [[unlikely]] {
-        if (displayQty == 0) {
-#ifndef OB_LEAN_MODE
-            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
-                              RejectReason::InvalidDisplayQty);
-            return RejectReason::InvalidDisplayQty;
-        }
+        if (displayQty == 0)
+            return rejectOrder(orderId, participantId, qty, RejectReason::InvalidDisplayQty);
         if (displayQty > qty) displayQty = qty;
     }
 
     if (type != OrderType::Market && type != OrderType::MOC && price <= 0
                  && type != OrderType::Stop && type != OrderType::StopLimit
-                 && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::InvalidPrice);
-        return RejectReason::InvalidPrice;
-    }
+                 && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
 
     // --- Duplicate orderId check ---
     // FlatHashMap::insert silently overwrites on duplicate key, which
     // would orphan the prior order in its price-level list and pool.
     // Reject explicitly so the duplicate is observable to the client
     // and no resources leak.
-    if (orderLookup_.find(orderId) != nullptr) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
-                          RejectReason::DuplicateOrderId);
-        return RejectReason::DuplicateOrderId;
+    if (orderLookup_.find(orderId) != nullptr) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::DuplicateOrderId);
+
+    return std::nullopt;
+}
+
+// --- P3-8: order-pool pressure, controlled degradation ---
+// Measure utilization and shed NEW orders before the pool is fully
+// exhausted, so the book keeps serving cancels/matches for resting orders.
+// 80% warns, >= 95% rejects with PoolCapacityExceeded, 100% additionally
+// raises a critical (kill-switch-like) alert. Never crashes, never drops
+// silently — the client always gets an explicit reject.
+// Precondition: bookLock_ held.
+std::optional<RejectReason> OrderBook::admitPoolPressure(OrderId orderId,
+                                                         ParticipantId participantId,
+                                                         Quantity qty) {
+    const size_t poolCap = orderPool_.capacity();
+    const size_t poolInUseNow = poolCap - orderPool_.available();
+    updatePoolUtilization(poolInUseNow, poolCap);
+    if (poolCap > 0 && poolInUseNow * 100 >= poolCap * 95) [[unlikely]] {
+        ++poolRejects_;
+        return rejectOrder(orderId, participantId, qty, RejectReason::PoolCapacityExceeded);
     }
+    return std::nullopt;
+}
 
-    // --- P3-8: order-pool pressure, controlled degradation ---
-    // Measure utilization and shed NEW orders before the pool is fully
-    // exhausted, so the book keeps serving cancels/matches for resting orders.
-    // 80% warns, >= 95% rejects with PoolCapacityExceeded, 100% additionally
-    // raises a critical (kill-switch-like) alert. Never crashes, never drops
-    // silently — the client always gets an explicit reject. This runs before
-    // either allocation site (MOC/LOC park and the main path) so both are covered.
-    {
-        const size_t poolCap = orderPool_.capacity();
-        const size_t poolInUseNow = poolCap - orderPool_.available();
-        updatePoolUtilization(poolInUseNow, poolCap);
-        if (poolCap > 0 && poolInUseNow * 100 >= poolCap * 95) [[unlikely]] {
-            ++poolRejects_;
-#ifndef OB_LEAN_MODE
-            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
-                              RejectReason::PoolCapacityExceeded);
-            return RejectReason::PoolCapacityExceeded;
-        }
-    }
-
-    // --- Pre-trade risk checks ---
-#ifndef OB_LEAN_MODE
-    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty)) [[unlikely]] {
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::RiskLimitBreached);
-        obSink().log(logOrderRejected(orderId, participantId, "risk_limit_breached"));
-        return RejectReason::RiskLimitBreached;
-    }
-
-    participantRisk_[OTRKey(participantId, symbolId_)].recordOrderSubmit();
-#endif
-
-    // --- Reference price for circuit breaker ---
+// --- Reference price + price band (LULD) admission filter ---
+// Seeds referencePrice_ from the first order carrying a meaningful limit price;
+// that seeding is what makes both the band below and the circuit breaker live,
+// so it stays attached to it.
+//
+// Then rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
+// is configured and a reference price has been established. Distinct
+// from the volatility breaker: this rejects the individual
+// order without halting the market, lets subsequent in-band orders
+// continue trading. Skipped on order types without a meaningful limit
+// price (Market / Stop families / Pegged).
+// Precondition: bookLock_ held.
+std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
+                                                      ParticipantId participantId,
+                                                      Price price, Quantity qty,
+                                                      OrderType type) {
     if (referencePrice_ == 0 && type != OrderType::Market
                  && type != OrderType::Stop && type != OrderType::StopLimit
                  && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
         referencePrice_ = price;
     }
 
-    // --- Price band (LULD) admission filter ---
-    // Reject orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
-    // is configured and a reference price has been established. Distinct
-    // from the volatility breaker below: this rejects the individual
-    // order without halting the market, lets subsequent in-band orders
-    // continue trading. Skipped on order types without a meaningful limit
-    // price (Market / Stop families / Pegged).
     if (priceBandPct_ > 0.0 && referencePrice_ > 0 &&
         (type == OrderType::Limit  || type == OrderType::IOC ||
          type == OrderType::FOK    || type == OrderType::PostOnly ||
@@ -607,18 +605,19 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             static_cast<double>(referencePrice_) * priceBandPct_);
         Price lo = referencePrice_ - half;
         Price hi = referencePrice_ + half;
-        if (price < lo || price > hi) {
-#ifndef OB_LEAN_MODE
-            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0,
-                              RejectReason::OutsidePriceBand);
-            return RejectReason::OutsidePriceBand;
-        }
+        if (price < lo || price > hi)
+            return rejectOrder(orderId, participantId, qty, RejectReason::OutsidePriceBand);
     }
+    return std::nullopt;
+}
 
-    // --- Circuit breaker check ---
 #ifndef OB_LEAN_MODE
+// --- Circuit breaker check ---  Precondition: bookLock_ held.
+// Deliberately does NOT go through rejectOrder(): a breaker trip is a venue
+// event, not a participant's fault, and the original never counted it against
+// the participant's rejectedOrders. Keeping the notify inline preserves that.
+std::optional<RejectReason> OrderBook::admitCircuitBreaker(OrderId orderId, Price price,
+                                                           Quantity qty, OrderType type) {
     if (type == OrderType::Limit || type == OrderType::IOC || type == OrderType::FOK
         || type == OrderType::PostOnly || type == OrderType::Iceberg || type == OrderType::Hidden) {
         if (!checkCircuitBreaker(price)) {
@@ -644,9 +643,14 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             return RejectReason::VolatilityCircuitBreaker;
         }
     }
+    return std::nullopt;
+}
 #endif
 
-    // --- Post-Only: reject if would cross the spread ---
+// --- Post-Only: reject if would cross the spread ---  Precondition: bookLock_ held.
+std::optional<RejectReason> OrderBook::admitPostOnly(OrderId orderId, ParticipantId participantId,
+                                                     Side side, Price price, Quantity qty,
+                                                     OrderType type) {
     if (type == OrderType::PostOnly) [[unlikely]] {
         bool wouldCross = false;
         if (side == Side::Buy)
@@ -654,92 +658,36 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         else
             wouldCross = !bids_.empty() && price <= bids_.bestPrice();
 
-        if (wouldCross) {
-#ifndef OB_LEAN_MODE
-            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::PostOnlyWouldCross);
-            return RejectReason::PostOnlyWouldCross;
-        }
+        if (wouldCross)
+            return rejectOrder(orderId, participantId, qty, RejectReason::PostOnlyWouldCross);
     }
+    return std::nullopt;
+}
 
-    // --- MOC/LOC: park or release immediately ---
-    // MOC (Market-on-Close) and LOC (Limit-on-Close) only execute during the
-    // AuctionClose uncross. In every other state they are parked in
-    // onCloseOrders_. When the book transitions to AuctionClose,
-    // releaseOnCloseOrders() moves them to the appropriate structures.
-    // Any LOC remaining unfilled after uncross() is cancelled by cancelLocOrders().
-    if (type == OrderType::MOC || type == OrderType::LOC) {
-        Order* order = FaultInjector::instance().shouldFail("pool.allocate.fail")
-                           ? nullptr : orderPool_.allocate();
-        if (!order) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-            participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::CapacityExhausted);
-            return RejectReason::CapacityExhausted;
-        }
-        order->id = orderId;
-        order->inBook = false;  // pool reuse hands back raw memory — start clean
-        order->participantId = participantId;
-        order->side = side;
-        order->price = price;   // only meaningful for LOC
-        order->initialQty = qty;
-        order->remainingQty = qty;
-        order->type = type;
-        order->status = OrderStatus::Accepted;
-        order->timeInForce = tif;
-        order->expiryTime = expiryTime;
-        order->stopPrice = 0;
-        order->stopLimitPrice = 0;
-        order->displayQty = 0;
-        order->visibleQty = 0;
-        order->pegType = PegType::None;
-        order->pegOffset = 0;
-        order->trailAmount = 0;
-        order->trailRefPrice = 0;
-        order->minQty = 0;
-        order->isHidden = false;
-        order->isStopTriggered = false;
-        order->symbolId = symbolId_;
-        order->timestamp = nowNs();
-        order->next = nullptr;
-        order->prev = nullptr;
-
-        orderLookup_.insert(orderId, order);
-        notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
-        if (obSinkActive()) obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
-
-        if (tradingState_ == TradingState::AuctionClose) {
-            if (type == OrderType::MOC) {
-                auctionMarketOrders_.push_back(order);
-            } else {
-                if (!addToBook(order)) {
-                    orderLookup_.erase(orderId);
-                    orderPool_.deallocate(order);
-                    return RejectReason::CapacityExhausted;
-                }
-                locActiveIds_.push_back(orderId);
-            }
-        } else {
-            onCloseOrders_.push_back(order);
-        }
-        return orderId;
-    }
-
-    // --- Allocate order from pool ---
-    // Fault injection: simulate pool exhaustion. The natural path
-    // (allocate 200k orders) is too slow for a unit test; this point
-    // exercises the CapacityExhausted reject path deterministically.
+// --- Allocate order from pool + register for O(1) lookup ---
+// Shared by the MOC/LOC park path and the main path: both allocated through the
+// same fault-injection point, filled the SAME fields in the SAME order, inserted
+// into orderLookup_, published Accepted and audit-logged it. Returns nullptr
+// when the pool is exhausted; both callers then reject with CapacityExhausted.
+//
+// Fault injection: simulate pool exhaustion. The natural path (allocate 200k
+// orders) is too slow for a unit test; this point exercises the
+// CapacityExhausted reject path deterministically.
+//
+// The parameter list mirrors addOrder's own, in the same order, so the main
+// call site reads as a straight forward and the MOC/LOC one as the same list
+// with the fields that only mean something to a live book order zeroed.
+// Precondition: bookLock_ held.
+Order* OrderBook::allocateAndRegisterOrder(OrderId orderId, ParticipantId participantId,
+                                           Side side, Price price, Quantity qty, OrderType type,
+                                           Price stopPrice, Quantity displayQty,
+                                           TimeInForce tif, uint64_t expiryTime,
+                                           Price stopLimitPrice, PegType pegType,
+                                           Price pegOffset, Price trailAmount,
+                                           Quantity minQty, bool hidden) {
     Order* order = FaultInjector::instance().shouldFail("pool.allocate.fail")
                        ? nullptr : orderPool_.allocate();
-    if (!order) [[unlikely]] {
-#ifndef OB_LEAN_MODE
-        participantRisk_[OTRKey(participantId, symbolId_)].rejectedOrders++;
-#endif
-        notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::CapacityExhausted);
-        return RejectReason::CapacityExhausted;
-    }
+    if (!order) [[unlikely]] return nullptr;
 
     order->id = orderId;
     order->inBook = false;  // pool reuse hands back raw memory — start clean
@@ -768,13 +716,96 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     order->next = nullptr;
     order->prev = nullptr;
 
-    // --- Register for O(1) lookup ---
     orderLookup_.insert(orderId, order);
-
     notifyOrderUpdate(orderId, OrderStatus::Accepted, 0, qty);
     if (obSinkActive()) obSink().log(logOrderAccepted(orderId, symbolId_, participantId, price, qty));
+    return order;
+}
 
-    // --- Auction Market orders: park for the uncross ---
+// --- MOC/LOC: park or release immediately ---
+// MOC (Market-on-Close) and LOC (Limit-on-Close) only execute during the
+// AuctionClose uncross. In every other state they are parked in
+// onCloseOrders_. When the book transitions to AuctionClose,
+// releaseOnCloseOrders() moves them to the appropriate structures.
+// Any LOC remaining unfilled after uncross() is cancelled by cancelLocOrders().
+//
+// nullopt => not an on-close order, addOrder carries on to the main path.
+// Precondition: bookLock_ held.
+std::optional<AddOrderResult> OrderBook::parkOnCloseOrder(OrderId orderId,
+                                                          ParticipantId participantId, Side side,
+                                                          Price price, Quantity qty, OrderType type,
+                                                          TimeInForce tif, uint64_t expiryTime) {
+    if (type != OrderType::MOC && type != OrderType::LOC) return std::nullopt;
+
+    // price is only meaningful for LOC; everything a resting/triggering order
+    // would need is zeroed.
+    Order* order = allocateAndRegisterOrder(orderId, participantId, side, price, qty, type,
+                                            /*stopPrice*/ 0, /*displayQty*/ 0, tif, expiryTime,
+                                            /*stopLimitPrice*/ 0, PegType::None, /*pegOffset*/ 0,
+                                            /*trailAmount*/ 0, /*minQty*/ 0, /*hidden*/ false);
+    if (!order) [[unlikely]]
+        return AddOrderResult{rejectOrder(orderId, participantId, qty,
+                                          RejectReason::CapacityExhausted)};
+
+    if (tradingState_ == TradingState::AuctionClose) {
+        if (type == OrderType::MOC) {
+            auctionMarketOrders_.push_back(order);
+        } else {
+            if (!addToBook(order)) {
+                orderLookup_.erase(orderId);
+                orderPool_.deallocate(order);
+                return AddOrderResult{RejectReason::CapacityExhausted};
+            }
+            locActiveIds_.push_back(orderId);
+        }
+    } else {
+        onCloseOrders_.push_back(order);
+    }
+    return AddOrderResult{orderId};
+}
+
+// --- Pegged: compute price from reference and rest ---
+// Both exits in the original returned orderId, so this returns void and the
+// caller does. A rest that cannot be placed (out of price range / depth) is torn
+// down here rather than left marked Accepted but dangling in orderLookup_ and
+// peggedOrders_ without resting.
+// Precondition: bookLock_ held.
+void OrderBook::restPeggedOrder(Order* order, OrderId orderId, Side side, Price price,
+                                Quantity qty, PegType pegType, Price pegOffset) {
+    Price pegPrice = price; // fallback
+    if (pegType == PegType::MidPeg) {
+        Price mid = getMidPrice();
+        if (mid > 0) pegPrice = mid + pegOffset;
+    } else if (pegType == PegType::PrimaryPeg) {
+        if (side == Side::Buy) {
+            Price bb = getBestBid();
+            if (bb > 0) pegPrice = bb + pegOffset;
+        } else {
+            Price ba = getBestAsk();
+            if (ba < std::numeric_limits<Price>::max()) pegPrice = ba + pegOffset;
+        }
+    }
+    order->price = pegPrice;
+    peggedOrders_.push_back(order);
+    if (!addToBook(order)) {
+        notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
+        peggedOrders_.erase_value(order);
+        orderLookup_.erase(orderId);
+        orderPool_.deallocate(order);
+        return;
+    }
+    if (!order->isHidden)
+        notifyMarketData(MarketDataUpdate::Action::Add, side, order->price);
+}
+
+// --- Order types that never match on arrival: park them and we are done ---
+// Auction Market park, Stop/StopLimit/MIT park, TrailingStop park, Pegged rest.
+// nullopt => this order goes on to match; a value => addOrder returns it.
+// Precondition: bookLock_ held.
+std::optional<OrderId> OrderBook::parkNonMatchingOrder(Order* order, OrderId orderId, Side side,
+                                                       Price price, Quantity qty, OrderType type,
+                                                       PegType pegType, Price pegOffset,
+                                                       Price trailAmount) {
     // A Market order in an auction state has no limit price; it cannot
     // rest in the FlatPriceMap and must not match continuously (we are
     // accumulating, not matching). Hold it in auctionMarketOrders_;
@@ -813,38 +844,17 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         return orderId;
     }
 
-    // --- Pegged: compute price from reference and rest ---
     if (type == OrderType::Pegged) [[unlikely]] {
-        Price pegPrice = price; // fallback
-        if (pegType == PegType::MidPeg) {
-            Price mid = getMidPrice();
-            if (mid > 0) pegPrice = mid + pegOffset;
-        } else if (pegType == PegType::PrimaryPeg) {
-            if (side == Side::Buy) {
-                Price bb = getBestBid();
-                if (bb > 0) pegPrice = bb + pegOffset;
-            } else {
-                Price ba = getBestAsk();
-                if (ba < std::numeric_limits<Price>::max()) pegPrice = ba + pegOffset;
-            }
-        }
-        order->price = pegPrice;
-        peggedOrders_.push_back(order);
-        if (!addToBook(order)) {
-            // Out of price range / depth: don't leave the order marked Accepted
-            // but dangling in orderLookup_ and peggedOrders_ without resting.
-            notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-            peggedOrders_.erase_value(order);
-            orderLookup_.erase(orderId);
-            orderPool_.deallocate(order);
-            return orderId;
-        }
-        if (!order->isHidden)
-            notifyMarketData(MarketDataUpdate::Action::Add, side, order->price);
+        restPeggedOrder(order, orderId, side, price, qty, pegType, pegOffset);
         return orderId;
     }
 
-    // --- FOK: require full liquidity ---
+    return std::nullopt;
+}
+
+// --- FOK: require full liquidity ---  Precondition: bookLock_ held.
+std::optional<RejectReason> OrderBook::screenFOK(Order* order, OrderId orderId, Side side,
+                                                 Price price, Quantity qty, OrderType type) {
     if (type == OrderType::FOK) [[unlikely]] {
         if (!checkLiquidity(side, price, qty, type)) {
             orderLookup_.erase(orderId);
@@ -853,8 +863,15 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             return RejectReason::FOKInsufficientLiquidity;
         }
     }
+    return std::nullopt;
+}
 
-    // --- Min quantity check ---
+// --- Min quantity check ---  Precondition: bookLock_ held.
+// nullopt => the order goes on to match. A value => the order was finalized
+// here (cancelled, or rested without matching) and addOrder returns it.
+std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Side side,
+                                               Price price, Quantity qty, OrderType type,
+                                               Quantity minQty) {
     if (minQty > 0 && type != OrderType::FOK) [[unlikely]] {
         if (!checkMinQty(side, price, minQty)) {
             if (type == OrderType::IOC) {
@@ -894,38 +911,15 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             return orderId;
         }
     }
+    return std::nullopt;
+}
 
-    // --- Match (skipped during auction / pre-open) ---
-    // PreOpen / AuctionOpen / AuctionClose all accumulate without
-    // continuous matching; uncross() at the appropriate session boundary
-    // produces all trades at the single discovered uncross price.
-    const bool inAuction =
-        (tradingState_ == TradingState::AuctionOpen) ||
-        (tradingState_ == TradingState::AuctionClose) ||
-        (tradingState_ == TradingState::PreOpen) ||
-        (tradingState_ == TradingState::VolatilityAuction);
-    if (!inAuction) {
-        if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-            matchProRata(order);
-        else
-            match(order);
-    }
-
-    // --- Trigger stops / update pegs ---
-    if (lastTradePrice_ > 0) {
-        checkStopOrders(lastTradePrice_);
-        updateTrailingStops(lastTradePrice_);
-    }
-    if (!peggedOrders_.empty())
-        updatePeggedOrders();
-
-    // --- Post-match: handle remaining quantity ---
-    // C1: an order STP zeroed has remainingQty == 0 WITHOUT having traded for
-    // it. This test must come first, because the remainingQty == 0 branch below
-    // reports Filled at full initialQty — the phantom fill that won OCO groups
-    // and cancelled innocent siblings for an order that traded nothing.
-    if (finalizeIfStpCancelled(order)) return orderId;
-
+// --- Post-match: handle remaining quantity ---  Precondition: bookLock_ held.
+// The caller MUST have run finalizeIfStpCancelled() first: the remainingQty == 0
+// branch below reports Filled at full initialQty, which is a phantom fill for an
+// order STP zeroed without trading.
+void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
+                                     OrderType type) {
     if (order->remainingQty > 0) [[likely]] {
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
             Quantity filled = order->initialQty - order->remainingQty;
@@ -956,6 +950,89 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
         orderLookup_.erase(orderId);
         orderPool_.deallocate(order);
     }
+}
+
+// Admission -> allocation -> park -> match -> finalize. bookLock_ is taken once,
+// on the first line, and held to the end; none of the helpers above re-take it.
+AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId, Side side, Price price,
+                          Quantity qty, OrderType type, Price stopPrice, Quantity displayQty,
+                          TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
+                          PegType pegType, Price pegOffset, Price trailAmount,
+                          Quantity minQty, bool hidden,
+                          [[maybe_unused]] bool riskChecksBypassed) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+
+    if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
+    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty)) return *r;
+    // Pool pressure runs before EITHER allocation site (the MOC/LOC park and the
+    // main path) so both are covered.
+    if (auto r = admitPoolPressure(orderId, participantId, qty)) return *r;
+
+    // --- Pre-trade risk checks ---
+#ifndef OB_LEAN_MODE
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty)) [[unlikely]] {
+        const RejectReason reason =
+            rejectOrder(orderId, participantId, qty, RejectReason::RiskLimitBreached);
+        obSink().log(logOrderRejected(orderId, participantId, "risk_limit_breached"));
+        return reason;
+    }
+
+    participantRisk_[OTRKey(participantId, symbolId_)].recordOrderSubmit();
+#endif
+
+    if (auto r = admitPriceBand(orderId, participantId, price, qty, type)) return *r;
+#ifndef OB_LEAN_MODE
+    if (auto r = admitCircuitBreaker(orderId, price, qty, type)) return *r;
+#endif
+    if (auto r = admitPostOnly(orderId, participantId, side, price, qty, type)) return *r;
+
+    if (auto res = parkOnCloseOrder(orderId, participantId, side, price, qty, type, tif, expiryTime))
+        return *res;
+
+    Order* order = allocateAndRegisterOrder(orderId, participantId, side, price, qty, type,
+                                           stopPrice, displayQty, tif, expiryTime, stopLimitPrice,
+                                           pegType, pegOffset, trailAmount, minQty, hidden);
+    if (!order) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::CapacityExhausted);
+
+    if (auto id = parkNonMatchingOrder(order, orderId, side, price, qty, type,
+                                       pegType, pegOffset, trailAmount)) return *id;
+
+    if (auto r = screenFOK(order, orderId, side, price, qty, type)) return *r;
+    if (auto id = screenMinQty(order, orderId, side, price, qty, type, minQty)) return *id;
+
+    // --- Match (skipped during auction / pre-open) ---
+    // PreOpen / AuctionOpen / AuctionClose all accumulate without
+    // continuous matching; uncross() at the appropriate session boundary
+    // produces all trades at the single discovered uncross price.
+    const bool inAuction =
+        (tradingState_ == TradingState::AuctionOpen) ||
+        (tradingState_ == TradingState::AuctionClose) ||
+        (tradingState_ == TradingState::PreOpen) ||
+        (tradingState_ == TradingState::VolatilityAuction);
+    if (!inAuction) {
+        if (matchAlgorithm_ == MatchAlgorithm::ProRata)
+            matchProRata(order);
+        else
+            match(order);
+    }
+
+    // --- Trigger stops / update pegs ---
+    if (lastTradePrice_ > 0) {
+        checkStopOrders(lastTradePrice_);
+        updateTrailingStops(lastTradePrice_);
+    }
+    if (!peggedOrders_.empty())
+        updatePeggedOrders();
+
+    // C1: an order STP zeroed has remainingQty == 0 WITHOUT having traded for
+    // it. This test must come first, because the remainingQty == 0 branch in
+    // finalizeRemainingQty reports Filled at full initialQty — the phantom fill
+    // that won OCO groups and cancelled innocent siblings for an order that
+    // traded nothing.
+    if (finalizeIfStpCancelled(order)) return orderId;
+
+    finalizeRemainingQty(order, orderId, side, price, type);
     return orderId;
 }
 

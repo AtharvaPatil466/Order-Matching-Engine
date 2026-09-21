@@ -8,7 +8,29 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Release enables `-O3 -march=native -mtune=native` (see `CMakeLists.txt`).
+Release enables `-O3` plus an architecture target chosen by `OB_ARCH`
+(see `CMakeLists.txt`):
+
+| `OB_ARCH` | Effect | Used by |
+|---|---|---|
+| `native` (default) | `-march=native -mtune=native` | local builds and every benchmark figure in `BENCHMARKS.md` |
+| a baseline, e.g. `x86-64-v3` | `-march=<value>`, no `-mtune` | `Dockerfile` and the chaos image |
+| empty | no architecture flags | portability checks |
+
+**The default is `native` on purpose, and the deployment images do not use it.**
+A Release build pinned to the builder's CPU is fine for benchmarking and wrong
+for a container: shipped to an older host it gives SIGILL rather than degrading.
+So the Dockerfile pins `x86-64-v3` on x86 (AVX2 era, 2013+) and `armv8-a` on
+arm64 — the arm64 branch exists because `-march=x86-64-v3` is rejected outright
+by an ARM compiler, and pinning a deployment build must not make the local build
+impossible.
+
+Override with `-DOB_ARCH=<value>` at configure time, or `--build-arg OB_ARCH=`
+for the image.
+
+Note `-Wno-error=invalid-feature-combination` is applied only under
+`OB_ARCH=native`: its cause is `-march=native` on newer silicon, so a pinned
+build carries no arch-related warning demotions and `-Werror` is absolute there.
 
 ### Notable CMake options (all opt-in, default OFF unless noted)
 

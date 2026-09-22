@@ -50,3 +50,8 @@ target_link_libraries(JournalContentionBenchmark PRIVATE OrderMatcher)
 # Thread-scaling curve — MatchingEngine async thread-per-symbol path, worker sweep
 add_executable(ScalingBenchmark ScalingBenchmark.cpp)
 target_link_libraries(ScalingBenchmark PRIVATE OrderMatcher)
+
+# bookLock_ contention — admin getSnapshot vs the matching path, swept on
+# orders-per-level (the axis that matters) and price levels; + FlatPriceMap RSS
+add_executable(SnapshotContentionBenchmark SnapshotContentionBenchmark.cpp)
+target_link_libraries(SnapshotContentionBenchmark PRIVATE OrderMatcher)

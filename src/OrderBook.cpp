@@ -2897,22 +2897,40 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
     // side-flipping cancelReplace can no longer interleave between the bid
     // traversal and the ask traversal.
     //
-    // SO AN ADMIN READ CAN STALL MATCHING, AND HERE IS WHAT IT COSTS. /book and
-    // /audit reach this through MatchingEngine::getSnapshot, so a dashboard
-    // polling them takes the same lock addOrder needs. Measured on a
-    // 20,000-order book at depth 10: P50 291 ns, P99 334 ns, max 7.25 us held.
-    // That is roughly one order's worth of matching time per request — a
-    // 1,000 req/s poll costs ~0.03% of a worker.
+    // SO AN ADMIN READ CAN STALL MATCHING, AND THE COST DEPENDS ENTIRELY ON
+    // QUEUE DEPTH. /book and /audit reach this through
+    // MatchingEngine::getSnapshot, so a dashboard polling them takes the same
+    // lock addOrder needs.
     //
-    // Deliberately NOT redesigned into a seqlock or double-buffered snapshot.
-    // The principle "monitoring must not be able to stop trading" is right, and
-    // the measurement says this does not stop trading; paying optimistic-read
-    // complexity on the hot path to save 291 ns of admin-triggered stall would
-    // be an unmeasured optimisation of the kind this codebase has already had
-    // to withdraw. Note /metrics and /prometheus do NOT come through here.
+    // The cost is O(depth x ORDERS-PER-LEVEL), not O(book size) and not
+    // O(levels): the loop above stops after maxDepth levels, but walks every
+    // order inside each one. Measured hold (benchmarks/SnapshotContentionBenchmark):
     //
-    // The number to watch is the max, not the P50: if depth or book size grows
-    // enough that the tail reaches tens of microseconds, revisit.
+    //   orders/level   hold P50    duty at a 1,000 req/s poll
+    //             1        42 ns    0.00%
+    //            10       167 ns    0.02%
+    //           100      2.79 us    0.28%
+    //         1,000       124 us   12.39%
+    //        10,000      15.9 ms   poll rate physically unreachable
+    //
+    // An earlier version of this comment said "P50 291 ns ... not worth a
+    // seqlock". That number was taken at ~10 orders per level and did not
+    // generalise: a book with a deep queue at the touch holds this lock for
+    // MILLISECONDS. The conclusion is now conditional, and the condition is
+    // queue depth at the touch, not book size.
+    //
+    // READ dP99 TOGETHER WITH DUTY CYCLE, OR IT WILL MISLEAD YOU. At a paced
+    // 1,000 req/s the matching path's P99 barely moves even at 1,000
+    // orders/level (+0 ns) — because a 12% duty cycle puts the stall at P88,
+    // below where P99 looks. Flat-out scraping at that depth collapses
+    // matching throughput to 0-1% of control with a 188 ms P99. Monitoring
+    // cannot stall this engine at a sane poll rate; it can absolutely starve it
+    // without one.
+    //
+    // A seqlock or double-buffered snapshot IS worth building if books here are
+    // expected to carry deep queues. It is not worth it for shallow ones, which
+    // is what this deployment has had so far. /metrics and /prometheus do NOT
+    // come through here.
     std::unique_lock<std::mutex> lock(bookLock_);
 
     MarketDataSnapshot snap{};

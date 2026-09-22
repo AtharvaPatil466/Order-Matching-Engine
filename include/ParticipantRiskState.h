@@ -25,8 +25,12 @@
 //   └─────────────────────────────────────────────────────────────────┘
 //
 // All fields are non-atomic: accessed only by the owning worker thread.
-// Cross-thread reads (admin endpoints, snapshots) must coordinate via
-// the existing bookLock_ shared_mutex.
+// Cross-thread reads (admin endpoints, snapshots) must coordinate via the
+// existing bookLock_ — which is a plain std::mutex, so any such read is
+// EXCLUSIVE and serialises against matching. It was a std::shared_mutex when
+// this note was written; it was swapped because a shared_mutex's uncontended
+// write-lock costs more than a mutex and every hot-path caller writes. There
+// is no reader-parallel mode left to take here.
 
 #include "Types.h"
 #include <cstdint>

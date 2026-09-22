@@ -382,11 +382,14 @@ public:
     // replication — closes the "joined-after-orders-existed" gap
     // surfaced by the rolling-restart chaos scenario.
     //
-    // Concurrency: takes each book's bookLock_ in shared mode while
-    // iterating. New orders accepted during iteration may or may not
-    // appear in the stream; the Snapshot handler on the receiver
-    // side is idempotent (skips already-known orderIds), so the
-    // overlap is safe — duplicates collapse, no entries are lost.
+    // Concurrency: takes bookMutex_, then each book's bookLock_ while
+    // iterating it. bookLock_ is a plain std::mutex (it was a shared_mutex
+    // when this note was written), so that hold is EXCLUSIVE — streaming one
+    // book blocks matching on that symbol for the length of its walk. New
+    // orders accepted during iteration may or may not appear in the stream;
+    // the Snapshot handler on the receiver side is idempotent (skips
+    // already-known orderIds), so the overlap is safe — duplicates collapse,
+    // no entries are lost.
     void streamSnapshot(const std::function<void(const struct JournalEntry&)>& fn) const;
 
     // Replay journal to rebuild order book state (crash recovery)
@@ -669,8 +672,10 @@ private:
                            uint64_t maxSpins = 1'000'000);
 
     // Resting orders for `pid` across every book, or all orders when pid is
-    // kKillAllParticipants. Takes each book's shared lock, so it is safe to
-    // call from the control thread while workers run. Control-plane only.
+    // kKillAllParticipants. Takes each book's bookLock_ — a plain std::mutex,
+    // so exclusively — which is what makes it safe to call from the control
+    // thread while workers run, at the cost of stalling matching on each book
+    // for the length of its walk. Control-plane only.
     size_t countResting(ParticipantId pid);
 
     // Enqueue a KillSwitch sweep on every worker, drain, then verify by
@@ -680,10 +685,6 @@ private:
     size_t getThreadIndex(SymbolId symbolId) const;
 
     // ─── OCO contingent-order plumbing ───────────────────────────────
-    // Per-book observer buffering ids of orders that executed, so the
-    // engine can drive OCO cancellation after the triggering request
-    // completes (off the book lock). Buffers only while OCO is active, so
-    // the no-OCO hot path stays free.
     // Per-book engine-side observer. Buffers (a) ids of orders that executed
     // — drained to drive OCO sibling-cancellation — and (b) executed trades —
     // drained to drive fees, hierarchical-risk position accrual, and the CAT

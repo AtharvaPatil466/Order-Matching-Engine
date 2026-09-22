@@ -12,16 +12,14 @@
 // catches up, or (b) the journal evicts it (in which case the
 // subscriber is too far behind and must take a full snapshot).
 //
-// Concurrency: a single-writer, multi-reader pattern is supported.
-// The writer (the publisher) calls record() under no internal lock
-// — it's the caller's responsibility not to call record() and
-// replayRange() concurrently from different threads. For most
-// deployments, the publisher writes from the engine-side thread
-// and the retransmission service reads from one or more TCP
-// connection threads; that needs external synchronization. In this
-// implementation we use a single mutex to make the journal
-// trivially safe across threads at the cost of some lock contention
-// on the publish hot path.
+// Concurrency: one internal mutex guards EVERY public method, so the
+// journal is trivially safe across threads and the caller needs no
+// external synchronization — record() on the engine-side publisher
+// thread and replayRange() on the retransmission service's TCP
+// connection threads may run concurrently. The cost is lock contention
+// on the publish hot path. (An earlier form took no internal lock and
+// made that serialisation the caller's job; the std::lock_guard at the
+// top of each method below is the contract now.)
 
 #include <cstdint>
 #include <cstring>

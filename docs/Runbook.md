@@ -259,7 +259,18 @@ The following can be changed without restart:
 See [CapacityPlanning.md](./CapacityPlanning.md) for detailed sizing guidance.
 
 Quick reference:
-- **Memory**: ~1KB per live order + ObjectPool overhead. 1M orders ≈ 1.5GB
+- **Memory**: ~1 KB per live order **all-in** — i.e. the whole per-book
+  footprint divided by pool capacity, not the marginal cost of one more order.
+  Measured: 10.35 MiB per book at the 10,000-slot default = **1,085 bytes per
+  slot**, which is what this rule of thumb approximates. It includes the price
+  maps, trade ring and inline vectors, all of which are resident whether or not
+  an order ever arrives.
+
+  `docs/CapacityPlanning.md` quotes **~248 bytes per live order** and is not in
+  conflict: that is the MARGINAL cost (192 B `Order` + 16 + 8 + 32). Use 248 B
+  to answer "what does one more order cost", and ~1 KB/slot to answer "how much
+  RAM does this book need" — the second is the one that sizes a box, because
+  the pool is pre-constructed. Both scale with `order_pool_capacity`.
 - **CPU**: 1 core per symbol-partition thread + 1 for gateway + 1 for admin
 - **Disk**: Journal grows at ~100 bytes/entry. At 1M orders/day ≈ 100MB/day
 - **Network**: Each FIX message is 200-500 bytes. At 10K orders/sec ≈ 5 MB/s

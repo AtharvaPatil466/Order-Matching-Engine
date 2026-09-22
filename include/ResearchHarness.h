@@ -227,10 +227,13 @@ private:
     void emitBookUpdate(const OrderBook& bk, SymbolId sym) {
         // getMidPrice() is lock-free (reads the price index directly) and
         // safe to call from within the EventListener callbacks, which are
-        // invoked while the book's bookLock_ unique_lock is held by the
-        // writer.  getSnapshot() takes a shared_lock and would deadlock,
-        // so we pass 0 for the bid/ask quantities here; callers that need
-        // full depth should take a snapshot *outside* the callback.
+        // invoked while the writer holds the book's bookLock_. getSnapshot()
+        // takes that SAME lock — exclusively, since bookLock_ is a plain,
+        // non-recursive std::mutex (it was a shared_mutex when this note was
+        // written, and even a shared_lock nested inside the writer's hold
+        // would have deadlocked). So calling it here self-deadlocks: we pass 0
+        // for the bid/ask quantities instead, and callers that need full depth
+        // should take a snapshot *outside* the callback.
         Price mid = bk.getMidPrice();
         bookUpdateCb_(sym, mid, /*bidQty=*/0, /*askQty=*/0);
     }

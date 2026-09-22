@@ -366,7 +366,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 | `Refinement.tla` | written | Refinement mapping from spec to implementation behavior |
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
 | `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
-| `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Read/write mutex prevents torn snapshots (lock spec verifies the fix found via the unlocked spec) |
+| `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) |
 | `Auction.tla` | verified | Opening/closing auction uncross correctness, price collar admission |
 | `EpochDurability.tla` | verified | Epoch-store durability invariant under crash |
 | `FixSession.tla` | verified | FIX session state machine safety (logon/heartbeat/gap-fill) |

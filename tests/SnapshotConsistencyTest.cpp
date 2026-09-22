@@ -1,5 +1,7 @@
 // SnapshotConsistencyTest — proves the torn-read window documented in
-// spec/Snapshot.tla is closed by the bookLock_ shared_mutex.
+// spec/Snapshot.tla is closed by bookLock_ (a shared_mutex when this test
+// was written, a plain std::mutex now; the reader excludes the writer for
+// the whole snapshot either way, which is the only part this test exercises).
 //
 // Setup: writer thread does cancelReplace operations that flip an
 // order's side (Buy → Sell at a different price). Reader thread takes
@@ -64,9 +66,9 @@ int main() {
             for (size_t i = 0; i < snap.askCount; ++i) total += snap.asks[i].totalQuantity;
             // Could be 0 momentarily during cancel before re-add inside
             // cancelReplace? cancelReplace is atomic under the lock —
-            // when getSnapshot's shared_lock is granted, the writer's
-            // unique_lock has been released, so the order MUST be
-            // visible on exactly one side.
+            // when getSnapshot's acquisition of bookLock_ is granted, the
+            // writer has already released it, so the order MUST be visible
+            // on exactly one side.
             assert(total >= 100 && "order vanished — torn read on quantity");
             snapsTaken.fetch_add(1, std::memory_order_relaxed);
         }

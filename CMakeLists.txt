@@ -141,12 +141,19 @@ if(ENABLE_PGO)
 endif()
 
 # Lean Mode Option
-# ─── Perf experiments (default OFF — the shipped binary is byte-identical) ───
-# Both of these were implemented, then reverted as "net-negative" on the
+# ─── Perf experiment (default OFF — the shipped binary is byte-identical) ───
+# Next-order prefetch was implemented, then reverted as "net-negative" on the
 # 100%-fill HonestBenchmark flow using a perf counter that was wrapped around
-# the whole process rather than the matching loop (see 156acb3). They are kept
-# here behind flags so the question can be re-measured on venue-shaped flow
-# (RealisticFlowBenchmark) and on x86 with perf, instead of re-litigated.
+# the whole process rather than the matching loop (see 156acb3). This flag is
+# what let that be re-measured properly on venue-shaped flow
+# (RealisticFlowBenchmark) instead of re-litigated: no benefit on either flow,
+# and a small penalty on RealisticFlow IOC mean, so it stays reverted and stays
+# OFF. It remains here for the one case still open — a sweep-heavy workload on
+# x86 under perf. See "Optimization History" in BENCHMARKS.md.
+#
+# The price-level arena allocator went through the same cycle to the same
+# verdict but has NO flag here: it is not carried in the tree at all. Recover
+# it from ff55338 (+ c9e2260 for the SLAB_SIZE override) if anyone revisits it.
 option(ENABLE_MATCH_PREFETCH "Prefetch the next order node in the matching loops" OFF)
 if(ENABLE_MATCH_PREFETCH)
     message(STATUS "OB_MATCH_PREFETCH Enabled: matching loops prefetch the next node")

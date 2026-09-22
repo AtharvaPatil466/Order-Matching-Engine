@@ -1,17 +1,24 @@
 ----------------------------- MODULE SnapshotLocked -----------------------------
-\* Locked variant of Snapshot.tla — models the bookLock_ shared_mutex
-\* added to OrderBook to close the torn-read window. Where the unlocked
-\* spec produced counterexamples for SnapshotIsPointInTime and
+\* Locked variant of Snapshot.tla — models the bookLock_ added to
+\* OrderBook to close the torn-read window. Where the unlocked spec
+\* produced counterexamples for SnapshotIsPointInTime and
 \* NoDoubleSidedSnapshot, this spec verifies that BOTH properties hold
-\* once the reader takes a shared lock for the duration of its 2-step
-\* read and the writer takes an exclusive lock for the duration of any
-\* mutation.
+\* once the reader holds bookLock_ for the duration of its 2-step read
+\* and the writer holds it for the duration of any mutation.
+\*
+\* WHICH LOCK, AND WHY THE RESULT SURVIVED THE SWAP. bookLock_ was a
+\* std::shared_mutex when this spec was written (reader: shared_lock,
+\* writer: unique_lock); it is now a plain std::mutex, so readers also
+\* exclude each other. This model has exactly ONE reader, so it never
+\* expressed reader-reader parallelism in the first place. What it does
+\* express — a reader excludes every writer for its whole 2-step read —
+\* is provided by both forms, so the verification carries over unchanged.
 \*
 \* Closes the formal-verification cycle:
 \*   1. spec/Snapshot.tla found the bug (counterexample trace shipping
 \*      an order on both sides of the snapshot)
-\*   2. include/OrderBook.h adds shared_mutex bookLock_; mutators take
-\*      unique_lock; getSnapshot takes shared_lock
+\*   2. include/OrderBook.h adds bookLock_; both mutators and getSnapshot
+\*      hold it for the whole operation
 \*   3. tests/SnapshotConsistencyTest.cpp empirically validates 32k+
 \*      concurrent snapshots are torn-free (also clean under TSan)
 \*   4. THIS SPEC verifies the lock makes the strong consistency
@@ -46,10 +53,10 @@ Init ==
     /\ readerAsks = {}
     /\ readerHoldsLock = FALSE
 
-\* ---------------- Writer actions (exclusive lock) -------------------------
+\* ---------------- Writer actions (hold bookLock_) -------------------------
 \* All writer actions are guarded with ~readerHoldsLock — they cannot run
-\* while the reader is mid-snapshot. This models the unique_lock /
-\* shared_lock exclusion.
+\* while the reader is mid-snapshot. That reader-excludes-writer property
+\* is what bookLock_ gives, as a shared_mutex then and a plain mutex now.
 
 WriterAddBid(o) ==
     /\ ~readerHoldsLock
@@ -99,7 +106,7 @@ WriterStep ==
         \/ WriterRemove(o)
         \/ WriterMoveBidToAsk(o)
 
-\* ---------------- Reader actions (shared lock) ----------------------------
+\* ---------------- Reader actions (hold bookLock_) -------------------------
 \* The reader holds the lock for the ENTIRE 2-step snapshot. Acquired in
 \* ReaderStart, released in ReaderRestart (or when transitioning to
 \* "done"). With the lock held, no writer action is enabled, so the
@@ -111,7 +118,7 @@ ReaderStart ==
     /\ readerPC' = "readBids"
     /\ readerBids' = {}
     /\ readerAsks' = {}
-    /\ readerHoldsLock' = TRUE       \* acquire shared lock
+    /\ readerHoldsLock' = TRUE       \* acquire bookLock_
     /\ UNCHANGED <<bids, asks, history, writerOpsLeft>>
 
 ReaderReadBids ==
@@ -131,7 +138,7 @@ ReaderReadAsks ==
 ReaderRestart ==
     /\ readerPC = "done"
     /\ readerPC' = "idle"
-    /\ readerHoldsLock' = FALSE      \* release shared lock
+    /\ readerHoldsLock' = FALSE      \* release bookLock_
     /\ UNCHANGED <<bids, asks, history, writerOpsLeft, readerBids,
                    readerAsks>>
 

@@ -176,8 +176,9 @@ void MatchingEngine::enqueueControl(size_t threadIndex, const OrderRequest& req)
 size_t MatchingEngine::countResting(ParticipantId pid) {
     // Same lock discipline as cancelAllRestingOrders(): bookMutex_ guards
     // symbolIds_/books_ against a concurrent addSymbol, and forEachOrderLocked
-    // takes each book's own shared lock so the walk is safe while a worker
-    // mutates a different book.
+    // takes each book's own bookLock_ — exclusively, since it is a plain
+    // std::mutex — so the walk is safe while a worker mutates a different
+    // book, and blocks a worker trying to mutate this one.
     std::lock_guard<std::mutex> lock(bookMutex_);
     size_t n = 0;
     for (SymbolId sym : symbolIds_) {
@@ -1136,8 +1137,10 @@ void MatchingEngine::setKillSwitch(bool engaged) {
 void MatchingEngine::cancelAllRestingOrders() {
     // Sync-mode kill-switch sweep. Lock order bookMutex_ -> bookLock_ ->
     // journalMutex_, matching expireOrders()/driveOco(). Ids are collected under
-    // the book's shared lock (forEachOrderLocked), then cancelled outside it so
-    // cancelOrder can take bookLock_ exclusively without re-entrancy.
+    // the book's own lock (forEachOrderLocked), then cancelled outside it so
+    // cancelOrder can re-take bookLock_ without re-entrancy — it is a plain,
+    // non-recursive std::mutex, so collecting and cancelling in one pass would
+    // self-deadlock.
     std::lock_guard<std::mutex> lock(bookMutex_);
     for (SymbolId sym : symbolIds_) {
         auto* book = getOrderBook(sym);

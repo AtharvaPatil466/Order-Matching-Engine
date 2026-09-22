@@ -8,9 +8,9 @@ This document details the architectural decisions, component lifecycles, failure
 
 The architecture is driven by three primary constraints: **predictable low latency**, **deterministic execution**, and **high availability**.
 
-### Why Not Traditional Mutexes?
-A naive matching engine protects the order book with a `std::mutex`. Under high load, threads spend more time context-switching and fighting for the lock than executing trades. 
-**Our Trade-off:** We use a **Thread-per-Symbol (Sharded) Model**. Each thread owns specific instruments exclusively. Producers (Gateway/API) push orders into lock-free Multi-Producer Single-Consumer (`MpscQueue`) ring buffers. The matching thread never blocks on locks.
+### Why Not One Contended Mutex?
+A naive matching engine protects one order book with one `std::mutex` that every thread fights over. Under high load, threads spend more time context-switching and contending than executing trades. 
+**Our Trade-off:** We use a **Thread-per-Symbol (Sharded) Model**. Each thread owns specific instruments exclusively. Producers (Gateway/API) push orders into lock-free Multi-Producer Single-Consumer (`MpscQueue`) ring buffers. Each book still carries a `bookLock_` and matching still takes it once per order — sharding makes that lock **uncontended**, not absent. It is a plain `std::mutex`: it was a `std::shared_mutex` until an optimization cycle swapped it, because a `shared_mutex`'s uncontended write-lock costs more than a mutex and every hot-path caller writes. The consequence is worth knowing rather than hiding: an admin read (`getSnapshot`, `GET /book`) takes the same lock **exclusively** and can stall matching on that symbol for the duration of the read — the cost is quantified at `OrderBook::getSnapshot`.
 
 ### Why Not `std::map`?
 `std::map` is a Red-Black tree. Traversing it means jumping across random heap allocations, destroying CPU cache locality.
@@ -18,7 +18,7 @@ A naive matching engine protects the order book with a `std::mutex`. Under high 
 
 ### Why Intrusive Lists?
 Using `std::list` or `std::vector` for orders at a price level requires dynamic heap allocations (`new`/`delete`), which induce unpredictable OS-level latency spikes.
-**Our Trade-off:** We use an `ObjectPool` to pre-allocate millions of `Order` structs at startup. The `Order` struct itself contains the `next` and `prev` pointers. When an order is added, it is simply linked into the `IntrusiveList`. Zero heap allocations happen on the hot path.
+**Our Trade-off:** We use an `ObjectPool` to pre-allocate a fixed number of `Order` structs at startup — `order_pool_capacity`, **10,000 slots per book by default** (it was a hard-coded 200,000 until the per-book footprint was made configurable; see "Per-book memory footprint" in `OrderBook.h` for what each setting costs in RAM). The `Order` struct itself contains the `next` and `prev` pointers. When an order is added, it is simply linked into the `IntrusiveList`. Zero heap allocations happen on the hot path.
 
 ---
 
@@ -210,7 +210,7 @@ Concurrency is notoriously difficult to test. We rely on **12 TLA+ Specification
 - `Replication.tla`: Realistic lease-propagation model. `BackupPromote` requires heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Verified at `MaxEntries=10` / `LeaseTimeout=7`, zero violations. A bug-injected variant (lease check stripped from `BackupPromote`) reproduces split brain in 188 states, confirming the verification is genuine.
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
 - `EngineConsumer.tla`: Verifies worker thread shutdown safety.
-- `Snapshot.tla` / `SnapshotLocked.tla`: Verifies the snapshot read/write mutex prevents torn snapshots.
+- `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.
 - `Auction.tla`: Opening/closing auction uncross correctness, price collar admission.
 - `EpochDurability.tla`: Epoch-store durability invariant under crash.
 - `FixSession.tla`: FIX session state machine safety (logon/heartbeat/gap-fill).

@@ -1,10 +1,14 @@
 -------------------------------- MODULE Snapshot --------------------------------
 \* Snapshot-read consistency under concurrent writes.
 \*
-\* Models OrderBook::getSnapshot in src/OrderBook.cpp, which walks bids
-\* and then asks without holding any lock. Writers (addOrder /
-\* cancelOrder) mutate the same data structures concurrently. The
-\* question this spec answers:
+\* Models the ORIGINAL, LOCKLESS OrderBook::getSnapshot: it walked bids
+\* and then asks while holding nothing, and writers (addOrder /
+\* cancelOrder) mutated the same structures concurrently. That is no
+\* longer what src/OrderBook.cpp does — getSnapshot has taken bookLock_
+\* for the whole 2-step read since this spec found the bug. This module
+\* is kept as the negative control: it is what makes the locked result
+\* in SnapshotLocked.tla non-vacuous. Do not read it as current
+\* behaviour. The question it answers:
 \*
 \*   Q1. Are the orders in the returned snapshot all "real" — i.e. was
 \*       each one actually in the book at some point during the read?

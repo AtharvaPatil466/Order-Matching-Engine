@@ -260,6 +260,24 @@ enable_assertions(PropertyTest)
 add_test(NAME PropertyTest COMMAND PropertyTest)
 set_tests_properties(PropertyTest PROPERTIES TIMEOUT 180 LABELS "project;property")
 
+# Differential fuzzer: the engine against RefMatcher.h, an independently
+# written price-time FIFO matcher. Every other test here was written by
+# whoever wrote the code under test; this one compares against a matcher
+# derived from the DEFINITION of price-time priority, so it can disagree with
+# the engine about something its author never considered.
+#
+# The registered run is a FIXED seed and a small operation count so CI is
+# deterministic and quick. The soak is a flag, not something every push pays
+# for: --seeds N --ops M (and --stats for measured generator bias).
+# The corpus argument replays every recorded finding in tests/fuzz_corpus
+# before fuzzing; see runCorpus() for the .known.flow convention.
+add_executable(DifferentialFuzzTest DifferentialFuzzTest.cpp)
+target_link_libraries(DifferentialFuzzTest PRIVATE OrderMatcher)
+enable_assertions(DifferentialFuzzTest)
+add_test(NAME DifferentialFuzzTest
+         COMMAND DifferentialFuzzTest --corpus ${CMAKE_CURRENT_SOURCE_DIR}/fuzz_corpus)
+set_tests_properties(DifferentialFuzzTest PROPERTIES TIMEOUT 180 LABELS "project;property")
+
 # Stop-order fan-out bound (kMaxStopExecutionsPerSweep): one incoming order does
 # bounded work, and every deferred election still fires.
 add_executable(StopCascadeBoundTest StopCascadeBoundTest.cpp)

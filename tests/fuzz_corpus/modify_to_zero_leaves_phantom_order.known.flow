@@ -1,0 +1,29 @@
+# KNOWN DIVERGENCE — engine defect, unfixed. Found by DifferentialFuzzTest and
+# shrunk automatically from 4000 operations down to these two.
+#
+# modifyOrder(id, newQty=0) is ACCEPTED (returns true, rejectReason=None) and
+# leaves a ZERO-QUANTITY order resting in the book.
+#
+#   engine    : bid level 999800 -> totalQuantity=0, orderCount=1
+#   reference : bid level 999800 -> totalQuantity=1, orderCount=1 (amendment refused)
+#
+# The engine already refuses an amendment that is not a reduction:
+#   modifyOrder(id, same qty) -> false, RejectReason::InvalidQuantity
+#   modifyOrder(id, larger)   -> false, RejectReason::InvalidQuantity
+# Zero slips through that guard because 0 IS strictly less than the current
+# quantity. Downstream consequences, all reproduced:
+#   * the L2 feed publishes a price level with one order and zero size, and it
+#     is the best bid — so the touch is a level that can never trade;
+#   * validateIntegrity() still reports the book as consistent;
+#   * the BookVisible feed emits Reduce(1) and never a delete, so an ITCH
+#     consumer rebuilds the same phantom;
+#   * an aggressor hitting that level produces a TRADE OF QUANTITY ZERO, and
+#     the phantom's owner is told status=Filled filledQty=1 — a fill quantity
+#     no trade ever carried, and one the counterparty's report contradicts.
+#
+# Whichever semantic was intended — refuse it, or treat it as a cancel — the
+# engine does neither. This file is EXPECTED to diverge until that is fixed.
+# Drop the ".known" from the filename once it is, so it becomes a hard
+# regression case instead of a tracked defect.
+A 1 30 2 B L 999800 1
+M 1 30 * 0

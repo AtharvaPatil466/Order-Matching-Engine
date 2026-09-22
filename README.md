@@ -403,6 +403,7 @@ The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE`
 | Document | Purpose |
 |----------|---------|
 | [Architecture.md](./Architecture.md) | Full technical deep-dive |
+| [docs/MatchingRules.md](./docs/MatchingRules.md) | **The rulebook** — iceberg/pro-rata allocation, STP, stop-election bounds, pegs, auction uncross, expiry, and the suspected defects |
 | [BENCHMARKS.md](./BENCHMARKS.md) | Three-path latency methodology + binary codec results |
 | [PerformanceWhitepaper.md](./PerformanceWhitepaper.md) | Benchmark methodology & analysis |
 | [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results (MatchingEngine + Replication) |

@@ -260,6 +260,14 @@ enable_assertions(PropertyTest)
 add_test(NAME PropertyTest COMMAND PropertyTest)
 set_tests_properties(PropertyTest PROPERTIES TIMEOUT 180 LABELS "project;property")
 
+# Stop-order fan-out bound (kMaxStopExecutionsPerSweep): one incoming order does
+# bounded work, and every deferred election still fires.
+add_executable(StopCascadeBoundTest StopCascadeBoundTest.cpp)
+target_link_libraries(StopCascadeBoundTest PRIVATE OrderMatcher)
+enable_assertions(StopCascadeBoundTest)
+add_test(NAME StopCascadeBoundTest COMMAND StopCascadeBoundTest)
+set_tests_properties(StopCascadeBoundTest PROPERTIES TIMEOUT 120 LABELS "project;property")
+
 # Journal replay determinism property test
 add_executable(JournalReplayPropertyTest JournalReplayPropertyTest.cpp)
 target_link_libraries(JournalReplayPropertyTest PRIVATE OrderMatcher)

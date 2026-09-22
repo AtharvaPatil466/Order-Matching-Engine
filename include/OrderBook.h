@@ -609,6 +609,41 @@ public:
     static constexpr double kPoolWarnPct   = 0.80;  // warn / observe
     static constexpr double kPoolRejectPct = 0.95;  // reject new orders
 
+    // ─── Stop-election fan-out bound ──────────────────────────────────────────
+    // How many elected stop orders one sweep will EXECUTE inline on a single
+    // incoming order — checkStopOrders() and updateTrailingStops() each get
+    // this budget. The rest are latched (isStopTriggered = true) and execute on
+    // the next sweep. Public because it is a venue-facing guarantee about
+    // single-order latency, and a test pins it.
+    //
+    // Why a bound exists at all. One trade print can elect every stop resting at
+    // or through that price — 16384 of them, the stopOrders_ capacity. Each
+    // election runs a full match() plus book mutation plus market-data publish.
+    // Measured on this box (Apple Silicon, Release -O3, library assertions on),
+    // one order into a book with N stops all elected by its own print:
+    //
+    //     N       median latency of that ONE order (before this bound)
+    //     10        2.2 us
+    //     100      23.8 us
+    //     1000    397.5 us
+    //     10000     2.13 ms
+    //
+    // against a 237 ns P50. Unbounded in the only sense that matters: the
+    // engine's tail became a function of how many stops clients happened to
+    // park, not of the engine. (It was never unbounded RECURSION — the sweep
+    // takes lastTradePrice by value, so a triggered stop's own fill price
+    // cannot elect further stops within the same sweep.)
+    //
+    // Why 64. An election measured ~210 ns here, so 64 of them is ~13 us of
+    // execution work — the same order of magnitude as the O(stops) scan that
+    // has to happen anyway, and a tail a venue can state. Lower starves a real
+    // flash crash across more messages for no latency win, since the scan then
+    // dominates; higher puts the millisecond back.
+    //
+    // A deferred election is never cancelled: the latch means the next sweep
+    // fires it regardless of where the price has moved back to.
+    static constexpr size_t kMaxStopExecutionsPerSweep = 64;
+
 private:
     // Update the utilization gauge and, on an upward band crossing, warn (≥80%),
     // note the reject band (≥95%), or raise a critical alert (100%). Cheap:

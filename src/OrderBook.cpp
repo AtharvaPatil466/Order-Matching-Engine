@@ -2205,32 +2205,63 @@ void OrderBook::expireOrders(uint64_t currentTime,
 void OrderBook::checkStopOrders(Price lastTradePrice) {
     if (stopOrders_.empty()) [[unlikely]] return;
 
+    // ponytail: the scan is O(all resting stops) on every sweep, ~1.8 ns each
+    // here, so a full 16384-entry stopOrders_ costs ~30 us of pure scanning
+    // whether or not anything is elected — and the sweep runs on every order
+    // once the book has ever traded, not only on orders that print. That is a
+    // SECOND latency term, independent of the execution bound below, and this
+    // is its ceiling. Upgrade path if it matters: index stopOrders_ by trigger
+    // price (two price-ordered buckets, buy-side and sell-side) so a sweep
+    // touches only the stops the print actually reached.
+
+    // Executions performed in THIS sweep, against kMaxStopExecutionsPerSweep.
+    // Elections beyond the cap are latched, not dropped — see the constant.
+    size_t executed = 0;
+
     // Index-based iteration with erase_swap (FixedVector compatible)
     size_t i = 0;
     while (i < stopOrders_.size()) {
         Order* order = stopOrders_[i];
-        bool triggered = false;
 
-        if (order->type == OrderType::MIT) {
-            // Market-if-Touched: favorable-direction mirror of a stop. A buy
-            // triggers when price falls to/through the level; a sell when it
-            // rises to/through it.
-            if (order->side == Side::Buy) {
-                if (lastTradePrice <= order->stopPrice) triggered = true;
+        // Already elected by an earlier sweep that ran out of execution budget.
+        // The election is NOT re-decided here: a stop elected by a print that
+        // went through its level must fire even if the price has since come
+        // back, or the bound would silently cancel it instead of deferring it.
+        bool triggered = order->isStopTriggered;
+
+        if (!triggered) {
+            if (order->type == OrderType::MIT) {
+                // Market-if-Touched: favorable-direction mirror of a stop. A buy
+                // triggers when price falls to/through the level; a sell when it
+                // rises to/through it.
+                if (order->side == Side::Buy) {
+                    if (lastTradePrice <= order->stopPrice) triggered = true;
+                } else {
+                    if (lastTradePrice >= order->stopPrice) triggered = true;
+                }
             } else {
-                if (lastTradePrice >= order->stopPrice) triggered = true;
-            }
-        } else {
-            // Stop / StopLimit: momentum trigger.
-            if (order->side == Side::Buy) {
-                if (lastTradePrice >= order->stopPrice) triggered = true;
-            } else {
-                if (lastTradePrice <= order->stopPrice) triggered = true;
+                // Stop / StopLimit: momentum trigger.
+                if (order->side == Side::Buy) {
+                    if (lastTradePrice >= order->stopPrice) triggered = true;
+                } else {
+                    if (lastTradePrice <= order->stopPrice) triggered = true;
+                }
             }
         }
 
         if (triggered) {
+            // Latch the election before deciding whether there is budget to act
+            // on it, so the deferred ones are the SAME set this print elected.
             order->isStopTriggered = true;
+
+            if (executed >= kMaxStopExecutionsPerSweep) [[unlikely]] {
+                // Out of budget: leave it parked and latched. The next sweep
+                // (every addOrder runs one once the book has traded) executes
+                // it. It stays cancellable by its owner until then.
+                ++i;
+                continue;
+            }
+            ++executed;
 
             bool becameMarket = false;
             if (order->type == OrderType::StopLimit) {
@@ -2277,28 +2308,48 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
 void OrderBook::updateTrailingStops(Price lastTradePrice) {
     if (trailingStopOrders_.empty()) [[unlikely]] return;
 
+    // Same fan-out bound as checkStopOrders: one print can elect every trailing
+    // stop at once, and each election is a full match(). See
+    // kMaxStopExecutionsPerSweep.
+    size_t executed = 0;
+
     size_t i = 0;
     while (i < trailingStopOrders_.size()) {
         Order* order = trailingStopOrders_[i];
-        bool triggered = false;
 
-        if (order->side == Side::Buy) {
-            if (lastTradePrice < order->trailRefPrice) {
-                order->trailRefPrice = lastTradePrice;
-                order->stopPrice = order->trailRefPrice + order->trailAmount;
+        // Latched by an earlier sweep that ran out of budget. Skipping the
+        // ratchet as well as the trigger test is the point: a deferred election
+        // whose trail kept following the price could stop qualifying, which
+        // would cancel it rather than defer it.
+        bool triggered = order->isStopTriggered;
+
+        if (!triggered) {
+            if (order->side == Side::Buy) {
+                if (lastTradePrice < order->trailRefPrice) {
+                    order->trailRefPrice = lastTradePrice;
+                    order->stopPrice = order->trailRefPrice + order->trailAmount;
+                }
+                if (lastTradePrice >= order->stopPrice) triggered = true;
+            } else {
+                if (lastTradePrice > order->trailRefPrice) {
+                    order->trailRefPrice = lastTradePrice;
+                    // Floor at 0 (see addOrder TrailingStop init).
+                    order->stopPrice = (order->trailAmount <= order->trailRefPrice)
+                                       ? order->trailRefPrice - order->trailAmount : 0;
+                }
+                if (lastTradePrice <= order->stopPrice) triggered = true;
             }
-            if (lastTradePrice >= order->stopPrice) triggered = true;
-        } else {
-            if (lastTradePrice > order->trailRefPrice) {
-                order->trailRefPrice = lastTradePrice;
-                // Floor at 0 (see addOrder TrailingStop init).
-                order->stopPrice = (order->trailAmount <= order->trailRefPrice)
-                                   ? order->trailRefPrice - order->trailAmount : 0;
-            }
-            if (lastTradePrice <= order->stopPrice) triggered = true;
         }
 
         if (triggered) {
+            order->isStopTriggered = true;
+
+            if (executed >= kMaxStopExecutionsPerSweep) [[unlikely]] {
+                ++i;
+                continue;
+            }
+            ++executed;
+
             order->type = OrderType::Limit;
             order->price = order->stopPrice;
             trailingStopOrders_.erase_swap(i);

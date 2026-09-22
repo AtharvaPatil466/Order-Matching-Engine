@@ -92,7 +92,12 @@ This is a C++20 low-latency order matching engine drawing on exchange design pri
 ## 3. Concurrency & Networking
 
 ### Thread-Per-Symbol Partitioning
-N worker threads with independent lock-free `MpscQueue` ring buffers. Orders are deterministically routed by `hash(symbolId) % numThreads`, eliminating cross-thread contention on the hot path.
+N worker threads with independent lock-free `MpscQueue` ring buffers. Orders are deterministically routed by `hash(symbolId) % numThreads`, so **the matching path** carries no cross-thread contention: one symbol is owned by one worker and two workers never touch the same book.
+
+Two qualifications, because the sentence above used to read "eliminating cross-thread contention on the hot path" full stop, and that is not true of the engine as a whole:
+
+- **Durability reserialises everything.** Every worker appends to one journal behind one `journalMutex_`, with the `fdatasync` inside the critical section. With journalling on, N workers funnel through a single lock and a single fsync stream — measured at roughly 165–190k appends/s on x86 CI regardless of worker count (§11). Contention-free matching and a serialised durability path are both true at once.
+- **Hash routing distributes symbols uniformly, not load.** Real order flow is Zipf: one instrument can carry orders of magnitude more traffic than the long tail, and `hash(symbolId) % numThreads` will happily put it on a worker that then saturates while others idle. There is no migration path for a hot symbol short of a drain. The scaling curve in §8 is measured with **uniform** symbol load, which is the shape that hides this, and it is not a claim about venue-shaped flow.
 
 ### Multi-Protocol Order Entry
 All four protocols dispatch into the same `MatchingEngine`. 
@@ -330,6 +335,28 @@ Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosm
 | **Core matching** | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **Engine wrapper** | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **Full-stack journal** | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
+
+> **THE 1.28M FIGURE IS NOT A DURABLE-ACKNOWLEDGEMENT NUMBER, AND A VENUE
+> SHOULD NOT PLAN AGAINST IT.** Two things separate it from what a venue that
+> cannot lose an order would see.
+>
+> First, acknowledgement. `enableDurableClientAcks` is **opt-in and refuses in
+> async mode** (see §11), so on the path this row measures an order is
+> acknowledged when it is matched, not when its journal entry is durable. The
+> row is throughput *with journalling switched on*, not throughput *of durable
+> acks*.
+>
+> Second, storage. 1.28M ops/s is EBS with the io_uring async ack. The same
+> journal measured on x86 CI caps at **roughly 165–190k appends/s regardless of
+> worker count**, because at the shipped `batch=64` the binding constraint is
+> the `fdatasync` inside the critical section (§11). Those two numbers are not
+> in conflict — they are different disks — but quoting only the larger one
+> without the constraint is how a reader ends up believing a durable venue runs
+> at 1.28M.
+>
+> **Plan against the fsync-bound figure for your storage**, then decide whether
+> batch size and outstanding-chain depth move it. Core matching at 2.80M ops/s
+> is the matching path alone and says nothing about durability.
 
 **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42 HonestBenchmark workload) takes Path A core matching to **P50 237 ns / P99 910 ns / 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO) Release build.
 

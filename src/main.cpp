@@ -1,4 +1,5 @@
 #include "MatchingEngine.h"
+#include "AlertDispatcher.h"
 #include "AdminServer.h"
 #include "CliFlags.h"
 #include "ReplicationProtocol.h"
@@ -172,6 +173,71 @@ int main(int argc, char* argv[]) {
 
     const std::string maxSizeStr = flagOrEnv(argc, argv, "--journal-max-mb", "OB_JOURNAL_MAX_SIZE_MB");
     const size_t journalMaxMb = maxSizeStr.empty() ? 0 : std::stoul(maxSizeStr);
+
+    // ── Alerting (config-driven) ──────────────────────────────────────
+    //
+    // alert_webhook_url / alert_webhook_format / alert_min_level existed only
+    // as commented-out lines in config/engine.conf.example. NO CODE READ THEM,
+    // so AlertDispatcher — implemented and unit-tested — was reachable from no
+    // production path at all. That is wired here.
+    //
+    // THE https LIMIT IS REPORTED AT STARTUP, NOT AT DELIVERY. AlertDispatcher
+    // has no TLS client: httpPost speaks plain HTTP, so addWebhook() returns
+    // false for any https:// URL. Finding that out when the first incident
+    // fires is the worst possible time, and the shipped example config pointed
+    // at https://hooks.slack.com/... — a URL the code provably refuses.
+    //
+    // The engine deliberately does NOT gain a TLS stack for this. It has no
+    // external dependencies beyond liburing on Linux, and adding OpenSSL to
+    // deliver one webhook would trade that for a supply-chain surface on the
+    // alerting path of all places. The standard answer is a local terminator:
+    // point the engine at http://127.0.0.1:<port> and let a sidecar do TLS to
+    // Slack or PagerDuty. That is documented in engine.conf.example and
+    // repeated in the failure message below.
+    static AlertDispatcher alerts;
+    const std::string alertUrl = cfg.getString("alert_webhook_url", "");
+    if (!alertUrl.empty()) {
+        const std::string fmtStr = cfg.getString("alert_webhook_format", "generic");
+        AlertDispatcher::Format fmt = AlertDispatcher::Format::Generic;
+        if (fmtStr == "slack")          fmt = AlertDispatcher::Format::Slack;
+        else if (fmtStr == "pagerduty") fmt = AlertDispatcher::Format::PagerDuty;
+        else if (fmtStr != "generic") {
+            std::cerr << "[Alert] FATAL: unknown alert_webhook_format '" << fmtStr
+                      << "' — expected generic, slack or pagerduty.\n";
+            return 1;
+        }
+
+        const std::string lvlStr = cfg.getString("alert_min_level", "warning");
+        AlertLevel minLevel = AlertLevel::Warning;
+        if (lvlStr == "info")          minLevel = AlertLevel::Info;
+        else if (lvlStr == "critical") minLevel = AlertLevel::Critical;
+        else if (lvlStr == "fatal")    minLevel = AlertLevel::Fatal;
+        else if (lvlStr != "warning") {
+            std::cerr << "[Alert] FATAL: unknown alert_min_level '" << lvlStr
+                      << "' — expected info, warning, critical or fatal.\n";
+            return 1;
+        }
+
+        if (!alerts.addWebhook(alertUrl, fmt, cfg.getString("alert_routing_key", ""),
+                               minLevel)) {
+            std::cerr
+                << "[Alert] FATAL: cannot deliver to " << alertUrl << "\n"
+                << "        AlertDispatcher has no TLS client, so an https://\n"
+                << "        endpoint is undeliverable. Refusing to start rather\n"
+                << "        than run with alerting that silently drops every\n"
+                << "        alert — you would find out during the incident it\n"
+                << "        was supposed to announce.\n"
+                << "        Run a local TLS terminator and point this at it:\n"
+                << "          alert_webhook_url = http://127.0.0.1:8081/alerts\n"
+                << "        (the sidecar forwards to Slack/PagerDuty over TLS)\n";
+            return 1;
+        }
+        alerts.start();
+        engine.getCapacityMonitor().setAlertDispatcher(&alerts);
+        engine.getKillSwitch().setAlertDispatcher(&alerts);
+        std::cout << "[Alert] Webhook enabled: " << alertUrl
+                  << " (format=" << fmtStr << ", min_level=" << lvlStr << ")\n";
+    }
 
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
     engine.startAsync(numThreads, 8192);

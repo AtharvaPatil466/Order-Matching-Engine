@@ -62,9 +62,36 @@ heartbeat_timeout_ms  = 500
 lease_duration_ms     = 5000
 
 # ── Alerting ─────────────────────────────────────────────────────────────────
-# alert_webhook_url    = https://hooks.slack.com/services/YOUR/WEBHOOK/URL
-# alert_webhook_format = slack
-# alert_min_level      = warning
+#
+# THE ENGINE HAS NO TLS CLIENT, SO THE URL MUST BE http://, NOT https://.
+#
+# AlertDispatcher speaks plain HTTP. An https:// URL is refused AT STARTUP and
+# the engine will not boot — deliberately, because the alternative is alerting
+# that silently drops every alert and an operator who discovers it during the
+# incident it was supposed to announce. The example below used to read
+# https://hooks.slack.com/... , which this code has never been able to deliver.
+#
+# This is not an oversight waiting on a patch. The engine has no external
+# dependencies beyond liburing on Linux, and linking OpenSSL to deliver one
+# webhook would trade that for a supply-chain surface on the alerting path.
+# Terminate TLS outside the process:
+#
+#   engine --http--> 127.0.0.1 sidecar --https--> Slack / PagerDuty
+#
+# Any local forwarder does this. For example, with a one-line nginx or a
+# 20-line reverse proxy listening on 8081 that holds the real Slack URL:
+#
+# alert_webhook_url    = http://127.0.0.1:8081/alerts
+# alert_webhook_format = slack          # generic | slack | pagerduty
+# alert_min_level      = warning        # info | warning | critical | fatal
+# alert_routing_key    =                # PagerDuty Events API v2 routing key
+#
+# Keeping the real endpoint in the sidecar rather than this file also keeps a
+# credential-bearing URL out of the engine's config.
+#
+# Leave alert_webhook_url unset to run without webhook alerting. Capacity and
+# kill-switch events still reach the structured log sink (see log_sink below),
+# which is where they go today.
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 log_sink = stderr

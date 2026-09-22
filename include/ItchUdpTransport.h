@@ -17,6 +17,36 @@
 // joinMulticastGroup() on the subscriber before start(). Tests use
 // plain unicast on 127.0.0.1 to avoid OS-level routing config.
 
+// ─── Group topology: one group per book, not one group per venue ────────────
+//
+// Read this before pointing two feeds at one address. The sequence space
+// lives in MoldUDP64Publisher::nextSeq_, and the ownership chain is strictly
+// one-to-one all the way down: one MoldUDP64Publisher per ItchUdpPublisher
+// (mold_, below), one ItchUdpPublisher per ItchMarketDataFeed
+// (ItchMarketDataFeed.h:146), one ItchMarketDataFeed per OrderBook. Each of
+// those counters independently starts at 1. Nothing sequences across books:
+// there is no venue-wide sequencer, no symbol-to-group table, and no
+// multicast group in config/engine.conf.example at all — the destination is
+// simply whatever the caller hands to start().
+//
+// So "if books are multiplexed into one group, whose sequence wins?" is
+// answered by the code refusing to have the situation rather than resolving
+// it: neither wins, because multiplexing is not implemented. Aim two feeds at
+// the same destIp:destPort and two independent sequence spaces interleave on
+// one group, while each subscriber holds exactly ONE nextExpectedSeq_ and ONE
+// expectedSession_ (MoldUDP64Subscriber, MoldUDP64.h). The outcome is either
+// a permanent gap storm (same session id, two counters fighting over one
+// expectation) or the silent loss of every symbol but one (distinct session
+// ids — the others are counted in sessionMismatches_ and dropped before
+// delivery). Nothing in the code rejects that configuration. This comment is
+// the only thing that says don't.
+//
+// Real Nasdaq DOES carry many symbols on one channel, but with a single
+// sequencer owning that channel's sequence space. Doing the same here means a
+// shared sequencer sitting ABOVE the per-book publishers; it does not exist
+// in this codebase today, and adding one is the prerequisite for any
+// symbol-multiplexed group, not an afterthought to it.
+
 #include "MoldUDP64.h"
 
 #include <arpa/inet.h>

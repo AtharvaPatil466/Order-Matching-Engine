@@ -22,6 +22,7 @@
 #include "OuchProtocol.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +30,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -76,6 +78,11 @@ inline bool moldReadHeader(const uint8_t* data, size_t len, MoldHeader& out) {
 // the batch as a single MoldUDP64 packet via the sink callback. Three
 // flush triggers: batched-size threshold, explicit flush(), or special
 // packets (heartbeat / end-of-session).
+//
+// ONE PUBLISHER INSTANCE, ONE PUBLISHING THREAD. The sequence counter is a
+// plain uint64_t and the batch buffers are plain vectors; nothing here is
+// synchronised. Debug builds enforce the rule — see assertPublishThread()
+// and the note on nextSeq_ at the bottom of the class.
 
 class MoldUDP64Publisher {
 public:
@@ -105,6 +112,12 @@ public:
     // seq N-1 sees N next, not a false gap back to 1. We also anchor the
     // persistence floor here so a resumed counter never regresses on
     // disk (monotonicity, matching spec/EpochDurability.tla).
+    //
+    // Deliberately NOT covered by assertPublishThread(): this is pre-publish
+    // configuration, made by whichever thread reads the persisted high-water
+    // at startup, which is not the thread that will go on to publish.
+    // Latching the owner here would reject the very restart path the method
+    // exists for. Call it before the first addMessage(), not during a run.
     void setNextSequence(uint64_t seq) {
         nextSeq_ = seq;
         if (seq > lastPersisted_) lastPersisted_ = seq;
@@ -121,6 +134,7 @@ public:
     // message would exceed the MTU, the current batch is flushed
     // first (and this message starts a new batch).
     uint64_t addMessage(const void* payload, uint16_t len) {
+        assertPublishThread();
         size_t needed = sizeof(uint16_t) + len;
         if (batchedMessageBytes_ + needed > mtu_ - MOLD_HEADER_BYTES &&
             !pending_.empty()) {
@@ -143,7 +157,13 @@ public:
     // Idempotent — flush() on an empty batch is a no-op (heartbeats
     // have a separate dedicated API).
     void flush() {
+        // The empty-batch early return sits ABOVE the ownership check on
+        // purpose: a flush with nothing pending emits no packet and moves no
+        // sequence, so it is not a sequence-advancing call. That is what lets
+        // ItchUdpPublisher::stop() (ItchUdpTransport.h:88) drain a quiesced
+        // publisher from the shutdown thread without tripping the assert.
         if (pending_.empty()) return;
+        assertPublishThread();
         emit(static_cast<uint16_t>(pending_.size()),
              pendingBuf_.data(), pendingBuf_.size());
         nextSeq_ += pending_.size();
@@ -165,6 +185,9 @@ public:
     // packet) — subscribers use this as a liveness check without
     // consuming a sequence slot.
     void sendHeartbeat() {
+        // Reads nextSeq_ straight onto the wire, so it is a sequenced call
+        // even though it does not advance the counter.
+        assertPublishThread();
         // Flush any pending messages first so heartbeat doesn't
         // overtake real data.
         flush();
@@ -175,6 +198,7 @@ public:
     // Send an end-of-session marker (MessageCount=0xFFFF). Terminal:
     // subscribers disconnect.
     void sendEndOfSession() {
+        assertPublishThread();
         flush();
         emit(MOLD_END_OF_SESSION, nullptr, 0);
         ++endOfSessionsEmitted_;
@@ -191,6 +215,39 @@ public:
 
 private:
     struct PendingMessage { uint16_t offset; uint16_t length; };
+
+    // ─── Single-publisher-thread invariant, enforced ────────────────────
+    // Every sequence-advancing call on one publisher instance must come from
+    // the same thread. Debug builds check it; Release compiles it away to
+    // nothing, member included, so the publish path is unchanged.
+    //
+    // The owner is latched on the FIRST sequence-advancing call rather than at
+    // construction, because in the shipped wiring those are legitimately
+    // different threads: ItchUdpPublisher::start() (ItchUdpTransport.h:71)
+    // news this object on whichever thread brings the feed up — main, in
+    // practice — while every addMessage()/flush() that follows arrives from
+    // the book's worker thread (a symbol maps to exactly one worker,
+    // MatchingEngine.cpp:264, and ItchPublisher is per book), or from the
+    // ItchPublisher drain thread once enableAsyncPublishing() is on
+    // (ItchPublisher.h:94). A construction-time latch would reject both.
+    //
+    // A deliberate hand-off — publish on thread A, join A, then publish on B —
+    // also trips this. That is intended: the check cannot tell a join from a
+    // race, and no caller in this codebase does it. If one ever needs to, the
+    // fix is to give the class an explicit rebind, not to delete the check.
+    void assertPublishThread() {
+#ifndef NDEBUG
+        const std::thread::id self = std::this_thread::get_id();
+        if (publishThread_ == std::thread::id{}) {
+            publishThread_ = self;   // first advance claims the publisher
+            return;
+        }
+        assert(publishThread_ == self &&
+               "MoldUDP64Publisher: sequence advanced from a second thread. "
+               "nextSeq_ is not atomic by design - one publisher instance, "
+               "one publishing thread.");
+#endif
+    }
 
     // Persist the high-water mark durably, but only when it advances —
     // the value handed to the sink is strictly monotonic, so a durable
@@ -217,6 +274,23 @@ private:
     SendBytes                    send_;
     SeqPersistFn                 persistSeq_;
     size_t                       mtu_;
+    // The wire sequence number. A PLAIN uint64_t, deliberately not an atomic:
+    // exactly one thread ever advances it (assertPublishThread() above says
+    // which, and enforces it in debug builds), so an atomic would buy nothing
+    // and cost a locked read-modify-write on the per-message publish path.
+    //
+    // What breaks if the rule is violated is the bad kind of breakage: nothing
+    // is loud. Two threads interleaving `nextSeq_ += pending_.size()` lose
+    // increments, so two different packets leave carrying the SAME sequence
+    // number, or the counter skips a range no packet ever carried. The
+    // publisher does not crash, nothing asserts at the venue, and the local
+    // counters all look sane — the corruption exists only on the wire. Every
+    // subscriber's gap detector (MoldUDP64Subscriber::feedPacket below) fires
+    // at once, the entire subscriber base re-requests from
+    // ItchRetransmissionService simultaneously, and MoldPacketJournal replays
+    // the same broken numbers back at them, so recovery cannot repair it
+    // either. A convention nobody wrote down is not enough to hold that up;
+    // hence the debug check.
     uint64_t                     nextSeq_;
     uint64_t                     lastPersisted_{0};
     std::vector<PendingMessage>  pending_;
@@ -225,6 +299,11 @@ private:
     uint64_t                     packetsEmitted_{0};
     uint64_t                     heartbeatsEmitted_{0};
     uint64_t                     endOfSessionsEmitted_{0};
+#ifndef NDEBUG
+    // Debug only, and guarded rather than merely unused so that a Release
+    // object file is byte-identical to one built before this check existed.
+    std::thread::id              publishThread_{};
+#endif
 };
 
 // ─── Subscriber ─────────────────────────────────────────────────────────────

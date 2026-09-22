@@ -40,6 +40,14 @@
 // producers; the single consumer keeps the live-order map lock-free.
 // Lifecycle: quiesce all event sources BEFORE stopAsyncPublishing()/destruction
 // so no producer races ring teardown; the worker drains buffered events on stop.
+//
+// In SYNC mode that MPSC framing is a statement about the ring only, not a
+// licence: serializeAndSend() — and therefore the sink — runs on the calling
+// thread, so two callers means two threads in liveOrders_ and in whatever the
+// sink owns. Downstream, MoldUDP64Publisher now asserts in debug builds that
+// its sequence counter is only ever advanced from one thread (MoldUDP64.h,
+// assertPublishThread()), so adding a second synchronous publish site fails
+// loudly there instead of silently corrupting the wire.
 
 #include "EventListener.h"
 #include "ItchProtocol.h"

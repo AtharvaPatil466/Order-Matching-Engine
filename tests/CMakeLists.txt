@@ -627,6 +627,17 @@ add_test(NAME SequenceIdBlockTest COMMAND SequenceIdBlockTest)
 set_tests_properties(SequenceIdBlockTest PROPERTIES TIMEOUT 60
                      LABELS "project;unit")
 
+# The single-publisher-thread invariant that lets MoldUDP64Publisher::nextSeq_
+# stay a plain uint64_t: correct single-threaded and construct-here-publish-
+# there use pass, a second thread advancing the sequence aborts (fork'd death
+# test, assertions-on builds only).
+add_executable(MoldPublishThreadTest MoldPublishThreadTest.cpp)
+target_link_libraries(MoldPublishThreadTest PRIVATE OrderMatcher)
+enable_assertions(MoldPublishThreadTest)
+add_test(NAME MoldPublishThreadTest COMMAND MoldPublishThreadTest)
+set_tests_properties(MoldPublishThreadTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;concurrency")
+
 # H18 — the capacity monitor is wired into a real engine, not just unit-tested
 # in isolation: startAsync installs the resource callbacks and runs the
 # monitor, a breach reaches the structured sink, stopAsync joins promptly.

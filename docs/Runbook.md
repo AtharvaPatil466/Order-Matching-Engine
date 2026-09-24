@@ -109,7 +109,7 @@ WantedBy=multi-user.target
 | Endpoint | Purpose | Expected Response |
 |----------|---------|-------------------|
 | `GET /health` | K8s liveness probe | `200 OK {"status":"healthy"}` |
-| `GET /readyz` | K8s readiness probe | Returns 503 until engine warmup completes, then 200. Use as k8s `readinessProbe`. Auth-exempt. |
+| `GET /readyz` | K8s readiness probe | Returns 503 until journal replay completes, then 200. On a large journal that wait is the recovery time. Use as k8s `readinessProbe`. Auth-exempt. |
 | `GET /metrics` | Internal counters | JSON with throughput, queue depth, latency |
 | `GET /prometheus` | Prometheus scrape | Text exposition format |
 | `GET /book?symbolId=0` | L2 book snapshot | JSON with bids/asks/trades |

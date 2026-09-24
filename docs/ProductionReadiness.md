@@ -50,7 +50,7 @@ Empirically verified:
 - **Lease propagation under partial failure**: backup's local lease is refreshed by every primary heartbeat-tick `LeaseGrant`; `BackupPromote` is gated on local lease expiry, not just heartbeat miss.
 - **Auth gating on `/chaos/order`**: rejects missing / wrong token, accepts matching `X-Chaos-Token` header when `OB_CHAOS_TOKEN` is set.
 - **Observability**: Prometheus counters (`replication_entries_shipped_total`, `_bytes_sent_total`, `_snapshot_streams_total`, `_snapshot_entries_total`) advance under load and on backup rejoin.
-- **`/readyz` k8s readiness probe**: HTTP 503 until `admin.setReady(true)` is called after engine warmup, then 200. Auth-exempt (same as `/health`). `AdminAuthTest` covers 7 scenarios including readyz pre/post-warmup transitions.
+- **`/readyz` k8s readiness probe**: HTTP 503 until `admin.setReady(true)` is called, which is after journal replay has finished, then 200. Auth-exempt (same as `/health`). `AdminAuthTest` covers 7 scenarios including readyz pre/post-ready transitions.
 - **Build-metadata endpoint**: `/version` returns `gitSha` + `buildTime` for ops.
 
 See [deploy/chaos/README.md](../deploy/chaos/README.md) for the full scenario catalog, RTO/RPO measurements, and instructions to run the suite locally.

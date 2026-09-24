@@ -57,7 +57,7 @@ All four protocols dispatch into the same `MatchingEngine`. Drop a different ses
 - **Pre-Trade Risk Limits**: Max order size, notional, and position limits per participant
 - **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst) to bound queue depth and tail latency
 - **Queue-Depth Backpressure**: Rejects orders when queue exceeds configurable threshold, hard ceiling on queuing delay
-- **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (HTTP 503 until warmup completes, then 200)
+- **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (HTTP 503 until journal replay completes, then 200)
 
 ### Microstructure Research Infrastructure
 - **Simulation Engine**: Multi-agent market simulator with `NoiseTrader`, `MarketMaker`, and `InformedTrader` agents; fully event-driven against the live `OrderBook`
@@ -277,7 +277,7 @@ AUTH="Authorization: Bearer $OB_ADMIN_TOKEN"
 
 # Probes — always credential-free (k8s liveness/readiness)
 curl localhost:8080/health                # k8s liveness probe
-curl localhost:8080/readyz                # 503 until warmup completes, then 200
+curl localhost:8080/readyz                # 503 until journal replay completes, then 200
 
 # Liveness / build / replication state
 curl -H "$AUTH" localhost:8080/version               # gitSha + buildTime + engineVersion

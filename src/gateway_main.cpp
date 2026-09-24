@@ -516,6 +516,30 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[Auth] FATAL: " << err << "\n";
                 return 1;
             }
+            // Zero is the dangerous answer, and it used to pass. A file holding
+            // nothing but comments and blank lines parses cleanly and yields no
+            // credentials, so ParticipantAuth::enabled() is false — and the
+            // setParticipantAuth call below then passes nullptr, which every
+            // gateway reads as "take each claimed identity on trust". The
+            // operator saw "Loaded 0 participant credential(s)", the port came
+            // up, and authentication was off on the socket that moves money.
+            //
+            // A fail-open on a control that WAS configured is worse than one
+            // that was forgotten: the forgotten case is already refused below,
+            // while this one looked configured. Distinguish it from an
+            // unreadable file, because the operator is looking at a file they
+            // just wrote and needs to be told it parsed and came out empty.
+            if (n == 0) {
+                std::cerr << "[Auth] FATAL: " << credPath
+                          << " parsed cleanly but contains no credentials.\n"
+                          << "        Every line was blank or a comment. Starting would\n"
+                          << "        leave the order-entry port accepting any claimed\n"
+                          << "        participant id.\n"
+                          << "        Add a credential as user:secret:id[,id...], or pass\n"
+                          << "        --no-participant-auth (OB_NO_PARTICIPANT_AUTH=1) to\n"
+                          << "        accept every claimed identity on purpose.\n";
+                return 1;
+            }
             std::cout << "[Auth] Loaded " << n << " participant credential(s) from "
                       << credPath << "\n";
         } else if (authDisabled) {

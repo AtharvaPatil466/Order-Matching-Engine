@@ -142,20 +142,25 @@ enable_assertions(ShutdownWatchdogTest)
 add_test(NAME ShutdownWatchdogTest COMMAND ShutdownWatchdogTest)
 set_tests_properties(ShutdownWatchdogTest PROPERTIES TIMEOUT 60 LABELS "project;lifecycle;concurrency")
 
-# The order-entry port must refuse to serve unauthenticated (H7). Run the real
-# binary with no credentials and no opt-out: it has to exit non-zero, and it
-# must never reach the point of binding a port. WILL_FAIL pins the exit status;
-# FAIL_REGULAR_EXPRESSION pins that it did not start listening anyway.
+# The order-entry port must refuse to serve unauthenticated (H7, GW-6), and must
+# still start when it is configured or when the opt-out is explicit. Driven
+# against the real binary because the decision lives in src/gateway_main.cpp.
 #
-# The environment is cleared rather than inherited so a developer who exports
-# OB_PARTICIPANT_CREDENTIALS in their shell does not silently pass this.
-add_test(NAME GatewayRequiresAuthTest COMMAND GatewayServer 0)
-set_tests_properties(GatewayRequiresAuthTest PROPERTIES
-    WILL_FAIL TRUE
-    FAIL_REGULAR_EXPRESSION "Order Gateway listening"
-    TIMEOUT 30
-    LABELS "project;security"
-    ENVIRONMENT "OB_PARTICIPANT_CREDENTIALS=;OB_NO_PARTICIPANT_AUTH=;OB_ENGINE_HOST=;OB_ENGINE_PORT=")
+# This REPLACES a pure-CMake `add_test(... COMMAND GatewayServer 0)` with
+# WILL_FAIL TRUE. That test rotted: once gateway_main learned to validate its
+# port argument, "0" was rejected with "PORT must be 1-65535" and the process
+# exited 1 before reaching the credentials check at all. WILL_FAIL cannot tell a
+# refusal from an argument error, so it stayed green while testing nothing.
+#
+# The script pins WHY each case exits, and runs the refusing cases with a
+# deadline — a gateway that decides to serve never exits, so an exit-code
+# assertion cannot observe that failure and a command substitution would hang.
+add_test(NAME GatewayRequiresCredentialsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/gateway_requires_credentials.sh
+                 $<TARGET_FILE:GatewayServer>)
+set_tests_properties(GatewayRequiresCredentialsTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;security")
 
 # The engine must refuse to start on a journal it cannot read, rather than
 # serving an empty book while the real orders sit unreadable on disk. Driven

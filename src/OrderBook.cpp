@@ -1930,6 +1930,20 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
         return false;
     }
 
+    // Zero is arithmetically a reduction and is not a modify. Applied, it left
+    // the order LINKED IN ITS LEVEL at zero quantity, and the two match
+    // algorithms then failed differently: price-time published a TRADE OF
+    // QUANTITY ZERO to the tape and to both participants before dropping the
+    // order (so an aggressor expecting the displayed 50 received nothing), and
+    // pro-rata hit `if (totalLevelQty == 0) { opposite.eraseBest(); continue; }`
+    // — where eraseBest correctly declines to deactivate a level that still
+    // holds orders, making it a no-op, so the matching thread spun forever on
+    // the same zero total. One symbol permanently dead per malformed amendment.
+    //
+    // A client that means "remove it" has cancel. cancelReplace has refused this
+    // same quantity since it was written; this path just never asked.
+    if (newQty == 0) [[unlikely]] { reason = RejectReason::InvalidQuantity; return false; }
+
     if (newQty < order->remainingQty) {
         const Quantity displayBefore = displayQuantity(*order);
         order->remainingQty = newQty;

@@ -303,15 +303,16 @@ private:
                 const Quantity current = book.qtyOf(op.id);
                 const uint64_t edge = pick(100);
                 if (current > 1 && edge < 70) op.qty = 1 + pick(current - 1);  // valid reduction
-                else if (edge < 85) op.qty = current;                          // no change: refuse
-                else op.qty = current + 1 + pick(5);                           // increase: refuse
-                // newQty == 0 is NOT generated here, and not because it is
-                // uninteresting: it is a live, unfixed engine defect, recorded
-                // as tests/fuzz_corpus/modify_to_zero_leaves_phantom_order.known.flow
-                // and replayed on every run. Left in the generator it would
-                // halt every seed within a couple of thousand operations and
-                // the rest of the space would never be reached.
-                if (op.qty == 0) op.qty = 1;
+                else if (edge < 80) op.qty = current;                          // no change: refuse
+                else if (edge < 90) op.qty = current + 1 + pick(5);            // increase: refuse
+                else op.qty = 0;                                               // zero: refuse
+                // newQty == 0 used to be suppressed here. It was a live engine
+                // defect — the modify was applied, leaving the order resting at
+                // zero quantity — so generating it halted every seed within a
+                // couple of thousand operations and the rest of the space was
+                // never reached. The engine now refuses it, as this reference
+                // always has (RefMatcher::modify), so it is back in the mix and
+                // every seed exercises the reject across thousands of flows.
             }
             return op;
         }

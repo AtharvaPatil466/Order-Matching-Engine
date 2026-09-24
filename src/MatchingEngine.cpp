@@ -1779,6 +1779,15 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
+    // OrderBook::modifyOrder refuses this too, and that guard is the one that
+    // actually protects the book. Repeating it here is about the ANSWER the
+    // client gets: on the async path the request would otherwise be queued, be
+    // accepted to the client's face, be refused by the worker, and never be
+    // mentioned again. An accept that silently means no is worse than a reject.
+    if (newQty == 0) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidQuantity);
+    }
+
     uint64_t sequenceId = nextSequenceId();
 
     if (async_) {

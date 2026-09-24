@@ -286,6 +286,14 @@ enable_assertions(StopCascadeBoundTest)
 add_test(NAME StopCascadeBoundTest COMMAND StopCascadeBoundTest)
 set_tests_properties(StopCascadeBoundTest PROPERTIES TIMEOUT 120 LABELS "project;property")
 
+# Modify-to-zero is refused. Its own alarm(30) turns the pro-rata livelock into a
+# signal, so the ctest timeout is only a backstop and never the thing that reports.
+add_executable(ModifyToZeroTest ModifyToZeroTest.cpp)
+target_link_libraries(ModifyToZeroTest PRIVATE OrderMatcher)
+enable_assertions(ModifyToZeroTest)
+add_test(NAME ModifyToZeroTest COMMAND ModifyToZeroTest)
+set_tests_properties(ModifyToZeroTest PROPERTIES TIMEOUT 60 LABELS "project;property")
+
 # Journal replay determinism property test
 add_executable(JournalReplayPropertyTest JournalReplayPropertyTest.cpp)
 target_link_libraries(JournalReplayPropertyTest PRIVATE OrderMatcher)

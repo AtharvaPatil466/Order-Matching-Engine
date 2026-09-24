@@ -169,6 +169,53 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cout << "[Engine] Journal enabled at " << journalPath << "\n";
+
+        // RECOVER. This binary wrote a write-ahead log and never read it back:
+        // replayJournal() existed, was covered by tests, and was called by
+        // tools/JournalReplayCLI and by nothing else. Every restart therefore
+        // opened an EMPTY BOOK while the resting orders sat on disk — and, as
+        // the refusal above says about an unreadable journal, an engine with no
+        // orders looks exactly like an engine at the start of a session, so
+        // nothing about the running system told anyone.
+        //
+        // Before startAsync, deliberately: replayJournal takes bookMutex_ and
+        // drives the books directly rather than through the submit path, so a
+        // worker running alongside it would be a data race. Being pre-workers
+        // is also why it cannot re-journal what it applies — it never touches
+        // the code that writes entries.
+        const size_t recoverable = engine.getJournal()
+                                 ? engine.getJournal()->strictPrefixEntries() : 0;
+        const size_t replayed = engine.replayJournal();
+
+        if (recoverable > 0 && replayed == 0) {
+            std::cerr << "[Engine] FATAL: journal holds " << recoverable
+                      << " recoverable entries but replay applied none.\n"
+                      << "        Refusing to start with an empty book on top of a\n"
+                      << "        journal that has state in it. Inspect it with\n"
+                      << "        JournalReplayCLI --journal " << journalPath
+                      << " --stats\n";
+            return 1;
+        }
+        std::cout << "[Engine] Replayed " << replayed << " of " << recoverable
+                  << " recoverable journal entries\n";
+        if (replayed != recoverable) {
+            std::cout << "[Engine] NOTE: counts differ — entries at or below an\n"
+                         "         already-seen sequence number are skipped.\n";
+        }
+
+        // WHAT THIS STILL DOES NOT CATCH, so nobody reads the line above as more
+        // than it is: replayJournal counts entries CONSUMED, not entries applied.
+        // The dispatch discards every return value (src/MatchingEngine.cpp:2060
+        // for addOrder, :2078 for modifyOrder), so an entry that replayed and was
+        // REFUSED — a duplicate order id, an exhausted pool, or a quantity that a
+        // newer guard now rejects — is counted as replayed and silently dropped.
+        // `replayed == recoverable` therefore does not mean the book matches the
+        // one that was journaled. Closing that needs replay to check its own
+        // results against an integrity oracle that can see a wrong book, which
+        // validateIntegrity() currently cannot.
+        //
+        // Per-participant kill cancels are also not journaled (THR-2), so an
+        // operator must re-issue any kill after a restart. The runbook says so.
     }
 
     const std::string maxSizeStr = flagOrEnv(argc, argv, "--journal-max-mb", "OB_JOURNAL_MAX_SIZE_MB");

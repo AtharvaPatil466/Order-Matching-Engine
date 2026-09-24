@@ -174,6 +174,20 @@ set_tests_properties(EngineNoWarmupOrdersTest PROPERTIES
     TIMEOUT 180
     LABELS "project;lifecycle")
 
+# A resting order must survive a restart. replayJournal() was covered by tests
+# and called by nothing in src/main.cpp, so the WAL was write-only and every
+# restart opened an empty book. Driven against the real binary because a direct
+# replayJournal() call passes on the broken tree — the function was never the
+# problem, main not calling it was. The order goes in through /chaos/order (a
+# real submitOrder, so it journals) and the level is compared field by field:
+# a replay that restores the wrong size is worse than one that restores nothing.
+add_test(NAME EngineReplaysJournalTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_replays_journal.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineReplaysJournalTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;recovery")
+
 # The engine must refuse to start on a journal it cannot read, rather than
 # serving an empty book while the real orders sit unreadable on disk. Driven
 # against the real binary because the decision lives in src/main.cpp; the

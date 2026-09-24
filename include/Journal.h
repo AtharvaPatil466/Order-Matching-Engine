@@ -487,6 +487,14 @@ public:
     // therefore refusing to append. See checkRecoverable().
     bool recoveryFailed() const { return recoveryFailed_; }
 
+    // How many entries form the longest CRC-valid CONTIGUOUS prefix of the file
+    // as it was opened — what recovery can legitimately replay. Exposed so the
+    // boot path can report it next to the number it actually replayed: an
+    // operator who restarts into a short book needs both figures to tell a
+    // truncated journal apart from one that replayed and was refused.
+    // Zero for a fresh file, and no longer meaningful once this process appends.
+    size_t strictPrefixEntries() const { return strictPrefixEntries_; }
+
     // Returns the number of header bytes at the front of `path`: the header
     // size when one is present, 0 for a pre-header file or one too short to
     // hold a header. Static so the read paths can use it without an instance.

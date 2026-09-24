@@ -442,30 +442,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // ── Warmup ───────────────────────────────────────────────────────
-    // Skip warmup on backup: it would inject orders that the primary
-    // hasn't sent, breaking the byte-identical-state invariant.
-    if (role != "backup") {
-        std::cout << "[Engine] Warming up books...\n";
-        uint64_t warmupId = 1;
-        for (size_t s = 0; s < numSymbols; ++s) {
-            auto sym = static_cast<SymbolId>(s);
-            for (int i = 0; i < 100; ++i) {
-                engine.processOrder(sym, warmupId++, 1, Side::Buy,
-                                    100000 + (i % 100), 10, OrderType::Limit);
-                engine.processOrder(sym, warmupId++, 2, Side::Sell,
-                                    100100 + (i % 100), 10, OrderType::Limit);
-            }
-        }
-        engine.waitForDrain();
-        std::cout << "[Engine] Warmup complete. System ready.\n\n";
-        admin.setReady(true);
-        std::cout << "[Engine] Ready for traffic.\n";
-    } else {
-        std::cout << "[Engine] Backup mode — skipping warmup, awaiting primary entries.\n\n";
-        admin.setReady(true);
-        std::cout << "[Engine] Ready for traffic.\n";
-    }
+    // ── Ready ────────────────────────────────────────────────────────
+    // A "warmup" used to run here: 200 Limit orders per symbol — 800 at the
+    // default --symbols 4 — attributed to participants 1 and 2 and submitted
+    // through processOrder before the engine announced itself. They were not a
+    // warmup. They rested in the live book and were served on /book, so a
+    // client's first fill was against a counterparty that had never submitted
+    // anything; they consumed client order ids 1..200*symbols, so a client
+    // numbering from 1 collided with DuplicateOrderId; and they were journaled,
+    // so the WAL opened with fabricated state. The log said "Warming up books",
+    // which reads as page-faulting, and then "System ready".
+    //
+    // Nothing replaces it. If pre-faulting the pools is ever worth doing,
+    // MemoryPool::warmup (include/MemoryPool.h:89) touches the memory without
+    // inventing orders — the book is the wrong place for a page-fault workaround.
+    //
+    // The primary/backup split went with it: both arms did the same two
+    // statements once the orders were gone, and the comment about breaking the
+    // byte-identical-state invariant described a hazard that only the injected
+    // orders created in the first place.
+    admin.setReady(true);
+    std::cout << "[Engine] Ready for traffic.\n";
 
 #ifdef OB_HAVE_DPDK
     // Kernel-bypass OUCH ingestion on the secondary ENI (F-Stack/DPDK). Behind

@@ -162,6 +162,18 @@ set_tests_properties(GatewayRequiresCredentialsTest PROPERTIES
     TIMEOUT 180
     LABELS "project;security")
 
+# Nobody's orders but the clients'. The engine used to submit 200 Limit orders
+# per symbol as participants 1 and 2 before announcing readiness, and served them
+# on /book. Driven against the real binary and read through /book, because the
+# defect was in src/main.cpp and the harm was what clients traded against. Waits
+# on /readyz, which is the only signal that cannot fire before warmup drained.
+add_test(NAME EngineNoWarmupOrdersTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_no_warmup_orders.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineNoWarmupOrdersTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;lifecycle")
+
 # The engine must refuse to start on a journal it cannot read, rather than
 # serving an empty book while the real orders sit unreadable on disk. Driven
 # against the real binary because the decision lives in src/main.cpp; the

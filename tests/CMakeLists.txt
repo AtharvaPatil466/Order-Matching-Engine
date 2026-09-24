@@ -307,7 +307,27 @@ target_link_libraries(DifferentialFuzzTest PRIVATE OrderMatcher)
 enable_assertions(DifferentialFuzzTest)
 add_test(NAME DifferentialFuzzTest
          COMMAND DifferentialFuzzTest --corpus ${CMAKE_CURRENT_SOURCE_DIR}/fuzz_corpus)
-set_tests_properties(DifferentialFuzzTest PROPERTIES TIMEOUT 180 LABELS "project;property")
+# TIMEOUT 900, not the 180 this shipped with. 180 was read off the unsanitized
+# runtime and never checked against the sanitizer lane, where it died at 180.12s
+# having printed only its corpus line — so it had no margin there from the day it
+# landed, and ci.yml's "Ubuntu Debug Sanitizers" lane runs this test.
+#
+# Measured, in order: 4.3s plain, 13.8s under ASan/UBSan locally, and 470.93s in
+# the ubuntu:24.04 container. That last is ~34x the local sanitized figure, far
+# worse than its neighbour PropertyTest (4.3s -> 9.3s -> 85.8s, ~9x), because
+# RefMatcher churns std::map and std::vector and ASan's allocator is where that
+# lands. It completes; it is not hung.
+#
+# The work did not grow: the same run is 3.37s before this series and 3.28s
+# after. This is headroom the number never had.
+#
+# 900 rather than 600 because 470.93s came from Docker on Apple Silicon, which is
+# probably SLOWER than the x86 runner CI actually uses — the figure is an upper
+# bound, not a prediction, and a 27% margin on a number measured in the wrong
+# environment is not a margin. Raising a ctest timeout costs nothing when the
+# test is fast; the fix for the 8 minutes it spends in that one lane is fewer
+# seeds under sanitizers, which trades coverage and is not this series' business.
+set_tests_properties(DifferentialFuzzTest PROPERTIES TIMEOUT 900 LABELS "project;property")
 
 # Stop-order fan-out bound (kMaxStopExecutionsPerSweep): one incoming order does
 # bounded work, and every deferred election still fires.

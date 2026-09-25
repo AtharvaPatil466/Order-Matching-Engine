@@ -178,7 +178,16 @@ int main() {
                 ++stats[c].sent;
                 if (resp.type == GatewayResponse::Type::Ack) {
                     ++stats[c].accepted;
-                    accepted[c].push_back(req.orderId);
+                    // Copy out first. OrderRequest is #pragma pack(1), so
+                    // orderId sits at offset 5 and is misaligned; push_back
+                    // takes const T&, and binding a reference to a packed
+                    // member is undefined behaviour — UBSan reports it at this
+                    // line. Reading the member BY VALUE is fine: the compiler
+                    // knows it is packed and emits an unaligned load. Clang's
+                    // -Waddress-of-packed-member does not flag this shape, so
+                    // nothing but the sanitizer was ever going to catch it.
+                    const OrderId id = req.orderId;
+                    accepted[c].push_back(id);
                 } else {
                     // The only legitimate failure mode in this scenario.
                     if (resp.rejectReason != RejectReason::QueueBackpressure) {

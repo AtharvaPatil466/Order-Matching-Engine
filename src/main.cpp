@@ -210,14 +210,15 @@ int main(int argc, char* argv[]) {
         const uint64_t epoch = engine.getJournal() ? engine.getJournal()->contentEpoch()
                                                    : JOURNAL_EPOCH_NO_SEEDING;
         if (recoverable > 0 && epoch == JOURNAL_EPOCH_LEGACY && !replayLegacy) {
-            std::cerr << "[Engine] FATAL: " << journalPath << " was written by a build\n"
-                      << "        that seeded synthetic orders at startup (journal content\n"
-                      << "        epoch " << epoch << "; this build writes "
-                      << JOURNAL_EPOCH_NO_SEEDING << "). It holds "
-                      << recoverable << " recoverable\n"
-                      << "        entries, and replaying them would rest up to 200 orders\n"
-                      << "        per symbol for participants 1 and 2 that no client sent.\n"
-                      << "        Clients would trade against them.\n"
+            std::cerr << "[Engine] FATAL: " << journalPath << " may hold orders nobody sent\n"
+                      << "        (journal content epoch " << epoch << "; this build writes "
+                      << JOURNAL_EPOCH_NO_SEEDING << "). Its\n"
+                      << "        lineage began with a build that seeded synthetic orders at startup:\n"
+                      << "        either that build wrote it, or it is a checkpoint of one replayed\n"
+                      << "        under --replay-legacy-journal (checkpoints inherit the epoch).\n"
+                      << "        It holds " << recoverable << " recoverable entries, and replaying them\n"
+                      << "        could rest up to 200 orders per symbol for participants 1 and 2\n"
+                      << "        that no client sent. Clients would trade against them.\n"
                       << "        Inspect it:  JournalReplayCLI --journal " << journalPath
                       << " --stats\n"
                       << "        Start clean: move the file aside.\n"
@@ -227,7 +228,10 @@ int main(int argc, char* argv[]) {
         }
         if (replayLegacy && epoch == JOURNAL_EPOCH_LEGACY) {
             std::cout << "[Engine] WARNING: replaying a legacy journal on request — it may\n"
-                         "         hold synthetic startup orders for participants 1 and 2.\n";
+                         "         hold synthetic startup orders for participants 1 and 2.\n"
+                         "         It stays marked legacy through every checkpoint, so this\n"
+                         "         flag will be needed on each boot of it: nothing can certify\n"
+                         "         the book clean once synthetic and real orders are mixed.\n";
         }
 
         const size_t replayed = engine.replayJournal();

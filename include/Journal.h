@@ -443,6 +443,14 @@ public:
             constexpr size_t kSnapshotBatch = 4096;
             Journal temp(tmpPath, SyncPolicy::GroupCommit, kSnapshotBatch);
             temp.truncate();
+            // The rewrite INHERITS the source's content epoch. A checkpoint is
+            // a snapshot of the book this journal built, so it can be no more
+            // trustworthy than that journal was. Stamping it fresh laundered a
+            // legacy journal: one boot under --replay-legacy-journal, then any
+            // clean stop — gracefulShutdown checkpoints on every one — rewrote
+            // the synthetic orders into a file marked trusted, and the next boot
+            // replayed them with no flag and no refusal.
+            temp.contentEpoch_ = contentEpoch_;
             writer(temp);
             temp.flush();
             // The snapshot is about to REPLACE the live journal, so publishing
@@ -1194,12 +1202,15 @@ private:
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
         h.formatVersion = JOURNAL_FORMAT_V1;
         h.recordSize    = static_cast<uint32_t>(sizeof(JournalEntry));
-        // This build seeds no synthetic orders, so anything it writes is
-        // client-caused and safe to replay. Checkpoint rewrites come through
-        // here too — prepareRewrite builds a fresh Journal over the temp file,
-        // which lands on this same deferred-header path — so a checkpoint of a
-        // clean journal is stamped clean rather than inheriting LEGACY.
-        h.contentEpoch  = JOURNAL_EPOCH_NO_SEEDING;
+        // This journal's own epoch: NO_SEEDING for a file this build created,
+        // since it seeds no synthetic orders. A checkpoint rewrite comes through
+        // here too — prepareRewrite builds a fresh Journal over the temp file —
+        // and copies the SOURCE's epoch in first, so a clean lineage stays
+        // clean and a legacy one stays legacy. An earlier version stamped the
+        // constant here and justified it as "a checkpoint of a clean journal is
+        // stamped clean"; it also stamped a checkpoint of a legacy journal
+        // clean, which laundered it on the next restart.
+        h.contentEpoch  = contentEpoch_;
         std::fseek(file_, 0, SEEK_END);
         if (std::fwrite(&h, sizeof(h), 1, file_) == 1) {
             // Flushed before any record is written, and before io_uring may

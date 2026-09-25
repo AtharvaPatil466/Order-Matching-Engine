@@ -184,6 +184,58 @@ run_case "legacy journal"                      refuse "$LEGACY"
 run_case "legacy journal, explicit override"   start  "$LEGACY" --replay-legacy-journal
 run_case "journal this build wrote"            start  "$MODERN"
 
+# ── Laundering: an override must not expire at the next routine restart ─────
+#
+# gracefulShutdown checkpoints on every clean stop, and the checkpoint rewrites
+# the journal through a fresh Journal whose header this build stamps. If that
+# stamp is "no seeding", one override boot plus one ordinary restart converts a
+# legacy journal into a TRUSTED one: the synthetic orders are now in a file the
+# next boot replays without refusal, without the flag, and without a warning.
+# Reproduced on a 1bfa4fc journal before this case existed: epoch 0 -> 1 across
+# a SIGTERM, then the fake orders back on /book with no flag passed.
+#
+# So: boot with the override, stop the way an operator does, and require that
+# the epoch survived the checkpoint AND that a flagless boot is still refused.
+LAUNDER="$TMP/launder.wal"
+cp "$LEGACY" "$LAUNDER"
+LP=47890
+"$ENGINE" --journal "$LAUNDER" --admin-no-auth --symbols 2 --port "$LP" \
+          --replay-legacy-journal > "$TMP/launder.log" 2>&1 &
+EPID=$!
+if python3 - "$LP" <<'PY'
+import json, sys, time, urllib.error, urllib.request
+port = int(sys.argv[1])
+deadline = time.time() + 30
+while time.time() < deadline:
+    try:
+        if json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/readyz", timeout=2).read()).get("status") == "ready":
+            sys.exit(0)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        pass
+    time.sleep(0.2)
+sys.exit(1)
+PY
+then
+    # A clean stop, so gracefulShutdown's checkpoint runs — that is the path
+    # under test. kill -9 would skip it and prove nothing.
+    kill -TERM "$EPID" 2>/dev/null
+    waited=0
+    while [ "$waited" -lt 120 ]; do kill -0 "$EPID" 2>/dev/null || break; sleep 0.25; waited=$((waited + 1)); done
+    kill -9 "$EPID" 2>/dev/null; wait "$EPID" 2>/dev/null; EPID=""
+
+    epoch=$(python3 -c "import struct,sys; print(struct.unpack_from('<8sIIQ', open(sys.argv[1],'rb').read(), 0)[3])" "$LAUNDER")
+    if [ "$epoch" != "0" ]; then
+        note_fail "clean restart after an override re-stamped the legacy journal as trusted (contentEpoch $epoch)"
+    else
+        echo "  ok  override boot + clean stop — checkpoint kept contentEpoch 0"
+    fi
+    run_case "same journal, next boot without the flag" refuse "$LAUNDER"
+else
+    kill -9 "$EPID" 2>/dev/null; wait "$EPID" 2>/dev/null; EPID=""
+    note_fail "override boot never became ready, so the laundering case could not run"
+    cat "$TMP/launder.log"
+fi
+
 if [ "$fails" -ne 0 ]; then
     echo "FAIL: $fails case(s) failed"
     exit 1

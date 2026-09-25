@@ -67,15 +67,22 @@ against.
 The engine refuses to start on one, and says why:
 
 ```
-[Engine] FATAL: <path> was written by a build
-        that seeded synthetic orders at startup (journal content
-        epoch 0; this build writes 1). ...
+[Engine] FATAL: <path> may hold orders nobody sent
+        (journal content epoch 0; this build writes 1). Its
+        lineage began with a build that seeded synthetic orders at startup: ...
 ```
 
 The signal is `contentEpoch` in the journal header: `0` for any file written
-before this was fixed, `1` for anything this build writes. It is **not** a format
+before this was fixed, `1` for a file this build creates. It is **not** a format
 version — the records are perfectly readable, and `JournalReplayCLI` will still
 dump them.
+
+**The mark is inherited.** A checkpoint — including the one every clean shutdown
+takes — copies the source journal's epoch rather than stamping its own. So a
+legacy journal stays legacy for life, however many times it is checkpointed. An
+earlier build stamped checkpoints clean, which meant one `--replay-legacy-journal`
+boot followed by any ordinary restart silently turned the journal into a trusted
+one, synthetic orders and all.
 
 Choose one:
 
@@ -83,7 +90,7 @@ Choose one:
 |---|---|
 | The journal holds only warmup orders (a node that never took client traffic) | Move it aside and start fresh: `mv journal.wal journal.wal.preupgrade` |
 | It holds real client orders too | Inspect first: `JournalReplayCLI --journal journal.wal --stats`, then see below |
-| You have a checkpoint from a build without the warmup | Start from it; it is already stamped `1` |
+| A checkpoint whose lineage never held warmup orders, written by this build or later | Start from it; it is stamped `1` |
 
 To replay a mixed journal, start with `--replay-legacy-journal`
 (`OB_REPLAY_LEGACY_JOURNAL=1`), then **cancel the synthetic orders by id**. They
@@ -92,6 +99,12 @@ up for you — that is why this is a flag and not an automatic migration. Warmup
 order ids run from 1 upward, two per iteration, alternating participant 1 (buy)
 and participant 2 (sell), 200 per symbol. Confirm with `GET /book?symbolId=<n>`
 that no participant 1 or 2 liquidity remains.
+
+Because the mark is inherited, **that journal needs the flag on every boot from
+then on**, even after the synthetic orders are cancelled — the engine cannot
+certify a mixed book clean, and neither can a checkpoint of it. Keep the flag
+scoped to that one node's configuration, so it can never quietly accept a
+different legacy journal.
 
 ### Bare Metal
 ```bash

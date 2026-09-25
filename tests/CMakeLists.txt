@@ -188,6 +188,20 @@ set_tests_properties(EngineReplaysJournalTest PROPERTIES
     TIMEOUT 180
     LABELS "project;recovery")
 
+# The other half of wiring replay in: a journal written before the boot-time
+# warmup was deleted holds 200 synthetic orders per symbol, so replaying one
+# restores fabricated liquidity and reports a clean recovery. Keyed on
+# JournalFileHeader::contentEpoch, deliberately not a formatVersion bump — the
+# records frame perfectly, so this is content trust, not layout compatibility.
+# Covers the refusal, the operator's override, and that a journal this build
+# wrote still replays.
+add_test(NAME EngineRefusesLegacyJournalTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRefusesLegacyJournalTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;recovery;security")
+
 # The engine must refuse to start on a journal it cannot read, rather than
 # serving an empty book while the real orders sit unreadable on disk. Driven
 # against the real binary because the decision lives in src/main.cpp; the

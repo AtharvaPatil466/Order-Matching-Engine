@@ -185,6 +185,51 @@ int main(int argc, char* argv[]) {
         // the code that writes entries.
         const size_t recoverable = engine.getJournal()
                                  ? engine.getJournal()->strictPrefixEntries() : 0;
+
+        // REFUSE A JOURNAL THAT MAY HOLD ORDERS NOBODY SENT.
+        //
+        // Wiring replay in is what made this reachable, and on its own it turned
+        // a fixed bug back on. Until the commit above, this binary seeded 200
+        // synthetic Limit orders per symbol at boot as participants 1 and 2 —
+        // and enableJournal ran BEFORE that loop, so every journal an older build
+        // wrote holds them. Replaying one restores those orders and reports
+        // "Replayed 400 of 400" while doing it. Reproduced on a journal written
+        // by the 1bfa4fc binary: 10 bid and 10 ask levels on both symbols,
+        // liquidity no client submitted, ready to be traded against.
+        //
+        // This is a content judgement, not a read error — the records frame
+        // perfectly — so it is checked here rather than by setting
+        // recoveryFailed_, which would also block appending and offer no way out.
+        //
+        // The override exists because an operator upgrading a node with a live
+        // journal has a real decision, and it has to be theirs: once replayed,
+        // the synthetic orders are indistinguishable from real ones, so nothing
+        // here can clean them up afterwards.
+        const bool replayLegacy = flagOrEnvBool(argc, argv, "--replay-legacy-journal",
+                                                "OB_REPLAY_LEGACY_JOURNAL");
+        const uint64_t epoch = engine.getJournal() ? engine.getJournal()->contentEpoch()
+                                                   : JOURNAL_EPOCH_NO_SEEDING;
+        if (recoverable > 0 && epoch == JOURNAL_EPOCH_LEGACY && !replayLegacy) {
+            std::cerr << "[Engine] FATAL: " << journalPath << " was written by a build\n"
+                      << "        that seeded synthetic orders at startup (journal content\n"
+                      << "        epoch " << epoch << "; this build writes "
+                      << JOURNAL_EPOCH_NO_SEEDING << "). It holds "
+                      << recoverable << " recoverable\n"
+                      << "        entries, and replaying them would rest up to 200 orders\n"
+                      << "        per symbol for participants 1 and 2 that no client sent.\n"
+                      << "        Clients would trade against them.\n"
+                      << "        Inspect it:  JournalReplayCLI --journal " << journalPath
+                      << " --stats\n"
+                      << "        Start clean: move the file aside.\n"
+                      << "        Replay anyway, having decided the contents are real:\n"
+                      << "        --replay-legacy-journal (OB_REPLAY_LEGACY_JOURNAL=1).\n";
+            return 1;
+        }
+        if (replayLegacy && epoch == JOURNAL_EPOCH_LEGACY) {
+            std::cout << "[Engine] WARNING: replaying a legacy journal on request — it may\n"
+                         "         hold synthetic startup orders for participants 1 and 2.\n";
+        }
+
         const size_t replayed = engine.replayJournal();
 
         if (recoverable > 0 && replayed == 0) {

@@ -97,12 +97,37 @@ struct JournalFileHeader {
     char     magic[8];       // "OBJRNL" + NUL padding
     uint32_t formatVersion;  // bump when the file or record layout changes
     uint32_t recordSize;     // sizeof(JournalEntry) as the writer saw it
-    uint64_t reserved;       // zero
+    uint64_t contentEpoch;   // what the WRITER's records mean; see below
 };
 #pragma pack(pop)
 
 inline constexpr char     JOURNAL_MAGIC[8]    = {'O','B','J','R','N','L','\0','\0'};
 inline constexpr uint32_t JOURNAL_FORMAT_V1   = 1;
+
+// contentEpoch answers a different question from formatVersion, and conflating
+// the two would be a lie in both directions. formatVersion is the LAYOUT
+// contract: a mismatch means the records cannot be framed, so reading is unsafe
+// and appending is destructive — which is why that check sets recoveryFailed_.
+// contentEpoch is the CONTENT contract: the records frame perfectly, and what is
+// in doubt is whether they describe only things clients actually did.
+//
+// It exists because the engine used to submit 200 synthetic Limit orders per
+// symbol at boot, as participants 1 and 2, through the ordinary submit path —
+// and enableJournal ran BEFORE that loop, so every journal written by such a
+// build holds those orders. Deleting the loop stopped new ones appearing; wiring
+// replay into boot then made the old ones come back, which is worse than either
+// bug alone, because recovery restores fabricated liquidity and reports success.
+//
+// This field was `reserved`, written as 0 and never read, which is exactly what
+// makes it usable: every pre-existing file already carries LEGACY without any
+// migration, and older readers ignore it.
+//
+// Deciding what to DO about a legacy journal is not this class's job — the same
+// split as fileIsOverlyPermissive, where Journal reports and the caller judges.
+// Journal reports the epoch; the boot path, which owns the operator's override
+// flag, chooses.
+inline constexpr uint64_t JOURNAL_EPOCH_LEGACY     = 0;  // may hold seeded orders
+inline constexpr uint64_t JOURNAL_EPOCH_NO_SEEDING = 1;  // writer seeded nothing
 static_assert(sizeof(JournalFileHeader) == 24,
               "JournalFileHeader is on disk; changing its size needs a format "
               "version bump and a migration path");
@@ -486,6 +511,13 @@ public:
     // True when the journal opened a file it could not read at all and is
     // therefore refusing to append. See checkRecoverable().
     bool recoveryFailed() const { return recoveryFailed_; }
+
+    // What the writer's records MEAN — see JOURNAL_EPOCH_* above. LEGACY says
+    // the file may hold synthetic orders the engine seeded at boot, so replaying
+    // it would restore liquidity no client ever submitted. Reported rather than
+    // acted on: the records frame correctly, so this is not a read error, and
+    // whether to refuse or override is the boot path's call.
+    uint64_t contentEpoch() const { return contentEpoch_; }
 
     // How many entries form the longest CRC-valid CONTIGUOUS prefix of the file
     // as it was opened — what recovery can legitimately replay. Exposed so the
@@ -1162,7 +1194,12 @@ private:
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
         h.formatVersion = JOURNAL_FORMAT_V1;
         h.recordSize    = static_cast<uint32_t>(sizeof(JournalEntry));
-        h.reserved      = 0;
+        // This build seeds no synthetic orders, so anything it writes is
+        // client-caused and safe to replay. Checkpoint rewrites come through
+        // here too — prepareRewrite builds a fresh Journal over the temp file,
+        // which lands on this same deferred-header path — so a checkpoint of a
+        // clean journal is stamped clean rather than inheriting LEGACY.
+        h.contentEpoch  = JOURNAL_EPOCH_NO_SEEDING;
         std::fseek(file_, 0, SEEK_END);
         if (std::fwrite(&h, sizeof(h), 1, file_) == 1) {
             // Flushed before any record is written, and before io_uring may
@@ -1259,10 +1296,14 @@ private:
             // first byte is an entryType (1..5) and the magic starts with 'O',
             // so this is a definite answer, not a guess.
             dataOffset_ = 0;
+            // Older than the header itself, so certainly older than the build
+            // that stopped seeding orders.
+            contentEpoch_ = JOURNAL_EPOCH_LEGACY;
             return;
         }
 
         dataOffset_ = sizeof(JournalFileHeader);
+        contentEpoch_ = h.contentEpoch;
         if (h.formatVersion != JOURNAL_FORMAT_V1 ||
             h.recordSize != sizeof(JournalEntry)) {
             recoveryFailed_ = true;
@@ -1453,6 +1494,10 @@ private:
     // Records a STRICT read would return: the contiguous-from-1 prefix of what
     // the lax read found. See checkRecoverable().
     size_t strictPrefixEntries_{0};
+    // Defaults to NO_SEEDING so a file this build creates is trusted without
+    // waiting for the deferred header to be written. The read path overwrites it
+    // for any file that already existed.
+    uint64_t contentEpoch_{JOURNAL_EPOCH_NO_SEEDING};
     // Bytes before the first record: header size, or 0 for a pre-header file.
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().

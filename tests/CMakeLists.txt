@@ -371,6 +371,16 @@ enable_assertions(IcebergMinQtyTest)
 add_test(NAME IcebergMinQtyTest COMMAND IcebergMinQtyTest)
 set_tests_properties(IcebergMinQtyTest PROPERTIES TIMEOUT 60 LABELS "project;property")
 
+# JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
+# point — must never be reported durable, and must stop the process. The child
+# reports every durability callback through a pipe, so the count survives the
+# abort that the fix introduces.
+add_executable(JournalWriteFailureTest JournalWriteFailureTest.cpp)
+target_link_libraries(JournalWriteFailureTest PRIVATE OrderMatcher)
+enable_assertions(JournalWriteFailureTest)
+add_test(NAME JournalWriteFailureTest COMMAND JournalWriteFailureTest)
+set_tests_properties(JournalWriteFailureTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Journal replay determinism property test
 add_executable(JournalReplayPropertyTest JournalReplayPropertyTest.cpp)
 target_link_libraries(JournalReplayPropertyTest PRIVATE OrderMatcher)

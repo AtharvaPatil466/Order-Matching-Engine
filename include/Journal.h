@@ -5,8 +5,10 @@
 #include "Metrics.h"
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -823,9 +825,10 @@ protected:
         // rewind and durability barrier below are mechanism-agnostic.
         size_t actuallyWritten = writeBatch(toWrite);
 
-        // If the OS returned short on the actual fwrite (independent of
-        // fault injection), rewind sequence_ for the un-written tail of
-        // the prefix so they get fresh numbers on retry.
+        // A real short write no longer reaches here — writeBatch fail-stops
+        // on it, because retrying appends after a possibly-torn record. This
+        // rewind stays for roadmap D2, which truncates the torn tail first
+        // and so makes a retry safe.
         if (actuallyWritten < toWrite) {
             sequence_ -= (toWrite - actuallyWritten);
         }
@@ -849,6 +852,10 @@ protected:
         bool durable = false;
         if (!fi.shouldFail("journal.commit.fsync_fail")) {
             durable = syncFile();
+            // A REAL sync failure is fatal — see failStop. The fault point above
+            // is a different thing: an fsync that has not happened YET, whose
+            // ack is withheld and retried by design.
+            if (!durable) failStop("fdatasync", errno);
         }
 
         persistedEntries_.fetch_add(actuallyWritten, std::memory_order_relaxed);
@@ -1089,12 +1096,28 @@ protected:
                 ? static_cast<size_t>(slot.writeRes) / sizeof(JournalEntry)
                 : 0;
             if (written > slot.count) written = slot.count;  // defensive
+
+            // Fail-stop on a REAL error, exactly as the synchronous path does —
+            // see failStop. The fault points cannot trip these: short_write
+            // shrinks slot.count before submission, and fsync_fail sets
+            // wantAck = false so no fsync is issued and fsyncRes is never set,
+            // which is why the fsync check is gated on wantAck.
+            const size_t wantBytes = slot.count * sizeof(JournalEntry);
+            if (slot.writeRes < 0)
+                failStop("io_uring write", -slot.writeRes);
+            if (static_cast<size_t>(slot.writeRes) != wantBytes)
+                failStop("io_uring write (short: " + std::to_string(slot.writeRes) +
+                         " of " + std::to_string(wantBytes) + " bytes)", 0);
+            if (slot.wantAck && slot.fsyncRes != 0)
+                failStop("io_uring fdatasync", slot.fsyncRes < 0 ? -slot.fsyncRes : 0);
+
             durable = slot.wantAck && written == slot.count && slot.fsyncRes == 0;
             bufPtr = slot.buf.data();
 
-            // Real short write: the linked fdatasync still synced what landed,
-            // so the `written` prefix is durable; the unwritten tail must be
-            // renumbered and rewritten. Stage it for the writer to fold back.
+            // A real short write no longer reaches here — it fail-stops above,
+            // because this path appends and a retry would land after a
+            // possibly-torn record. This requeue stays for roadmap D2, which
+            // truncates the torn tail first and so makes the retry safe.
             if (written < slot.count) {
                 requeue_.assign(
                     slot.buf.begin() + static_cast<std::ptrdiff_t>(written),
@@ -1212,22 +1235,60 @@ private:
         // clean, which laundered it on the next restart.
         h.contentEpoch  = contentEpoch_;
         std::fseek(file_, 0, SEEK_END);
-        if (std::fwrite(&h, sizeof(h), 1, file_) == 1) {
-            // Flushed before any record is written, and before io_uring may
-            // touch the same fd — stdio buffering and the ring must not
-            // interleave.
-            std::fflush(file_);
-            pendingHeader_ = false;
-            bytesOnDisk_.fetch_add(sizeof(JournalFileHeader),
-                                   std::memory_order_relaxed);
-        }
+        // Flushed before any record is written, and before io_uring may touch
+        // the same fd — stdio buffering and the ring must not interleave. A
+        // header that did not land is as fatal as a record that did not:
+        // everything written after it would be framed wrongly.
+        if (std::fwrite(&h, sizeof(h), 1, file_) != 1 || std::fflush(file_) != 0)
+            failStop("writing the journal header", errno);
+        pendingHeader_ = false;
+        bytesOnDisk_.fetch_add(sizeof(JournalFileHeader), std::memory_order_relaxed);
     }
 
     size_t writeBatch(size_t toWrite) {
         writePendingHeader();
-        size_t w = std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
-        std::fflush(file_);
+        const size_t w = std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
+        // fwrite reports what reached the stdio BUFFER, not the file, so its
+        // count proves nothing on its own; the flush is where the bytes really
+        // go out, and where a full disk shows up. Ignoring its result is what let
+        // entries be reported durable that were never written (JRN-4).
+        const int flushed = std::fflush(file_);
+        const int err = errno;
+        if (flushed != 0 || std::ferror(file_) || w != toWrite)
+            failStop("writing journal records", err);
         return w;
+    }
+
+    // Stop the process on a REAL I/O error from the journal's write path.
+    //
+    // Not "withhold the ack and carry on", for three reasons, each sufficient:
+    //   * Both commit paths APPEND. A failed or short write can leave a torn
+    //     record at EOF; anything appended after it is lost on replay, because
+    //     recovery stops at the first record whose CRC does not check.
+    //   * DurabilityGate releases client events against one FIFO count of
+    //     committed entries. If this batch is skipped and a later one commits,
+    //     that count advances across this batch, and the gate releases acks for
+    //     exactly the orders that were dropped.
+    //   * After fdatasync reports an error, Linux may already have dropped the
+    //     dirty pages and marked them clean, so a retry "succeeds" with the data
+    //     gone. PostgreSQL treats fsync failure as fatal for this reason.
+    //
+    // The fault-injection points are deliberately NOT routed here: short_write
+    // shrinks the batch before it is written, and fsync_fail models an fsync
+    // that has not happened yet — both are benign, retried or withheld by
+    // design, and pinned by the chaos suites. A restart replays the file up to
+    // its last whole record. Roadmap 1.4-D4 replaces this abort with a halted
+    // state that rejects new orders and alerts.
+    [[noreturn]] void failStop(const std::string& what, int err) const {
+        std::fprintf(stderr,
+            "[Journal] FATAL: %s failed for %s%s%s.\n"
+            "          The entries in this commit may be missing or torn on disk,\n"
+            "          so they cannot be reported durable, and appending after a\n"
+            "          torn record would lose every later entry on replay.\n"
+            "          Stopping. A restart replays up to the last whole record.\n",
+            what.c_str(), filePath_.c_str(), err ? ": " : "",
+            err ? std::strerror(err) : "");
+        std::abort();
     }
 
     // Returns true iff the durable barrier actually made the bytes durable.

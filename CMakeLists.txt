@@ -19,7 +19,16 @@ if(ENABLE_SANITIZERS AND ENABLE_THREAD_SANITIZER)
 endif()
 if(ENABLE_SANITIZERS)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+        # -fno-sanitize-recover=all is what makes this lane mean anything.
+        # UBSan RECOVERS by default: it prints "runtime error" to stderr and
+        # carries on, so the process exits 0 — and ctest only shows output from
+        # tests that FAIL. Together that made every UBSan finding invisible:
+        # CombinedChaosTest emitted nine misaligned-reference errors per run and
+        # was reported as passed, on every lane, while this lane was cited as
+        # "no sanitizer reports". ASan already aborts; =all makes UBSan match,
+        # and keeps any sanitizer added here later fatal by default.
+        add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all
+                            -fno-omit-frame-pointer)
         add_link_options(-fsanitize=address,undefined)
     else()
         message(WARNING "ENABLE_SANITIZERS is only configured for Clang/GNU")

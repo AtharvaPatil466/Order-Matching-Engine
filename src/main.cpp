@@ -6,6 +6,7 @@
 #include "Config.h"
 #include "ConfigValidator.h"
 #include "Journal.h"
+#include "JournalBoot.h"
 #include "Metrics.h"
 #ifdef OB_HAVE_DPDK
 #include "DpdkGateway.h"
@@ -152,120 +153,10 @@ int main(int argc, char* argv[]) {
     // the coordinator hooks the journal's onCommit callback. Without a
     // journal, the engine still runs but replication has no entries to
     // ship (heartbeats only).
-    const std::string journalPath = flagOrEnv(argc, argv, "--journal", "OB_JOURNAL_PATH");
-    if (!journalPath.empty()) {
-        // A journal we cannot read is not the same as no journal. Starting
-        // anyway would serve an EMPTY BOOK while the real resting orders sit
-        // unreadable on disk — and the operator would have no reason to
-        // suspect it, because an engine with no orders looks exactly like an
-        // engine at the start of a session. The Journal prints what is wrong
-        // and how to proceed; refusing to boot is what makes someone read it.
-        if (!engine.enableJournal(journalPath)) {
-            std::cerr << "[Engine] FATAL: journal at " << journalPath
-                      << " could not be read (see the [Journal] message above).\n"
-                      << "        Refusing to start with an empty book. Move the\n"
-                      << "        file aside to start fresh, or replay it with the\n"
-                      << "        build that wrote it.\n";
-            return 1;
-        }
-        std::cout << "[Engine] Journal enabled at " << journalPath << "\n";
-
-        // RECOVER. This binary wrote a write-ahead log and never read it back:
-        // replayJournal() existed, was covered by tests, and was called by
-        // tools/JournalReplayCLI and by nothing else. Every restart therefore
-        // opened an EMPTY BOOK while the resting orders sat on disk — and, as
-        // the refusal above says about an unreadable journal, an engine with no
-        // orders looks exactly like an engine at the start of a session, so
-        // nothing about the running system told anyone.
-        //
-        // Before startAsync, deliberately: replayJournal takes bookMutex_ and
-        // drives the books directly rather than through the submit path, so a
-        // worker running alongside it would be a data race. Being pre-workers
-        // is also why it cannot re-journal what it applies — it never touches
-        // the code that writes entries.
-        const size_t recoverable = engine.getJournal()
-                                 ? engine.getJournal()->strictPrefixEntries() : 0;
-
-        // REFUSE A JOURNAL THAT MAY HOLD ORDERS NOBODY SENT.
-        //
-        // Wiring replay in is what made this reachable, and on its own it turned
-        // a fixed bug back on. Until the commit above, this binary seeded 200
-        // synthetic Limit orders per symbol at boot as participants 1 and 2 —
-        // and enableJournal ran BEFORE that loop, so every journal an older build
-        // wrote holds them. Replaying one restores those orders and reports
-        // "Replayed 400 of 400" while doing it. Reproduced on a journal written
-        // by the 1bfa4fc binary: 10 bid and 10 ask levels on both symbols,
-        // liquidity no client submitted, ready to be traded against.
-        //
-        // This is a content judgement, not a read error — the records frame
-        // perfectly — so it is checked here rather than by setting
-        // recoveryFailed_, which would also block appending and offer no way out.
-        //
-        // The override exists because an operator upgrading a node with a live
-        // journal has a real decision, and it has to be theirs: once replayed,
-        // the synthetic orders are indistinguishable from real ones, so nothing
-        // here can clean them up afterwards.
-        const bool replayLegacy = flagOrEnvBool(argc, argv, "--replay-legacy-journal",
-                                                "OB_REPLAY_LEGACY_JOURNAL");
-        const uint64_t epoch = engine.getJournal() ? engine.getJournal()->contentEpoch()
-                                                   : JOURNAL_EPOCH_NO_SEEDING;
-        if (recoverable > 0 && epoch == JOURNAL_EPOCH_LEGACY && !replayLegacy) {
-            std::cerr << "[Engine] FATAL: " << journalPath << " may hold orders nobody sent\n"
-                      << "        (journal content epoch " << epoch << "; this build writes "
-                      << JOURNAL_EPOCH_NO_SEEDING << "). Its\n"
-                      << "        lineage began with a build that seeded synthetic orders at startup:\n"
-                      << "        either that build wrote it, or it is a checkpoint of one replayed\n"
-                      << "        under --replay-legacy-journal (checkpoints inherit the epoch).\n"
-                      << "        It holds " << recoverable << " recoverable entries, and replaying them\n"
-                      << "        could rest up to 200 orders per symbol for participants 1 and 2\n"
-                      << "        that no client sent. Clients would trade against them.\n"
-                      << "        Inspect it:  JournalReplayCLI --journal " << journalPath
-                      << " --stats\n"
-                      << "        Start clean: move the file aside.\n"
-                      << "        Replay anyway, having decided the contents are real:\n"
-                      << "        --replay-legacy-journal (OB_REPLAY_LEGACY_JOURNAL=1).\n";
-            return 1;
-        }
-        if (replayLegacy && epoch == JOURNAL_EPOCH_LEGACY) {
-            std::cout << "[Engine] WARNING: replaying a legacy journal on request — it may\n"
-                         "         hold synthetic startup orders for participants 1 and 2.\n"
-                         "         It stays marked legacy through every checkpoint, so this\n"
-                         "         flag will be needed on each boot of it: nothing can certify\n"
-                         "         the book clean once synthetic and real orders are mixed.\n";
-        }
-
-        const size_t replayed = engine.replayJournal();
-
-        if (recoverable > 0 && replayed == 0) {
-            std::cerr << "[Engine] FATAL: journal holds " << recoverable
-                      << " recoverable entries but replay applied none.\n"
-                      << "        Refusing to start with an empty book on top of a\n"
-                      << "        journal that has state in it. Inspect it with\n"
-                      << "        JournalReplayCLI --journal " << journalPath
-                      << " --stats\n";
-            return 1;
-        }
-        std::cout << "[Engine] Replayed " << replayed << " of " << recoverable
-                  << " recoverable journal entries\n";
-        if (replayed != recoverable) {
-            std::cout << "[Engine] NOTE: counts differ — entries at or below an\n"
-                         "         already-seen sequence number are skipped.\n";
-        }
-
-        // WHAT THIS STILL DOES NOT CATCH, so nobody reads the line above as more
-        // than it is: replayJournal counts entries CONSUMED, not entries applied.
-        // The dispatch discards every return value (src/MatchingEngine.cpp:2060
-        // for addOrder, :2078 for modifyOrder), so an entry that replayed and was
-        // REFUSED — a duplicate order id, an exhausted pool, or a quantity that a
-        // newer guard now rejects — is counted as replayed and silently dropped.
-        // `replayed == recoverable` therefore does not mean the book matches the
-        // one that was journaled. Closing that needs replay to check its own
-        // results against an integrity oracle that can see a wrong book, which
-        // validateIntegrity() currently cannot.
-        //
-        // Per-participant kill cancels are also not journaled (THR-2), so an
-        // operator must re-issue any kill after a restart. The runbook says so.
-    }
+    //
+    // Enable, refuse and replay the journal — the same sequence GatewayServer
+    // runs, shared through JournalBoot.h so the two cannot drift apart.
+    if (const int rc = bootJournal(engine, argc, argv); rc != 0) return rc;
 
     const std::string maxSizeStr = flagOrEnv(argc, argv, "--journal-max-mb", "OB_JOURNAL_MAX_SIZE_MB");
     const size_t journalMaxMb = maxSizeStr.empty() ? 0 : std::stoul(maxSizeStr);

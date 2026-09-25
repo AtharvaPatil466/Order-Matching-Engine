@@ -1029,6 +1029,20 @@ protected:
             e.sequenceNumber = 0;
             e.checksum = 0;
         }
+
+        // Immediate means durable when the append RETURNS — the contract the
+        // synchronous path always met, and the one the order-entry binary sends
+        // its Ack on. This path used to submit the chain and return, leaving the
+        // fsync to the reaper, so on an io_uring build an Ack could leave the
+        // process before its entry was on disk and kill -9 in that window lost an
+        // acknowledged order. Wait for the chain.
+        //
+        // It also makes DurabilityGate safe on this path. The gate has no lock,
+        // and onDurable runs on the reaper: without the wait, the reaper's
+        // release raced the writer's next capture. With it, the release happens
+        // while this thread is blocked, and chainDone_ orders it before this
+        // thread resumes. Callbacks must therefore not re-enter the journal.
+        if (syncPolicy_ == SyncPolicy::Immediate) drainCompletions();
     }
 
     // Reaper thread loop: reap CQEs, finalize chains, fire onCommit. Runs until

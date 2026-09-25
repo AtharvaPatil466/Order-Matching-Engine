@@ -393,6 +393,16 @@ add_test(NAME GatewayJournalRestartTest
          COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
 set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
+# Immediate means durable when the append RETURNS, on every commit path. The
+# io_uring path submitted the fsync and returned before it completed, so on Linux
+# the order-entry Ack could precede durability. Passes on the synchronous path
+# either way; the regression it pins is Linux io_uring, where it was found.
+add_executable(JournalImmediateDurableTest JournalImmediateDurableTest.cpp)
+target_link_libraries(JournalImmediateDurableTest PRIVATE OrderMatcher)
+enable_assertions(JournalImmediateDurableTest)
+add_test(NAME JournalImmediateDurableTest COMMAND JournalImmediateDurableTest)
+set_tests_properties(JournalImmediateDurableTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Journal replay determinism property test
 add_executable(JournalReplayPropertyTest JournalReplayPropertyTest.cpp)
 target_link_libraries(JournalReplayPropertyTest PRIVATE OrderMatcher)

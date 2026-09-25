@@ -264,6 +264,27 @@ void OrderBook::ensurePriceRange(Price price) {
 }
 
 bool OrderBook::addToBook(Order* order) {
+    // An iceberg must never rest with nothing displayed. Enforced HERE, at the
+    // choke point every add path funnels through, rather than trusted to the
+    // eleven callers — because the trust already failed once. screenMinQty
+    // rested a minQty order via a direct addToBook without slicing it, and
+    // orders are allocated with visibleQty = 0, so an iceberg taking that route
+    // entered the book at ZERO displayed quantity with its full size behind it.
+    //
+    // That is the second route to the MATCH-1 livelock (modify-to-zero was the
+    // first). Price-time printed a zero-size trade before re-slicing; pro-rata
+    // summed the level to 0, and eraseBest will not deactivate a populated
+    // level, so the matching thread spun forever. Reachable by one client alone:
+    // a buy iceberg with minQty against an empty ask side.
+    //
+    // Slicing rather than refusing, because three callers ignore this function's
+    // return value, and a refusal they drop is its own bug. It cannot change any
+    // correct path: admission rejects displayQty == 0 and a resting order has
+    // remainingQty > 0, so every caller that already slices arrives with
+    // visibleQty > 0 and never reaches this branch.
+    if (order->type == OrderType::Iceberg && order->visibleQty == 0) [[unlikely]]
+        order->visibleQty = std::min(order->remainingQty, order->displayQty);
+
     if (!canAddToBook(order)) return false;
     ensurePriceRange(order->price);
     auto& book = (order->side == Side::Buy) ? bids_ : asks_;
@@ -277,7 +298,8 @@ bool OrderBook::addToBook(Order* order) {
     // Public display event. Fired HERE rather than beside the callers'
     // Accepted notify because this is the single choke point all eleven add
     // paths funnel through, and it is the first moment the display quantity
-    // is final (the iceberg slice is sized just before the call).
+    // is final (the iceberg slice is sized by the caller, or by the guard at
+    // the top of this function for a caller that did not).
     if (!order->isHidden)
         notifyBookVisible(BookVisibleUpdate::Action::Rest, order->id, order->side,
                           order->price, displayQuantity(*order));

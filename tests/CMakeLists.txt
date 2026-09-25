@@ -361,6 +361,16 @@ enable_assertions(ModifyToZeroTest)
 add_test(NAME ModifyToZeroTest COMMAND ModifyToZeroTest)
 set_tests_properties(ModifyToZeroTest PROPERTIES TIMEOUT 60 LABELS "project;property")
 
+# The second route to the same livelock: an iceberg resting through the minQty
+# path skipped the slice and entered the book at zero displayed quantity. Same
+# shape as ModifyToZeroTest — both algorithms, invariant not return code, and an
+# alarm(30) so the pro-rata spin fails rather than hangs.
+add_executable(IcebergMinQtyTest IcebergMinQtyTest.cpp)
+target_link_libraries(IcebergMinQtyTest PRIVATE OrderMatcher)
+enable_assertions(IcebergMinQtyTest)
+add_test(NAME IcebergMinQtyTest COMMAND IcebergMinQtyTest)
+set_tests_properties(IcebergMinQtyTest PROPERTIES TIMEOUT 60 LABELS "project;property")
+
 # Journal replay determinism property test
 add_executable(JournalReplayPropertyTest JournalReplayPropertyTest.cpp)
 target_link_libraries(JournalReplayPropertyTest PRIVATE OrderMatcher)

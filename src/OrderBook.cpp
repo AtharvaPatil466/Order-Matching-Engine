@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <set>
@@ -1546,6 +1547,37 @@ void OrderBook::matchProRata(Order* incoming) {
             totalLevelQty += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
         }
         if (totalLevelQty == 0) {
+            // Two different states reach this branch, and only one is benign.
+            //
+            // An EMPTY level: eraseBest deactivates it and the loop moves to the
+            // next price. Legitimate cleanup.
+            //
+            // A POPULATED level that sums to zero: every order in it contributes
+            // nothing — an iceberg with no slice, or an order at remainingQty 0.
+            // eraseBest refuses to deactivate a level that still holds orders
+            // (correctly: it would orphan them), so it is a no-op, `continue`
+            // recomputes the same zero, and this thread spins forever. Its symbol
+            // stops matching while its queue keeps accepting orders it will
+            // never process. That is MATCH-1, and it was silent.
+            //
+            // Both known routes into the second state are closed at their source
+            // (modifyOrder refuses zero; addToBook slices an unsliced iceberg).
+            // This is the backstop for the next one: fail loudly instead of
+            // wedging. std::abort, not assert — assert depends on NDEBUG, and a
+            // Release build is exactly where a silent livelock would be worst.
+            // With replay on boot, a crash recovers; a livelock does not.
+            if (!level.empty()) [[unlikely]] {
+                size_t orders = 0;
+                for (Order* o = level.front(); o; o = o->next) ++orders;
+                std::fprintf(stderr,
+                    "[OrderBook] FATAL: symbol %u, %s level at %lld holds %zu "
+                    "order(s) with zero executable quantity. Pro-rata cannot "
+                    "match it and eraseBest cannot remove it; continuing would "
+                    "spin this matching thread forever. Aborting instead.\n",
+                    static_cast<unsigned>(symbolId_), isBuy ? "ask" : "bid",
+                    static_cast<long long>(bestPrice), orders);
+                std::abort();
+            }
             opposite.eraseBest();
             continue;
         }

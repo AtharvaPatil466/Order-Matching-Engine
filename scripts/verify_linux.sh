@@ -44,7 +44,12 @@ EXCLUDE_TSAN='BenchmarkRegressionTest|PropertyTest|AdminServerEndpointsTest'
 
 case "$LANE" in
   sanitizers)
-    CM_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON -DENABLE_THREAD_SANITIZER=OFF -DBUILD_BENCHMARKS=ON"
+    # OB_DIFF_FUZZ_TIMEOUT: this container is 25-50x slower than CI's x86 runner
+    # for DifferentialFuzzTest under ASan (~475s here, 9-20s there), so it needs
+    # its own limit. CI keeps the default 180; see tests/CMakeLists.txt. Do not
+    # read timings from this container as CI's — that mistake is already in the
+    # history once.
+    CM_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON -DENABLE_THREAD_SANITIZER=OFF -DBUILD_BENCHMARKS=ON -DOB_DIFF_FUZZ_TIMEOUT=900"
     EXCLUDE="$EXCLUDE_DEFAULT"
     # Two, not nproc: a sanitizer build of this tree peaks at a few GB per
     # translation unit and OOM-kills cc1plus when fanned out. That surfaces as

@@ -321,27 +321,29 @@ target_link_libraries(DifferentialFuzzTest PRIVATE OrderMatcher)
 enable_assertions(DifferentialFuzzTest)
 add_test(NAME DifferentialFuzzTest
          COMMAND DifferentialFuzzTest --corpus ${CMAKE_CURRENT_SOURCE_DIR}/fuzz_corpus)
-# TIMEOUT 900, not the 180 this shipped with. 180 was read off the unsanitized
-# runtime and never checked against the sanitizer lane, where it died at 180.12s
-# having printed only its corpus line — so it had no margin there from the day it
-# landed, and ci.yml's "Ubuntu Debug Sanitizers" lane runs this test.
+# The timeout is PER ENVIRONMENT, because the environments differ by 50x and one
+# number cannot serve both. Measured under ASan/UBSan:
 #
-# Measured, in order: 4.3s plain, 13.8s under ASan/UBSan locally, and 470.93s in
-# the ubuntu:24.04 container. That last is ~34x the local sanitized figure, far
-# worse than its neighbour PropertyTest (4.3s -> 9.3s -> 85.8s, ~9x), because
-# RefMatcher churns std::map and std::vector and ASan's allocator is where that
-# lands. It completes; it is not hung.
+#     GitHub x86 runner (the CI lane)            8.99s at dc807e1, 19.58s at 1bfa4fc
+#     macOS, native                              13.8s
+#     ubuntu:24.04 in Docker on Apple Silicon    470.93s, 479.27s   (native arm64)
 #
-# The work did not grow: the same run is 3.37s before this series and 3.28s
-# after. This is headroom the number never had.
+# 180 is right for CI: a 9-20x margin that still fails a genuine hang in three
+# minutes. The container is 25-50x slower for this test in particular —
+# RefMatcher churns std::map and std::vector, and ASan's allocator in that VM is
+# where the cost lands — so scripts/verify_linux.sh raises it for its own
+# sanitizer lane with -DOB_DIFF_FUZZ_TIMEOUT. A single limit sized for the
+# container would let CI pass a 45x slowdown or a near-hang for fifteen minutes.
 #
-# 900 rather than 600 because 470.93s came from Docker on Apple Silicon, which is
-# probably SLOWER than the x86 runner CI actually uses — the figure is an upper
-# bound, not a prediction, and a 27% margin on a number measured in the wrong
-# environment is not a margin. Raising a ctest timeout costs nothing when the
-# test is fast; the fix for the 8 minutes it spends in that one lane is fewer
-# seeds under sanitizers, which trades coverage and is not this series' business.
-set_tests_properties(DifferentialFuzzTest PROPERTIES TIMEOUT 900 LABELS "project;property")
+# CORRECTION to 25a293b, which set this to 900 and is already pushed. Its message
+# says this lane "has had no margin since the day it landed" and that my earlier
+# claim that every lane was green at 1bfa4fc "was wrong". Both are false. CI's
+# sanitizer lane passed at 1bfa4fc, in 19.58s against 180. Only the local
+# container ever timed out; I read its number as though it were CI's.
+set(OB_DIFF_FUZZ_TIMEOUT 180 CACHE STRING
+    "ctest TIMEOUT for DifferentialFuzzTest; raise only for known-slow environments")
+set_tests_properties(DifferentialFuzzTest PROPERTIES
+    TIMEOUT ${OB_DIFF_FUZZ_TIMEOUT} LABELS "project;property")
 
 # Stop-order fan-out bound (kMaxStopExecutionsPerSweep): one incoming order does
 # bounded work, and every deferred election still fires.

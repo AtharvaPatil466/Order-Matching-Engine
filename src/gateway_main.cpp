@@ -1,5 +1,6 @@
 #include "TcpGateway.h"
 #include "CliFlags.h"
+#include "JournalBoot.h"
 #include "ParticipantAuth.h"
 #include "MarketDataPublisher.h"
 #include <iostream>
@@ -409,9 +410,15 @@ void printUsage() {
         "                                  user:secret:id[,id...]\n"
         "  --no-participant-auth           accept every claimed identity\n"
         "                                  (explicit opt-out; see below)\n"
+        "  --journal PATH                  journal every accepted order and replay\n"
+        "                                  it on start; without one, a restart\n"
+        "                                  loses every order\n"
+        "  --replay-legacy-journal         replay a journal written by a build that\n"
+        "                                  seeded synthetic orders (see Runbook §1)\n"
         "  --help                          this message\n"
         "\n"
         "Environment: OB_PARTICIPANT_CREDENTIALS, OB_NO_PARTICIPANT_AUTH,\n"
+        "             OB_JOURNAL_PATH, OB_REPLAY_LEGACY_JOURNAL,\n"
         "             OB_ENGINE_HOST + OB_ENGINE_PORT (forwarding mode).\n"
         "\n"
         "The gateway REFUSES TO START with no credentials unless\n"
@@ -561,6 +568,20 @@ int main(int argc, char* argv[]) {
         engine.start();
         engine.addSymbol(0);
         engine.addSymbol(1);
+
+        // This is the only shipped binary that takes client orders over the
+        // network, and it had no journal at all — every order it acknowledged
+        // lived only in memory, so any restart lost the book. Same sequence as
+        // OrderEngine (JournalBoot.h: enable, refuse an unreadable or legacy
+        // journal, replay), and it has to run here, before gateway.start():
+        // an order admitted while replay is still rebuilding the book would
+        // race it.
+        if (const int rc = bootJournal(engine, argc, argv); rc != 0) return rc;
+        if (!engine.getJournal()) {
+            std::cout << "[Gateway] WARNING: no journal (--journal / OB_JOURNAL_PATH).\n"
+                         "          Every order this port acknowledges lives only in\n"
+                         "          memory and is lost on any restart.\n";
+        }
 
         // Start market data publisher
         MarketDataPublisher mdPub("orderbook_md");

@@ -297,6 +297,23 @@ curl -H "X-Chaos-Token: $TOK" \
      "localhost:8080/chaos/order?orderId=1&participantId=1&price=100000&qty=1&side=0"
 ```
 
+### Order Entry Journal
+
+`GatewayServer` journals every order it accepts when given `--journal PATH` (or
+`OB_JOURNAL_PATH`), and replays that journal before it starts listening — the
+same boot sequence as `OrderEngine`, including its refusal of unreadable and
+legacy journals. Without one it warns at startup: every acknowledged order lives
+only in memory and is lost on any restart.
+
+```bash
+GatewayServer 9876 --participant-credentials /etc/orderbook/participants.conf \
+                   --journal /var/lib/orderbook/gateway.wal
+```
+
+This makes a **clean** restart safe. It does not by itself make an
+acknowledgement survive `kill -9`: that needs the journal synced before the ack
+is sent, which the default group commit does not do.
+
 ### Order Entry Authentication
 
 `GatewayServer` refuses to start unless participant credentials are configured

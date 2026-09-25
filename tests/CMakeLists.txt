@@ -381,6 +381,18 @@ enable_assertions(JournalWriteFailureTest)
 add_test(NAME JournalWriteFailureTest COMMAND JournalWriteFailureTest)
 set_tests_properties(JournalWriteFailureTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# The order-entry port must journal what it acknowledges: GatewayServer had no
+# journal at all, so a restart lost every order it had accepted. Driven against
+# the real binary through the order port — acknowledge, restart, then cancel the
+# order (Ack = it survived) and cancel it again (must be refused, so the probe
+# can tell the two apart).
+add_executable(GatewayJournalRestartTest GatewayJournalRestartTest.cpp)
+target_link_libraries(GatewayJournalRestartTest PRIVATE OrderMatcher)
+enable_assertions(GatewayJournalRestartTest)
+add_test(NAME GatewayJournalRestartTest
+         COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
+set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+
 # Journal replay determinism property test
 add_executable(JournalReplayPropertyTest JournalReplayPropertyTest.cpp)
 target_link_libraries(JournalReplayPropertyTest PRIVATE OrderMatcher)

@@ -1992,9 +1992,9 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     }
 }
 
-bool MatchingEngine::enableJournal(const std::string& path) {
+bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy policy) {
     std::lock_guard<std::mutex> lock(journalMutex_);
-    journal_ = std::make_unique<Journal>(path, Journal::SyncPolicy::GroupCommit, 64);
+    journal_ = std::make_unique<Journal>(path, policy, 64);
     return !journal_->recoveryFailed();
 }
 

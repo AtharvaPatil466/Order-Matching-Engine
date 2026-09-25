@@ -576,7 +576,15 @@ int main(int argc, char* argv[]) {
         // journal, replay), and it has to run here, before gateway.start():
         // an order admitted while replay is still rebuilding the book would
         // race it.
-        if (const int rc = bootJournal(engine, argc, argv); rc != 0) return rc;
+        //
+        // Immediate, not the default group commit: this is the binary that sends
+        // acks, and under group commit an order sits in a 64-entry user-space
+        // batch when its ack goes out — kill -9 then loses an order the client
+        // was told it has. Immediate syncs inside the append, and on this sync
+        // engine the ack is only sent once submitOrder returns.
+        if (const int rc = bootJournal(engine, argc, argv, Journal::SyncPolicy::Immediate);
+            rc != 0)
+            return rc;
         if (!engine.getJournal()) {
             std::cout << "[Gateway] WARNING: no journal (--journal / OB_JOURNAL_PATH).\n"
                          "          Every order this port acknowledges lives only in\n"
@@ -599,6 +607,27 @@ int main(int argc, char* argv[]) {
                 book->setEventListener(listener.get());
                 listeners.push_back(std::move(listener));
             }
+        }
+
+        // Durable acks for everything else a client can see. Immediate makes the
+        // Ack durable, but fills and order updates are dispatched from INSIDE
+        // the match, before the journal append even happens — so without this a
+        // trade reaches market data before the order that caused it is on disk.
+        // The gate holds those events until their entry is durable.
+        //
+        // It must come AFTER every setEventListener above: it interposes on the
+        // listener that is set when it is called, and a later setEventListener
+        // would silently replace it and switch the guarantee off. And it must
+        // come before gateway.start(), so no order is admitted undurably.
+        if (engine.getJournal()) {
+            if (!engine.enableDurableClientAcks(true)) {
+                std::cerr << "[Gateway] FATAL: a journal is configured but durable acks\n"
+                             "        could not be enabled. Refusing to acknowledge orders\n"
+                             "        the journal has not made durable.\n";
+                return 1;
+            }
+            std::cout << "[Gateway] Durable acks: each order is synced to the journal\n"
+                         "          before it is acknowledged (one fsync per order).\n";
         }
 
         // Start TCP gateway

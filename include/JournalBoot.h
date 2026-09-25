@@ -27,7 +27,11 @@ namespace OrderMatcher {
 // an admitted order running alongside it would race it — and being ahead of both
 // is also why replay cannot re-journal what it applies: it never reaches the
 // code that writes entries.
-inline int bootJournal(MatchingEngine& engine, int argc, char** argv) {
+//
+// `policy` is when appends reach the disk (see MatchingEngine::enableJournal):
+// the order-entry binary passes Immediate so that its acks are durable.
+inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
+                       Journal::SyncPolicy policy = Journal::SyncPolicy::GroupCommit) {
     const std::string journalPath = flagOrEnv(argc, argv, "--journal", "OB_JOURNAL_PATH");
     if (journalPath.empty()) return 0;
 
@@ -37,7 +41,7 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv) {
     // engine with no orders looks exactly like an engine at the start of a
     // session. The Journal prints what is wrong and how to proceed; refusing to
     // boot is what makes someone read it.
-    if (!engine.enableJournal(journalPath)) {
+    if (!engine.enableJournal(journalPath, policy)) {
         std::cerr << "[Engine] FATAL: journal at " << journalPath
                   << " could not be read (see the [Journal] message above).\n"
                   << "        Refusing to start with an empty book. Move the\n"

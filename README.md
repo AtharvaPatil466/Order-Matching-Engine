@@ -310,9 +310,15 @@ GatewayServer 9876 --participant-credentials /etc/orderbook/participants.conf \
                    --journal /var/lib/orderbook/gateway.wal
 ```
 
-This makes a **clean** restart safe. It does not by itself make an
-acknowledgement survive `kill -9`: that needs the journal synced before the ack
-is sent, which the default group commit does not do.
+With a journal, **acks are durable**: every order is synced to the journal before
+it is acknowledged, so an order the client was told it has survives `kill -9`
+sent the moment the ack arrives — the scenario `GatewayJournalRestartTest` runs
+against the real binary. Fills and order updates are held until durable too.
+
+The cost is one fsync per order, serialised on the gateway's single event
+thread, so order-entry throughput is bounded by your disk's fsync latency.
+Measure it on the hardware you deploy to; this repository's published
+throughput figures do not apply to this configuration.
 
 ### Order Entry Authentication
 

@@ -331,7 +331,15 @@ public:
     // Not [[nodiscard]]: 45 of the 46 call sites are tests that legitimately
     // do not care, and making them all churn to silence a warning would be
     // noise. The one production call site checks it.
-    bool enableJournal(const std::string& path);
+    //
+    // `policy` decides WHEN an append reaches the disk, and so what an ack can
+    // promise. GroupCommit (the default) batches 64 entries in user space, so an
+    // order is acknowledged before it is durable and kill -9 can lose it.
+    // Immediate syncs every entry inside the append: on the sync path the ack is
+    // sent after submitOrder returns, so by then the order is on disk — at the
+    // cost of one fsync per order, serialised.
+    bool enableJournal(const std::string& path,
+                       Journal::SyncPolicy policy = Journal::SyncPolicy::GroupCommit);
 
     // Access the underlying Journal (null if enableJournal not called).
     // Used by the replication coordinator wiring to attach an onCommit

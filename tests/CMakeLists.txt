@@ -211,6 +211,17 @@ set_tests_properties(EngineRefusesReplicationRoleTest PROPERTIES
 # it; it used to bind INADDR_ANY. Probed from one of the host's non-loopback
 # addresses, the way another machine would reach it; skips (77) on a host
 # without one.
+# A GTD order must be gone once its time passes: OrderEngine never started the
+# expiry timer, so GTD orders rested and traded forever. Drives the binary via
+# /chaos/order with a GTD due in 1 s, a GTD due in 1 h and a GTC; only the first
+# may disappear.
+add_test(NAME EngineExpiresGtdTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_expires_gtd.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineExpiresGtdTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;lifecycle")
+
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
                  $<TARGET_FILE:OrderEngine>)
@@ -416,6 +427,17 @@ enable_assertions(GatewayJournalRestartTest)
 add_test(NAME GatewayJournalRestartTest
          COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
 set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+
+# A GTD order must be gone once its time passes. Neither binary ran the expiry
+# sweep, so GatewayServer let GTD orders rest and trade forever. Black-box: a GTD
+# due in 1 s, a GTD due in 1 h and a GTC; after the wait, a cancel for each —
+# OrderNotFound for the first, Ack for the other two.
+add_executable(GatewayExpiresGtdTest GatewayExpiresGtdTest.cpp)
+target_link_libraries(GatewayExpiresGtdTest PRIVATE OrderMatcher)
+enable_assertions(GatewayExpiresGtdTest)
+add_test(NAME GatewayExpiresGtdTest
+         COMMAND GatewayExpiresGtdTest $<TARGET_FILE:GatewayServer>)
+set_tests_properties(GatewayExpiresGtdTest PROPERTIES TIMEOUT 120 LABELS "project;lifecycle")
 
 # Immediate means durable when the append RETURNS, on every commit path. The
 # io_uring path submitted the fsync and returned before it completed, so on Linux

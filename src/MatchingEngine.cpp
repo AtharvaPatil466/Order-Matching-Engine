@@ -1211,7 +1211,10 @@ MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown(bool cancelDayOr
     ShutdownReport report{};
 
     // 1. Stop admitting new orders. Already-enqueued requests still drain.
+    //    Stop expiry too: until stopAsync() (after the checkpoint below) the
+    //    timer would keep posting sweeps into books that are being persisted.
     shuttingDown_.store(true, std::memory_order_release);
+    stopExpiryTimer();
 
     // 2. Drain in-flight work so IOC remainders are cancelled during matching
     //    and any partial fill completes before we snapshot (see header).

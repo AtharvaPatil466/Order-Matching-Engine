@@ -308,6 +308,7 @@ void TcpGateway::eventLoop() {
             }
         }
         checkIdleTimeouts();
+        if (tick_) tick_();
     }
 
 #elif defined(USE_EPOLL)
@@ -333,6 +334,7 @@ void TcpGateway::eventLoop() {
             }
         }
         checkIdleTimeouts();
+        if (tick_) tick_();
     }
 #endif
 }

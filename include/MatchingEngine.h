@@ -190,8 +190,9 @@ public:
     // what OrderEngine calls on SIGTERM — so every deploy, config reload or
     // crash-restart cancelled every client's DAY orders mid-session. Pass true
     // only from something that knows the session has actually ended. No such
-    // caller exists yet: neither binary runs a session calendar or the expiry
-    // timer, so today DAY orders, like GTD, do not expire by themselves.
+    // caller exists yet: neither binary runs a session calendar, so a DAY order
+    // expires only if it carries an expiryTime (both binaries run the expiry
+    // sweep); one without behaves like GTC.
     //
     // Never throws, never crashes; safe to call once at process shutdown. The
     // engine is NOT torn down here — the caller still calls stop()/stopAsync().

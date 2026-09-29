@@ -252,6 +252,10 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
     engine.startAsync(numThreads, 8192);
+    // GTD/DAY expiry. Nothing started this, so GTD orders rested and traded
+    // forever. Safe in async mode: each sweep is posted to every worker as an
+    // in-band control message, never run against a book from this thread.
+    engine.startExpiryTimer();
 
     // ── Replication wiring (env-driven) ──────────────────────────────
     // The OrderEngine binary used to read these env vars only via its

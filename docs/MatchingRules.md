@@ -852,7 +852,10 @@ scan.**
 The mechanism end to end:
 
 1. `startExpiryTimer(intervalMs)` spawns a thread that sleeps, wakes, and calls
-   `expireOrdersFromClock()`. **Default interval: 1000 ms.**
+   `expireOrdersFromClock()`. **Default interval: 1000 ms.** `OrderEngine` starts it after
+   `startAsync()`. `GatewayServer` does not — its engine is synchronous, so it calls
+   `expireOrdersFromClock()` once a second from the gateway's event thread instead, between
+   orders. `expiryTime` is **Unix-epoch nanoseconds, wall clock** (`system_clock`).
    > `include/MatchingEngine.h:194`, `src/MatchingEngine.cpp:461-484`
 2. In async mode the sweep is posted as an `ExpireCheck` control message to every worker; in
    sync mode it runs inline.
@@ -928,9 +931,9 @@ stop keeps DAY orders").
 
 That leaves a real gap, stated rather than hidden: nothing retires a `DAY` order at the end
 of the day. Neither binary runs `SessionScheduler` (which drives trading states but never
-touches time-in-force) or the expiry timer, and nothing derives a session-end `expiryTime`.
-So a `DAY` order with `expiryTime == 0` behaves exactly like `GTC` — the same state `GTD`
-orders are already in, since without the timer they do not expire either.
+touches time-in-force), and nothing derives a session-end `expiryTime`. Both binaries run the
+expiry sweep (Rule 8.1), so a `DAY` order that carries an `expiryTime` expires like `GTD`;
+one with `expiryTime == 0` behaves exactly like `GTC`.
 
 **How venues specify it.** Every venue publishes DAY as "cancelled at the end of the trading
 session", and deriving the session-end timestamp from the session calendar is how I would

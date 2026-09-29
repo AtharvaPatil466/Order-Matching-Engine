@@ -245,7 +245,14 @@ private:
     // ponytail: fixed byte cap, no per-client tuning until a deployment needs it.
     static constexpr size_t kMaxWriteBufBytes = 1u << 20;  // 1 MiB
 
+    std::function<void()> tick_;
+
 public:
     void setIdleTimeout(std::chrono::seconds timeout) { idleTimeout_ = timeout; }
+
+    // Periodic work that must run on the event thread — the thread that
+    // processes orders — such as the expiry sweep on a synchronous engine.
+    // Called at least every 10 ms (each event-loop pass). Set before start().
+    void setTickHandler(std::function<void()> fn) { tick_ = std::move(fn); }
 };
 } // namespace OrderMatcher

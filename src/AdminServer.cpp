@@ -724,15 +724,24 @@ std::string AdminServer::generateChaosOrderResponse(const std::string& query,
     Quantity qty           = getU("qty",           0);
     // side: 0=Buy, 1=Sell (matches Side enum)
     uint32_t sideRaw       = getU32("side",        0);
+    // tif: 0=GTC (default), 1=GTD, 2=DAY (matches TimeInForce).
+    // expiryTime: Unix-epoch nanoseconds, for GTD/DAY; 0 = none.
+    uint32_t tifRaw        = getU32("tif",         0);
+    uint64_t expiryTime    = getU("expiryTime",    0);
 
     if (orderId == 0 || pid == 0 || price == 0 || qty == 0) {
         return "{\"enabled\":true,\"accepted\":false,"
                "\"error\":\"missing required field (orderId, participantId, price, qty)\"}";
     }
+    if (tifRaw > static_cast<uint32_t>(TimeInForce::DAY)) {
+        return "{\"enabled\":true,\"accepted\":false,"
+               "\"error\":\"tif must be 0 (GTC), 1 (GTD) or 2 (DAY)\"}";
+    }
 
     Side side = (sideRaw == 0) ? Side::Buy : Side::Sell;
     SubmitResult r = engine_.submitOrder(
-        symbolId, orderId, pid, side, price, qty, OrderType::Limit);
+        symbolId, orderId, pid, side, price, qty, OrderType::Limit,
+        /*stopPrice=*/0, /*displayQty=*/0, static_cast<TimeInForce>(tifRaw), expiryTime);
 
     std::ostringstream oss;
     oss << "{\"enabled\":true,"

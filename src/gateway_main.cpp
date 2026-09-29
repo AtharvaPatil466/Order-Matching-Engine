@@ -633,6 +633,18 @@ int main(int argc, char* argv[]) {
         // Start TCP gateway
         TcpGateway gateway(engine);
         gateway.setParticipantAuth(participantAuth.enabled() ? &participantAuth : nullptr);
+        // GTD/DAY expiry, once a second. Nothing ran it, so GTD orders rested
+        // and traded forever. Not engine.startExpiryTimer(): this engine is
+        // synchronous, orders run on the gateway's event thread, and a sweep
+        // from the timer's own thread would race them through the durability
+        // gate and the market-data publisher, neither of which locks. The tick
+        // runs on the event thread, between orders.
+        gateway.setTickHandler([&engine, next = std::chrono::steady_clock::now()]() mutable {
+            const auto now = std::chrono::steady_clock::now();
+            if (now < next) return;
+            next = now + std::chrono::seconds(1);
+            engine.expireOrdersFromClock();
+        });
         if (!gateway.start(port)) {
             std::cerr << "Failed to start gateway on port " << port << std::endl;
             return 1;

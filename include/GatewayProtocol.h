@@ -86,7 +86,7 @@ struct OrderRequestV1 {
     Price           stopPrice;
     Quantity        displayQty;
     TimeInForce     tif;
-    uint64_t        expiryTime;
+    uint64_t        expiryTime;     // GTD/DAY: Unix-epoch nanoseconds (wall clock); 0 = none
     Price           stopLimitPrice;
     PegType         pegType;
     Price           pegOffset;
@@ -119,7 +119,7 @@ struct OrderRequestV2 {
     Price           stopPrice;
     Quantity        displayQty;
     TimeInForce     tif;
-    uint64_t        expiryTime;
+    uint64_t        expiryTime;     // GTD/DAY: Unix-epoch nanoseconds (wall clock); 0 = none
     Price           stopLimitPrice;
     PegType         pegType;
     Price           pegOffset;

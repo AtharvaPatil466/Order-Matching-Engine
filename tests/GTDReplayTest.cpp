@@ -15,6 +15,7 @@
 #include "MatchingEngine.h"
 #include "Journal.h"
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <iostream>
 
@@ -216,10 +217,22 @@ void test_clear_expiry_clock() {
     engine.setExpiryClock([&]() -> uint64_t { return virtualNow; });
     assert(engine.expiryNow() == 1);
 
-    // Clear and verify it reads real wall time (>> 1)
+    // Clear and verify it reads real WALL time: Unix-epoch nanoseconds, the
+    // unit a client's GTD expiryTime is in. "> 1000" used to be the check, and
+    // time-since-boot passes that too — which is what libc++ gave (its
+    // high_resolution_clock is steady_clock), so on macOS an expiryTime meant
+    // an uptime while on Linux it meant a wall-clock instant.
     engine.clearExpiryClock();
-    uint64_t real = engine.expiryNow();
-    assert(real > 1000);  // any real clock value is many orders of magnitude > 1
+    const auto wall = [] {
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    };
+    const int64_t before = wall();
+    const int64_t real = static_cast<int64_t>(engine.expiryNow());
+    const int64_t after = wall();
+    constexpr int64_t kSlackNs = 5'000'000'000;
+    assert(real >= before - kSlackNs && real <= after + kSlackNs &&
+           "expiryNow() must be wall-clock nanoseconds since the Unix epoch");
 
     engine.stop();
     PASS();

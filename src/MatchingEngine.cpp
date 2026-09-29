@@ -492,8 +492,12 @@ uint64_t MatchingEngine::expiryNow() const {
     if (expiryClock_) {
         return expiryClock_();
     }
-    return static_cast<uint64_t>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    // Wall-clock nanoseconds since the Unix epoch — the unit of a client's GTD
+    // expiryTime. Not high_resolution_clock: that is system_clock under
+    // libstdc++ but steady_clock (time since boot) under libc++, so the same
+    // expiryTime meant a wall-clock instant on Linux and an uptime on macOS.
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 void MatchingEngine::expireOrdersFromClock() {

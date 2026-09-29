@@ -46,6 +46,8 @@ pandoc "$SRC" -o "$OUT" \
   -V fontsize=11pt \
   -V colorlinks=true \
   -V linkcolor=blue \
+  -V header-includes='\setlength{\emergencystretch}{3em}' \
+  -V header-includes='\DeclareRobustCommand{\_}{\textunderscore\allowbreak}' \
   -V header-includes='\usepackage{newunicodechar}' \
   -V header-includes='\newunicodechar{≈}{\ensuremath{\approx}}' \
   -V header-includes='\newunicodechar{≥}{\ensuremath{\geq}}' \

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdio>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <cstring>
 #include <algorithm>
 #include <random>
@@ -699,34 +700,119 @@ void testUnreadableJournalRefusesToAppend() {
     std::cout << "testUnreadableJournalRefusesToAppend PASSED" << std::endl;
 }
 
-// A torn FIRST write — a crash partway through record one — leaves a
-// non-empty file with no valid records too, and that is legitimate. Recovery
-// has always tolerated it, so the guard above must not fire on it.
-void testTornFirstRecordStillAppends() {
-    std::cout << "Running testTornFirstRecordStillAppends..." << std::endl;
-    cleanup();
+// ── Bytes past the last replayable record refuse the append (JRN-2) ─────────
+//
+// Replay stops at the first record it cannot use. Anything after that point —
+// a torn final write, a corrupt record with more behind it — is a wall: append
+// past it and the next boot's replay stops at the same wall, so every entry
+// accepted in between is lost without a word. This used to be allowed, and the
+// test that "proved" it only checked that the file grew, never that the new
+// record could be read back. Each case below shows the loss if the journal
+// accepts the file, then requires the refusal, the bytes left alone, and that
+// the repair the refusal prints (truncate to the last good record) works.
 
+static size_t journalFileSize() {
+    struct stat st{};
+    return ::stat(JOURNAL_PATH, &st) == 0 ? static_cast<size_t>(st.st_size) : 0;
+}
+
+static void requireRefusedThenRepairable(size_t goodRecords, const char* what) {
+    const size_t before = journalFileSize();
+    bool refused = false;
+    { Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1); refused = j.recoveryFailed(); }
+
+    if (!refused) {
+        // What accepting it costs: append one entry, then replay.
+        {
+            Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+            j.logAddOrder(9999, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+            j.flush();
+        }
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        std::cout << "  " << what << ": the journal accepted the file; one entry appended, "
+                  << "then replay saw " << j.readAll(true, true).size() << " of "
+                  << goodRecords + 1 << " — the append is lost" << std::endl;
+    }
+    assert(refused && "a journal with bytes past its last replayable record must refuse to append");
+    assert(journalFileSize() == before && "refusing must leave the bytes where they are");
+
+    // The repair the refusal prints: cut the file at the end of the last good record.
+    const size_t validEnd = Journal::headerBytesOf(JOURNAL_PATH) + goodRecords * sizeof(JournalEntry);
+    assert(::truncate(JOURNAL_PATH, static_cast<off_t>(validEnd)) == 0);
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        assert(!j.recoveryFailed() && "after the printed truncate the journal must be usable");
+        j.logAddOrder(9998, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        j.flush();
+    }
+    Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+    assert(j.readAll(true, true).size() == goodRecords + 1 &&
+           "an entry appended after the repair must replay");
+}
+
+static void writeGoodRecords(int n) {
+    Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+    for (int i = 1; i <= n; ++i) {
+        j.logAddOrder(static_cast<OrderId>(i), 100, 0, Side::Buy, toPrice(90.0 + i), 10,
+                      OrderType::Limit);
+    }
+    j.flush();
+}
+
+// A crash partway through record one: the file holds no whole record at all.
+void testTornFirstRecordIsRefused() {
+    std::cout << "Running testTornFirstRecordIsRefused..." << std::endl;
+    cleanup();
     {
         std::ofstream out(JOURNAL_PATH, std::ios::binary);
         std::vector<char> partial(sizeof(JournalEntry) / 2, '\x00');
         out.write(partial.data(), static_cast<std::streamsize>(partial.size()));
     }
-
-    {
-        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
-        assert(!j.recoveryFailed() &&
-               "a partial first record is a torn write, not a format mismatch");
-        j.logAddOrder(1, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
-        j.flush();
-    }
-
-    struct stat st{};
-    assert(::stat(JOURNAL_PATH, &st) == 0);
-    assert(static_cast<size_t>(st.st_size) > sizeof(JournalEntry) / 2 &&
-           "a torn first write must not block recovery from continuing");
-
+    requireRefusedThenRepairable(0, "torn first record");
     cleanup();
-    std::cout << "testTornFirstRecordStillAppends PASSED" << std::endl;
+    std::cout << "testTornFirstRecordIsRefused PASSED" << std::endl;
+}
+
+// Three good records, then a crash partway through the fourth.
+void testTornTailIsRefused() {
+    std::cout << "Running testTornTailIsRefused..." << std::endl;
+    cleanup();
+    writeGoodRecords(3);
+    {
+        FILE* f = std::fopen(JOURNAL_PATH, "ab");
+        assert(f != nullptr);
+        char garbage[sizeof(JournalEntry) / 2];
+        std::memset(garbage, 0xAB, sizeof(garbage));
+        std::fwrite(garbage, 1, sizeof(garbage), f);
+        std::fclose(f);
+    }
+    requireRefusedThenRepairable(3, "torn tail");
+    cleanup();
+    std::cout << "testTornTailIsRefused PASSED" << std::endl;
+}
+
+// Five good records, then record 3 corrupted: replay stops at 2 and never sees
+// the valid 4 and 5 behind it.
+void testCorruptRecordWithMoreAfterIsRefused() {
+    std::cout << "Running testCorruptRecordWithMoreAfterIsRefused..." << std::endl;
+    cleanup();
+    writeGoodRecords(5);
+    {
+        FILE* f = std::fopen(JOURNAL_PATH, "r+b");
+        assert(f != nullptr);
+        const long offset = static_cast<long>(Journal::headerBytesOf(JOURNAL_PATH) +
+                                              2 * sizeof(JournalEntry) + 20);
+        std::fseek(f, offset, SEEK_SET);
+        uint8_t byte = 0;
+        std::fread(&byte, 1, 1, f);
+        byte ^= 0xFF;
+        std::fseek(f, offset, SEEK_SET);
+        std::fwrite(&byte, 1, 1, f);
+        std::fclose(f);
+    }
+    requireRefusedThenRepairable(2, "corrupt record 3 of 5");
+    cleanup();
+    std::cout << "testCorruptRecordWithMoreAfterIsRefused PASSED" << std::endl;
 }
 
 
@@ -918,7 +1004,9 @@ int main() {
     testBytesOnDiskTracksTheRealFile();
     testDuplicateIdAcrossSymbols();
     testUnreadableJournalRefusesToAppend();
-    testTornFirstRecordStillAppends();
+    testTornFirstRecordIsRefused();
+    testTornTailIsRefused();
+    testCorruptRecordWithMoreAfterIsRefused();
     testFormatVersionMismatchIsRefused();
     testPreHeaderJournalStillReads();
     testLogNotStartingAtSequenceOneIsRefused();

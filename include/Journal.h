@@ -1449,7 +1449,9 @@ private:
                     "numbering.\n",
                     filePath_.c_str(), readable,
                     (unsigned long long)firstSequenceOnDisk());
+                return;
             }
+            refuseIfBytesPastReplayablePrefix();
             return;
         }
         // Record bytes, excluding any file header — a file holding nothing but
@@ -1457,7 +1459,8 @@ private:
         const size_t total = bytesOnDisk();
         const size_t bytes = total > dataOffset_ ? total - dataOffset_ : 0;
         if (bytes < sizeof(JournalEntry)) {
-            return;   // empty, or a torn first record
+            refuseIfBytesPastReplayablePrefix();   // a torn first record
+            return;
         }
         recoveryFailed_ = true;
         std::fprintf(stderr,
@@ -1472,6 +1475,38 @@ private:
             "          refused. Move the file aside and start from a\n"
             "          checkpoint, or replay it with the build that wrote it.\n",
             filePath_.c_str(), bytes, sizeof(JournalEntry));
+    }
+
+    // Replay stops at the first record it cannot use: a torn final write, a
+    // CRC-bad record, a sequence gap. Bytes past that point are a wall.
+    // Appending behind the wall is what this refuses: the next boot's replay
+    // stops at the same place, so every entry accepted in between is lost
+    // without a word (JRN-2). The bytes are left exactly as they are, and the
+    // message gives the repair. Truncating is the operator's call because past
+    // a corrupt record there may be valid ones, and truncating discards them.
+    void refuseIfBytesPastReplayablePrefix() {
+        const size_t validEnd = dataOffset_ + strictPrefixEntries_ * sizeof(JournalEntry);
+        const size_t total = bytesOnDisk();
+        if (total <= validEnd) {
+            return;
+        }
+        recoveryFailed_ = true;
+        const size_t extra = total - validEnd;
+        std::fprintf(stderr,
+            "[Journal] REFUSING TO APPEND: %s has %zu byte(s) after its last replayable\n"
+            "          record (%zu record(s), ending at byte %zu). Replay stops there, so\n"
+            "          anything appended behind them would be lost on the next restart.\n"
+            "          %s\n"
+            "          To keep the %zu replayable record(s) and continue, save a copy and\n"
+            "          cut the file at that point:\n"
+            "            cp '%s' '%s.damaged' && truncate -s %zu '%s'\n",
+            filePath_.c_str(), extra, strictPrefixEntries_, validEnd,
+            extra < sizeof(JournalEntry)
+                ? "Less than one record: the signature of a torn final write."
+                : "More than one record: a corrupt record or a gap, possibly with valid\n"
+                  "          records behind it, which truncating discards.",
+            strictPrefixEntries_, filePath_.c_str(), filePath_.c_str(), validEnd,
+            filePath_.c_str());
     }
 
     // First record's sequence number, for diagnostics only.

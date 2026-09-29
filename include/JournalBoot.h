@@ -35,18 +35,18 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
     const std::string journalPath = flagOrEnv(argc, argv, "--journal", "OB_JOURNAL_PATH");
     if (journalPath.empty()) return 0;
 
-    // A journal we cannot read is not the same as no journal. Starting anyway
-    // would serve an EMPTY BOOK while the real resting orders sit unreadable on
-    // disk — and the operator would have no reason to suspect it, because an
-    // engine with no orders looks exactly like an engine at the start of a
-    // session. The Journal prints what is wrong and how to proceed; refusing to
-    // boot is what makes someone read it.
+    // A journal we cannot safely append to is not the same as no journal.
+    // Starting anyway would serve an empty or partial book while the real
+    // resting orders sit on disk, or append where replay can never reach — and
+    // the operator would have no reason to suspect it, because a book missing
+    // orders looks like any other book. The Journal prints what is wrong and
+    // how to repair it; refusing to boot is what makes someone read it.
     if (!engine.enableJournal(journalPath, policy)) {
         std::cerr << "[Engine] FATAL: journal at " << journalPath
-                  << " could not be read (see the [Journal] message above).\n"
-                  << "        Refusing to start with an empty book. Move the\n"
-                  << "        file aside to start fresh, or replay it with the\n"
-                  << "        build that wrote it.\n";
+                  << " could not be opened safely (see the [Journal] message above).\n"
+                  << "        Refusing to start. Follow the repair it gives, move the\n"
+                  << "        file aside to start fresh, or replay it with the build\n"
+                  << "        that wrote it.\n";
         return 1;
     }
     std::cout << "[Engine] Journal enabled at " << journalPath << "\n";

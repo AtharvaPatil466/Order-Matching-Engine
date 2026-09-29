@@ -272,6 +272,11 @@ k8s probes (`/health`, `/readyz`) requires `Authorization: Bearer <token>`
 (constant-time compare, 401 otherwise). The production compose fails closed
 if the token is unset.
 
+The port listens on `127.0.0.1` unless `--admin-bind` / `OB_ADMIN_BIND` widens
+it. The Docker image sets `OB_ADMIN_BIND=0.0.0.0`, because a published port or
+a k8s probe arrives on the container's interface, not its loopback. Running the
+binary directly on a host that others need to reach? Pass `--admin-bind`.
+
 ```bash
 AUTH="Authorization: Bearer $OB_ADMIN_TOKEN"
 

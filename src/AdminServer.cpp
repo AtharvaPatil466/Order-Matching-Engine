@@ -86,7 +86,7 @@ AdminServer::~AdminServer() {
 bool AdminServer::start() {
     if (running_) return true;
 
-    // Fail closed. The admin port is bound to INADDR_ANY and serves the full
+    // Fail closed. The admin port can be bound off-box and serves the full
     // book, participant risk state and (when chaos injection is enabled)
     // order submission. Starting it with no token because none was
     // configured is the failure mode this guard exists to prevent — an
@@ -112,11 +112,16 @@ bool AdminServer::start() {
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port_);
+    if (::inet_pton(AF_INET, bindAddress_.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "[AdminServer] '" << bindAddress_
+                  << "' is not an IPv4 admin bind address\n";
+        ::close(sock);
+        return false;
+    }
 
     if (::bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[AdminServer] Failed to bind to port " << port_ << ": "
+        std::cerr << "[AdminServer] Failed to bind to " << bindAddress_ << ":" << port_ << ": "
                   << std::strerror(errno) << "\n";
         ::close(sock);
         return false;

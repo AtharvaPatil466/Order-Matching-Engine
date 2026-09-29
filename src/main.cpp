@@ -60,6 +60,7 @@ int main(int argc, char* argv[]) {
                 << "Usage: OrderEngine [options]\n"
                 << "  --threads N    Worker threads (default: 4)\n"
                 << "  --port P       Admin HTTP port (default: 8080)\n"
+                << "  --admin-bind A Admin listen address (default: 127.0.0.1; OB_ADMIN_BIND)\n"
                 << "  --symbols S    Number of symbols (default: 4)\n"
                 << "\n"
                 << "Replication (DISABLED unless acknowledged — known defects REPL-1..6):\n"
@@ -419,6 +420,13 @@ int main(int argc, char* argv[]) {
     // ── Admin HTTP server ────────────────────────────────────────────
     AdminServer admin(engine, adminPort);
     admin.setReplicationCoordinator(coord.get());  // null is fine — standalone
+    // Loopback unless widened. The Docker image sets OB_ADMIN_BIND=0.0.0.0: a
+    // published port or a k8s probe arrives on the container's interface, not
+    // its loopback. A bad address makes admin.start() below refuse.
+    if (const std::string adminBind = flagOrEnv(argc, argv, "--admin-bind", "OB_ADMIN_BIND");
+        !adminBind.empty()) {
+        admin.setBindAddress(adminBind);
+    }
     const std::string adminToken = flagOrEnv(argc, argv, "--admin-token", "OB_ADMIN_TOKEN");
     // Presence is enough. Read as a value-taking flag, a bare --admin-no-auth
     // in the last argv slot was invisible, so the opt-out the FATAL message

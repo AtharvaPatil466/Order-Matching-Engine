@@ -67,7 +67,11 @@ COPY config/engine.conf.example /app/config/engine.conf
 # Journal volume
 VOLUME /app/journal
 
-# Admin HTTP
+# Admin HTTP. OrderEngine listens on 127.0.0.1 unless told otherwise, and a
+# published port or a k8s probe arrives on the container's interface, not its
+# loopback — so the image widens it. The container's network namespace is the
+# boundary; auth still applies.
+ENV OB_ADMIN_BIND=0.0.0.0
 EXPOSE 8080
 # Gateway
 EXPOSE 9001

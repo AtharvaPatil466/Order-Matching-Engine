@@ -46,7 +46,7 @@ public:
     // unless either a token is set here or setAuthDisabled(true) is called
     // explicitly. The admin surface exposes the full order book (/book),
     // participant risk state, and — when OB_CHAOS_INJECT is on — order
-    // injection, on a socket bound to INADDR_ANY. An empty-token default
+    // injection, on whatever setBindAddress() exposes. An empty-token default
     // meant a deployment that simply forgot to configure a token served all
     // of that to anyone with network reach, silently. Forgetting is now a
     // startup failure rather than an open port.
@@ -57,6 +57,13 @@ public:
     // the admin port unauthenticated has to be a decision someone made, not
     // a config they omitted.
     void setAuthDisabled(bool disabled) { authDisabled_ = disabled; }
+
+    // IPv4 address to listen on. Call before start(). Loopback by default: the
+    // port used to bind INADDR_ANY, so every interface of the host served the
+    // book and risk state (all of it, under setAuthDisabled). A deployment
+    // reached from off-box — a published container port, a k8s probe — widens
+    // it on purpose, e.g. "0.0.0.0". start() refuses an unparseable address.
+    void setBindAddress(const std::string& address) { bindAddress_ = address; }
 
     // Readiness gate — false until the caller signals the engine is
     // ready to serve traffic. Flipped via setReady(true) after warm-up
@@ -121,6 +128,8 @@ private:
 
     // Explicit "I know this port is unauthenticated" acknowledgement.
     bool authDisabled_{false};
+
+    std::string bindAddress_{"127.0.0.1"};
 
     // Readiness flag — starts false. Set via setReady(true) once the
     // engine has completed start-up (journal replay, warm-up, etc.).

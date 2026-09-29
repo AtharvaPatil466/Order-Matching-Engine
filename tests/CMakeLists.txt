@@ -207,6 +207,18 @@ set_tests_properties(EngineRefusesReplicationRoleTest PROPERTIES
     TIMEOUT 180
     LABELS "project;security")
 
+# The admin port listens on loopback unless --admin-bind / OB_ADMIN_BIND widens
+# it; it used to bind INADDR_ANY. Probed from one of the host's non-loopback
+# addresses, the way another machine would reach it; skips (77) on a host
+# without one.
+add_test(NAME AdminBindsLoopbackTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(AdminBindsLoopbackTest PROPERTIES
+    TIMEOUT 180
+    SKIP_RETURN_CODE 77
+    LABELS "project;security")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)

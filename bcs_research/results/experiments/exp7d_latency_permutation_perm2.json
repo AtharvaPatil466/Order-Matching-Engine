@@ -1,0 +1,1941 @@
+{
+  "arms": [
+    {
+      "any_redistribution": true,
+      "cells": [
+        {
+          "aggregate_delta": {
+            "lower": 352.159228800631,
+            "mean": 602.1756569998474,
+            "n": 100,
+            "std": 1253.0496188858012,
+            "upper": 846.1450520497704
+          },
+          "aggregate_verdict": "maker_gains",
+          "hft_qty": 10,
+          "is_redistribution": false,
+          "n_hfts": 1,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1079.2526660748083,
+                "mean": 1518.356969999902,
+                "n": 100,
+                "std": 2068.06496328548,
+                "upper": 1910.4597529998798
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -1320.4767095750944,
+                "mean": -916.1813130000548,
+                "n": 100,
+                "std": 2135.146838421978,
+                "upper": -491.3382086000075
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -4.6266394804206354e-10,
+            "mean": -1.808648164569604e-10,
+            "n": 100,
+            "std": 1.4997540564204338e-09,
+            "upper": 1.1915616227042835e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": 142.79048734991247,
+            "mean": 408.5058619998637,
+            "n": 100,
+            "std": 1330.2412760831241,
+            "upper": 675.9981976251206
+          },
+          "aggregate_verdict": "maker_gains",
+          "hft_qty": 10,
+          "is_redistribution": false,
+          "n_hfts": 2,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1805.6456905742177,
+                "mean": 2231.4687339997445,
+                "n": 100,
+                "std": 2083.4195601863503,
+                "upper": 2649.759313825241
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2251.9248214246786,
+                "mean": -1822.962871999881,
+                "n": 100,
+                "std": 2121.880088457461,
+                "upper": -1415.693591750118
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -3.925862088749454e-10,
+            "mean": -1.0622528634485206e-10,
+            "n": 100,
+            "std": 1.509776751449552e-09,
+            "upper": 1.8169655646715879e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -85.32139302468318,
+            "mean": 161.71553499994644,
+            "n": 100,
+            "std": 1267.4276459279843,
+            "upper": 422.22833682503176
+          },
+          "aggregate_verdict": "indeterminate",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 3,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1804.4038362998504,
+                "mean": 2169.143078999871,
+                "n": 100,
+                "std": 1777.3062219247145,
+                "upper": 2517.6464692000864
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2361.648776349589,
+                "mean": -2007.4275439999242,
+                "n": 100,
+                "std": 1855.365213025237,
+                "upper": -1646.4023177749548
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -2.456231413816567e-10,
+            "mean": 1.4942713733034907e-11,
+            "n": 100,
+            "std": 1.289570367924516e-09,
+            "upper": 2.858118719473167e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -652.6510987237407,
+            "mean": -394.1547839995529,
+            "n": 100,
+            "std": 1288.9744924126353,
+            "upper": -129.187616174631
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 5,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1658.2500524252778,
+                "mean": 2021.939720000234,
+                "n": 100,
+                "std": 1779.5565194097148,
+                "upper": 2360.7984995498996
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2743.967523049825,
+                "mean": -2416.094503999787,
+                "n": 100,
+                "std": 1753.8935133112066,
+                "upper": -2074.9479485996135
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": 2.2083924022808823e-11,
+            "mean": 3.8944449443079067e-10,
+            "n": 100,
+            "std": 1.8303807023921692e-09,
+            "upper": 7.510091108997584e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -881.9673446250669,
+            "mean": -629.6269119999549,
+            "n": 100,
+            "std": 1282.1380339407267,
+            "upper": -373.8095207248861
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 6,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1157.4379381247932,
+                "mean": 1524.7340429998835,
+                "n": 100,
+                "std": 1794.0746940729043,
+                "upper": 1883.905541699691
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2496.5780785000184,
+                "mean": -2154.3609549998387,
+                "n": 100,
+                "std": 1835.5495144375006,
+                "upper": -1804.50128922471
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -4.187243405340265e-10,
+            "mean": -3.246896085329354e-11,
+            "n": 100,
+            "std": 2.0286633657307623e-09,
+            "upper": 3.571580577954586e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1090.7718430499053,
+            "mean": -837.8636709999362,
+            "n": 100,
+            "std": 1255.523885904734,
+            "upper": -581.7647293248295
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 7,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 891.8437927003529,
+                "mean": 1252.3404849999267,
+                "n": 100,
+                "std": 1771.3038305115595,
+                "upper": 1600.722998899732
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2422.6836909497483,
+                "mean": -2090.204155999863,
+                "n": 100,
+                "std": 1759.450343114472,
+                "upper": -1756.2380521750363
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -1.7125000795203953e-10,
+            "mean": 1.728619736240944e-10,
+            "n": 100,
+            "std": 1.7527875656155158e-09,
+            "upper": 5.139196730397088e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1271.308168875255,
+            "mean": -1007.9396870001626,
+            "n": 100,
+            "std": 1304.9940341883103,
+            "upper": -737.092506300128
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 8,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 275.5566412248467,
+                "mean": 660.074966999858,
+                "n": 100,
+                "std": 1874.2797518422376,
+                "upper": 1029.2954193747094
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2025.460668049911,
+                "mean": -1668.0146540000212,
+                "n": 100,
+                "std": 1873.805738100553,
+                "upper": -1307.1757523255183
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -6.793385978198785e-10,
+            "mean": -2.57073224929627e-10,
+            "n": 100,
+            "std": 2.141638515416058e-09,
+            "upper": 1.6367897615054946e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1552.6376379753417,
+            "mean": -1301.3513010001327,
+            "n": 100,
+            "std": 1269.4430730081701,
+            "upper": -1044.3234342007042
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 13,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -3001.157367025175,
+                "mean": -2618.421094000334,
+                "n": 100,
+                "std": 1868.7120189448444,
+                "upper": -2258.5071078509122
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 966.2496660004414,
+                "mean": 1317.0697930002016,
+                "n": 100,
+                "std": 1867.490290733849,
+                "upper": 1681.3870497003857
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -5.290293074722285e-10,
+            "mean": -8.918732419260778e-11,
+            "n": 100,
+            "std": 2.280331354231789e-09,
+            "upper": 3.5309875556777056e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1059.5477281000383,
+            "mean": -805.2182959997886,
+            "n": 100,
+            "std": 1281.2536737858823,
+            "upper": -539.0736896742279
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 21,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -3817.795075699771,
+                "mean": -3458.6013650001387,
+                "n": 100,
+                "std": 1701.561736115129,
+                "upper": -3116.01732312562
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 2325.7141493257636,
+                "mean": 2653.3830690003506,
+                "n": 100,
+                "std": 1760.3708338631739,
+                "upper": 2993.762121825423
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -3.1427720159626896e-10,
+            "mean": 1.8245373212266715e-10,
+            "n": 100,
+            "std": 2.5436943520661322e-09,
+            "upper": 6.728120069965368e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": 57.055627549807575,
+            "mean": 321.3520409997423,
+            "n": 100,
+            "std": 1289.32154783329,
+            "upper": 573.3873851248948
+          },
+          "aggregate_verdict": "maker_gains",
+          "hft_qty": 20,
+          "is_redistribution": false,
+          "n_hfts": 1,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1774.381916549767,
+                "mean": 2169.011712999842,
+                "n": 100,
+                "std": 1919.7742181783883,
+                "upper": 2542.619831749644
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -2204.5187574750958,
+                "mean": -1847.6596720001,
+                "n": 100,
+                "std": 1959.154223699787,
+                "upper": -1475.173019499993
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -4.3604693900078927e-10,
+            "mean": -1.2964278539584483e-10,
+            "n": 100,
+            "std": 1.5569512404335277e-09,
+            "upper": 1.747525715245497e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -469.7852857498582,
+            "mean": -205.86505699992864,
+            "n": 100,
+            "std": 1318.561171702761,
+            "upper": 58.52094812518507
+          },
+          "aggregate_verdict": "indeterminate",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 2,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 2503.4435150502622,
+                "mean": 2886.54254100002,
+                "n": 100,
+                "std": 1858.1008952399416,
+                "upper": 3260.135642374319
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -3441.008463225114,
+                "mean": -3092.407597999949,
+                "n": 100,
+                "std": 1794.3013110012257,
+                "upper": -2740.0236049000177
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -2.922535600191621e-10,
+            "mean": -4.3482373257575094e-11,
+            "n": 100,
+            "std": 1.3225859987351243e-09,
+            "upper": 2.1875291622563962e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -995.0401026499296,
+            "mean": -741.4940750000831,
+            "n": 100,
+            "std": 1277.0478200406762,
+            "upper": -477.40375762488884
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 3,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 2959.585836225078,
+                "mean": 3341.686602000004,
+                "n": 100,
+                "std": 1892.7154249537202,
+                "upper": 3718.066448900278
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -4448.091808200082,
+                "mean": -4083.1806770000867,
+                "n": 100,
+                "std": 1951.5342351400013,
+                "upper": -3710.068626800209
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -3.80332750182788e-10,
+            "mean": -8.512188287568279e-11,
+            "n": 100,
+            "std": 1.4919120830773752e-09,
+            "upper": 2.0091854935344561e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -2103.5717404750926,
+            "mean": -1845.9029620000556,
+            "n": 100,
+            "std": 1280.2864724285414,
+            "upper": -1581.333860525228
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 5,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 3117.94144160022,
+                "mean": 3486.3287709999877,
+                "n": 100,
+                "std": 1781.886186972775,
+                "upper": 3851.6108094251545
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -5667.45108214979,
+                "mean": -5332.231733000044,
+                "n": 100,
+                "std": 1774.6934293934507,
+                "upper": -4995.607746175168
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -5.336437425285112e-10,
+            "mean": -2.390970621490851e-10,
+            "n": 100,
+            "std": 1.4666864525481007e-09,
+            "upper": 6.395362106559286e-11
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -2571.252936824852,
+            "mean": -2312.333861999992,
+            "n": 100,
+            "std": 1287.9896291671196,
+            "upper": -2055.42754387509
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 6,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 2843.820399299919,
+                "mean": 3221.7272220000614,
+                "n": 100,
+                "std": 1858.6448795718052,
+                "upper": 3580.7740422250226
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -5882.57970132503,
+                "mean": -5534.061084000054,
+                "n": 100,
+                "std": 1878.2010849712613,
+                "upper": -5170.635066800138
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -3.564877033568336e-10,
+            "mean": -4.009507392765954e-11,
+            "n": 100,
+            "std": 1.647815293489455e-09,
+            "upper": 2.78031620837282e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -2986.1958494001196,
+            "mean": -2733.825576999852,
+            "n": 100,
+            "std": 1281.400742497144,
+            "upper": -2478.120849600255
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 7,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 2413.8993475002485,
+                "mean": 2787.3412499999995,
+                "n": 100,
+                "std": 1814.5516536552163,
+                "upper": 3148.9965704997553
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -5864.681649874808,
+                "mean": -5521.166826999851,
+                "n": 100,
+                "std": 1813.5038018103326,
+                "upper": -5169.80503829996
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -2.2704466573486557e-10,
+            "mean": 1.6363628674298524e-10,
+            "n": 100,
+            "std": 1.866998820891391e-09,
+            "upper": 5.449022637549205e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -3249.304106549717,
+            "mean": -2997.3784269997873,
+            "n": 100,
+            "std": 1269.3062443590575,
+            "upper": -2735.303033875049
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 8,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1855.882673750229,
+                "mean": 2230.8906250002137,
+                "n": 100,
+                "std": 1827.6977225759274,
+                "upper": 2586.1877898497346
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -5577.034814949652,
+                "mean": -5228.269052000001,
+                "n": 100,
+                "std": 1857.7632957712071,
+                "upper": -4859.940381975439
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -2.719935991990496e-10,
+            "mean": 1.0399617167422548e-10,
+            "n": 100,
+            "std": 2.049231898907257e-09,
+            "upper": 4.991179594071581e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -3944.3720790254506,
+            "mean": -3698.0935809999983,
+            "n": 100,
+            "std": 1248.5961381388286,
+            "upper": -3450.6511680754547
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": false,
+          "n_hfts": 13,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2907.051195500101,
+                "mean": -2512.8157320000873,
+                "n": 100,
+                "std": 1864.0096163881265,
+                "upper": -2138.1003257499365
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": -1525.216647624569,
+                "mean": -1185.2778489999116,
+                "n": 100,
+                "std": 1803.1492577378012,
+                "upper": -837.1322912499561
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -4.788448677572886e-10,
+            "mean": -6.869868229841813e-11,
+            "n": 100,
+            "std": 2.0414090403725007e-09,
+            "upper": 3.3394610454706706e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -3398.5541254253117,
+            "mean": -3147.3574450000506,
+            "n": 100,
+            "std": 1245.0911135331537,
+            "upper": -2898.686823425168
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 21,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -4343.361268750075,
+                "mean": -3990.668498000112,
+                "n": 100,
+                "std": 1707.134400658297,
+                "upper": -3650.9101051251873
+              },
+              "latency_us": 1000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 522.3603274501605,
+                "mean": 843.3110530000625,
+                "n": 100,
+                "std": 1725.9688484816077,
+                "upper": 1159.304761099909
+              },
+              "latency_us": 5000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -5.300773864291841e-10,
+            "mean": -2.7284841053187847e-12,
+            "n": 100,
+            "std": 2.5897246323363433e-09,
+            "upper": 5.01732642987917e-10
+          }
+        }
+      ],
+      "elapsed_sec": 402.2573528289795,
+      "latencies_us": [
+        1000,
+        5000
+      ],
+      "latency_scheme": "perm:[1, 5]",
+      "max_abs_residual": 3.8944449443079067e-10,
+      "n_makers": 2,
+      "n_per_maker_cells": 36,
+      "n_per_maker_gain_cells": 17,
+      "quoted_qty": [
+        1031,
+        1030
+      ]
+    },
+    {
+      "any_redistribution": true,
+      "cells": [
+        {
+          "aggregate_delta": {
+            "lower": 350.0855340000598,
+            "mean": 565.7451470003332,
+            "n": 100,
+            "std": 1150.9814041450252,
+            "upper": 786.7432347502166
+          },
+          "aggregate_verdict": "maker_gains",
+          "hft_qty": 10,
+          "is_redistribution": false,
+          "n_hfts": 1,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -1129.6783160747511,
+                "mean": -757.1247189997197,
+                "n": 100,
+                "std": 1939.9971936547954,
+                "upper": -376.69396139962566
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 932.7452892250013,
+                "mean": 1322.869866000053,
+                "n": 100,
+                "std": 2054.7091370030753,
+                "upper": 1697.60977262535
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -4.904451706977396e-10,
+            "mean": -1.609699040727719e-10,
+            "n": 100,
+            "std": 1.7399601600870539e-09,
+            "upper": 1.8730842299419229e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": 226.41192232533987,
+            "mean": 431.312251000359,
+            "n": 100,
+            "std": 1068.7701164057787,
+            "upper": 646.061453575557
+          },
+          "aggregate_verdict": "maker_gains",
+          "hft_qty": 10,
+          "is_redistribution": false,
+          "n_hfts": 2,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2004.7234766995578,
+                "mean": -1670.148377999646,
+                "n": 100,
+                "std": 1707.211478484099,
+                "upper": -1353.1267397749252
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 1733.1664549248944,
+                "mean": 2101.4606290000047,
+                "n": 100,
+                "std": 1934.443291635481,
+                "upper": 2483.5389187248647
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -3.288709464754901e-10,
+            "mean": -2.0846755433012732e-11,
+            "n": 100,
+            "std": 1.5743074847577004e-09,
+            "upper": 2.820645974566104e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -37.89269529978429,
+            "mean": 179.0616130003817,
+            "n": 100,
+            "std": 1140.4231818150088,
+            "upper": 412.19729705005994
+          },
+          "aggregate_verdict": "indeterminate",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 3,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2371.8153545492846,
+                "mean": -2045.7572709997119,
+                "n": 100,
+                "std": 1707.7924702451185,
+                "upper": -1724.3795344496605
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 1856.2050342500966,
+                "mean": 2224.818884000093,
+                "n": 100,
+                "std": 1924.613549945003,
+                "upper": 2602.550226975083
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -3.619134076870978e-10,
+            "mean": -5.5355684480673516e-11,
+            "n": 100,
+            "std": 1.5239058912905383e-09,
+            "upper": 2.4264868869749963e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -560.4276703495955,
+            "mean": -352.1732099996297,
+            "n": 100,
+            "std": 1087.515721195379,
+            "upper": -130.39055762477747
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 5,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2468.4428060499426,
+                "mean": -2152.104367999608,
+                "n": 100,
+                "std": 1641.3063075961409,
+                "upper": -1837.3563025746685
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 1449.815861050082,
+                "mean": 1799.9311579999778,
+                "n": 100,
+                "std": 1802.927485948539,
+                "upper": 2152.45055654966
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -2.8644669214372693e-10,
+            "mean": 5.3961457524565046e-11,
+            "n": 100,
+            "std": 1.7677219136260643e-09,
+            "upper": 3.99059274514002e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -770.2352569244807,
+            "mean": -565.5068289996299,
+            "n": 100,
+            "std": 1100.861121579335,
+            "upper": -348.13329879980023
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 6,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2420.048271349953,
+                "mean": -2064.6434359997656,
+                "n": 100,
+                "std": 1832.0259263076543,
+                "upper": -1703.9851700499528
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 1124.7667427499382,
+                "mean": 1499.1366070001359,
+                "n": 100,
+                "std": 1928.5684349031128,
+                "upper": 1886.393902775293
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -4.0780699350762004e-10,
+            "mean": -4.407525011629332e-11,
+            "n": 100,
+            "std": 1.754369860510694e-09,
+            "upper": 2.8593939305210354e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1013.2927884995581,
+            "mean": -810.9610169995332,
+            "n": 100,
+            "std": 1060.7133934261462,
+            "upper": -595.2732326250228
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 7,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2129.7193545998034,
+                "mean": -1814.118909999686,
+                "n": 100,
+                "std": 1700.338080053917,
+                "upper": -1494.6548001996296
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 638.586402650284,
+                "mean": 1003.1578930001531,
+                "n": 100,
+                "std": 1898.3319266643246,
+                "upper": 1363.7687566250045
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -2.761478867796541e-10,
+            "mean": 8.768665793468244e-11,
+            "n": 100,
+            "std": 1.8453097531050175e-09,
+            "upper": 4.4191358483658393e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1149.2367295742183,
+            "mean": -942.7147939994293,
+            "n": 100,
+            "std": 1067.2373127674823,
+            "upper": -725.9606940242527
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 8,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -1874.1750671246843,
+                "mean": -1545.2306459995818,
+                "n": 100,
+                "std": 1758.604373441884,
+                "upper": -1211.6104349746747
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 238.16078487518288,
+                "mean": 602.5158520001527,
+                "n": 100,
+                "std": 1886.6395760039863,
+                "upper": 967.927066000262
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -2.744137646004673e-10,
+            "mean": 1.4861825547995977e-10,
+            "n": 100,
+            "std": 2.1685515660185333e-09,
+            "upper": 5.680495860360677e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -1436.2409932991989,
+            "mean": -1228.6634429995624,
+            "n": 100,
+            "std": 1082.2224851316175,
+            "upper": -1010.22922214943
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 13,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 1272.3202272752226,
+                "mean": 1578.985705000313,
+                "n": 100,
+                "std": 1675.8241210524975,
+                "upper": 1906.1061478001475
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -3152.4230475999393,
+                "mean": -2807.649147999876,
+                "n": 100,
+                "std": 1796.1724540522541,
+                "upper": -2462.937226650019
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -4.0604169271318814e-10,
+            "mean": 1.0377789294579998e-10,
+            "n": 100,
+            "std": 2.6234493506902986e-09,
+            "upper": 5.989596161271037e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -973.8004578245984,
+            "mean": -767.7198339997589,
+            "n": 100,
+            "std": 1093.852719343933,
+            "upper": -544.6302024998035
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 10,
+          "is_redistribution": true,
+          "n_hfts": 21,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 2510.480853775167,
+                "mean": 2813.724176000038,
+                "n": 100,
+                "std": 1659.404727487147,
+                "upper": 3145.411336324879
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.009699321047526674,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -3932.3513990496226,
+                "mean": -3581.444009999795,
+                "n": 100,
+                "std": 1781.404529815819,
+                "upper": -3233.58155114984
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.009708737864077669,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.0048520135856380394,
+          "zero_sum_residual": {
+            "lower": -6.754490868843275e-10,
+            "mean": -2.0490801944106353e-10,
+            "n": 100,
+            "std": 2.3344044459479754e-09,
+            "upper": 2.3650676439501675e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": 196.6122660256118,
+            "mean": 393.38136300055044,
+            "n": 100,
+            "std": 1045.2231771202323,
+            "upper": 606.8973024504763
+          },
+          "aggregate_verdict": "maker_gains",
+          "hft_qty": 20,
+          "is_redistribution": false,
+          "n_hfts": 1,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -2082.3244074493887,
+                "mean": -1660.4755399996718,
+                "n": 100,
+                "std": 2105.6296686347514,
+                "upper": -1255.9976426496603
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 1599.9351593248798,
+                "mean": 2053.856903000222,
+                "n": 100,
+                "std": 2259.969622029495,
+                "upper": 2511.7018727250907
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -4.156456867576701e-11,
+            "mean": 2.309005253664509e-10,
+            "n": 100,
+            "std": 1.389530976450424e-09,
+            "upper": 5.06670758682048e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -414.91394564960814,
+            "mean": -197.48240799972442,
+            "n": 100,
+            "std": 1125.3232298729033,
+            "upper": 33.216402625290435
+          },
+          "aggregate_verdict": "indeterminate",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 2,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -3611.1420318247533,
+                "mean": -3237.116959999752,
+                "n": 100,
+                "std": 1870.7821963498477,
+                "upper": -2888.78209764963
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 2668.3689769251796,
+                "mean": 3039.6345520000277,
+                "n": 100,
+                "std": 1990.5411224702937,
+                "upper": 3415.8159313499077
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -3.660657625914609e-10,
+            "mean": -1.234212732015294e-10,
+            "n": 100,
+            "std": 1.2833113014580899e-09,
+            "upper": 1.299885354910652e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -938.7983081744483,
+            "mean": -732.0253969993029,
+            "n": 100,
+            "std": 1096.4323583963703,
+            "upper": -507.47106814975103
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 3,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -4340.189640524713,
+                "mean": -4017.2259149996557,
+                "n": 100,
+                "std": 1744.26678382847,
+                "upper": -3676.5519114994254
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 2902.227246100668,
+                "mean": 3285.2005180003525,
+                "n": 100,
+                "std": 1908.1212323905252,
+                "upper": 3645.4945245005997
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -1.0969841923724636e-11,
+            "mean": 2.6804059416463133e-10,
+            "n": 100,
+            "std": 1.4185540046391993e-09,
+            "upper": 5.387230430642375e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -2072.5169334245807,
+            "mean": -1864.3132369997911,
+            "n": 100,
+            "std": 1088.68171343898,
+            "upper": -1642.4505269000151
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 5,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -5490.156172699868,
+                "mean": -5163.827523999826,
+                "n": 100,
+                "std": 1731.9809831515875,
+                "upper": -4821.89980182481
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 2916.5973279000477,
+                "mean": 3299.514287000034,
+                "n": 100,
+                "std": 1957.1706142527316,
+                "upper": 3671.3306061750714
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -5.65633115456876e-10,
+            "mean": -2.264982867927756e-10,
+            "n": 100,
+            "std": 1.7501811400240236e-09,
+            "upper": 1.1274858024989927e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -2461.72994682414,
+            "mean": -2265.40165599954,
+            "n": 100,
+            "std": 1060.2731140127241,
+            "upper": -2050.807000274157
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 6,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -5748.0914100746395,
+                "mean": -5426.43416699963,
+                "n": 100,
+                "std": 1737.564436872412,
+                "upper": -5091.332411899557
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 2794.0691240751594,
+                "mean": 3161.0325110000913,
+                "n": 100,
+                "std": 1879.1577463425615,
+                "upper": 3522.631766825067
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -2.3258189685293472e-10,
+            "mean": 1.4453689800575374e-10,
+            "n": 100,
+            "std": 1.9170637477870416e-09,
+            "upper": 5.232723196968434e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -2852.1218225741895,
+            "mean": -2635.779865999444,
+            "n": 100,
+            "std": 1126.1018017850852,
+            "upper": -2403.0389974493505
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 7,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -5846.310681574892,
+                "mean": -5513.260509999718,
+                "n": 100,
+                "std": 1771.6594887030542,
+                "upper": -5166.144769199985
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 2507.640435925362,
+                "mean": 2877.4806440002744,
+                "n": 100,
+                "std": 1961.2410725180268,
+                "upper": 3271.3473043002696
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -1.0032260888692689e-10,
+            "mean": 2.0092102204216643e-10,
+            "n": 100,
+            "std": 1.5483341486513697e-09,
+            "upper": 4.996771849619108e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -3177.8208630252693,
+            "mean": -2968.5162779997486,
+            "n": 100,
+            "std": 1090.9581617639358,
+            "upper": -2741.700795274596
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 8,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -5441.645715524726,
+                "mean": -5126.083364999765,
+                "n": 100,
+                "std": 1698.3802079018367,
+                "upper": -4800.084317724648
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": 1799.102326999745,
+                "mean": 2157.5670870000167,
+                "n": 100,
+                "std": 1864.5671582084838,
+                "upper": 2512.840353675244
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_gains"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -6.330911901386571e-10,
+            "mean": -2.0306742953835056e-10,
+            "n": 100,
+            "std": 2.1714222150070347e-09,
+            "upper": 1.8132095647160884e-10
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -3868.5818452497915,
+            "mean": -3663.304404999931,
+            "n": 100,
+            "std": 1087.390280178536,
+            "upper": -3446.876639449863
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": false,
+          "n_hfts": 13,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": -1480.2528870997726,
+                "mean": -1152.2646259997573,
+                "n": 100,
+                "std": 1750.931618050083,
+                "upper": -819.2376020246295
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_pays"
+            },
+            {
+              "delta_ci": {
+                "lower": -2850.1150202751314,
+                "mean": -2511.0397790001734,
+                "n": 100,
+                "std": 1814.8195408398826,
+                "upper": -2162.5711201251247
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -7.822968655091245e-10,
+            "mean": -3.5482571547618135e-10,
+            "n": 100,
+            "std": 2.176744237891064e-09,
+            "upper": 6.605500857403966e-11
+          }
+        },
+        {
+          "aggregate_delta": {
+            "lower": -3346.2121570495005,
+            "mean": -3134.055516999298,
+            "n": 100,
+            "std": 1091.6554449941723,
+            "upper": -2910.641833348662
+          },
+          "aggregate_verdict": "maker_pays",
+          "hft_qty": 20,
+          "is_redistribution": true,
+          "n_hfts": 21,
+          "n_seeds": 100,
+          "per_maker": [
+            {
+              "delta_ci": {
+                "lower": 675.9566147007322,
+                "mean": 987.4737600005896,
+                "n": 100,
+                "std": 1659.4764740276075,
+                "upper": 1312.193636900654
+              },
+              "latency_us": 5000,
+              "maker_index": 0,
+              "quoted_qty": 1031,
+              "snipe_quote_ratio_per_maker": 0.019398642095053348,
+              "verdict": "maker_gains"
+            },
+            {
+              "delta_ci": {
+                "lower": -4451.969619399907,
+                "mean": -4121.529276999887,
+                "n": 100,
+                "std": 1723.2776607540745,
+                "upper": -3777.8174858746825
+              },
+              "latency_us": 1000,
+              "maker_index": 1,
+              "quoted_qty": 1030,
+              "snipe_quote_ratio_per_maker": 0.019417475728155338,
+              "verdict": "maker_pays"
+            }
+          ],
+          "snipe_quote_ratio": 0.009704027171276079,
+          "zero_sum_residual": {
+            "lower": -1.5038403944345185e-10,
+            "mean": 3.260902303736657e-10,
+            "n": 100,
+            "std": 2.460745163156822e-09,
+            "upper": 7.996319482117537e-10
+          }
+        }
+      ],
+      "elapsed_sec": 381.4403278827667,
+      "latencies_us": [
+        5000,
+        1000
+      ],
+      "latency_scheme": "perm:[5, 1]",
+      "max_abs_residual": 3.5482571547618135e-10,
+      "n_makers": 2,
+      "n_per_maker_cells": 36,
+      "n_per_maker_gain_cells": 17,
+      "quoted_qty": [
+        1031,
+        1030
+      ]
+    }
+  ],
+  "config": {
+    "adverse_sensitivity": 0.015,
+    "base_half_spread": 50,
+    "dt_us": 1000,
+    "duration_us": 3000000,
+    "hft_cost_bps": 0.0,
+    "hft_latency_us": 0,
+    "hft_qty": 2061,
+    "hft_race_noise_us": 100,
+    "lambda_per_tick": 0.4265786518731485,
+    "min_quote_qty": 1,
+    "mm_inventory_skew": 0.2,
+    "mm_latency_us": 3000,
+    "n_hft": 3,
+    "n_noise": 8,
+    "noise_qty": 1,
+    "quote_qty": 2061,
+    "sigma": 20.567342137215924,
+    "size_sigma_ln": 2.7972073448963837,
+    "spread_cap_mult": 10.0,
+    "spread_decay": 0.1
+  },
+  "conservation_ok": true,
+  "elapsed_sec": 783.6979088783264,
+  "group": "perm2",
+  "max_abs_residual": 3.8944449443079067e-10,
+  "n_seeds": 100
+}

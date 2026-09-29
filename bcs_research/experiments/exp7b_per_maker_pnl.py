@@ -125,8 +125,10 @@ def run_cell(hft_qty: int, n_hfts: int, arm_cfg: dict, base_rows: list[dict],
 
 
 def run_arm(n_makers: int, scheme: str, cfg: dict, n_seeds: int,
-            boot_seed: int = 0) -> dict:
-    lats = maker_latencies(n_makers, scheme)
+            boot_seed: int = 0, lats: list[int] | None = None) -> dict:
+    # Explicit latencies (per maker slot, in slot order) for exp7d's permutation
+    # and alternative-value arms; otherwise the scheme's published set.
+    lats = list(lats) if lats is not None else maker_latencies(n_makers, scheme)
     qtys = _split_qty(cfg["quote_qty"], n_makers)
     arm_cfg = {**cfg, "mm_latencies_us": lats}
     print(f"\n{'=' * 96}\nM={n_makers} [{scheme}] lat={lats} qty={qtys}\n{'=' * 96}",

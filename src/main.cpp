@@ -62,7 +62,8 @@ int main(int argc, char* argv[]) {
                 << "  --port P       Admin HTTP port (default: 8080)\n"
                 << "  --symbols S    Number of symbols (default: 4)\n"
                 << "\n"
-                << "Replication (env-driven, optional):\n"
+                << "Replication (DISABLED unless acknowledged — known defects REPL-1..6):\n"
+                << "  --allow-unsafe-replication  required with a role (OB_ALLOW_UNSAFE_REPLICATION=1)\n"
                 << "  OB_NODE_ROLE              primary | backup   (unset = standalone)\n"
                 << "  OB_NODE_ID                numeric node id    (default: 1)\n"
                 << "  OB_REPLICATION_PORT       primary listen port (default: 9002)\n"
@@ -131,6 +132,28 @@ int main(int argc, char* argv[]) {
         if (!resolvedJournal.empty() && !isJournalPathWritable(resolvedJournal)) {
             vr.fail("journal path '" + resolvedJournal +
                     "': parent directory does not exist or is not writable");
+        }
+
+        // Replication is disabled unless explicitly acknowledged. A role used
+        // to switch it on, and docker-compose.yml set one on both engines, so
+        // the default deployment ran a path with known CRITICAL defects
+        // (REPL-1..6): a deposed primary is never fenced; a promoted backup
+        // keeps applying the old primary's stream, so orders execute twice; a
+        // replication send blocks the journal commit path with no timeout,
+        // freezing acks; entries lost in a disconnect are never re-sent. The
+        // opt-in exists for the chaos suite, which is there to exercise exactly
+        // this path — the same shape as --no-participant-auth.
+        const std::string requestedRole = flagOrEnv(argc, argv, "--role", "OB_NODE_ROLE");
+        if (!requestedRole.empty() &&
+            !flagOrEnvBool(argc, argv, "--allow-unsafe-replication",
+                           "OB_ALLOW_UNSAFE_REPLICATION")) {
+            vr.fail("replication is disabled (--role / OB_NODE_ROLE = '" + requestedRole +
+                    "'). It has known CRITICAL defects (REPL-1..6): a deposed primary "
+                    "is never fenced, a promoted backup can execute orders twice, a "
+                    "slow backup freezes acks, and entries lost in a disconnect are "
+                    "never re-sent. Run standalone (unset the role), or pass "
+                    "--allow-unsafe-replication (OB_ALLOW_UNSAFE_REPLICATION=1) to run "
+                    "it anyway");
         }
 
         if (!vr.ok) {

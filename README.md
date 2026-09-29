@@ -70,7 +70,7 @@ All four protocols dispatch into the same `MatchingEngine`. Drop a different ses
 
 ### Reliability & Observability
 - **CRC-32 Journaling**: Write-ahead log with crash recovery, atomic checkpoint, and deterministic replay via virtual clock; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
-- **End-to-End Wired Primary-Backup Replication**: `ReplicationCoordinator` instantiated in `src/main.cpp` driven by `OB_NODE_ROLE` / `OB_NODE_ID` / `OB_PRIMARY_HOST` env vars; primary's `Journal::onCommit` hook ships each fsync-durable batch to backup, backup's `applyReplicatedEntry` writes to its own journal — empirically verified end-to-end via the chaos suite
+- **Primary-Backup Replication — disabled by default, known defects**: `ReplicationCoordinator` is wired into `src/main.cpp` behind `OB_NODE_ROLE`, but a role now refuses to boot unless `--allow-unsafe-replication` acknowledges it. The path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced, and a promoted backup can execute orders twice. The chaos suite still runs the 1+1 topology, opted in
 - **Lease Propagation + Fencing**: Primary broadcasts `LeaseGrant` (durationMs) every heartbeat tick; backup's local lease state is refreshed via same-epoch-from-same-holder path; `BackupPromote` requires both heartbeat miss AND local lease expiry — prevents split brain under packet loss, asymmetric partition, and clock skew
 - **TCP Auto-Reconnect**: `ReplicationTransport::receiveLoop` retries `connectTo()` against saved host/port after socket loss — backup re-establishes within milliseconds of primary recovery without external orchestration
 - **Snapshot Catchup on Join**: When a backup connects, primary streams all currently-resting orders via `streamSnapshot` → `JournalEntry::Snapshot` messages; idempotent on receiver — closes the rolling-restart gap
@@ -356,7 +356,9 @@ The forwarding proxy (`OB_ENGINE_HOST`/`OB_ENGINE_PORT`) relays frames it does
 not interpret, so it does not authenticate; the engine it forwards to does.
 
 ### Replication (live binary)
-The OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE` is set. Primary listens on `OB_REPLICATION_PORT` (default 9002); backup connects to `OB_PRIMARY_HOST`:`OB_PRIMARY_REPLICATION_PORT` and runs in replay mode until promotion. Set `OB_JOURNAL_PATH` to enable journal commit → backup shipping. The chaos suite (`docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build`) provides a fully-wired 1+1 topology.
+**Disabled unless explicitly acknowledged.** Setting `OB_NODE_ROLE` / `--role` alone makes `OrderEngine` refuse to boot, because the path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced; a promoted backup keeps applying the old primary's stream, so orders execute twice; a replication send blocks the journal commit path with no timeout, freezing acks; entries lost in a disconnect are never re-sent. The default `docker-compose.yml` is a single node. To run it anyway, also pass `--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`).
+
+With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE` is set. Primary listens on `OB_REPLICATION_PORT` (default 9002); backup connects to `OB_PRIMARY_HOST`:`OB_PRIMARY_REPLICATION_PORT` and runs in replay mode until promotion. Set `OB_JOURNAL_PATH` to enable journal commit → backup shipping. The chaos suite (`docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build`) provides a fully-wired 1+1 topology, opted in.
 
 ## 🧪 Verification
 

@@ -35,6 +35,9 @@ services:
       - "19002:9002"   # replication (mostly for debugging; backup connects via network alias)
     environment:
       - OB_NODE_ROLE=primary
+      # Replication refuses to start without this acknowledgement (known
+      # defects REPL-1..6). This suite exists to exercise that path, so it opts in.
+      - OB_ALLOW_UNSAFE_REPLICATION=1
       - OB_NODE_ID=1
       - OB_REPLICATION_PORT=9002
       - OB_JOURNAL_PATH=/app/journal/primary.wal
@@ -66,6 +69,9 @@ services:
       - "18081:8080"
     environment:
       - OB_NODE_ROLE=backup
+      # Replication refuses to start without this acknowledgement (known
+      # defects REPL-1..6). This suite exists to exercise that path, so it opts in.
+      - OB_ALLOW_UNSAFE_REPLICATION=1
       - OB_NODE_ID=2
       - OB_PRIMARY_HOST=primary
       - OB_PRIMARY_REPLICATION_PORT=9002

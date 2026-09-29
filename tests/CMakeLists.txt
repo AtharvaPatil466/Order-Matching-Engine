@@ -195,6 +195,18 @@ set_tests_properties(EngineReplaysJournalTest PROPERTIES
 # records frame perfectly, so this is content trust, not layout compatibility.
 # Covers the refusal, the operator's override, and that a journal this build
 # wrote still replays.
+# A role must not switch replication on. It has known CRITICAL defects
+# (REPL-1..6), and docker-compose.yml set a role on both engines, so the default
+# deployment ran it. Now a role refuses to boot unless --allow-unsafe-replication
+# acknowledges it; deploy/chaos opts in. Deadline-driven: at HEAD the engine
+# served, and a serving engine never exits.
+add_test(NAME EngineRefusesReplicationRoleTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_replication_role.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRefusesReplicationRoleTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;security")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)

@@ -1141,9 +1141,15 @@ protected:
             }
         }
 
-        // persistedEntries_ + metric reflect bytes that reached the file,
-        // regardless of the ack decision (matches the synchronous path).
+        // persistedEntries_, bytesOnDisk_ + metric reflect bytes that reached
+        // the file, regardless of the ack decision (matches the synchronous
+        // path). bytesOnDisk_ used to be missing here, so on io_uring it counted
+        // only the 24-byte header — after 200 appends, 24 against a 26,824-byte
+        // file — and the size-based checkpoint, which reads it, could never fire.
+        // It went unseen because no environment ran this path: CI has no
+        // liburing, and Docker's default seccomp blocks io_uring at runtime.
         persistedEntries_.fetch_add(written, std::memory_order_relaxed);
+        bytesOnDisk_.fetch_add(written * sizeof(JournalEntry), std::memory_order_relaxed);
         static auto& kEntriesCommitted = MetricsRegistry::instance().counter(
             "journal_entries_committed_total",
             "Total journal entries successfully written to disk");

@@ -913,17 +913,24 @@ timer**.
 
 > `src/OrderBook.cpp:2191-2192`
 
-What actually retires DAY orders is a separate sweep at graceful shutdown, which cancels
-every `DAY` order regardless of `expiryTime`.
+There is a separate session-end sweep, `cancelDayOrders()`, which cancels every `DAY` order
+regardless of `expiryTime`. It runs only from `gracefulShutdown(/*cancelDayOrders=*/true)` —
+an explicit end-of-day stop — and **no shipped binary makes that call**.
 
-> `src/MatchingEngine.cpp:1168-1181` — `cancelDayOrders()`, called from the shutdown report
-> path at `src/MatchingEngine.cpp:1219`
+> `src/MatchingEngine.cpp` — `cancelDayOrders()`, and the `cancelDayOrdersNow` branch of
+> `gracefulShutdown`
 
-**Status: Undocumented — no test pins the interaction, and it may be incidental.** Nothing in
-the engine derives a session-end `expiryTime` for a `DAY` order, so between submission and
-shutdown a `DAY` order with `expiryTime == 0` behaves identically to a `GTC` order. That may
-be intended (shutdown is the session end) or may be a gap — `SessionScheduler` drives
-trading-state transitions but never touches time-in-force.
+**Status: Decided — a process stop is not a session end.** `gracefulShutdown()` used to run
+the sweep unconditionally, and it is what `OrderEngine` calls on SIGTERM, so every deploy,
+config reload or crash-restart cancelled every client's `DAY` orders mid-session. It now
+defaults to keeping them, and a restart restores them (`GracefulShutdownTest`, "A routine
+stop keeps DAY orders").
+
+That leaves a real gap, stated rather than hidden: nothing retires a `DAY` order at the end
+of the day. Neither binary runs `SessionScheduler` (which drives trading states but never
+touches time-in-force) or the expiry timer, and nothing derives a session-end `expiryTime`.
+So a `DAY` order with `expiryTime == 0` behaves exactly like `GTC` — the same state `GTD`
+orders are already in, since without the timer they do not expire either.
 
 **How venues specify it.** Every venue publishes DAY as "cancelled at the end of the trading
 session", and deriving the session-end timestamp from the session calendar is how I would

@@ -80,7 +80,10 @@ int main() {
 
         std::thread shutter([&] {
             while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
-            engine.gracefulShutdown();
+            // Explicitly end-of-day: the DAY-order sweep is the teardown this
+            // test races. A routine stop no longer runs it, so without `true`
+            // this would still pass while testing nothing.
+            engine.gracefulShutdown(/*cancelDayOrders=*/true);
         });
 
         go.store(true, std::memory_order_release);

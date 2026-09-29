@@ -1203,7 +1203,7 @@ size_t MatchingEngine::cancelDayOrders() {
     return cancelled;
 }
 
-MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown() {
+MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown(bool cancelDayOrdersNow) {
     ShutdownReport report{};
 
     // 1. Stop admitting new orders. Already-enqueued requests still drain.
@@ -1215,8 +1215,10 @@ MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown() {
         waitForDrain();
     }
 
-    // 3. Session end: cancel every DAY order (journaled + logged). GTD/GTC stay.
-    report.dayOrdersCancelled = cancelDayOrders();
+    // 3. Only at a real session end: cancel every DAY order (journaled +
+    //    logged). A process stop is not one — see the header — so by default
+    //    DAY orders are persisted like everything else and restored on restart.
+    if (cancelDayOrdersNow) report.dayOrdersCancelled = cancelDayOrders();
 
     // 4. Tally the survivors by time-in-force so the caller can see exactly what
     //    will be restored, then persist them via checkpoint. Restart's

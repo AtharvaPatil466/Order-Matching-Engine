@@ -509,8 +509,11 @@ int main(int argc, char* argv[]) {
     }
 
     // Graceful shutdown (P3-6): stop admitting new orders, drain in-flight
-    // requests, cancel DAY orders at session end, and checkpoint GTD/GTC
-    // resting orders so a restart restores them.
+    // requests, and checkpoint every resting order so a restart restores it.
+    // DAY orders included: a SIGTERM is a deploy, a reload or a crash-restart,
+    // not the end of a session, and this used to cancel every client's DAY
+    // orders on each one. Nothing here knows when a session ends, so nothing
+    // here cancels them.
     std::cout << "\n[Engine] Shutting down — draining queues...\n";
     admin.stop();
 #ifdef OB_HAVE_DPDK

@@ -3,12 +3,14 @@
 // Explicit semantics under test (see MatchingEngine::gracefulShutdown):
 //   * GTD resting orders PERSIST and are restored on restart.
 //   * GTC resting orders persist too (they outlive a session by definition).
-//   * DAY orders are CANCELLED at session end and are NOT restored.
+//   * DAY orders are cancelled ONLY at an explicit end-of-day stop
+//     (gracefulShutdown(true)) and are then not restored. A routine stop —
+//     what OrderEngine does on SIGTERM — keeps them; see Test 6.
 //   * An in-flight IOC that cannot fully match cancels its remainder — it is
 //     never left resting, so it is not persisted.
 //   * An in-flight partial fill completes: the resting remainder of a GTD is
 //     persisted with the correct remaining quantity; the remainder of a DAY is
-//     cancelled.
+//     cancelled at an end-of-day stop.
 //
 // Restart is modelled the same way the GTD replay test does it: destroy the
 // engine (flushing the journal), then build a fresh engine and replayJournal().
@@ -58,7 +60,7 @@ void test_gtd_persists_day_cancelled() {
 
         assert(countOrders(*engine.getOrderBook(1)) == 3);
 
-        report = engine.gracefulShutdown();
+        report = engine.gracefulShutdown(/*cancelDayOrders=*/true);   // an end-of-day stop
 
         // DAY gone from the live book; GTD + GTC still resting.
         assert(engine.getOrderBook(1)->getOrder(101) == nullptr);
@@ -156,7 +158,7 @@ void test_partial_fill_day_cancelled() {
         auto* o300 = engine.getOrderBook(1)->getOrder(300);
         assert(o300 != nullptr && o300->remainingQty == 7);
 
-        auto report = engine.gracefulShutdown();
+        auto report = engine.gracefulShutdown(/*cancelDayOrders=*/true);
         assert(report.dayOrdersCancelled == 1);
         assert(report.ordersPersisted == 0);
         assert(engine.getOrderBook(1)->getOrder(300) == nullptr);
@@ -197,7 +199,7 @@ void test_async_drain_ioc_and_gtd() {
                            0, 0, TimeInForce::DAY);
         engine.submitOrder(1, 402, 2, Side::Buy, 970000, 5, OrderType::IOC);
 
-        auto report = engine.gracefulShutdown();  // drains internally
+        auto report = engine.gracefulShutdown(/*cancelDayOrders=*/true);  // drains internally
 
         assert(report.dayOrdersCancelled == 1);
         assert(report.gtdOrdersPersisted == 1);
@@ -241,7 +243,7 @@ void test_no_journal_safe() {
     engine.submitOrder(1, 501, 1, Side::Buy, 980000, 10, OrderType::Limit,
                        0, 0, TimeInForce::DAY);
 
-    auto report = engine.gracefulShutdown();
+    auto report = engine.gracefulShutdown(/*cancelDayOrders=*/true);
     assert(report.dayOrdersCancelled == 1);
     assert(report.gtdOrdersPersisted == 1);
     assert(!report.journalEnabled);  // nothing durable to restore from
@@ -249,6 +251,60 @@ void test_no_journal_safe() {
     assert(engine.getOrderBook(1)->getOrder(500) != nullptr);
 
     engine.stop();
+    PASS();
+}
+
+// ─── Test 6: a ROUTINE stop keeps DAY orders across a restart ──────────────
+//
+// Process stop is not session end. gracefulShutdown() used to cancel every DAY
+// order unconditionally, and it is exactly what OrderEngine calls on SIGTERM —
+// so every deploy, config reload or crash-restart silently cancelled every
+// client's DAY orders mid-session, orders the clients had never cancelled.
+// Neither binary runs a session calendar, so nothing else was ever going to
+// tell a restart apart from the end of the day.
+//
+// The default now keeps them; cancelling is an explicit end-of-day choice
+// (cancelDayOrders = true), which the tests above exercise.
+
+void test_routine_stop_keeps_day_orders() {
+    SECTION("A routine stop keeps DAY orders, and a restart restores them");
+
+    const char* jpath = "/tmp/graceful_shutdown_routine_day.journal";
+    std::remove(jpath);
+
+    MatchingEngine::ShutdownReport report{};
+    {
+        MatchingEngine engine;
+        engine.addSymbol(1);
+        engine.enableJournal(jpath);
+        engine.start();
+
+        engine.submitOrder(1, 600, 1, Side::Buy, 980000, 10, OrderType::Limit,
+                           0, 0, TimeInForce::DAY);
+        engine.submitOrder(1, 601, 2, Side::Buy, 970000, 10, OrderType::Limit,
+                           0, 0, TimeInForce::GTC);
+
+        report = engine.gracefulShutdown();   // the call OrderEngine makes on SIGTERM
+
+        assert(engine.getOrderBook(1)->getOrder(600) != nullptr &&
+               "a routine stop cancelled a DAY order — process stop is not session end");
+        engine.stop();
+    }
+    assert(report.dayOrdersCancelled == 0);
+    assert(report.ordersPersisted == 2);
+
+    MatchingEngine restarted;
+    restarted.addSymbol(1);
+    restarted.enableJournal(jpath);
+    restarted.replayJournal();
+
+    const auto* day = restarted.getOrderBook(1)->getOrder(600);
+    assert(day != nullptr && "the DAY order did not survive the restart");
+    assert(day->timeInForce == TimeInForce::DAY && day->remainingQty == 10 &&
+           day->price == 980000 && "the DAY order came back altered");
+    assert(restarted.getOrderBook(1)->getOrder(601) != nullptr);
+
+    std::remove(jpath);
     PASS();
 }
 
@@ -299,6 +355,7 @@ int main() {
     test_partial_fill_day_cancelled();
     test_async_drain_ioc_and_gtd();
     test_no_journal_safe();
+    test_routine_stop_keeps_day_orders();
     test_shutdown_terminates_with_a_full_ring();
 
     std::cout << "\n─── Results: " << tests_passed << " passed ───" << std::endl;

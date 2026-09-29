@@ -179,15 +179,23 @@ public:
     //        · an in-flight IOC cancels its unmatched remainder during the match;
     //        · an in-flight partial fill completes (the batched match loop runs
     //          to completion) and the resting remainder is materialised before
-    //          the snapshot, so it is either persisted (GTD/GTC) or cancelled
-    //          (DAY) — never left half-processed.
-    //   3. Cancel every DAY order (session end) — journaled + logged — so a
-    //      restart does NOT restore them.
-    //   4. Checkpoint the remaining resting orders (GTD + GTC) so a restart's
+    //          the snapshot, so it is persisted — never left half-processed.
+    //   3. ONLY if cancelDayOrders: cancel every DAY order — journaled + logged
+    //      — so a restart does not restore them.
+    //   4. Checkpoint the remaining resting orders so a restart's
     //      replayJournal() restores them byte-for-byte.
+    //
+    // cancelDayOrders defaults to FALSE because a process stop is not the end
+    // of a session. This used to cancel DAY orders unconditionally, and it is
+    // what OrderEngine calls on SIGTERM — so every deploy, config reload or
+    // crash-restart cancelled every client's DAY orders mid-session. Pass true
+    // only from something that knows the session has actually ended. No such
+    // caller exists yet: neither binary runs a session calendar or the expiry
+    // timer, so today DAY orders, like GTD, do not expire by themselves.
+    //
     // Never throws, never crashes; safe to call once at process shutdown. The
     // engine is NOT torn down here — the caller still calls stop()/stopAsync().
-    ShutdownReport gracefulShutdown();
+    ShutdownReport gracefulShutdown(bool cancelDayOrders = false);
     bool isShuttingDown() const { return shuttingDown_.load(std::memory_order_acquire); }
 
     // Automated expiry timer (Gap 3)

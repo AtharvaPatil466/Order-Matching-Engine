@@ -100,7 +100,10 @@ def _run(seed, cfg, with_hft, per_maker=False):
                              adverse_sensitivity=cfg["adverse_sensitivity"],
                              spread_decay=cfg["spread_decay"],
                              spread_cap_mult=cfg["spread_cap_mult"],
-                             min_quote_qty=cfg["min_quote_qty"])
+                             min_quote_qty=cfg["min_quote_qty"],
+                             # Off only for the fixed-depth fragility check; every
+                             # published run uses the thinning rule (the default).
+                             thin_liquidity=cfg.get("thin_liquidity", True))
               for i in range(len(lats))]
     noise = [NoiseTrader(100 + i, lambda_per_tick=cfg["lambda_per_tick"],
                          qty=cfg["noise_qty"], seed=seed * 1000 + i,

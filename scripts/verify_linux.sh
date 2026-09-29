@@ -97,10 +97,30 @@ echo "==> excluding: $EXCLUDE"
 echo "==> $CM_ARGS"
 
 # :ro on the source mount is the point — see the header.
+# seccomp=unconfined, because Docker's default profile BLOCKS io_uring:
+# io_uring_queue_init fails with EPERM and the journal falls back to its
+# synchronous commit path without a word. CMake still prints "io_uring journal
+# path enabled" — a compile-time fact, not a runtime one — so this script used to
+# test the sync path on Linux while appearing to test io_uring. Nothing else runs
+# io_uring either: CI's runners have no liburing, and the shipped image does not
+# install it — so without this, the async commit path is executed by no test at
+# all. The probe turns the silent fallback into a failure. The relaxation applies
+# only to this throwaway --rm container.
 docker run --rm -t \
+    --security-opt seccomp=unconfined \
     -v "$REPO_ROOT":/src:ro \
     "$IMAGE" \
     bash -euo pipefail -c "
+        echo '#include <liburing.h>
+int main(void){struct io_uring r;if(io_uring_queue_init(8,&r,0)<0)return 1;io_uring_queue_exit(&r);return 0;}' \
+            | gcc -x c -o /tmp/uring_probe - -luring
+        if ! /tmp/uring_probe; then
+            echo 'FATAL: io_uring_queue_init failed in this container. The journal would'
+            echo '       silently run its sync path, so this lane would not exercise the'
+            echo '       io_uring commit path at all.'
+            exit 3
+        fi
+        echo '==> io_uring: available at runtime (the journal async path will run)'
         cmake -S /src -B /build $CM_ARGS -DBUILD_TESTS=ON
         cmake --build /build --parallel $JOBS
         ctest --test-dir /build --output-on-failure -L project -E '$EXCLUDE'

@@ -86,20 +86,33 @@ if mode == "inject":
         sys.exit(1)
 
 # Read the book back and compare the level field by field.
-book = json.loads(get(f"/book?symbolId={sym}"))
-levels = book["bids" if side == 0 else "asks"]
 want_side = "bid" if side == 0 else "ask"
 
+def read_level():
+    book = json.loads(get(f"/book?symbolId={sym}"))
+    levels = book["bids" if side == 0 else "asks"]
+    return levels, [lv for lv in levels if lv.get("price") == price]
+
+# "accepted" means the order was queued, not that the matching thread has
+# rested it yet — a loaded Debug+ASan CI runner read the book first and failed
+# here. So after the submit, poll. After a restart, read once: replay finishes
+# inside bootJournal, before /readyz says ready, so polling there could only
+# hide a replay that had gone asynchronous.
 if mode == "inject":
     label = "after submit"
+    deadline = time.time() + 10
+    levels, match = read_level()
+    while not match and time.time() < deadline:
+        time.sleep(0.05)
+        levels, match = read_level()
 else:
     label = "AFTER RESTART"
+    levels, match = read_level()
 
-match = [lv for lv in levels if lv.get("price") == price]
 if not match:
     print(f"FAIL: {label}: no {want_side} level at {price}.")
     print(f"       the book has {len(levels)} {want_side} level(s): {levels[:3]}")
-    if not levels:
+    if not levels and mode == "expect":
         print("       the book is EMPTY — the journal on disk was not replayed")
     sys.exit(1)
 

@@ -1248,7 +1248,10 @@ MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown(bool cancelDayOr
     if (report.journalEnabled) {
         // Already drained (step 2) and cancelDayOrders() is synchronous, so no
         // fresh queue entries exist — snapshot the current state directly.
-        checkpointInternal(true);
+        // Waits out a checkpoint worker 0 may still be running: waitForDrain()
+        // returns once it has bumped its processed count, which is before it
+        // starts one.
+        checkpointInternal(true, /*waitIfBusy=*/true);
     }
     report.ordersPersisted = report.gtdOrdersPersisted + report.otherOrdersPersisted;
 
@@ -2303,13 +2306,39 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
     return applied;
 }
 
-void MatchingEngine::checkpointInternal(bool alreadyDrained) {
+void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
     if (!journal_) {
         return;
     }
 
     if (async_ && !alreadyDrained) {
         waitForDrain();
+    }
+
+    // One checkpoint at a time (THR-6). The callers run on different threads —
+    // main's size-based rotation, worker 0 once checkpointPending_ is set,
+    // waitForDrain(), gracefulShutdown — and every one of them builds the same
+    // <journal>.tmp outside journalMutex_. Overlapped, the second remove()d the
+    // first's finished replacement and started its own, the first then renamed
+    // the second's half-written file over the live journal, and the second kept
+    // writing into it through a non-append handle.
+    //
+    // Taken AFTER the drain: waitForDrain() can run a pending checkpoint on this
+    // same thread, and try_lock on a mutex the thread already owns is undefined.
+    //
+    // Busy means another checkpoint is doing this job, so the periodic callers
+    // skip. gracefulShutdown waits instead: its snapshot is the one taken after
+    // the drain and any DAY cancels, and when it returns the report it prints
+    // says the book is on disk — which must be its checkpoint, finished, and
+    // not whatever an overlapping one gathered before those changes.
+    std::unique_lock<std::mutex> exclusive(checkpointMutex_, std::try_to_lock);
+    if (!exclusive.owns_lock()) {
+        if (!waitIfBusy) {
+            obSink().log(obEvent("checkpoint_skipped_busy"));
+            return;
+        }
+        obSink().log(obEvent("checkpoint_waiting"));
+        exclusive.lock();
     }
 
     // A checkpoint REPLACES the journal, so every record it discards must be
@@ -2390,6 +2419,12 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained) {
                              .kv("orders", (unsigned long long)resting.size()));
             return;
         }
+        // The replacement is on disk as <journal>.tmp and about to be swapped
+        // in. CheckpointConcurrencyTest parks a checkpoint here to force an
+        // overlap deterministically.
+        obSink().log(obEvent("checkpoint_prepared")
+                         .kv("attempt", (long long)attempt)
+                         .kv("orders", (unsigned long long)resting.size()));
 
         // Phase 3: swap, but only if nothing was appended since the counter
         // read above.

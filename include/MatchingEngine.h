@@ -558,7 +558,9 @@ private:
     void maybeTriggerAutoCheckpoint();
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);
-    void checkpointInternal(bool alreadyDrained);
+    // waitIfBusy: false skips when another checkpoint is in flight (it is
+    // doing the same job); true waits for it and then runs. See the .cpp.
+    void checkpointInternal(bool alreadyDrained, bool waitIfBusy = false);
     void rebuildThreadSymbolIndex();
     // Point capacityMonitor_ at the engine's real resource counters. Called
     // from startAsync() once the queues exist and BEFORE the monitor thread
@@ -584,6 +586,9 @@ private:
     // Thread safety for sync-mode expiry timer
     mutable std::mutex bookMutex_;
     mutable std::mutex journalMutex_;
+    // One checkpoint at a time: they all build the same <journal>.tmp outside
+    // journalMutex_. Never held while taking a drain; see checkpointInternal.
+    std::mutex checkpointMutex_;
 
     // Async mode (Thread Pool)
     bool async_{false};

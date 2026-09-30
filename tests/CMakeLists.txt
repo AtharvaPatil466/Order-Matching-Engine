@@ -757,6 +757,15 @@ add_test(NAME GracefulShutdownTest COMMAND GracefulShutdownTest)
 set_tests_properties(GracefulShutdownTest PROPERTIES TIMEOUT 60
                      LABELS "project;persistence")
 
+# One checkpoint at a time (THR-6): a second is skipped, gracefulShutdown's
+# waits. The overlap is forced by parking the first in a log sink, not raced.
+add_executable(CheckpointConcurrencyTest CheckpointConcurrencyTest.cpp)
+target_link_libraries(CheckpointConcurrencyTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointConcurrencyTest)
+add_test(NAME CheckpointConcurrencyTest COMMAND CheckpointConcurrencyTest)
+set_tests_properties(CheckpointConcurrencyTest PROPERTIES TIMEOUT 60
+                     LABELS "project;persistence")
+
 add_executable(GTDReplayTest GTDReplayTest.cpp)
 target_link_libraries(GTDReplayTest PRIVATE OrderMatcher)
 enable_assertions(GTDReplayTest)

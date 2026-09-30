@@ -9,7 +9,11 @@
 ### Journal Storage Pre-Flight (RUN BEFORE EVERY START)
 
 > **HARD REQUIREMENT: the journal MUST be on instance-store (local) NVMe or a
-> RAM-backed tmpfs. EBS / Persistent Disk / Managed Disk / any network block
+> RAM-backed tmpfs.** A tmpfs journal is lost on any host reboot or power
+> loss, and replication — which the snippet below used to say durability
+> "must come from" — is disabled by default and has known CRITICAL defects
+> (see §4). On a single node, tmpfs means no durability across a host failure.
+> **EBS / Persistent Disk / Managed Disk / any network block
 > device is NOT acceptable for the journal path** — every group-commit flush
 > would pay a network round-trip that shows up directly in the order-entry P99
 > tail. See [CapacityPlanning.md](./CapacityPlanning.md) §3 "Journal Storage
@@ -30,7 +34,7 @@ echo "journal dir $JOURNAL_DIR -> source=$SRC fstype=$FSTYPE"
 
 # Accept tmpfs (RAM), reject anything that looks like a network block device.
 case "$FSTYPE" in
-  tmpfs|ramfs) echo "OK: RAM-backed journal (durability must come from replication)";;
+  tmpfs|ramfs) echo "WARN: RAM-backed journal — lost on host reboot; replication is disabled by default";;
   nfs*|cifs|9p) echo "FATAL: journal is on a network filesystem ($FSTYPE) — abort"; exit 1;;
   *)
     # Block device: confirm it is local NVMe / instance-store, not EBS/PD/SAN.
@@ -108,18 +112,26 @@ different legacy journal.
 
 ### Bare Metal
 ```bash
-# Load config and start with 4 worker threads
-./bin/OrderEngine --threads 4 --port 8080 --symbols 4
+# OrderEngine refuses to start without an admin token: set OB_ADMIN_TOKEN
+# (or pass --admin-token, or --admin-no-auth to run the admin port open).
+# Without --journal / OB_JOURNAL_PATH it keeps no journal at all.
+export OB_ADMIN_TOKEN=...
 
-# With config file (supports SIGHUP hot-reload)
+# Start with 4 worker threads
+./bin/OrderEngine --threads 4 --port 8080 --symbols 4 --journal /var/lib/orderengine/journal.wal
+
+# With config file. SIGHUP re-reads it, but only rate_limit.default_rate /
+# rate_limit.default_burst take effect (§5)
 ./bin/OrderEngine --threads 4 --port 8080 --symbols 4 --config /etc/orderengine/engine.conf
 
 # Hot-reload config without restart
 kill -SIGHUP $(pidof OrderEngine)
-
-# Lean mode (disables risk checks — HFT deployments only)
-./bin/OrderEngine --lean --threads 4 --port 8080 --symbols 4
 ```
+
+There is no `--lean` flag. OrderEngine ignores flags it does not know, so
+`--lean` was silently dropped. Lean mode is a build option
+(`./build.sh --lean`, or `-DUSE_LEAN_MODE=ON`) that compiles out the risk and
+stats features.
 
 ### Docker
 ```bash
@@ -139,7 +151,9 @@ Type=simple
 # Fail fast if the journal is on EBS / a network block device. Save the §1
 # "Journal Storage Pre-Flight" snippet as this script (it exits non-zero on EBS).
 ExecStartPre=/opt/orderengine/scripts/check_journal_storage.sh /var/lib/orderengine
-ExecStart=/opt/orderengine/bin/OrderEngine --threads 4 --port 8080 --symbols 4
+# Without a token OrderEngine refuses to start; without --journal it keeps no journal.
+Environment=OB_ADMIN_TOKEN=<token>
+ExecStart=/opt/orderengine/bin/OrderEngine --threads 4 --port 8080 --symbols 4 --journal /var/lib/orderengine/journal.wal
 WorkingDirectory=/opt/orderengine
 Restart=on-failure
 RestartSec=5
@@ -159,11 +173,12 @@ WantedBy=multi-user.target
 
 | Endpoint | Purpose | Expected Response |
 |----------|---------|-------------------|
-| `GET /health` | K8s liveness probe | `200 OK {"status":"healthy"}` |
-| `GET /readyz` | K8s readiness probe | Returns 503 until journal replay completes, then 200. On a large journal that wait is the recovery time. Use as k8s `readinessProbe`. Auth-exempt. |
-| `GET /metrics` | Internal counters | JSON with throughput, queue depth, latency |
+| `GET /health` | K8s liveness probe | `200 OK {"status":"ok"}` |
+| `GET /readyz` | K8s readiness probe | 200 `{"status":"ready"}` once the engine is up. The admin port opens only after journal replay completes, so during replay both probes get connection refused, not 503 — give the liveness probe enough `initialDelaySeconds`/`failureThreshold` for your recovery time, or k8s restarts the pod mid-replay. Auth-exempt. |
+| `GET /metrics` | Internal counters | JSON: submitted/processed counts, `pendingOrders` (engine-wide queue depth), `e2eLatency` percentiles |
 | `GET /prometheus` | Prometheus scrape | Text exposition format |
-| `GET /book?symbolId=0` | L2 book snapshot | JSON with bids/asks/trades |
+| `GET /book?symbolId=0` | L2 book snapshot | JSON with bids/asks and the last trade |
+| `GET /auction?symbolId=0` | Trading state | JSON with `tradingState` (e.g. `VolatilityAuction`) and indicative price |
 | `GET /otr?participantId=1` | OTR ratio | JSON with order/trade counts |
 
 ### Prometheus Scrape Config
@@ -180,9 +195,9 @@ scrape_configs:
 
 | Metric | Warning | Critical | Action |
 |--------|---------|----------|--------|
-| `queue_depth` | > 50% capacity | > 80% capacity | Check consumer threads |
+| `pendingOrders` in `/metrics` JSON (not exported to Prometheus) | > 50% capacity | > 80% capacity | Check consumer threads |
 | `orders_rejected_total` (rate) | > 100/s | > 1000/s | Check rate limits / risk config |
-| `processing_latency_p99` | > 1μs (lean) / > 5μs (full) | > 10μs | Check CPU affinity, competing workloads |
+| `e2eLatency.p99Ns` in `/metrics` JSON (not exported to Prometheus) | > 1μs (lean) / > 5μs (full) | > 10μs | Check CPU affinity, competing workloads |
 | `journal_entries_committed_total` (rate) | — | drops to 0 | Journal disk may be full |
 | Health endpoint | — | Returns non-200 | Restart engine |
 
@@ -198,25 +213,42 @@ scrape_configs:
 5. If stuck: `kill -SIGABRT <pid>` to get core dump, then restart
 
 ### Circuit Breaker Triggered
-1. Check `/metrics` for which symbol halted
+A priced order more than 5% (fixed; no key sets it) from the book's reference
+price is rejected and switches that symbol to `VolatilityAuction`.
+1. Check `/auction?symbolId=<n>` for each symbol's `tradingState` (`/metrics` does not show it)
 2. Review the price move that triggered it
-3. If legitimate: wait for `halt_duration_ms` to auto-resume
-4. If erroneous: manually resume via admin endpoint
-5. Post-incident: review if `price_band_pct` is too tight
+3. **Nothing resumes it.** There is no timer (`halt_duration_ms` is read by
+   nothing) and no admin endpoint for it.
+   `MatchingEngine::resumeVolatilityAuctions()` exists but neither binary
+   calls it. The symbol stays in the auction until the process restarts
+   (trading state is not journaled; a book starts `Continuous`).
+4. `price_band_pct` is read by nothing; the price band is off
 
 ### Kill Switch Activated
-1. All orders for the participant are cancelled immediately
-2. Check OTR ratio at `/otr?participantId=<id>`
-3. Review the participant's recent order flow
-4. Re-enable by restarting the engine (kill switch is sticky per session)
+1. All resting orders for the participant are cancelled immediately. It is a
+   one-shot sweep, **not sticky**: the participant can submit new orders
+   straight away, and nothing needs re-enabling.
+2. The cancels are **not journaled**. The kill switch arrives through
+   GatewayServer's order port, and GatewayServer replays its journal on every
+   restart without checkpointing at shutdown, so any restart restores the
+   killed orders unless an automatic checkpoint ran after the kill. Re-issue
+   the kill after a restart.
+3. GatewayServer, where the kill switch is, has no admin port, so there is
+   no `/otr` to check for its participants (OrderEngine's `/otr` reports
+   symbol 0 of its own engine only)
+4. Review the participant's recent order flow
 
 ### Journal Corruption Detected
-1. Engine will log a CRC mismatch and halt replay
+1. The engine **refuses to start**: `[Journal] REFUSING TO APPEND: <path> has N
+   byte(s) after its last replayable record`, then `[Engine] FATAL: journal ...
+   could not be opened safely`. It leaves the file untouched.
 2. **Do NOT delete the journal** — it's the audit trail
-3. Copy the corrupt journal: `cp journal.wal journal.wal.corrupt`
-4. Truncate to the last valid entry: the engine's `replayJournal()` stops at the first corruption
-5. Restart the engine — it will replay up to the corruption point
-6. Manual reconciliation may be needed for orders after the corruption
+3. The message prints the exact repair: `cp '<path>' '<path>.damaged' &&
+   truncate -s <bytes> '<path>'`. More than one record past the valid prefix
+   means a corrupt record or a gap, possibly with valid records behind it,
+   which truncating discards.
+4. Restart the engine — it replays the records before the cut
+5. Manual reconciliation may be needed for orders after the corruption
 
 ### High Latency / Queue Buildup
 1. Check CPU affinity: `taskset -p <pid>` — workers should be pinned
@@ -224,7 +256,9 @@ scrape_configs:
 3. Check NUMA topology: workers should be on the same NUMA node
 4. Check journal disk latency: `iostat -x 1`
 5. **Confirm the journal is NOT on EBS / a network block device** — re-run the §1 "Journal Storage Pre-Flight" check. A network-backed journal adds ~1–4 ms per flush and is the single most common cause of an inflated Path C P99; the fix is to move the journal to instance-store NVMe or tmpfs, not to change code.
-6. If disk-bound: switch to `SyncPolicy::GroupCommit` (default) or `None`
+6. If disk-bound: there is no switch. `SyncPolicy` has two values, `Immediate`
+   and `GroupCommit`, fixed per binary with no flag or key: OrderEngine uses
+   `GroupCommit`, GatewayServer `Immediate` (its durable acks depend on it)
 7. If CPU-bound: increase thread count or reduce symbol count per thread
 
 ### Random Tail-Latency Spikes (50–200 µs P99.9, uncorrelated with load)
@@ -240,31 +274,52 @@ IRQs on the "pinned" cores. Work through [OSTuning.md](./OSTuning.md):
 ## 4. Backup / Recovery
 
 ### Journal Checkpoint
-The engine automatically checkpoints when the journal exceeds `checkpoint_entries` or `checkpoint_bytes`. Manual checkpoint:
+The engine checkpoints automatically at 250,000 entries or 64 MiB (compiled
+in; `checkpoint_entries` and `checkpoint_bytes` are read by nothing), when
+OrderEngine's `--journal-max-mb` / `OB_JOURNAL_MAX_SIZE_MB` is reached, and on
+every clean OrderEngine shutdown. **A checkpoint replaces the journal** with a
+snapshot of the resting orders: fills and cancels before it are gone. Copy the
+file first if you need that history.
 
-```bash
-# Via the engine's API (if exposed), or by sending a signal:
-kill -USR1 <pid>  # triggers checkpoint if wired
-```
+There is no manual checkpoint. **Do not send SIGUSR1**: nothing handles it, so
+it kills the process.
 
 ### Disaster Recovery from Journal
-```bash
-# Start a fresh engine pointed at the existing journal
-./bin/OrderEngine --journal /var/lib/orderengine/journal.wal --replay-only
+There is no `--replay-only`. OrderEngine ignores the flag and starts a live
+engine on the journal: it replays on boot, serves the admin port, and on a
+clean shutdown checkpoints — replacing the journal. Copy the journal before
+pointing anything at it.
 
-# The engine will replay all journal entries and reach the last consistent state
+```bash
+cp /var/lib/orderengine/journal.wal /var/lib/orderengine/journal.wal.dr
+
+# Inspect without writing to it
+JournalReplayCLI --journal /var/lib/orderengine/journal.wal.dr --stats
+
+# Recover: a normal start replays the journal before serving
+./bin/OrderEngine --journal /var/lib/orderengine/journal.wal
 ```
 
 ### Backup Promotion
+Replication is disabled unless `--allow-unsafe-replication` is passed, and has
+known CRITICAL defects (REPL-1..6): a deposed primary is never fenced and
+never steps down, so a partition that outlasts the lease leaves two
+primaries, and a promoted backup can execute orders twice. The steps below
+describe what the code does, not a safe failover.
+
 If the primary fails and a backup is running:
-1. The backup's `HeartbeatMonitor` detects the failure (within `heartbeat_timeout_ms`)
+1. The backup's `HeartbeatMonitor` detects the failure after 3 consecutive
+   missed heartbeats (compiled in: 100 ms interval, 500 ms timeout;
+   `heartbeat_timeout_ms` is read by nothing); promotion also waits for the
+   primary's 5,000 ms lease to lapse locally
 2. The backup acquires a new `LeaderLease` with a higher epoch
 3. The backup promotes **itself** — no operator action. `ReplicationCoordinator`
    fires its promotion callback, which `src/main.cpp` wires to
    `engine.setReplayModeAllBooks(false)`, and the process logs
    `[Replication] PROMOTED to primary — exiting replay mode`. That log line is
    what to grep for to confirm promotion happened.
-4. Clients reconnect to the backup's gateway port
+4. There is no client failover: OrderEngine has no order-entry port (orders
+   reach it only through the chaos-only `/chaos/order`)
 
 > This step previously said "the backup calls `JournalFollower::promote()`".
 > That was wrong in two ways, and both matter during an incident: no shipped
@@ -283,13 +338,13 @@ If the primary fails and a backup is running:
 The following can be changed without restart:
 
 **Via SIGHUP** (send `kill -SIGHUP <pid>` — reloads the config file):
-- Any setting in the config file pointed to by `--config PATH`
-- Rate limit parameters, alert webhooks, symbol config
+- Only the rate limiter. Everything else in the file — alert webhooks,
+  sizing, symbols — is read once at startup or not at all.
 - `RateLimiter::reconfigure()` is now called on every SIGHUP: reads `rate_limit.default_rate` and `rate_limit.default_burst` from the reloaded config, updates the default rate/burst, and clears all existing participant token buckets so they inherit the new limits on their next request.
 
-**Via environment variables** (take effect on next config reload or restart):
-- `OB_RATE_LIMIT_*` — per-participant rate limit parameters
-- `OB_ALERT_WEBHOOK_URL` — webhook target
+**Via environment variables** (a running process's environment cannot be changed, so in practice these take effect at restart):
+- `OB_RATE_LIMIT_DEFAULT_RATE` / `OB_RATE_LIMIT_DEFAULT_BURST` — the default rate/burst, applied only on a SIGHUP and only when `--config` is set; no per-participant limit is read
+- `OB_ALERT_WEBHOOK_URL` — webhook target, read once at startup
 - `OB_JOURNAL_MAX_SIZE_MB` — maximum journal file size in megabytes before auto-checkpoint. Default: disabled (0). Set to e.g. `256` to rotate at 256 MB. When the threshold is reached, `Journal::needsCheckpoint()` fires and the main loop calls `engine.checkpoint()` automatically.
 
 ### Cold Settings (Require Restart)
@@ -331,7 +386,7 @@ Quick reference:
 ## 7. Maintenance Windows
 
 ### Pre-Market
-1. Verify journal replays cleanly: `./bin/OrderEngine --replay-only`
+1. Verify the journal reads cleanly: `JournalReplayCLI --journal <path> --stats` (there is no `--replay-only`)
 2. Check disk space: need at least 10x daily journal size free
 3. Run health check: `curl localhost:8080/health`
 4. Verify time sync: `chronyc tracking` — clock skew < 1ms

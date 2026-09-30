@@ -441,9 +441,11 @@ void test_BulkRemovalWithParkedOrdersKeepsBookIntact() {
         f.engine.submitOrder(1, 100, 1, Side::Sell, 1001, 40, OrderType::Limit);
         f.engine.submitOrder(1, 101, 1, Side::Sell, 1002, 25, OrderType::Limit);
 
-        // Participant 2: a displayed order plus three parked ones whose prices
+        // Participant 2: a displayed order plus parked ones whose prices
         // collide with participant 1's levels — the collision that made the
-        // single-cancel path wipe a whole level.
+        // single-cancel path wipe a whole level. (The Pegged one is refused at
+        // admission since roadmap 0.12; it stays here so the scenario is whole
+        // again when 1.6-F4 lifts the reject.)
         f.engine.submitOrder(1, 200, 2, Side::Sell, 1001, 60, OrderType::Limit);
         f.engine.submitOrder(1, 201, 2, Side::Sell, 1001, 70, OrderType::StopLimit,
                              /*stopPrice=*/990, /*displayQty=*/0,
@@ -454,9 +456,7 @@ void test_BulkRemovalWithParkedOrdersKeepsBookIntact() {
                              TimeInForce::GTC, /*expiryTime=*/0,
                              /*stopLimitPrice=*/0, PegType::PrimaryPeg, 0);
         f.engine.submitOrder(1, 203, 2, Side::Sell, 1002, 30, OrderType::MOC);
-        // No exact depth asserted here: a PrimaryPeg sell tracks the best ask,
-        // so 202 lands at 1001 rather than the price it was submitted with.
-        // The invariant that matters is that both feeds agree either way.
+        // The invariant that matters is that both feeds agree.
         f.check();
 
         // Kill participant 2 across the board.
@@ -613,8 +613,6 @@ void test_RandomisedFlowStaysInSync() {
         // of them reaching the feed is proof releaseOnCloseOrders() ran.
         std::vector<OrderId> onCloseIds;
         std::set<OrderId> onCloseThatReachedTheFeed;
-        std::vector<OrderId> peggedIds;
-        std::set<OrderId> peggedThatReachedTheFeed;
         int auctionCycles = 0;
         int replaces = 0;
 
@@ -678,17 +676,17 @@ void test_RandomisedFlowStaysInSync() {
                 resting.push_back(id);
                 stopIds.push_back(id);
             } else if (action == 13) {
-                // Pegged: repriced in place after every trade, which is the
-                // "price field vs. book linkage" hazard that produced the
-                // parked-order corruption.
-                f.engine.submitOrder(1, id, 6, side, price, qty, OrderType::Pegged,
+                // Pegged is refused at admission (roadmap 0.12: a peg rests and
+                // reprices without matching, so it can cross the book). The
+                // check after this step confirms the refusal reached no feed.
+                // Restore the peg-reprice coverage when 1.6-F4 lifts the reject.
+                const auto r = f.engine.submitOrder(1, id, 6, side, price, qty, OrderType::Pegged,
                                      /*stopPrice=*/0, /*displayQty=*/0,
                                      TimeInForce::GTC, /*expiryTime=*/0,
                                      /*stopLimitPrice=*/0,
                                      (step % 3 == 0) ? PegType::MidPeg : PegType::PrimaryPeg,
                                      /*pegOffset=*/0);
-                resting.push_back(id);
-                peggedIds.push_back(id);
+                CHECK(!r.isAccepted() && "Pegged must be refused at admission");
             } else if (action == 14) {
                 // TrailingStop: parked, and mutated on every trade.
                 f.engine.submitOrder(1, id, 7, side, price, qty, OrderType::TrailingStop,
@@ -745,9 +743,6 @@ void test_RandomisedFlowStaysInSync() {
             for (OrderId s : onCloseIds) {
                 if (f.reco.knows(s)) onCloseThatReachedTheFeed.insert(s);
             }
-            for (OrderId s : peggedIds) {
-                if (f.reco.knows(s)) peggedThatReachedTheFeed.insert(s);
-            }
 
             // The invariant holds after EVERY event, not just at the end —
             // an end-only check lets compensating errors cancel out.
@@ -770,15 +765,12 @@ void test_RandomisedFlowStaysInSync() {
         CHECK(!stopsThatReachedTheFeed.empty() &&
               "no stop ever triggered and rested — the stop path went unexercised");
         CHECK(replaces >= 5 && "cancelReplace path went unexercised");
-        CHECK(!peggedThatReachedTheFeed.empty() &&
-              "no pegged order ever rested — the peg reprice path went unexercised");
         CHECK(!onCloseThatReachedTheFeed.empty() &&
               "no MOC/LOC ever reached the book — releaseOnCloseOrders went unexercised");
         std::cout << "[" << auctionCycles << " auctions, "
                   << stopsThatReachedTheFeed.size() << "/" << stopIds.size()
                   << " stops triggered onto the feed, "
                   << replaces << " replaces, "
-                  << peggedThatReachedTheFeed.size() << " pegged, "
                   << onCloseThatReachedTheFeed.size() << "/" << onCloseIds.size()
                   << " on-close released] ";
     } END

@@ -529,17 +529,19 @@ void testSnapshotFieldFidelity() {
                   TimeInForce::GTD, kExpiry, /*stopPrice=*/0,
                   /*stopLimitPrice=*/0, /*displayQty=*/10);
 
-    // Hidden pegged order with a minQty.
-    auto r2 = leader.addOrder(2, 7, Side::Sell, 1010, 50, OrderType::Pegged,
+    // Hidden order with a minQty. This was a hidden PrimaryPeg (offset 2),
+    // which also pinned pegType/pegOffset; Pegged is refused at admission
+    // since roadmap 0.12, so it is a hidden Limit until 1.6-F4 lifts that.
+    auto r2 = leader.addOrder(2, 7, Side::Sell, 1010, 50, OrderType::Limit,
                               /*stopPrice=*/0, /*displayQty=*/0,
                               TimeInForce::GTC, /*expiryTime=*/0,
-                              /*stopLimitPrice=*/0, PegType::PrimaryPeg,
-                              /*pegOffset=*/2, /*trailAmount=*/0,
+                              /*stopLimitPrice=*/0, PegType::None,
+                              /*pegOffset=*/0, /*trailAmount=*/0,
                               /*minQty=*/5, /*hidden=*/true);
     assert(std::holds_alternative<OrderId>(r2));
-    j.logAddOrder(2, 7, 0, Side::Sell, 1010, 50, OrderType::Pegged,
+    j.logAddOrder(2, 7, 0, Side::Sell, 1010, 50, OrderType::Limit,
                   TimeInForce::GTC, 0, 0, 0, /*displayQty=*/0,
-                  PegType::PrimaryPeg, /*pegOffset=*/2, /*trailAmount=*/0,
+                  PegType::None, /*pegOffset=*/0, /*trailAmount=*/0,
                   /*minQty=*/5, /*hidden=*/true);
     j.flush();
 
@@ -574,7 +576,7 @@ void testSnapshotFieldFidelity() {
     assert(snapshotBook(leader) == snapshotBook(follower) &&
            "re-reading an unchanged snapshot file changed the follower book");
 
-    std::printf("checkpoint/fidelity: GTD iceberg + hidden peg restored with "
+    std::printf("checkpoint/fidelity: GTD iceberg + hidden minQty order restored with "
                 "every field intact\n");
 
     fs::remove(path);

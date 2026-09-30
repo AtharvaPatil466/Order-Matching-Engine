@@ -17,7 +17,8 @@
 // Coverage:
 //   1. Plain flow: adds, partial and full fills, cancels
 //   2. Hidden orders contribute nothing; icebergs contribute only their slice
-//   3. Pegged orders republish when the peg moves them to a new price
+//   3. Pegged orders are refused at admission (roadmap 0.12, until 1.6-F4
+//      makes a peg match) and publish nothing
 //   4. Randomised soak: reconstructed depth must equal the snapshot at every
 //      step, with sequence numbers strictly increasing throughout
 
@@ -200,31 +201,26 @@ void test_HiddenAndIcebergDisplayCorrectly() {
     } END
 }
 
-void test_PeggedRepriceIsPublished() {
-    TEST(PeggedRepriceIsPublished) {
+// This test used to rest a PrimaryPeg and check its reprice was published.
+// Pegged is now refused at admission (roadmap 0.12: a peg rests and reprices
+// without matching, so it can cross the book — STP-13). Restore the reprice
+// scenario from git history when 1.6-F4 lifts the reject.
+void test_PeggedIsRejectedAndPublishesNothing() {
+    TEST(PeggedIsRejectedAndPublishesNothing) {
         Fixture f;
-        // Establish a market so the peg has a reference.
         f.engine.submitOrder(1, 100, 1, Side::Buy,   995, 40, OrderType::Limit);
         f.engine.submitOrder(1, 200, 2, Side::Sell, 1005, 40, OrderType::Limit);
         f.check();
+        const uint64_t before = f.reco.messages();
 
-        // Primary-pegged buy tracks the best bid, so it rests at 995.
-        f.engine.submitOrder(1, 101, 3, Side::Buy, 995, 25, OrderType::Pegged,
+        const auto r = f.engine.submitOrder(1, 101, 3, Side::Buy, 995, 25, OrderType::Pegged,
                              /*stopPrice=*/0, /*displayQty=*/0,
                              TimeInForce::GTC, /*expiryTime=*/0,
                              /*stopLimitPrice=*/0, PegType::PrimaryPeg,
                              /*pegOffset=*/0);
+        CHECK(!r.isAccepted() && "Pegged must be refused at admission");
+        CHECK(f.reco.messages() == before && "a refused peg published market data");
         f.check();
-
-        // Improve the bid. updatePeggedOrders runs on the NEXT submission,
-        // repricing the peg from 995 to 998 — a change to two levels that the
-        // incremental stream has to publish, or every subscriber keeps
-        // showing depth at a price the order has left.
-        f.engine.submitOrder(1, 102, 4, Side::Buy, 998, 60, OrderType::Limit);
-        f.check();
-        f.engine.submitOrder(1, 103, 5, Side::Buy, 990, 10, OrderType::Limit);
-        f.check();
-
         CHECK(f.reco.sequenceViolations() == 0);
     } END
 }
@@ -308,13 +304,15 @@ void test_SoakStaysInSync() {
                 f.engine.submitOrder(1, id, 3, side, price, qty, OrderType::Hidden);
                 resting.push_back(id);
             } else if (action == 7) {
-                f.engine.submitOrder(1, id, 4, side, price, qty, OrderType::Pegged,
+                // Pegged is refused at admission (roadmap 0.12) until 1.6-F4;
+                // f.check() below confirms the refusal published nothing.
+                const auto r = f.engine.submitOrder(1, id, 4, side, price, qty, OrderType::Pegged,
                                      /*stopPrice=*/0, /*displayQty=*/0,
                                      TimeInForce::GTC, /*expiryTime=*/0,
                                      /*stopLimitPrice=*/0,
                                      (step % 3 == 0) ? PegType::MidPeg : PegType::PrimaryPeg,
                                      /*pegOffset=*/0);
-                resting.push_back(id);
+                CHECK(!r.isAccepted() && "Pegged must be refused at admission");
                 ++pegged;
             } else if (action == 8 && !resting.empty()) {
                 const size_t idx = rng() % resting.size();
@@ -336,7 +334,7 @@ void test_SoakStaysInSync() {
 
         CHECK(f.reco.sequenceViolations() == 0 &&
               "market-data sequence numbers must strictly increase");
-        CHECK(pegged >= 10 && "peg path went unexercised");
+        CHECK(pegged >= 10 && "peg reject path went unexercised");
         std::cout << "[" << f.reco.messages() << " updates, "
                   << pegged << " pegs] ";
     } END
@@ -347,7 +345,7 @@ int main() {
 
     test_PlainFlowReconstructs();
     test_HiddenAndIcebergDisplayCorrectly();
-    test_PeggedRepriceIsPublished();
+    test_PeggedIsRejectedAndPublishesNothing();
     test_ProRataFillsArePublished();
     test_AuctionUncrossIsPublished();
     test_SoakStaysInSync();

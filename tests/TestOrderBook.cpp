@@ -2400,19 +2400,18 @@ TEST_F(ProRataTest, FullSweepAtLevel) {
 
 // ─── Pegged Order Tests ──────────────────────────────────────────────────────
 
-TEST_F(OrderBookTest, PeggedOrder_MidPegReprices) {
-    // Establish BBO
+// Pegged is refused at admission (roadmap 0.12, STP-13): a peg rests and
+// reprices without matching, so it can cross the book. This test used to
+// assert the mid-peg price; restore that when 1.6-F4 lifts the reject.
+TEST_F(OrderBookTest, PeggedOrder_RejectedAtAdmission) {
     book.addOrder(1, 1, Side::Buy, 990000, 100, OrderType::Limit);   // bid 99.0
     book.addOrder(2, 2, Side::Sell, 1010000, 100, OrderType::Limit);  // ask 101.0
 
-    // Pegged buy at mid (100.0) with no offset
-    book.addOrder(3, 3, Side::Buy, 1000000, 50, OrderType::Pegged,
-                  0, 0, TimeInForce::GTC, 0, 0, PegType::MidPeg, 0, 0, 0, false);
-
-    const Order* peg = book.getOrder(3);
-    ASSERT_NE(peg, nullptr);
-    // Mid = (990000 + 1010000) / 2 = 1000000
-    EXPECT_EQ(peg->price, 1000000);
+    auto r = book.addOrder(3, 3, Side::Buy, 1000000, 50, OrderType::Pegged,
+                           0, 0, TimeInForce::GTC, 0, 0, PegType::MidPeg, 0, 0, 0, false);
+    ASSERT_TRUE(std::holds_alternative<RejectReason>(r));
+    EXPECT_EQ(std::get<RejectReason>(r), RejectReason::OrderTypeNotAllowedInState);
+    EXPECT_EQ(book.getOrder(3), nullptr);
 }
 
 // ─── Stop Order Tests ────────────────────────────────────────────────────────

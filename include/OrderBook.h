@@ -734,7 +734,7 @@ private:
                                                      Quantity qty, OrderType type);
     OB_ALWAYS_INLINE std::optional<RejectReason> validateOrderRequest(OrderId orderId, ParticipantId participantId,
                                                      Price price, Quantity qty, OrderType type,
-                                                     Quantity& displayQty);
+                                                     Quantity& displayQty, Quantity minQty);
     std::optional<RejectReason> admitPoolPressure(OrderId orderId, ParticipantId participantId,
                                                   Quantity qty);
     OB_ALWAYS_INLINE std::optional<RejectReason> admitPriceBand(OrderId orderId, ParticipantId participantId,

@@ -540,7 +540,8 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
                                                             ParticipantId participantId,
                                                             Price price, Quantity qty,
                                                             OrderType type,
-                                                            Quantity& displayQty) {
+                                                            Quantity& displayQty,
+                                                            Quantity minQty) {
     if (qty == 0) [[unlikely]]
         return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
 
@@ -558,10 +559,26 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
         if (displayQty > qty) displayQty = qty;
     }
 
+    // Stop is NOT exempt: an elected Stop becomes a Limit at `price`, so a Stop
+    // at price 0 swept the book to zero and rested its remainder at 0 (OTM-4).
+    // Stop-gap until 1.6-F2 makes Stop a stop-market.
     if (type != OrderType::Market && type != OrderType::MOC && price <= 0
-                 && type != OrderType::Stop && type != OrderType::StopLimit
+                 && type != OrderType::StopLimit
                  && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]]
         return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
+
+    // Market + minQty: screenMinQty reads the market order's price 0 as a limit,
+    // sees no liquidity, and RESTS the market order in the book (OTM-2).
+    // Stop-gap until 1.6-F2 gives it IOC+minQty semantics.
+    if (type == OrderType::Market && minQty > 0) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
+
+    // Pegged rests and reprices at a computed price without ever matching, so
+    // an offset through the touch, or a PrimaryPeg ratcheting off its own
+    // price, leaves a crossed book (STP-13). Refused until 1.6-F4.
+    if (type == OrderType::Pegged) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty,
+                           RejectReason::OrderTypeNotAllowedInState);
 
     // --- Duplicate orderId check ---
     // FlatHashMap::insert silently overwrites on duplicate key, which
@@ -987,7 +1004,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     std::unique_lock<std::mutex> lock(bookLock_);
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
-    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty)) return *r;
+    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty, minQty)) return *r;
     // Pool pressure runs before EITHER allocation site (the MOC/LOC park and the
     // main path) so both are covered.
     if (auto r = admitPoolPressure(orderId, participantId, qty)) return *r;

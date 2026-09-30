@@ -422,6 +422,14 @@ enable_assertions(BreakerNoAuctionTest)
 add_test(NAME BreakerNoAuctionTest COMMAND BreakerNoAuctionTest)
 set_tests_properties(BreakerNoAuctionTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
 
+# Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
+# the book holding an order it must never hold; refused at admission.
+add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)
+target_link_libraries(OrderTypeAdmissionTest PRIVATE OrderMatcher)
+enable_assertions(OrderTypeAdmissionTest)
+add_test(NAME OrderTypeAdmissionTest COMMAND OrderTypeAdmissionTest)
+set_tests_properties(OrderTypeAdmissionTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

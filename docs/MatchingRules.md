@@ -408,6 +408,11 @@ The arming capacity is 16,384 per book. A 16,385th stop is silently dropped by
 exists in `orderLookup_`, so it is cancellable but will never trigger. **Status:
 Undocumented — no test pins this, may be incidental.**
 
+A `Stop` must carry a positive `price`, or it is rejected with `InvalidPrice`. An elected
+`Stop` becomes a `Limit` at that price, so a `Stop` at price 0 used to sweep the book to zero
+and rest its remainder as an ask at 0 (roadmap 0.12, OTM-4). This is a stop-gap: 1.6-F2 makes
+`Stop` a stop-market. Pinned by `tests/OrderTypeAdmissionTest.cpp`.
+
 ### Rule 5.2 — Election tests
 
 Evaluated against the last trade price, at or through the level:
@@ -562,6 +567,10 @@ does the latter without saying so.
 ---
 
 ## 6. Trailing stops and pegged orders
+
+> **`Pegged` is currently refused at admission** (`OrderTypeNotAllowedInState`, roadmap 0.12,
+> STP-13) because of [defect B4](#b4--pegged-orders-can-rest-at-a-crossing-price). The peg
+> rules below describe code that no order can currently reach. 1.6-F4 lifts the reject.
 
 ### Rule 6.1 — Every trailing stop is rescanned on every order submission, unconditionally
 
@@ -1020,6 +1029,11 @@ rests and waits.
 **Status: Deliberate — commented and pinned.** The comment states the semantic explicitly and
 explains why the crossing case cannot simply rest.
 
+A `Market` order with `minQty > 0` is rejected with `InvalidQuantity`. The screen read the
+market order's price (0) as a limit, so a buy saw no liquidity at any price and was **rested in
+the book as a bid at 0** (roadmap 0.12, OTM-2). This is a stop-gap: 1.6-F2 gives it IOC+minQty
+semantics.
+
 ---
 
 ## 10. Suspected defects
@@ -1113,6 +1127,11 @@ peg can sit crossed indefinitely.
 
 **Severity: high.** A crossed book is visible to every market-data subscriber and breaks any
 consumer that assumes `bestBid < bestAsk`.
+
+**Stop-gap (roadmap 0.12):** `Pegged` is refused at admission, so no peg can rest. A second
+route was found while verifying this: a `PrimaryPeg` counts its own price as the touch, so
+offset +1 ratchets it up one tick on every later submission and walks it through the ask.
+The real fix is 1.6-F4.
 
 ### B5 — Triggered stops and pegs bypass the price band and the circuit breaker
 

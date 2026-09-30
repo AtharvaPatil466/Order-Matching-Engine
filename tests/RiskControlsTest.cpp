@@ -202,3 +202,36 @@ TEST_F(RiskFixture, RiskControlsInertByDefault) {
     EXPECT_EQ(engine.getFatFingerRejectCount(), 0u);
     EXPECT_EQ(engine.getOtrRejectCount(), 0u);
 }
+
+// ─── ENGTEST-1: participant ids past the per-participant arrays ─────────────
+//
+// Position, OTR and STP state is indexed by participant id into arrays of
+// MAX_PARTICIPANTS. Every index is guarded, so an id past the end never wrote
+// out of bounds — it skipped the control instead: setPositionLimit(5000, 100)
+// returned silently and participant 5000 then bought 1,000,000 unopposed.
+
+TEST_F(RiskFixture, ParticipantIdPastRiskArraysIsRejectedNotUnlimited) {
+    constexpr ParticipantId kLast = MatchingEngine::MAX_PARTICIPANTS - 1;
+    engine.setPositionLimit(kLast, 100);
+    EXPECT_EQ(buy(1, kLast, 990'000, 1'000'000).rejectReason,
+              RejectReason::PositionLimitExceeded);
+
+    OrderId id = 10;
+    for (ParticipantId pid : {ParticipantId{MatchingEngine::MAX_PARTICIPANTS},
+                              ParticipantId{5000}, kAnyParticipant}) {
+        engine.setPositionLimit(pid, 100);
+        const auto r = buy(id, pid, 990'000, 1'000'000);
+        EXPECT_FALSE(r.isAccepted()) << "pid " << pid;
+        EXPECT_EQ(r.rejectReason, RejectReason::InvalidFieldValue) << "pid " << pid;
+        EXPECT_FALSE(resting(id)) << "pid " << pid;
+        ++id;
+    }
+}
+
+TEST_F(RiskFixture, ParticipantIdCapHoldsWithNoRiskConfigured) {
+    // The cap is admission, not a risk control: it must not wait for one to
+    // be configured, or the first limit set later would already be bypassed.
+    EXPECT_TRUE(buy(1, MatchingEngine::MAX_PARTICIPANTS - 1, 990'000, 10).isAccepted());
+    EXPECT_EQ(buy(2, MatchingEngine::MAX_PARTICIPANTS, 990'000, 10).rejectReason,
+              RejectReason::InvalidFieldValue);
+}

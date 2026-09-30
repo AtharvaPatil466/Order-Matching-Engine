@@ -465,9 +465,10 @@ public:
     // All checks below are O(1), lock-free (atomic ops only) and allocation-free
     // on the accept path. Each control is opt-in: it does nothing until configured
     // at startup, so the existing hot path is unchanged when unused. Per-id state
-    // lives in fixed-size arrays indexed by participant/symbol id; ids at or above
-    // the bounds bypass the array-indexed controls.
-    static constexpr size_t MAX_PARTICIPANTS = 1024;  // positions_ / OTR array bound
+    // lives in fixed-size arrays indexed by participant/symbol id. submitOrder
+    // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue);
+    // symbol ids at or above MAX_RISK_SYMBOLS bypass the fat-finger arrays.
+    static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // positions_ / OTR array bound
     static constexpr size_t MAX_RISK_SYMBOLS = 256;   // fat-finger array bound
 
     // P2-8 Kill switch. setKillSwitch(true) is callable from a monitoring thread

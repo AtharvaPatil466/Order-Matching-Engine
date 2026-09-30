@@ -94,7 +94,7 @@ static MicrostructureSnapshot strongBuySnap() {
 TEST(PaperTraderTest, NeutralTicksNoTrades) {
     auto eng = makeEngine();
     // Use a very low maxPosition so cap test is independent
-    PaperTrader pt(*eng, SYM, /*pid=*/9999,
+    PaperTrader pt(*eng, SYM, /*pid=*/1023,
                    /*buyThreshold=*/0.20, /*sellThreshold=*/0.20,
                    /*orderSize=*/100, /*maxPosition=*/1000);
 
@@ -114,7 +114,7 @@ TEST(PaperTraderTest, NeutralTicksNoTrades) {
 // ---------------------------------------------------------------------------
 TEST(PaperTraderTest, StrongBuySignalExceedsThreshold) {
     auto eng = makeEngine();
-    PaperTrader pt(*eng, SYM, /*pid=*/9999,
+    PaperTrader pt(*eng, SYM, /*pid=*/1023,
                    /*buyThreshold=*/0.20, /*sellThreshold=*/0.20,
                    /*orderSize=*/100, /*maxPosition=*/1000);
 
@@ -146,7 +146,7 @@ TEST(PaperTraderTest, UnrealizedPnlZeroWhenFlat) {
 // ---------------------------------------------------------------------------
 TEST(PaperTraderTest, TotalPnlIdentity) {
     auto eng = makeEngine();
-    PaperTrader pt(*eng, SYM, /*pid=*/9999,
+    PaperTrader pt(*eng, SYM, /*pid=*/1023,
                    /*buyThreshold=*/0.20, /*sellThreshold=*/0.20,
                    /*orderSize=*/100, /*maxPosition=*/1000);
 
@@ -172,7 +172,7 @@ TEST(PaperTraderTest, TotalPnlIdentity) {
 // ---------------------------------------------------------------------------
 TEST(PaperTraderTest, ResetClearsAllState) {
     auto eng = makeEngine();
-    PaperTrader pt(*eng, SYM, /*pid=*/9999,
+    PaperTrader pt(*eng, SYM, /*pid=*/1023,
                    /*buyThreshold=*/0.20, /*sellThreshold=*/0.20,
                    /*orderSize=*/100, /*maxPosition=*/1000);
 
@@ -204,7 +204,7 @@ TEST(PaperTraderTest, PositionCapRespected) {
 
     // orderSize (50) == maxPosition (50): after the first fill the cap is reached
     // and no further buys should be issued, so position stays <= 50.
-    PaperTrader pt(*eng, SYM, /*pid=*/9999,
+    PaperTrader pt(*eng, SYM, /*pid=*/1023,
                    /*buyThreshold=*/0.001,  // very low threshold → fires on almost any buy signal
                    /*sellThreshold=*/0.001,
                    /*orderSize=*/50,        // each order ≤ maxPosition

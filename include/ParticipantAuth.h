@@ -57,6 +57,7 @@
 #include "Types.h"
 
 #include <algorithm>
+#include <charconv>
 #include <fstream>
 #include <cstddef>
 #include <string>
@@ -179,7 +180,17 @@ public:
                                             ": non-numeric participant id '" + tok + "'";
                         return -1;
                     }
-                    ids.push_back(static_cast<ParticipantId>(std::stoull(tok)));
+                    // from_chars, not stoull: a 20-digit id threw out of here
+                    // uncaught and aborted gateway startup without naming the line.
+                    ParticipantId id = 0;
+                    const auto res = std::from_chars(tok.data(), tok.data() + tok.size(), id);
+                    if (res.ec != std::errc{} || id >= kMaxParticipants) {
+                        if (error) *error = "line " + std::to_string(lineNo) +
+                                            ": participant id '" + tok + "' must be below " +
+                                            std::to_string(kMaxParticipants);
+                        return -1;
+                    }
+                    ids.push_back(id);
                 }
                 if (comma == std::string::npos) break;
                 pos = comma + 1;

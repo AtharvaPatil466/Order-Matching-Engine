@@ -1533,6 +1533,14 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
+    // ENGTEST-1: position and OTR state is indexed by participant id. Past the
+    // arrays those controls were skipped, not enforced, so an id there traded
+    // with no limits. Every ingress (gateway, admin, OUCH/DPDK, SBE, FIX) comes
+    // through here; checked before the rate limiter so a junk id grows nothing.
+    if (participantId >= MAX_PARTICIPANTS) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
+    }
+
     uint64_t sequenceId = nextSequenceId();
 
     if (rateLimiter_.isEnabled() && !rateLimiter_.allow(participantId)) {

@@ -92,6 +92,13 @@ enum class PegType : uint8_t {
 // forgotten field can produce by accident is not a sentinel.
 constexpr ParticipantId kAnyParticipant = std::numeric_limits<ParticipantId>::max();
 
+// Per-participant risk state (position limits, OTR) lives in fixed arrays of
+// this many entries, indexed by id. An id at or above it never indexed out of
+// bounds — it skipped those controls, silently (ENGTEST-1). So the engine
+// rejects such an id at submitOrder and the credentials loader refuses to
+// provision one.
+constexpr ParticipantId kMaxParticipants = 1024;
+
 enum class RejectReason : uint8_t {
     None,
     VolatilityCircuitBreaker, // The order that tripped the breaker

@@ -167,7 +167,7 @@ void test_StopDrainsBufferedEvents() {
             // Distinct participants keep every resting order independent of
             // per-account risk caps; count how many the engine accepts so
             // the drain assertion targets the true 'A' population.
-            auto r = engine.submitOrder(11, 1000 + i, /*pid=*/1000 + i,
+            auto r = engine.submitOrder(11, 1000 + i, /*pid=*/1 + i,
                                         Side::Buy, 900 - i, 10,
                                         OrderType::Limit);
             if (r.isAccepted()) ++accepted;

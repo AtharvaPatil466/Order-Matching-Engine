@@ -34,7 +34,7 @@ public:
     // maxPosition  : absolute position cap (no new orders if |position| >= maxPosition)
     explicit PaperTrader(MatchingEngine& engine,
                          SymbolId symbol,
-                         ParticipantId pid       = 9999,
+                         ParticipantId pid       = 1023,  // highest id the engine admits (kMaxParticipants - 1)
                          double buyThreshold     = 0.20,
                          double sellThreshold    = 0.20,
                          Quantity orderSize      = 100,

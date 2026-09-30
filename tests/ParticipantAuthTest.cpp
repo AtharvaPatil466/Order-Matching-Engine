@@ -181,7 +181,7 @@ void test_LoadsCredentialsFromFile() {
         out << "# desks for firm-a\n"
             << "firm-a:s3cret:100,101\n"
             << "\n"
-            << "firm-b:0th3r:200\n";
+            << "firm-b:0th3r:200,1023\n";  // 1023: the highest id the engine admits
     }
 
     ParticipantAuth auth;
@@ -191,7 +191,7 @@ void test_LoadsCredentialsFromFile() {
     auto a = auth.authenticate("firm-a", "s3cret");
     assert(a.valid() && a.permits(100) && a.permits(101) && !a.permits(200));
     auto b = auth.authenticate("firm-b", "0th3r");
-    assert(b.valid() && b.permits(200) && !b.permits(100));
+    assert(b.valid() && b.permits(200) && b.permits(1023) && !b.permits(100));
 
     std::remove(path.c_str());
     PASS();
@@ -211,6 +211,10 @@ void test_MalformedCredentialLineIsFatal() {
         {":s3cret:100\n",             "empty user"},
         {"firm-a::100\n",             "empty secret"},
         {"firm-a:s3cret:\n",          "no ids at all"},
+        // ENGTEST-1: past the engine's per-participant arrays every risk
+        // control was skipped for the id, so provisioning one is a config error.
+        {"firm-a:s3cret:100,1024\n",  "id at MAX_PARTICIPANTS"},
+        {"firm-a:s3cret:99999999999999999999\n", "id overflows uint64"},
     };
 
     for (const auto& c : cases) {

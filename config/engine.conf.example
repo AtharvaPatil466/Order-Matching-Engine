@@ -1,10 +1,18 @@
 # Order Matching Engine — Example Configuration
 #
-# Copy to /etc/orderengine/engine.conf or set OB_* environment variables.
-# Every key can be overridden by an env var with the prefix OB_
-# (e.g. "threads" → OB_THREADS).
+# Copy to /etc/orderengine/engine.conf and pass it with --config PATH (or
+# OB_CONFIG_PATH). An OB_<KEY> env var overrides a key only where code reads
+# that key (e.g. "log_sink" → OB_LOG_SINK).
+#
+# MANY KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
+# changes nothing: no risk limit, rate limit, checkpoint threshold, port or
+# replication timing is taken from this file. What is read: log_sink, the
+# alert_* keys, order_pool_capacity / trade_history_capacity, and, on SIGHUP
+# only, rate_limit.default_rate / rate_limit.default_burst. journal_path,
+# instruments and participants are validated at startup but not applied.
 
 # ── Core Engine ──────────────────────────────────────────────────────────────
+# not read: use --threads / --symbols; lean mode is a build option (./build.sh --lean)
 threads         = 4
 symbols         = 4
 lean_mode       = false
@@ -20,6 +28,10 @@ lean_mode       = false
 # so size it above the symbol's peak resting-order count, not at it. The
 # order-id lookup map is sized from this value automatically — it has no key of
 # its own, so it can never be configured smaller than the pool it indexes.
+#
+# These two are read from the file named by OB_CONFIG_PATH (or from
+# OB_ORDER_POOL_CAPACITY / OB_TRADE_HISTORY_CAPACITY), not from --config alone
+# (src/OrderBook.cpp sizingConfig).
 order_pool_capacity    = 10000
 # Trades retained in the in-memory ring (80 B each). Rounded up to a power of
 # two. Only affects getTradeHistory(); the journal/market-data feeds are
@@ -27,30 +39,43 @@ order_pool_capacity    = 10000
 trade_history_capacity = 65536
 
 # ── Networking ───────────────────────────────────────────────────────────────
+# not read: OrderEngine's admin port is --port; GatewayServer's order port is an
+# optional leading positional argument (default 9876)
 admin_port      = 8080
 gateway_port    = 9001
 
 # ── Journaling ───────────────────────────────────────────────────────────────
+# journal_path is only validated; the journal opened is --journal / OB_JOURNAL_PATH.
+# checkpoint_* are not read: auto-checkpoint is fixed at 250,000 entries or
+# 64 MiB, plus --journal-max-mb.
 journal_path    = /var/lib/orderengine/journal.wal
 checkpoint_entries = 100000
 checkpoint_bytes   = 104857600
 
 # ── Rate Limiting ────────────────────────────────────────────────────────────
+# not read. The rate limiter is off unless a SIGHUP reload finds
+# rate_limit.default_rate (and rate_limit.default_burst) in this file.
 rate_limit_msgs_per_sec = 10000
 rate_limit_burst        = 100
 queue_depth_threshold   = 0.8
 
 # ── Risk Limits ──────────────────────────────────────────────────────────────
+# not read: neither binary applies any risk limit from configuration
 max_order_size   = 1000000
 max_notional     = 100000000
 max_position     = 5000000
 otr_threshold    = 100
 
 # ── Circuit Breakers ─────────────────────────────────────────────────────────
+# not read: the breaker is fixed at 5% and nothing resumes a tripped book;
+# the price band stays off
 price_band_pct   = 0.05
 halt_duration_ms = 30000
 
 # ── High Availability ────────────────────────────────────────────────────────
+# not read: replication uses --role / OB_NODE_ROLE (plus
+# --allow-unsafe-replication) and OB_* env vars, with compiled-in timings
+# (heartbeat 100 ms, timeout 500 ms, lease 5000 ms)
 node_id           = 1
 node_role         = primary
 replication_port  = 9002

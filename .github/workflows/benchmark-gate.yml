@@ -15,9 +15,16 @@
 # runner removes the baseline file, the staleness, and the cross-machine variance
 # in one move.
 #
-# The gate is BLOCKING. If it cannot make a comparison it fails. Do not add
-# continue-on-error, and do not make a missing measurement pass — a gate that
-# cannot fail is the bug this workflow was rewritten to fix.
+# The job FAILS if it cannot make a comparison. Do not add continue-on-error,
+# and do not make a missing measurement pass — a gate that cannot fail is the
+# bug this workflow was rewritten to fix.
+#
+# It does not BLOCK anything yet. A failing job stops a merge only when
+# "benchmark" is a required status check, and as of 2026-09-30 `main` has no
+# branch protection or ruleset (gh api repos/:owner/:repo/branches/main ->
+# "protected": false) and this workflow has never run. Until that check is
+# required, a red run here is advice, and the admin-bypass override below
+# refers to branch-protection settings that are not configured.
 #
 # Override path
 # -------------
@@ -50,10 +57,11 @@ name: Benchmark Regression Gate
 on:
   pull_request:
     branches: [main, develop]
-    # Deliberately NO paths: filter. This gate is a required status check, and
-    # GitHub does not synthesize a success for a path-filtered workflow that
-    # never triggers — the check would sit at "Expected — Waiting for status to
-    # be reported" forever and block the PR just as hard as a failure would. A
+    # Deliberately NO paths: filter. This gate is meant to be a required status
+    # check (it is not one yet — see the header), and GitHub does not
+    # synthesize a success for a path-filtered workflow that never triggers —
+    # the check would sit at "Expected — Waiting for status to be reported"
+    # forever and block the PR just as hard as a failure would. A
     # doc-only PR being unmergeable is the same footgun as a gate that cannot
     # fail, pointed the other way.
     #

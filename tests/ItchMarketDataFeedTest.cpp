@@ -290,7 +290,10 @@ void test_FeedEndToEndGapRecoveryViaRetransmissionService() {
             CHECK(!f.empty());
             CHECK(f[0] == ITCH_MT_ADD_ORDER);
         }
-        CHECK(svc.messagesReplayedTotal() == 3);
+        // The service sends each frame and THEN counts it, so the third frame
+        // can arrive here before the third increment. Wait for the count rather
+        // than reading it once; a slow run (TSan) lost that race.
+        CHECK(waitFor([&] { return svc.messagesReplayedTotal() == 3; }));
 
         ::close(fd);
         svc.stop();

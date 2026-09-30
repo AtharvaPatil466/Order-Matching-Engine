@@ -290,7 +290,10 @@ public:
     bool validateIntegrity(std::string* err = nullptr) const;
 
 
-    // Cancel/Replace: full amendment (price change loses time priority)
+    // Cancel/Replace. Quantity may change only on a completely unfilled order
+    // and never above its size; otherwise newQty must equal remainingQty
+    // (InvalidQuantity). Until roadmap 1.5-E1 defines newQty as the new total.
+    // A price change loses time priority.
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                        ParticipantId requester = kAnyParticipant);
     // Same, but reports why. A replace can fail because the order is gone,

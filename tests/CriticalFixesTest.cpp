@@ -464,23 +464,34 @@ OrderId seedReplaceTarget(OrderBook& book, Quantity qty = 100) {
 }
 }  // namespace
 
+// A replace can no longer grow an order at all (roadmap 0.11, MATCH-4: a
+// growth past the order's size wrapped filledQty). This test used to grow
+// 100 -> 120 "within maxOrderSize". Risk limits still bite on a replace through
+// notional: repricing up raises it.
 TEST(AuditFixes, CancelReplaceHonoursRiskLimits) {
     OrderBook book(1);
-    seedReplaceTarget(book);
+    seedReplaceTarget(book);                 // buy 100 @ PX: notional 10,000
 
     RiskLimits limits;
-    limits.maxOrderSize = 150;          // the replace below asks for 5000
+    limits.maxOrderNotional = 11'000;
     book.setRiskLimits(/*pid=*/1, limits);
 
-    EXPECT_FALSE(book.cancelReplace(1, PX, /*newQty=*/5000))
-        << "an arbitrary quantity increase must be bounded by maxOrderSize";
+    RejectReason why = RejectReason::None;
+    EXPECT_FALSE(book.cancelReplace(1, PX, /*newQty=*/5000, why))
+        << "a replace must not grow an order";
+    EXPECT_EQ(why, RejectReason::InvalidQuantity);
+
+    EXPECT_FALSE(book.cancelReplace(1, PX + PX / 5, 100, why))   // notional 12,000
+        << "a reprice past maxOrderNotional must be refused";
+    EXPECT_EQ(why, RejectReason::RiskLimitBreached);
     const Order* o = book.getOrder(1);
     ASSERT_NE(o, nullptr) << "a rejected replace leaves the order resting";
-    EXPECT_EQ(o->remainingQty, 100u) << "and unmodified";
+    EXPECT_EQ(o->price, PX) << "and unmodified";
+    EXPECT_EQ(o->remainingQty, 100u);
 
     // Within the limit it still works.
-    EXPECT_TRUE(book.cancelReplace(1, PX, /*newQty=*/120));
-    EXPECT_EQ(book.getOrder(1)->remainingQty, 120u);
+    EXPECT_TRUE(book.cancelReplace(1, PX + PX / 20, 100));      // notional 10,500
+    EXPECT_EQ(book.getOrder(1)->price, PX + PX / 20);
 }
 
 TEST(AuditFixes, CancelReplaceHonoursPriceBand) {

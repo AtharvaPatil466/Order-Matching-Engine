@@ -980,13 +980,38 @@ An iceberg's slice is clamped to the new leaves, and only the *displayed* shrink
 A modify-down that consumes hidden reserve without touching the slice emits nothing the market
 can see (`src/OrderBook.cpp:1936-1952`).
 
-### Rule 9.2 — `cancelReplace` loses priority on a price change or a quantity increase, keeps it on a shrink
+### Rule 9.2 — `cancelReplace` loses priority on a price change or a same-size re-add, keeps it on a shrink
+
+First, which quantities a replace may ask for. This is roadmap 0.11 (MATCH-4) and holds until
+1.5-E1 defines `newQty` as the new total:
+
+| Order state | `newQty` accepted |
+|---|---|
+| Any | `newQty == remainingQty`, a price-only replace |
+| Completely unfilled (`remainingQty == initialQty`) | Any `newQty <= initialQty`. The new size becomes `initialQty`, so later reports show no phantom fill and the order still counts as unfilled |
+| Partially filled | Only `newQty == remainingQty` |
+
+Anything else is refused with `InvalidQuantity` (FIX OrdRejReason 13, OUCH invalid-quantity
+reject), and the order is left untouched. A replace can never grow an order.
+
+`newQty` used to become `remainingQty` with `initialQty` left unchanged. Two things went wrong:
+
+- An order for 100 with 60 filled, replaced "to 100", executed 160.
+- Growing an unfilled order past its size wrapped the derived `filledQty` (100→120 reported
+  18446744073709551596).
+
+On an unfilled order the FIX total and the leaves are the same number, so a resize there means
+the same thing under either reading. That keeps resize-down for OUCH and FIX clients, whose
+gateways have no modify message. A FIX client repricing a partially filled order must send the
+leaves quantity, because the original total is refused. "Unfilled" is `remainingQty ==
+initialQty`, so an order cut by `modifyOrder` counts as partially filled until E1 records fills.
+Pinned by `tests/ReplaceQuantityTest.cpp`.
 
 | Change | Priority |
 |---|---|
-| Price changed | Lost. Removed, repriced, timestamped, matched if it now crosses, then re-rested at the tail. `src/OrderBook.cpp:2048-2097` |
-| Same price, quantity down | **Kept.** In-place reduction. `src/OrderBook.cpp:2100-2113` |
-| Same price, quantity up | Lost. Removed and re-added at the tail with a fresh timestamp. `src/OrderBook.cpp:2114-2124` |
+| Price changed | Lost. Removed, repriced, timestamped, matched if it now crosses, then re-rested at the tail. |
+| Same price, quantity down | **Kept.** In-place reduction. |
+| Same price, same quantity | Lost. Removed and re-added at the tail with a fresh timestamp. |
 
 A repriced order is **off the book while it matches** and acts as an aggressor. Its display
 entry is removed before the match so its fills surface through the resting maker's execution

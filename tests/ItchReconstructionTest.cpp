@@ -294,12 +294,14 @@ void test_CancelReplaceReconstructs() {
         // (a) Same price, quantity DOWN. The order keeps its place in the
         // queue and simply shrinks — the same shape as a modify-down, and it
         // must reach the feed as one.
-        CHECK(f.engine.cancelReplace(1, 100, 1000, 40));
-        CHECK(f.reco.depth(Side::Buy).at(1000) == 40);
+        CHECK(f.engine.cancelReplace(1, 100, 1000, 75));
+        CHECK(f.reco.depth(Side::Buy).at(1000) == 75);
         f.check();
 
-        // (b) Same price, quantity UP. This forfeits time priority, so the
-        // wire form is delete-then-add rather than an in-place grow.
+        // (b) Same price, same quantity: the re-add path. This forfeits time
+        // priority, so the wire form is delete-then-add. (It used to grow the
+        // order 40 -> 75 here; a replace can no longer grow an order — roadmap
+        // 0.11, MATCH-4 — so (a) now cuts to 75 and (b) re-adds at 75.)
         CHECK(f.engine.cancelReplace(1, 100, 1000, 75));
         CHECK(f.reco.depth(Side::Buy).at(1000) == 75);
         f.check();
@@ -338,7 +340,8 @@ void test_CancelReplaceReconstructs() {
             g.check();
 
             const uint64_t execsBefore = g.pub->executedEmitted();
-            CHECK(g.engine.cancelReplace(1, 601, 1002, 200));
+            // Same quantity (was 50 -> 200, a growth a replace now refuses).
+            CHECK(g.engine.cancelReplace(1, 601, 1002, 50));
             g.check();
 
             CHECK(g.pub->executedEmitted() == execsBefore + 1 &&
@@ -353,7 +356,8 @@ void test_CancelReplaceReconstructs() {
         f.check();
         CHECK(f.engine.cancelReplace(1, 400, 1030, 60));
         f.check();
-        CHECK(f.engine.cancelReplace(1, 400, 1031, 200));
+        // Reprice at the new size (was 60 -> 200, a growth a replace now refuses).
+        CHECK(f.engine.cancelReplace(1, 400, 1031, 60));
         f.check();
 
         // (g) Replacing a HIDDEN order stays entirely off the feed.

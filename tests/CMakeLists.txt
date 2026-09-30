@@ -438,6 +438,14 @@ enable_assertions(ReplaceIcebergSliceTest)
 add_test(NAME ReplaceIcebergSliceTest COMMAND ReplaceIcebergSliceTest)
 set_tests_properties(ReplaceIcebergSliceTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 0.11 (MATCH-4): a replace changes quantity only on an unfilled order
+# and never above its original size — no over-execution, no wrapped fills.
+add_executable(ReplaceQuantityTest ReplaceQuantityTest.cpp)
+target_link_libraries(ReplaceQuantityTest PRIVATE OrderMatcher)
+enable_assertions(ReplaceQuantityTest)
+add_test(NAME ReplaceQuantityTest COMMAND ReplaceQuantityTest)
+set_tests_properties(ReplaceQuantityTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

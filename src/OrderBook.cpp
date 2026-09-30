@@ -381,8 +381,8 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     if (tradingState_ == TradingState::PostClose) return RejectReason::MarketClosed;
 
 #ifndef OB_LEAN_MODE
-    // Risk limits — this is also what bounds an arbitrary quantity increase
-    // (maxOrderSize / maxOrderNotional / maxPositionSize).
+    // Risk limits (maxOrderSize / maxOrderNotional / maxPositionSize). A
+    // replace cannot grow an order, but a reprice can raise its notional.
     if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty))
         return RejectReason::RiskLimitBreached;
 #else
@@ -2108,6 +2108,20 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         return false;
     }
 
+    // MATCH-4, until 1.5-E1 defines newQty as the new TOTAL (FIX). newQty used
+    // to become remainingQty with initialQty untouched: 100 with 60 filled,
+    // replaced "to 100", executed 160, and growing past initialQty wrapped
+    // every later filled = initialQty - remainingQty to ~2^64. Now a quantity
+    // change is allowed only on a completely unfilled order (where total ==
+    // leaves, so both readings agree) and never above its original size.
+    // newQty == remainingQty (price-only) is always fine.
+    const bool unfilled = order->remainingQty == order->initialQty;
+    if (newQty != order->remainingQty && !(unfilled && newQty <= order->initialQty))
+        [[unlikely]] {
+        reason = RejectReason::InvalidQuantity;
+        return false;
+    }
+
     // H2: a replace is a fresh admission decision. Previously cancelReplace
     // ran only the qty/price sanity checks above, so it bypassed the trading
     // state gate, risk limits (hence arbitrary quantity increases), the LULD
@@ -2128,6 +2142,10 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
     }
 
     reason = RejectReason::None;
+    // An unfilled resize is a new instruction for newQty, so it becomes the
+    // order's size. Without this, filled = initialQty - remainingQty reported
+    // the cut as a phantom fill, and the order no longer looked unfilled.
+    if (unfilled) order->initialQty = newQty;
     Price oldPrice = order->price;
     bool priceChanged = (newPrice != oldPrice);
 
@@ -2204,7 +2222,8 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                                   order->side, order->price,
                                   displayBefore - displayAfter);
         } else {
-            // Quantity increase loses time priority
+            // Same quantity (a replace cannot grow an order): re-add, which
+            // loses time priority
             removeFromBook(order);
             order->remainingQty = newQty;
             // Re-slice an iceberg against its new size, the same way the

@@ -628,8 +628,10 @@ size_t writeTwoSymbolJournal(Journal& j, OrderBook& b1, OrderBook& b2) {
     add(b1, 1, 11, Side::Buy, 996, 20);
     assert(b2.modifyOrder(20, 15));
     j.logModifyOrder(20, 2, 15);
-    assert(b1.cancelReplace(11, 997, 25));
-    j.logCancelReplace(11, 1, 997, 25);
+    // A shrink (was 20 -> 25: growth past the order's size, which a replace
+    // refuses since roadmap 0.11 because it wrapped filledQty).
+    assert(b1.cancelReplace(11, 997, 15));
+    j.logCancelReplace(11, 1, 997, 15);
     j.flush();
     return 8;
 }

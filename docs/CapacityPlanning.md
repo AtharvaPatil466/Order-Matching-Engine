@@ -24,6 +24,13 @@ Memory = (max_live_orders × 248 bytes)
        + 256MB                                        # framework overhead
 ```
 
+> **This formula does not describe the engine.** A book is allocated in full
+> when its symbol is added, whether or not an order ever arrives: measured
+> **10.3 MiB per empty book** at the defaults (10,000 order slots, 65,536-trade
+> ring — see `config/engine.conf.example`), not 64 KB. Memory scales with
+> `symbols × order_pool_capacity`, not with live orders; the ~248 B above is
+> only the marginal cost of one more order (Runbook §6).
+
 ### Examples
 
 | Scenario | Live Orders | Symbols | Memory |
@@ -32,6 +39,10 @@ Memory = (max_live_orders × 248 bytes)
 | Medium (prop desk) | 100K | 50 | ~512 MB |
 | Large (exchange) | 1M | 500 | ~2 GB |
 | Ultra (HFT venue) | 5M | 2000 | ~8 GB |
+
+These totals are understated. At the default sizing, book memory alone is
+`symbols × 10.3 MiB`: about 0.5 GiB for 50 symbols, 5 GiB for 500 and 20 GiB
+for 2,000, before any other overhead.
 
 ---
 
@@ -63,7 +74,7 @@ Cores = num_worker_threads + 3 (gateway + admin + journal)
 | 16 | 8 | 150M ops/s | 14M ops/s |
 | 32 | 16 | 280M ops/s | 25M ops/s |
 
-> **Note**: These are theoretical maximums assuming perfect symbol distribution. Real-world throughput depends on match rate, order book depth, and cross-symbol correlation.
+> **Note**: These are not measurements. No benchmark in this repository produces them, and no lean-mode figure is published anywhere. For comparison, the published x86 single-thread core-matching figure is 2.80M ops/s (3.10M with PGO) at commit `d2e688c`, with no journal (BENCHMARKS.md). Real-world throughput depends on match rate, order book depth, and cross-symbol correlation.
 
 ### CPU Affinity Best Practices
 ```bash
@@ -88,13 +99,17 @@ taskset -c 2-5 ./bin/OrderEngine --threads 4
 ## 3. Disk Sizing (Journal)
 
 ### Journal Entry Size
+Every record is a packed `JournalEntry` of **134 bytes**, whatever its type
+(`include/Journal.h`); the file starts with a 24-byte header. An earlier table
+here gave 24-100 bytes by type.
+
 | Entry Type | Size | Notes |
 |------------|------|-------|
-| AddOrder | ~80 bytes | All order fields + CRC |
-| CancelOrder | ~24 bytes | OrderId + CRC |
-| ModifyOrder | ~32 bytes | OrderId + newQty + CRC |
-| Checkpoint header | ~16 bytes | Sequence + CRC |
-| Snapshot entry | ~100 bytes | Full order state |
+| AddOrder | 134 bytes | All order fields + CRC |
+| CancelOrder | 134 bytes | Same fixed record |
+| ModifyOrder | 134 bytes | Same fixed record |
+| File header | 24 bytes | Once per file |
+| Snapshot entry | 134 bytes | Same fixed record |
 
 ### Daily Journal Growth
 ```
@@ -109,17 +124,26 @@ Journal/day = orders_per_day × avg_entry_size
 | Large | 10M | 100 | ~1.5 GB | ~45 GB |
 | Ultra | 100M | 500 | ~15 GB | ~450 GB |
 
+These are bytes **written**, not bytes kept. A checkpoint replaces the journal
+with a snapshot of the resting orders, and one runs automatically at 250,000
+entries or 64 MiB (compiled in), at `--journal-max-mb`, and on every clean
+OrderEngine shutdown — so the file never holds a day's history, and fills and
+cancels before the last checkpoint are gone unless something copied the file
+first.
+
 ### Disk IOPS Requirements
 | Sync Policy | IOPS Needed | Latency Impact |
 |-------------|-------------|----------------|
-| `None` | ~100 | 0 (async) |
-| `GroupCommit` (default) | ~1K-5K | ~1-5μs per batch |
-| `EveryEntry` | 10K-100K | ~10-100μs per entry |
+| `GroupCommit` (OrderEngine) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the ~1-5 µs this table used to give |
+| `Immediate` (GatewayServer) | 10K-100K | one `fdatasync` per entry |
+
+There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
+`{Immediate, GroupCommit}`, and each binary hard-codes its choice.
 
 ### Recommended Disk
 - **Development**: Any SSD
 - **Production**: NVMe SSD with ≥100K IOPS write
-- **Ultra-low-latency**: Intel Optane or tmpfs (if durability handled by replication)
+- **Ultra-low-latency**: Intel Optane. tmpfs only if losing the journal on a host reboot is acceptable: replication, which this line used to lean on, is disabled by default and has known CRITICAL defects
 
 ### Journal Storage Backing — HARD Deployment Constraint
 
@@ -133,26 +157,28 @@ Journal/day = orders_per_day × avg_entry_size
 
 | Backing | Journal flush latency | Verdict |
 |---------|-----------------------|---------|
-| RAM tmpfs (`/dev/shm`) | ~0 (durability via replication) | ✅ Best — ultra-low-latency, requires HA replication for durability |
+| RAM tmpfs (`/dev/shm`) | ~0 | ⚠️ Lost on host reboot. Replication, which was supposed to cover that, is disabled by default with known CRITICAL defects — no durability across a host failure |
 | Instance-store NVMe (e.g. `c6id.metal`, `c6gd`, `i4i`) | ~10–30 µs | ✅ Required minimum for production |
 | Local physical NVMe (bare metal) | ~10–30 µs | ✅ Equivalent to instance-store NVMe |
 | **EBS / PD / Managed Disk / SAN / NFS** | **~1–4 ms round-trip** | ❌ **NOT acceptable for the journal** |
 
 **Why this matters for the published numbers.** The current benchmarked
-**Path C P99 of 3,568 ns was measured with the journal on EBS** (see
-[BENCHMARKS.md](../../BENCHMARKS.md) — "async io_uring ack on EBS"). A large
-part of that figure is EBS network-block-device round-trip latency, **not**
-matching-engine or journal-code cost — it is a *deployment* artifact, not a
-code bug. **The production P99 must be re-benchmarked with the journal on
+**Path C P99 of 3,568 ns** was measured with the journal at
+`/tmp/honest_benchmark.journal` (`benchmarks/HonestBenchmark.cpp`), on a host
+whose `/tmp` backing — EBS or tmpfs — was not recorded. Earlier revisions of
+this page and [BENCHMARKS.md](../BENCHMARKS.md) called it EBS-backed; nothing
+shows that, so how much of the figure is storage latency is unknown.
+**The production P99 must be re-benchmarked with the journal on
 instance-store NVMe (or tmpfs) and that re-measured number reported as the
-real Path C P99.** Do not cite the EBS-backed 3,568 ns as the engine's
+real Path C P99.** Do not cite the 3,568 ns as the engine's
 achievable production tail.
 
 **Instance selection (AWS example).** Choose an instance family with local
 NVMe instance-store — `c6id`/`c7gd`/`m6id`/`i4i`/`c6gd` — and place the
 journal on the mounted instance-store volume (or a tmpfs). Do **not** put
-the journal on the root EBS volume. If durability is delivered by
-primary-backup replication (see §5), a RAM tmpfs journal is preferred.
+the journal on the root EBS volume. A RAM tmpfs journal is only durable if
+something else is, and replication is disabled by default with known CRITICAL
+defects.
 
 ---
 

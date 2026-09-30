@@ -127,6 +127,14 @@ enable_assertions(GatewayLoginTest)
 add_test(NAME GatewayLoginTest COMMAND GatewayLoginTest)
 set_tests_properties(GatewayLoginTest PROPERTIES TIMEOUT 120 LABELS "project;security;integration")
 
+# Out-of-range enum bytes and a non-0/1 `hidden` byte on the native wire
+# (PROTO-1): rejected with InvalidFieldValue, never booked.
+add_executable(GatewayFieldValidationTest GatewayFieldValidationTest.cpp)
+target_link_libraries(GatewayFieldValidationTest PRIVATE OrderMatcher)
+enable_assertions(GatewayFieldValidationTest)
+add_test(NAME GatewayFieldValidationTest COMMAND GatewayFieldValidationTest)
+set_tests_properties(GatewayFieldValidationTest PROPERTIES TIMEOUT 60 LABELS "project;protocol;security")
+
 # Who may cancel whose order (H7). The login frame proves identity; this is
 # the authorisation half it cannot reach.
 add_executable(OrderOwnershipTest OrderOwnershipTest.cpp)

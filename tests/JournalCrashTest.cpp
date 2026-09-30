@@ -253,6 +253,63 @@ void testCorruptedCRC() {
 
 // ─── Test 4: Checkpoint + replay ─────────────────────────────────────────────
 
+// ── A checkpoint whose temp file wrote nothing must not replace the journal ──
+//
+// prepareRewrite builds the snapshot in a Journal over <path>.tmp, and that
+// Journal's truncate() closes the file and reopens it "wb+". When the reopen
+// fails the temp journal has no file, and appendEntry DROPS every snapshot
+// record without a word. flush() then has nothing pending, so the old test —
+// pendingEntries() == 0 — called the snapshot complete, and commitRewrite
+// renamed a zero-byte file over the live journal: every resting order gone
+// (JRN-4). In production the reopen fails on fd exhaustion: truncate() frees
+// the descriptor and another thread's accept() can take it first.
+//
+// Forced here with the umask. Creating the file grants the access asked for
+// whatever its mode, so the first open succeeds; a umask without owner-write
+// leaves it 0400, and the reopen for writing is refused. Root ignores file
+// modes, so under root the reopen cannot be made to fail and the test skips.
+void testCheckpointWithUnwritableTempKeepsTheJournal() {
+    std::cout << "Running testCheckpointWithUnwritableTempKeepsTheJournal..." << std::endl;
+    if (::geteuid() == 0) {
+        std::cout << "  SKIPPED: root ignores file modes" << std::endl;
+        return;
+    }
+    // Per-process path: other suites share /tmp.
+    const std::string path =
+        "/tmp/test_journal_ckpt_temp_" + std::to_string(::getpid()) + ".bin";
+    const std::string tmpPath = path + ".tmp";
+    std::remove(path.c_str());
+    std::remove(tmpPath.c_str());
+
+    {
+        MatchingEngine engine;
+        engine.enableJournal(path);
+        engine.start();
+        engine.processOrder(0, 1, 100, Side::Buy, toPrice(99.00), 50, OrderType::Limit);
+        engine.processOrder(0, 2, 100, Side::Buy, toPrice(98.00), 30, OrderType::Limit);
+        engine.processOrder(0, 3, 200, Side::Sell, toPrice(101.00), 40, OrderType::Limit);
+
+        const mode_t saved = ::umask(0277);
+        engine.checkpoint();
+        ::umask(saved);
+        engine.stop();
+    }
+
+    MatchingEngine restarted;
+    restarted.enableJournal(path);
+    restarted.start();
+    const size_t replayed = restarted.replayJournal();
+    assert(replayed == 3 &&
+           "a checkpoint whose temp file wrote nothing replaced the journal (JRN-4)");
+    assert(restarted.getOrderBook(0)->getBidLevelsCount() == 2);
+    assert(restarted.getOrderBook(0)->getAskLevelsCount() == 1);
+    assert(::access(tmpPath.c_str(), F_OK) != 0 && "the refused temp file was left behind");
+    restarted.stop();
+
+    std::remove(path.c_str());
+    std::cout << "testCheckpointWithUnwritableTempKeepsTheJournal PASSED" << std::endl;
+}
+
 void testCheckpointReplay() {
     std::cout << "Running testCheckpointReplay..." << std::endl;
     cleanup();
@@ -998,6 +1055,7 @@ int main() {
     testTruncatedWrite();
     testCorruptedCRC();
     testCheckpointReplay();
+    testCheckpointWithUnwritableTempKeepsTheJournal();
     testEmptyJournal();
     testJournalWithTrades();
     testDeterministicReplayEquivalence();

@@ -17,9 +17,7 @@
 #ifdef __APPLE__
 #include <fcntl.h>
 #endif
-#ifdef __linux__
 #include <sys/stat.h>
-#endif
 
 // Optional io_uring-backed journal write path (Linux only). Enabled when the
 // build defines OB_HAVE_LIBURING (set by CMake when liburing is found). When
@@ -461,7 +459,22 @@ public:
             // (a short or torn write), abandon the rewrite and leave the
             // original in place; the caller sees false and the pre-call state,
             // which is exactly the atomicity contract.
-            snapshotComplete = (temp.pendingEntries() == 0);
+            //
+            // Nothing pending is not enough on its own (JRN-4). appendEntry
+            // DROPS entries, silently, when the file is not open or is refusing
+            // appends, and then nothing is pending either. truncate()'s reopen
+            // above fails that way on fd exhaustion, and this renamed a
+            // zero-byte file over the live journal. So ask the file: it must be
+            // exactly the header plus one record per entry appended, from a
+            // journal that was accepting them. (A real write error never gets
+            // here — writeBatch and syncFile fail-stop.)
+            const uint64_t n = temp.entriesAppended_;
+            const uint64_t expectedBytes =
+                n == 0 ? 0 : sizeof(JournalFileHeader) + n * sizeof(JournalEntry);
+            struct stat st{};
+            snapshotComplete = temp.pendingEntries() == 0 && !temp.recoveryFailed_ &&
+                               temp.file_ && ::fstat(fileno(temp.file_), &st) == 0 &&
+                               static_cast<uint64_t>(st.st_size) == expectedBytes;
         }
         if (!snapshotComplete) {
             std::remove(tmpPath.c_str());

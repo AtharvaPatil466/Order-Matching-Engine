@@ -994,6 +994,12 @@ only, as any aggressor's do.
 
 > `src/OrderBook.cpp:2050-2059`
 
+A repriced iceberg that rests afterwards is re-sliced to `min(remainingQty, displayQty)`,
+the same way as on every other rest path. Before this, it kept its old slice. When the match
+left less than that slice, the book advertised more than the order held, and the next
+aggressor's fill wrapped `remainingQty` to ~2^64 (roadmap 0.11, MATCH-3). Pinned by
+`tests/ReplaceIcebergSliceTest.cpp`.
+
 ### Rule 9.3 — A replace is a fresh admission decision
 
 `cancelReplace` re-runs the full admission chain — trading-state gate, risk limits, price

@@ -2166,6 +2166,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         if (finalizeIfStpCancelled(order)) return true;
 
         if (order->remainingQty > 0) {
+            // Re-slice, as every other rest path does (MATCH-3). The match
+            // above can leave remainingQty below the old slice; resting that
+            // slice made visibleQty > remainingQty, and the next aggressor was
+            // filled for more than the order held — remainingQty wrapped.
+            if (order->type == OrderType::Iceberg)
+                order->visibleQty = std::min(order->remainingQty, order->displayQty);
             if (!addToBook(order)) {
                 Quantity filled = order->initialQty - order->remainingQty;
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, filled, 0);

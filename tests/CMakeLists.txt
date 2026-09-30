@@ -430,6 +430,14 @@ enable_assertions(OrderTypeAdmissionTest)
 add_test(NAME OrderTypeAdmissionTest COMMAND OrderTypeAdmissionTest)
 set_tests_properties(OrderTypeAdmissionTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 0.11 (MATCH-3): a repriced iceberg is re-sliced, so it never rests
+# showing more than it holds.
+add_executable(ReplaceIcebergSliceTest ReplaceIcebergSliceTest.cpp)
+target_link_libraries(ReplaceIcebergSliceTest PRIVATE OrderMatcher)
+enable_assertions(ReplaceIcebergSliceTest)
+add_test(NAME ReplaceIcebergSliceTest COMMAND ReplaceIcebergSliceTest)
+set_tests_properties(ReplaceIcebergSliceTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

@@ -17,9 +17,9 @@
 > device is NOT acceptable for the journal path** — every group-commit flush
 > would pay a network round-trip that shows up directly in the order-entry P99
 > tail. See [CapacityPlanning.md](./CapacityPlanning.md) §3 "Journal Storage
-> Backing". This is also why the published EBS-backed Path C P99 (3,568 ns)
-> must be re-benchmarked on instance-store NVMe before it is quoted as the
-> production number.
+> Backing". This is also why the published Path C P99 (3,568 ns; its journal
+> was on `/tmp`, backing device not recorded) must be re-benchmarked on
+> instance-store NVMe before it is quoted as the production number.
 
 Verify the journal path resolves to a local NVMe or tmpfs device before launch:
 

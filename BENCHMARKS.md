@@ -136,7 +136,7 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | Components |
 |------|------------|
-| **A** | `OrderBook::addOrder()` — matching, STP, WashTrade, LULD, price-time priority |
+| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority (WashTrade and LULD are held by `OrderBook` but never called) |
 | **B** | Path A + `MatchingEngine::submitOrder()` — sequence allocation, rate limiter check |
 | **C** | Path B + `Journal` — GroupCommit (batch=64) with `fdatasync` per batch |
 

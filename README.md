@@ -111,7 +111,7 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O3 -march=native (Release). Each order individually timed with `nowNs()` (`std::chrono::high_resolution_clock`).
 
 > [!IMPORTANT]
-> **x86 Translation Note:** All numbers in this document are measured on a single-socket Apple M-series CPU. These are **not** multi-socket x86 numbers. Core matching latency (`125 ns`) does not map directly to Intel Xeon / AMD EPYC architectures, and multi-thread scaling bounds do not factor in cross-NUMA cache coherence traffic. Bare-metal x86 benchmarking is pending.
+> **Two machines:** the rows below are labelled x86 (AWS c6in.metal, commit `d2e688c`) or ARM (a single-socket Apple M-series dev machine), and must not be compared across that line. (This note used to say every number here was measured on Apple M-series, and quoted a 125 ns core-matching figure that is withdrawn.) Multi-thread scaling bounds do not factor in cross-NUMA cache coherence traffic.
 > 
 > These are **per-order processing latencies** on the matching thread. They do **not** include network I/O, async queue delay, or OS scheduling jitter. See [BENCHMARKS.md](./BENCHMARKS.md) for full methodology and caveats.
 

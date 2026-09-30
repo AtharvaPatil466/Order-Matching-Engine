@@ -178,16 +178,16 @@ void testCircuitBreaker() {
     book.setEventListener(&listener);
 
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
-    // A buy 6% above the 5% default band trips the breaker → volatility
-    // auction (not a hard halt); the triggering order itself is rejected.
+    // A buy 6% above the 5% default band trips the breaker: the triggering
+    // order is rejected and the trading state is untouched (roadmap 0.14 —
+    // this used to switch the whole book to VolatilityAuction).
     book.addOrder(2, 2, Side::Buy, 1060000, 100, OrderType::Limit);
-    assert(book.getTradingState() == TradingState::VolatilityAuction);
+    assert(book.getTradingState() == TradingState::Continuous);
     assert(book.getOrder(2) == nullptr);
 
-    // In-band orders now accumulate into the auction instead of being
-    // rejected; they rest until a reopening cross.
+    // In-band orders keep trading continuously: this sell fills the resting bid.
     book.addOrder(3, 3, Side::Sell, 1000000, 100, OrderType::Limit);
-    assert(book.getOrder(3) != nullptr);
+    assert(book.getOrder(3) == nullptr && book.getOrder(1) == nullptr);
     std::cout << "testCircuitBreaker PASSED" << std::endl;
 }
 
@@ -300,10 +300,15 @@ void testCircuitBreakerBoundaries() {
     book.addOrder(2, 2, Side::Sell, 1049000, 100, OrderType::Limit);
     assert(listener.trades.size() == 0);
 
+    // 5.1% away: the breaker rejects this order.
     book.addOrder(3, 3, Side::Buy, 1051000, 100, OrderType::Limit);
+    assert(book.getOrder(3) == nullptr);
 
+    // The rejection does not stop the market (roadmap 0.14): this in-band sell
+    // trades against the resting bid on arrival. It used to be asserted NOT to
+    // trade, because the trip had switched the book to VolatilityAuction.
     book.addOrder(4, 4, Side::Sell, 1000000, 100, OrderType::Limit);
-    assert(listener.trades.size() == 0);
+    assert(listener.trades.size() == 1);
 
     std::cout << "testCircuitBreakerBoundaries PASSED" << std::endl;
 }

@@ -402,8 +402,10 @@ public:
     void setReferencePrice(Price price) { referencePrice_ = price; }
 
     // Price-band (LULD-style) admission filter. Distinct from the
-    // volatility circuit breaker: the breaker HALTS the market when a
-    // single price moves too far; the band REJECTS individual orders
+    // volatility circuit breaker (a threshold on the same reference, reported
+    // as VolatilityCircuitBreaker and logged as breaker_trip — it does not
+    // change the trading state; see admitCircuitBreaker). The band REJECTS
+    // individual orders
     // priced outside [ref*(1-pct), ref*(1+pct)] without affecting market
     // state. Both can be active simultaneously.
     //
@@ -702,7 +704,7 @@ private:
     // reject notifications. Returns RejectReason::None if the order may be
     // admitted. Shared so cancelReplace applies the same gates as a new
     // order; addOrder still runs its own inline copies because those are
-    // interleaved with side effects (breaker -> VolatilityAuction transition,
+    // interleaved with side effects (breaker_trip event,
     // referencePrice_ init, rejectedOrders accounting) that a replace must
     // NOT trigger. Folding addOrder onto this is a mechanical follow-up.
     RejectReason checkAdmission(ParticipantId participantId, Side side,

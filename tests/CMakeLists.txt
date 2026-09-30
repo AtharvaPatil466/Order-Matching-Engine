@@ -414,6 +414,14 @@ enable_assertions(IcebergMinQtyTest)
 add_test(NAME IcebergMinQtyTest COMMAND IcebergMinQtyTest)
 set_tests_properties(IcebergMinQtyTest PROPERTIES TIMEOUT 60 LABELS "project;property")
 
+# Roadmap 0.14: the volatility breaker rejects the out-of-band order and leaves
+# the book's trading state alone — one passive order must not stop a symbol.
+add_executable(BreakerNoAuctionTest BreakerNoAuctionTest.cpp)
+target_link_libraries(BreakerNoAuctionTest PRIVATE OrderMatcher)
+enable_assertions(BreakerNoAuctionTest)
+add_test(NAME BreakerNoAuctionTest COMMAND BreakerNoAuctionTest)
+set_tests_properties(BreakerNoAuctionTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

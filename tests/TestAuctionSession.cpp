@@ -8,9 +8,10 @@
 //      executable volume, the engine resolves by minimum imbalance, then by
 //      proximity to the reference price — NOT the old "lowest price" behavior.
 //   3. Imbalance qty/side are still reported for a one-sided (non-crossing) book.
-//   4. A circuit-breaker breach enters TradingState::VolatilityAuction (not a
-//      hard Halt); orders then accumulate without matching; resumeVolatility-
-//      Auction() runs the reopening cross and returns the book to Continuous.
+//   4. A circuit-breaker breach rejects the order and leaves the book
+//      Continuous (roadmap 0.14). A VolatilityAuction entered explicitly
+//      accumulates orders without matching; resumeVolatilityAuction() runs the
+//      reopening cross and returns the book to Continuous.
 
 #include "OrderBook.h"
 #include "Types.h"
@@ -96,9 +97,10 @@ void test_one_sided_imbalance() {
     PASS();
 }
 
-// 4. Volatility auction: breach -> auction (not halt) -> accumulate -> reopen.
+// 4. Volatility auction: breach rejects only; explicit auction -> accumulate
+//    -> reopen.
 void test_volatility_auction_lifecycle() {
-    SECTION("circuit-breaker breach auctions and reopens via a cross");
+    SECTION("breach rejects only; a volatility auction reopens via a cross");
     OrderBook book(1);
     book.setCircuitBreakerThreshold(0.05);           // 5% band
     book.setTradingState(TradingState::Continuous);
@@ -107,10 +109,16 @@ void test_volatility_auction_lifecycle() {
     addLimit(book, 1, 1, Side::Buy, 100, 100);
     assert(book.getTradingState() == TradingState::Continuous);
 
-    // A sell 100% away from reference trips the breaker -> volatility auction,
-    // NOT a hard halt. The triggering order itself is rejected.
+    // A sell 100% away from reference trips the breaker: the order is
+    // rejected and the market is left alone. This used to switch the book to
+    // VolatilityAuction — a limit price is not a print, so one passive order
+    // could stop the symbol (roadmap 0.14; the real trigger is 1.8-H3).
     addLimit(book, 2, 2, Side::Sell, 200, 100);
-    assert(book.getTradingState() == TradingState::VolatilityAuction);
+    assert(book.getOrder(2) == nullptr);
+    assert(book.getTradingState() == TradingState::Continuous);
+
+    // The auction itself is entered explicitly.
+    book.setTradingState(TradingState::VolatilityAuction);
 
     // Orders now accumulate without continuous matching. This in-band sell
     // crosses the resting buy on paper but must NOT trade until the reopen.

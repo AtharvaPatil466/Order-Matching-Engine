@@ -402,9 +402,8 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     }
 
 #ifndef OB_LEAN_MODE
-    // Circuit breaker: the TEST only. addOrder additionally transitions the
-    // book into VolatilityAuction on a breach; a replace must not move the
-    // market's trading state, so it only declines.
+    // Circuit breaker: the TEST only. addOrder's copy additionally logs the
+    // breaker_trip event; a replace only declines.
     if (priced && !checkCircuitBreaker(price))
         return RejectReason::VolatilityCircuitBreaker;
 #endif
@@ -601,10 +600,10 @@ std::optional<RejectReason> OrderBook::admitPoolPressure(OrderId orderId,
 // so it stays attached to it.
 //
 // Then rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
-// is configured and a reference price has been established. Distinct
-// from the volatility breaker: this rejects the individual
-// order without halting the market, lets subsequent in-band orders
-// continue trading. Skipped on order types without a meaningful limit
+// is configured and a reference price has been established. It rejects the
+// individual order and lets subsequent in-band orders continue trading (as
+// the volatility breaker now does too, with its own threshold and reject
+// reason). Skipped on order types without a meaningful limit
 // price (Market / Stop families / Pegged).
 // Precondition: bookLock_ held.
 std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
@@ -644,14 +643,16 @@ std::optional<RejectReason> OrderBook::admitCircuitBreaker(OrderId orderId, Pric
     if (type == OrderType::Limit || type == OrderType::IOC || type == OrderType::FOK
         || type == OrderType::PostOnly || type == OrderType::Iceberg || type == OrderType::Hidden) {
         if (!checkCircuitBreaker(price)) {
-            // Volatility breach: enter a short volatility auction rather
-            // than an outright halt. Orders now accumulate and the
-            // indicative/imbalance is published until a reopening cross
-            // (resumeVolatilityAuction) returns the book to continuous
-            // trading. A manual halt remains a hard halt. The order that
-            // tripped the breach is still rejected; later orders are
-            // admitted into the auction (no MarketHalted while auctioning).
-            tradingState_ = TradingState::VolatilityAuction;
+            // Reject the order; leave the market's trading state alone.
+            // This used to move the whole book into VolatilityAuction, but
+            // the price tested here is a LIMIT price, not a print: a passive
+            // bid 50% below the market cannot execute, yet it switched every
+            // participant on the symbol to accumulate-only, and nothing in the
+            // binary ever resumed it (PRIOR-5, AUCT-8). Tripping on a would-be
+            // execution price and reopening on a timer is roadmap 1.8-H3;
+            // until then the breaker is a per-order reject.
+            // VolatilityAuction is still entered explicitly (setTradingState).
+            // Pinned by BreakerNoAuctionTest.
             // Compliance/monitoring contract: a breach must always emit the
             // `breaker_trip` event (symbol/price/ref/threshold_pct). Kept
             // alongside the newer structured `risk.circuit_breaker` event so

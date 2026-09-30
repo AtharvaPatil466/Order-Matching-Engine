@@ -133,9 +133,12 @@ TEST_F(OrderBookTest, CircuitBreaker_ConfigurableThreshold) {
     book.addOrder(2, 2, Side::Sell, 1015000, 100, OrderType::Limit);
     EXPECT_FALSE(book.isHalted());
 
-    // 3% move trips the breaker → volatility auction (not a hard halt)
-    book.addOrder(3, 3, Side::Sell, 1030000, 100, OrderType::Limit);
-    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
+    // 3% move trips the breaker: the order is rejected, the market is not
+    // (roadmap 0.14 — the book stays Continuous).
+    auto trip = book.addOrder(3, 3, Side::Sell, 1030000, 100, OrderType::Limit);
+    ASSERT_TRUE(std::holds_alternative<RejectReason>(trip));
+    EXPECT_EQ(std::get<RejectReason>(trip), RejectReason::VolatilityCircuitBreaker);
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
 }
 
 TEST_F(OrderBookTest, CircuitBreaker_DefaultThreshold) {
@@ -224,12 +227,12 @@ TEST_F(OrderBookTest, TradingState_AuctionRejectsIOCAndFOK) {
               RejectReason::OrderTypeNotAllowedInState);
 }
 
-TEST_F(OrderBookTest, TradingState_CircuitBreakerEntersVolatilityAuction) {
+TEST_F(OrderBookTest, TradingState_CircuitBreakerRejectsWithoutAuction) {
     // The order that trips the breaker reports VolatilityCircuitBreaker and
-    // the book enters a volatility auction rather than a hard halt. Unlike a
-    // halt, the auction ACCUMULATES subsequent orders (no continuous match)
-    // until a reopening cross — so a post-trip limit order is admitted, not
-    // rejected with MarketHalted.
+    // the book's trading state is untouched (roadmap 0.14). This used to
+    // assert entry into VolatilityAuction — the defect itself: a limit price
+    // is not a print, so one passive out-of-band order stopped continuous
+    // trading for the whole symbol. Post-trip orders trade normally.
     book.setCircuitBreakerThreshold(0.02);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
@@ -237,12 +240,12 @@ TEST_F(OrderBookTest, TradingState_CircuitBreakerEntersVolatilityAuction) {
     ASSERT_TRUE(std::holds_alternative<RejectReason>(trip));
     EXPECT_EQ(std::get<RejectReason>(trip),
               RejectReason::VolatilityCircuitBreaker);
-    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
 
     auto post = book.addOrder(3, 3, Side::Buy, 1000000, 50, OrderType::Limit);
     ASSERT_TRUE(std::holds_alternative<OrderId>(post))
-        << "post-trip orders accumulate into the volatility auction, not rejected";
-    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
+        << "post-trip in-band orders are admitted";
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
 }
 
 // ─── Market orders in auction states ────────────────────────────────────────
@@ -965,7 +968,8 @@ TEST_F(OrderBookTest, CircuitBreaker_RecoveryAfterReset) {
     book.setCircuitBreakerThreshold(0.02);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.addOrder(2, 2, Side::Sell, 1030000, 100, OrderType::Limit); // trips breaker
-    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction);
+    // Rejects the order only; the state is untouched (roadmap 0.14).
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
 
     // Reset and resume
     book.resetStatus();

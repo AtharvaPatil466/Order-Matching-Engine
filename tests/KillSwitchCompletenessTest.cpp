@@ -45,8 +45,8 @@ constexpr ParticipantId kBystander = 8;
 
 // Async engine with the volatility breaker relaxed. Scenario 2 rests a
 // bystander at 9000 and the victim at 10000; that ~11% spread trips the default
-// breaker and parks the book in VolatilityAuction, which has nothing to do with
-// the kill switch under test.
+// breaker and rejects one of them, which has nothing to do with the kill switch
+// under test.
 void configure(MatchingEngine& engine) {
     engine.addSymbol(kSymbol);
     // One retry: pre-fix this makes the control-message drop the common case

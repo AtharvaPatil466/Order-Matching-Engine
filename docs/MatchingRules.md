@@ -783,17 +783,20 @@ is auction-only and does not get to become a limit at the clearing price
 `matchAlgorithm_` and is always FIFO is a real semantic choice — a pro-rata product would
 plausibly want pro-rata allocation at the cross — and nothing states it or tests it.
 
-### Rule 7.4 — A volatility breach opens an auction; reopening is operator-driven
+### Rule 7.4 — A volatility breach rejects the order; the auction is entered explicitly
 
-When an order's price deviates from `referencePrice_` by more than `cbThreshold_`, the book
-transitions to `VolatilityAuction` rather than halting. The breaching order is rejected
-(`VolatilityCircuitBreaker`); subsequent orders are admitted into the auction. A manual halt
-remains a hard halt.
+When an order's price deviates from `referencePrice_` by more than `cbThreshold_`, that order
+is rejected (`VolatilityCircuitBreaker`) and a `breaker_trip` event is logged. The book's
+trading state is **not** changed. It used to switch to `VolatilityAuction`. But the price
+tested is a limit price, not a print, so one passive order far from the market could stop
+continuous trading for the whole symbol, and nothing in the binary reopened it (roadmap 0.14,
+findings PRIOR-5 and AUCT-8). Tripping on a would-be execution price and reopening on a timer
+is roadmap 1.8-H3. Pinned by `tests/BreakerNoAuctionTest.cpp`.
 
-> `src/OrderBook.cpp:626-645` — `admitCircuitBreaker`
-> `src/OrderBook.cpp:340-345` — `checkCircuitBreaker`
+> `admitCircuitBreaker` and `checkCircuitBreaker` in `src/OrderBook.cpp`
 
-Reopening runs the standard uncross, re-anchors `referencePrice_` to the reopening print so
+`VolatilityAuction` is still a trading state. It is entered with `setTradingState`, and
+admission then works as in the other auction states. Reopening runs the standard uncross, re-anchors `referencePrice_` to the reopening print so
 the post-auction bands measure from the fresh price, and returns to `Continuous`:
 
 > `src/OrderBook.cpp:2869-2884` — `resumeVolatilityAuction()`, with the re-anchor at

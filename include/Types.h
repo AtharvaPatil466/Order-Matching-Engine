@@ -185,10 +185,12 @@ enum class TradingState : uint8_t {
     PostClose,     // Post-session: reject all new orders (MarketClosed);
                    // cancels still allowed for participants cleaning up
                    // remaining day orders.
-    VolatilityAuction  // LULD / circuit-breaker breach: enter a short
-                       // auction (orders accumulate, indicative is
-                       // published) and reopen via a cross, instead of a
+    VolatilityAuction  // A short auction (orders accumulate, indicative is
+                       // published) that reopens via a cross, instead of a
                        // hard halt. Same admission as the auction states.
+                       // Entered only via setTradingState: the breaker
+                       // rejects the out-of-band order and no longer
+                       // switches the book here (roadmap 0.14 / 1.8-H3).
 };
 
 enum class MatchAlgorithm : uint8_t {

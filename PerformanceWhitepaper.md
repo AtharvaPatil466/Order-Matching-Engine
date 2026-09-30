@@ -1,15 +1,20 @@
 # Order Matching Engine — Performance Whitepaper
 
-> **Platform.** All numbers are from AWS c6in.metal (dual Intel Xeon Platinum
-> 8375C @ 2.90 GHz), hyperthreading disabled, NUMA-pinned, Clang C++20. Apple
-> Silicon ARM64 numbers are reported in [BENCHMARKS.md](./BENCHMARKS.md) for
-> reference.
+> **Platform.** The x86 numbers are from AWS c6in.metal (dual Intel Xeon
+> Platinum 8375C @ 2.90 GHz), hyperthreading disabled, NUMA-pinned, Clang C++20.
+> §3.1-§3.4 are Apple Silicon ARM64 dev-machine runs; more are in
+> [BENCHMARKS.md](./BENCHMARKS.md).
+>
+> **Age.** The x86 run was taken at commit `d2e688c` (2026-06-27), 340 commits
+> before this revision, and no raw log of it is in the repository. It has not
+> been re-measured since — including after `0c3115e` rewrote the match hot
+> path — so it describes that commit, not this one.
 
 ## 1. Executive Summary
 
-This document records **verified, reproducible** performance measurements for the C++20 order matching engine. All numbers come from a single benchmark binary (`HonestBenchmark`) that feeds an identical, deterministic order flow through three progressively heavier execution paths. The numbers are machine-specific and should not be treated as a portable latency SLA.
+This document records performance measurements for the C++20 order matching engine. All numbers come from a single benchmark binary (`HonestBenchmark`) that feeds an identical, deterministic order flow through three progressively heavier execution paths. The numbers are machine-specific and should not be treated as a portable latency SLA.
 
-**Key Result (authoritative, x86 bare metal — AWS c6in.metal)**: Core matching latency is **261 ns P50** including all compliance checks (STP, WashTrade, LULD); full-stack with the async io_uring journal is **615 ns P50**. That 615 ns is the io_uring async-ack result, not the earlier synchronous `fdatasync` figure — the async path returns before durability, so the completion-reaper's overhead surfaces in P50 while P99 falls by a third. Journal I/O still dominates tail latency at P99+. (The Apple Silicon dev machine reads ~125 ns P50 for core matching — a *dev-machine reference only*, ~2.2× faster than x86 for microarchitectural reasons, not a portable SLA.)
+**Key Result (authoritative, x86 bare metal — AWS c6in.metal)**: Core matching latency is **261 ns P50** including STP (`OrderBook` holds a `WashTradeDetector` and an `LULDManager`, but no code calls either, so neither runs on this path); full-stack with the async io_uring journal is **615 ns P50**. That 615 ns is the io_uring async-ack result, not the earlier synchronous `fdatasync` figure — the async path returns before durability, so the completion-reaper's overhead surfaces in P50 while P99 falls by a third. Journal I/O still dominates tail latency at P99+. (An earlier revision quoted ~125 ns P50 on the Apple Silicon dev machine, "~2.2× faster than x86". [BENCHMARKS.md](./BENCHMARKS.md) reports that figure did not reproduce and withdraws it; §3.1 keeps the old run for the record.)
 
 ## 2. Methodology
 
@@ -17,13 +22,13 @@ This document records **verified, reproducible** performance measurements for th
 
 All three paths process the **identical** deterministic order stream (seed=42):
 - 50,000 limit orders
-- Random walk mid ± 50 ticks (realistic clustering forces matching)
+- Mid random-walks by up to ±200 per order; each order is priced up to ±5,000 from mid (`HonestBenchmark.cpp` walkDist / spreadDist)
 - 20 participants, quantities 1–100
 - Each order individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()`
 
 | Path | What's Measured | Entry Point |
 |------|----------------|-------------|
-| **A** | Core matching + STP + WashTrade + LULD | `OrderBook::addOrder()` |
+| **A** | Core matching + STP (WashTrade and LULD are never called) | `OrderBook::addOrder()` |
 | **B** | Path A + sequence allocation + rate limiter | `MatchingEngine::submitOrder()` |
 | **C** | Path B + GroupCommit journal (batch=64, fdatasync) | `MatchingEngine::submitOrder()` + `Journal` |
 
@@ -36,7 +41,7 @@ All three paths process the **identical** deterministic order stream (seed=42):
 
 ### 2.3 Timing Source
 
-`HonestBenchmark` times each order with `nowNs()`, defined in `LatencyTracker.h` as `std::chrono::high_resolution_clock::now().time_since_epoch().count()`. On Apple Silicon ARM64 this clock resolves to nanoseconds. (The separate `ManualBenchmark` is the only benchmark that reads raw platform counters — `mach_absolute_time` / `rdtsc` — and is not the source of the numbers in this document.)
+`HonestBenchmark` times each order with `nowNs()`, defined in `LatencyTracker.h` as `std::chrono::high_resolution_clock::now().time_since_epoch().count()`. On Apple Silicon ARM64 it reports nanoseconds but ticks at ~41.67 ns (see the measurement-floor note in [BENCHMARKS.md](./BENCHMARKS.md)), so ARM figures are quantized to that grid. (The separate `ManualBenchmark` is the only benchmark that reads raw platform counters — `mach_absolute_time` / `rdtsc` — and is not the source of the numbers in this document.)
 
 ### 2.4 Reproducibility
 
@@ -118,7 +123,7 @@ Path B can show ~84 ns), and the Path C ~1,040 ns figure is a macOS/APFS
 ### 3.1 Path A — Core Matching
 
 ```
-OrderBook::addOrder() — includes STP, WashTrade, LULD, price-time priority
+OrderBook::addOrder() — includes STP and price-time priority (WashTrade/LULD never called)
 
   Orders:     50,000
   Throughput: 6,561,860 orders/sec
@@ -190,13 +195,13 @@ This is the correct production configuration. The P99 spike is **not** matching 
 
 ### Production Options to Reduce P99
 
-1. **Async journal thread**: Dedicated I/O thread decouples persistence from hot path. Matching latency stays at core-match speed (261 ns x86 / ~125 ns ARM dev ref). Journal confirms persistence asynchronously. This is now shipped: the io_uring async ack cut Path C P99 by 32.8%.
+1. **Async journal thread**: Dedicated I/O thread decouples persistence from hot path. Matching latency stays at core-match speed (261 ns x86 at `d2e688c`). Journal confirms persistence asynchronously. This is now shipped: the io_uring async ack cut Path C P99 by 32.8%.
 2. **Larger batch size**: `batch_size=256` reduces fdatasync frequency 4x (one sync per 256 entries instead of 64).
 3. **Page-cache only**: Skip fdatasync entirely. Data persists in the OS page cache. Accept a data loss window on crash/power failure.
 
 ## 5. Architectural Analysis
 
-### Why Core Matching is Fast (~261ns x86 / ~125ns ARM dev reference)
+### Why Core Matching is Fast (~261ns x86 at `d2e688c`)
 
 - **O(1) price lookup**: `FlatPriceMap` — flat array indexed by tick offset. No tree traversal.
 - **O(1) order lookup**: `FlatHashMap` — Robin Hood open-addressing. No chaining.
@@ -240,11 +245,11 @@ Shadow comparison validated against a deliberate FIFO violation:
 
 | Claim | Evidence | Confidence |
 |-------|----------|------------|
-| Core matching (x86): **261 ns** P50 (237 ns PGO) | HonestBenchmark Path A, AWS c6in.metal, 50K orders, seed=42 | Reproducible |
-| Full-stack (x86): **615 ns** P50 | HonestBenchmark Path C, AWS c6in.metal, async io_uring ack (batch=64) | Reproducible |
-| Core matching (ARM dev ref): ~125 ns P50 | HonestBenchmark Path A, Apple M3 Pro — reference only | Reproducible |
+| Core matching (x86): **261 ns** P50 (237 ns PGO) | HonestBenchmark Path A, AWS c6in.metal, 50K orders, seed=42 | Measured at `d2e688c` (5 runs); no raw log committed; not re-run since |
+| Full-stack (x86): **615 ns** P50 | HonestBenchmark Path C, AWS c6in.metal, async io_uring ack (batch=64) | Measured at `d2e688c` (5 runs); no raw log committed; not re-run since |
+| Core matching (ARM dev ref): ~125 ns P50 | HonestBenchmark Path A, Apple M3 Pro — reference only | **Did not reproduce** (BENCHMARKS.md); withdrawn |
 | Journal dominates P99 | 2.7ms = fdatasync, not matching | Structural |
 | Safety invariants hold | TLC: 171,187,419 distinct states, 0 violations | Formally verified |
 | Shadow mode catches bugs | FIFO violation → trade divergence detected | Validated |
 
-These numbers are honest. They are true and provable.
+The x86 rows describe commit `d2e688c` and have no committed raw log; rerun `HonestBenchmark` at the commit you deploy before relying on them.

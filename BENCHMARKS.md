@@ -8,13 +8,17 @@
 > **Reference platform**: Apple M3 Pro (ARM64) dev machine — quoted separately
 > below and clearly labelled as a *dev-machine reference only*, NOT an SLA.
 > Throughput is wall-clock and load-sensitive; P50 is the stable per-op number.
+> **Age:** `d2e688c` (2026-06-27) is 340 commits before this revision, no raw log
+> of the x86 run is in the repository, and it has not been re-run since —
+> including after `0c3115e` rewrote the match hot path. The x86 figures describe
+> that commit.
 
 ## TL;DR
 
 | Claim | Evidence | Status |
 |-------|----------|--------|
-| Core matching (x86, PGO): **237 ns** P50 · 3.10M ops/s | Clang IR-PGO on the seed=42 workload (AWS c6in.metal); 261 ns non-PGO baseline | ✅ Verified |
-| Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack on EBS | ✅ Verified |
+| Core matching (x86, PGO): **237 ns** P50 · 3.10M ops/s | Clang IR-PGO on the seed=42 workload (AWS c6in.metal); 261 ns non-PGO baseline | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
+| Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack; journal at `/tmp/honest_benchmark.journal` — whether that host's `/tmp` was EBS or tmpfs is not recorded | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
 | Safety invariants | TLC: 171,187,419 distinct states, 0 violations (matching/cross layer modeled; `MatchingEngine4.cfg`, MaxOrders=4) | ✅ Verified |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
@@ -30,7 +34,7 @@ expected to disagree; quoting any one of them alone misrepresents the engine.
 
 | Benchmark | Question | Load model | Workload |
 |---|---|---|---|
-| `HonestBenchmark` | Floor on the matching path under favourable conditions | Closed-loop | 50K orders, seed=42, **100% fill**, no cancels |
+| `HonestBenchmark` | Floor on the matching path under favourable conditions | Closed-loop | 50K orders, seed=42, no cancels; fill rate unmeasured (its "100% fill" counts accepts) |
 | `RealisticFlowBenchmark` | Cost on venue-shaped flow | Closed-loop | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify |
 | `CoordinatedOmissionBenchmark` | What a client sees when arrivals do not wait for us | **Open-loop**, paced | `RealisticWorkload` New+Cancel stream at a fixed offered rate |
 | `ColdCacheBenchmark` | First-touch cost after an idle gap | Closed-loop | Same `RealisticWorkload` stream, working set evicted before each timed op |
@@ -41,13 +45,17 @@ The last two share `benchmarks/RealisticWorkload.h` — a New+Cancel-only stream
 uses its own inline generator with IOC and modify events and 8 participants.
 The four benchmarks' absolute numbers are not directly comparable to each other.
 
-**`HonestBenchmark`** (seed=42, 50K orders, **100.0% fill rate — 50,000 of
-50,000, confirmed in its own output**) is the controlled reproducible baseline.
-It measures the best-case hot path — a dense resting book, predictable price
-clustering, a fill on every new order — under a **closed-loop** harness that
+**`HonestBenchmark`** (seed=42, 50K orders) is the controlled reproducible
+baseline. Its output reports a "100.0% fill rate — 50,000 of 50,000", but the
+printed "Fills" / fill rate counts **accepted** orders (`HonestBenchmark.cpp`
+increments it when `addOrder` returns an id or `submitOrder` returns
+Accepted), not orders that traded, so that line means every order was
+accepted. The share of orders that actually trade is not measured by this benchmark. It measures the hot path
+on a dense resting book with predictable price clustering under a
+**closed-loop** harness that
 issues the next order only after the previous one returns. **P50 237 ns (PGO),
 P99 910 ns, ratio 3.8× on x86.** This is a *floor*, not an expected operating
-number: 100% fill is the least cancel-like order flow that exists, and a
+number: a flow with no cancels is the least cancel-like order flow that exists, and a
 closed-loop harness cannot see coordinated omission. It is legitimate and
 reproducible, and it is the flow every figure in the Results section and all
 optimization history are measured on.
@@ -104,8 +112,12 @@ description of this regime assumed it would be.
 new (48% vs 49%), exactly as the default does. This file's own header records
 why: an earlier 65/25 version drained the pool so ~2 of 3 cancels no-op'd
 against an empty book, and the run measured an empty book wearing venue-shaped
-labels. Sparse means shallow-but-live. The **0 no-op cancels** above is the
-evidence that it stayed live; it is printed on every run rather than assumed.
+labels. Sparse means shallow-but-live. The **0 no-op cancels** above does
+**not** show that: the counter only increments when the benchmark's own list of
+resting ids is empty (`RealisticFlowBenchmark.cpp`, `if (resting.empty())`).
+That list is a superset — IOC fills retire orders without removing their ids —
+so a cancel of an already-filled id is timed as a real cancel and never
+counted as a no-op. How many timed cancels hit dead ids is not measured.
 
 Cancel latency in this regime: P50 250 ns, P99 375 ns, P99.9 417 ns, mean 227 ns
 over 141,183 samples, 10.4% of which completed inside one clock tick and are
@@ -141,9 +153,9 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 |------|------------------|----:|----:|----:|-----------:|
-| **A** Core matching | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
-| **B** Engine wrapper | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
-| **C** Full-stack journal | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
+| **A** Core matching | OrderBook + STP (WashTrade and LULD are never called) | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **B** Engine wrapper | + sequence alloc, rate-limiter check (limiter disabled, its default) | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
+| **C** Full-stack journal | + GroupCommit (batch=64, async io_uring ack; journal on `/tmp`, backing device not recorded) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 
 > **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42
 > HonestBenchmark workload) takes Path A to **P50 237 ns / P99 910 ns /
@@ -223,7 +235,7 @@ An x86 TSC tick on a 2.9 GHz part is ~0.34 ns — roughly 120× finer than this
 box's 41.67 ns — so neither problem arises there. Any ARM number within a small
 multiple of 42 ns should be read as quantization, not measurement.
 
-#### `HonestBenchmark` — closed-loop, 100% fill, seed=42, 50K orders
+#### `HonestBenchmark` — closed-loop, seed=42, 50K orders
 
 | Path | P50 | P90 | P99 | P99.9 | Max | Throughput |
 |------|----:|----:|----:|------:|----:|-----------:|
@@ -231,7 +243,9 @@ multiple of 42 ns should be read as quantization, not measurement.
 | B Engine wrapper | 250 ns | 500 ns | 791 ns | 1,208 ns | 43,292 ns | 2.95M ops/s |
 | C Full-stack journal | 1,750 ns | 4,096 ns | 1,761,280 ns | 3,899,392 ns | 10,773,458 ns | 24,603 ops/s |
 
-Fill rate **100.0% on all three paths (50,000 of 50,000)**. Paths A and B report
+The printed fill rate is 100.0% on all three paths (50,000 of 50,000), but
+that counter counts **accepted** orders, not orders that traded (see "The four
+benchmarks" above). Paths A and B report
 an identical 250 ns P50 (6 ticks) because the wrapper overhead is smaller than
 one tick here; x86 measures it at 8 ns (269 − 261). Path C is a macOS/APFS
 `fdatasync` artifact, **not structural** — 615 ns on Linux x86 with the async
@@ -257,7 +271,9 @@ Mean resting depth **2,418 orders**, **0 empty-book no-op cancels**.
 **The cancel P50 of 42 ns is not a measurement** — it is exactly one tick, and
 means only that the median cancel completes in under 42 ns. **26.4% of cancels
 (57,429 of 217,256) finished inside one tick and were dropped from the
-histogram**, so the cancel percentiles cover the slower 73.6% and are biased
+histogram** by the recorder of the time (fixed in `6c93b11`, after this table
+was taken; the current recorder counts them), so the cancel percentiles cover
+the slower 73.6% and are biased
 upward. The same loss costs the combined row 58,372 of 495,000 samples (11.8%),
 making the combined P50 of 208 ns an upper bound rather than a centre. Cancel is
 the fastest path in the engine and the one this box is least able to measure.
@@ -532,6 +548,16 @@ The 1.0 ns/op SBE encode number is approaching the floor of what's measurable on
 | Throughput | 7.6M ops/sec | 45.2M ops/sec |
 | P50 | 84 ns | 42 ns |
 | **Speedup** | — | **5.97x** |
+
+> **Not a measurement of matching.** `ShardedBookStressTest` never checks what
+> `addOrder` returned. Its prices are uniform over ±20% of centre (±40% across
+> the shards), while the default 5% circuit breaker anchors on each book's
+> first order price (`OrderBook.cpp`, `admitPriceBand`) and rejects anything
+> outside ±5% of it — tripping the book into a volatility auction nothing
+> resumes. A large share of the timed operations, most of the single-thread
+> baseline's, are therefore rejects, in proportions the benchmark does not
+> report. The P50s are one and two ARM clock ticks. Treat all five numbers as
+> unmeasured.
 
 **Critical caveat**: Real market data clusters around a moving midpoint. The
 cross-shard match rate under realistic conditions is unknown. This is the

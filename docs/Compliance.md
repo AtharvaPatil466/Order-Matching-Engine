@@ -52,7 +52,7 @@
 | Feature | Standard | Implementation | File | Status |
 |---------|----------|---------------|------|--------|
 | LULD-style pauses | NMS Plan | `LULDManager` with configurable band % and pause duration per symbol. Reference price tracking. A member of `OrderBook` that no code path calls. | [LULDManager.h](../include/LULDManager.h) | ⚠️ Library only, not enabled |
-| Circuit breakers | Exchange rules | Per-symbol circuit breaker at 5% (the setter has no caller, so it is fixed). Rejects the order and switches the symbol to `TradingState::VolatilityAuction` — not `Halted`. Nothing resumes it: `resumeVolatilityAuctions()` has no caller in either binary. | [OrderBook.h](../include/OrderBook.h) | ⚠️ Enabled, no resume |
+| Circuit breakers | Exchange rules | Per-symbol circuit breaker at 5% (the setter has no caller, so it is fixed). Rejects the order and leaves the symbol trading; it no longer switches to `TradingState::VolatilityAuction`, which nothing in either binary resumed. | [OrderBook.h](../include/OrderBook.h) | ✅ Enabled |
 | Price bands | Exchange rules | `priceBandPct_` admission filter rejects individual orders outside [ref±X%]. Defaults to 0 (off); `setPriceBandPct()` has no caller and `price_band_pct` is read by nothing. | [OrderBook.h](../include/OrderBook.h) | ⚠️ Library only, not enabled |
 
 ### On-Close Order Types

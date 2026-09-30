@@ -7,8 +7,9 @@
 > **Acks are durable only from `GatewayServer` started with `--journal`**, which
 > syncs each order to disk before acknowledging it. `OrderEngine` acknowledges
 > at enqueue and group-commits its journal, so an acknowledged order can be
-> lost. FIX, OUCH, SBE, ITCH and MoldUDP64 are library code that neither binary
-> serves, and most risk and compliance controls below are library code that
+> lost. FIX, SBE, ITCH and MoldUDP64 are library code that neither binary
+> serves, OUCH is served only by an `OrderEngine` built with `ENABLE_DPDK`
+> (off by default), and most risk and compliance controls below are library code that
 > neither binary enables — see [docs/Compliance.md](./docs/Compliance.md).
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
@@ -32,7 +33,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ## 🚀 Key Features
 
 ### Core Engine
-- **Professional Order Types**: Limit, Market, IOC, FOK, Stop, StopLimit, TrailingStop, Pegged, Iceberg, Hidden, PostOnly, MIT, MOC, LOC
+- **Professional Order Types**: Limit, Market, IOC, FOK, Stop, StopLimit, TrailingStop, Iceberg, Hidden, PostOnly, MIT, MOC, LOC (Pegged is rejected at admission: it rested through the opposite side)
 - **O(1) Price Lookup**: `FlatPriceMap` — flat array indexed by price tick, replacing `std::map` red-black trees
 - **Intrusive Data Structures**: Zero-heap matching via `ObjectPool` + intrusive doubly-linked order lists
 - **Dual Match Algorithms**: Price-Time FIFO and Pro-Rata allocation with LMM/DMM floor guarantee (40% of available qty) and rounding-remainder priority
@@ -44,7 +45,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 - **Binary Protocol Versioning**: `GatewayProtocol.h` — 16-byte fixed header with V1/V2 payload evolution, forward+backward compatibility, and `GatewayResponse` ack frames
 
 ### Multi-Protocol Order Entry
-**Library code.** No shipped binary serves FIX, OUCH, SBE or SoupBinTCP; `GatewayServer` runs only `TcpGateway`. In the library and its tests, all four protocols dispatch into the same `MatchingEngine`. Drop a different session class in front of the gateway loop, and you've changed the wire format without touching the engine.
+**Library code.** The default build serves none of FIX, OUCH, SBE or SoupBinTCP; `GatewayServer` runs only `TcpGateway`, and only an `OrderEngine` built with `ENABLE_DPDK` (off by default) ingests OUCH. In the library and its tests, all four protocols dispatch into the same `MatchingEngine`. Drop a different session class in front of the gateway loop, and you've changed the wire format without touching the engine.
 
 - **FIX 4.2 / 4.4** (`FixSession.h`): ASCII text + checksum, full session-layer state machine (Logon/Logout/Heartbeat/TestRequest/ResendRequest with `SequenceReset-GapFill`), numeric `OrdRejReason` mapped from internal `RejectReason`, `TransactTime` validation on 4.4 inbound. Version negotiation per accepted `BeginString`.
 - **OUCH 4.2** (`OuchSession.h`, `OuchProtocol.h`): NASDAQ binary order entry. Inbound `O`/`X`/`U` (Enter/Cancel/Replace) → outbound `A`/`J`/`C`/`E`/`U` (Accepted/Rejected/Canceled/Executed/Replaced). Token ↔ engine-orderId reverse-map preserves identity across `submitCancelReplace`. Big-endian fixed-width.
@@ -63,7 +64,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ### Regulatory & Risk
 In the shipped binaries, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy
-- **Volatility Circuit Breakers**: a fixed 5% band; a breach rejects the order and moves the symbol into a volatility auction that nothing in either binary resumes
+- **Volatility Circuit Breakers**: a fixed 5% band; a breach rejects the order and the symbol keeps trading
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant
 - **Kill Switch**: Instant cancellation of all orders for a participant across all symbols
 - **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first
@@ -348,6 +349,7 @@ held for a while, applied to the port that moves money.
 
 ```bash
 # One credential per line: user:secret:participantId[,participantId...]
+# Participant ids must be below 1024; a larger one is a config error.
 cat > /etc/orderbook/participants.conf <<'EOF'
 firm-a:s3cret:100,101
 firm-b:0th3r:200
@@ -472,7 +474,7 @@ promote. Past the lease the primary never steps down (REPL-1..6).
 
 ## 🔮 Remaining Work
 
-The wire-protocol codecs (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retransmission) exist as library code with tests, but no shipped binary serves them. The honest list of what's still NOT done:
+The wire-protocol codecs (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retransmission) exist as library code with tests, but the default build serves none of them (an `OrderEngine` built with `ENABLE_DPDK` ingests OUCH). The honest list of what's still NOT done:
 
 | Item | Status | Blocker |
 |------|--------|---------|

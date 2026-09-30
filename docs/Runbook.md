@@ -214,15 +214,11 @@ scrape_configs:
 
 ### Circuit Breaker Triggered
 A priced order more than 5% (fixed; no key sets it) from the book's reference
-price is rejected and switches that symbol to `VolatilityAuction`.
-1. Check `/auction?symbolId=<n>` for each symbol's `tradingState` (`/metrics` does not show it)
-2. Review the price move that triggered it
-3. **Nothing resumes it.** There is no timer (`halt_duration_ms` is read by
-   nothing) and no admin endpoint for it.
-   `MatchingEngine::resumeVolatilityAuctions()` exists but neither binary
-   calls it. The symbol stays in the auction until the process restarts
-   (trading state is not journaled; a book starts `Continuous`).
-4. `price_band_pct` is read by nothing; the price band is off
+price is rejected with `VolatilityCircuitBreaker`, and the trip is logged. The
+symbol keeps trading: the breaker no longer moves it into a volatility auction.
+1. Review the price move that triggered it in the log
+2. If a participant is repeatedly tripping it, check that client's pricing
+3. `price_band_pct` is read by nothing; the price band is off
 
 ### Kill Switch Activated
 1. All resting orders for the participant are cancelled immediately. It is a

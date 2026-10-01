@@ -7,12 +7,15 @@
 #include <unordered_set>
 #include <cmath>
 #include <algorithm>
+#include <limits>
+#include <map>
+#include <string>
 
 using namespace OrderMatcher;
 
 // ─── Property-Based Test Framework ──────────────────────────────────────────
 // Generates random order sequences with Zipf-distributed prices (realistic)
-// and asserts 5 invariants after every operation.
+// and checks five properties after every operation.
 
 // Zipf distribution for realistic price clustering
 class ZipfDistribution {
@@ -37,6 +40,9 @@ private:
 };
 
 // ─── Invariant Checkers ─────────────────────────────────────────────────────
+//
+// Every property is checked after EVERY operation. An every-tenth-op check
+// lets a violation that the next nine operations repair go unseen.
 
 // Property 1: Best bid < best ask (spread invariant)
 bool checkSpreadInvariant(const OrderBook& book) {
@@ -48,74 +54,167 @@ bool checkSpreadInvariant(const OrderBook& book) {
     return true; // One side empty — invariant trivially holds
 }
 
-// Property 2: Every order in the book is reachable via lookup
-bool checkNoPhantomOrders(OrderBook& book) {
-    const Order* orders[65536];
-    size_t count = book.getAllOrders(orders, 65536);
-    for (size_t i = 0; i < count; ++i) {
-        if (!orders[i]) return false;
-        if (orders[i]->remainingQty == 0) return false; // Filled orders should be removed
-    }
+// Property 2: Price levels are sorted (bids descending, asks ascending)
+bool checkLevelsSorted(const OrderBook& book) {
+    MarketDataSnapshot snap = book.getSnapshot(20);
+    for (size_t i = 1; i < snap.bidCount; ++i)
+        if (snap.bids[i].price > snap.bids[i - 1].price) return false;
+    for (size_t i = 1; i < snap.askCount; ++i)
+        if (snap.asks[i].price < snap.asks[i - 1].price) return false;
     return true;
 }
 
-// Property 3: Trade IDs are monotonically increasing
 struct TradeMonitor : EventListener {
-    std::vector<uint64_t> tradeIds;
     std::vector<Trade> trades;
+    void onTrade(const Trade& t) override { trades.push_back(t); }
+};
 
-    void onTrade(const Trade& t) override {
-        tradeIds.push_back(t.tradeId);
-        trades.push_back(t);
+// Properties 3-5 need to know what the book SHOULD hold, so this keeps a model
+// of every order: what it has left (its size minus its fills; a modify resets
+// it) and when it joined its level's queue.
+//
+//   3. Trade ids strictly increase, and no trade is for zero.
+//   4. Per-order conservation: an order is never filled past its size, a
+//      resting order holds exactly its size minus its fills, and an order only
+//      leaves the book filled or cancelled.
+//   5. In-level FIFO by maker: a trade's maker is the oldest order still
+//      queued at its price — nothing that joined the level earlier survives
+//      a fill of something that joined later.
+class OrderModel {
+public:
+    void submitted(OrderId id, Quantity qty) {
+        orders_[id] = Expect{qty};
+        touched_.push_back(id);
     }
-    void onOrderUpdate(const OrderUpdate&) override {}
-    void onMarketData(const MarketDataUpdate&) override {}
+    void modified(OrderId id, Quantity qty) {
+        orders_.at(id).leaves = qty;
+        touched_.push_back(id);
+    }
+    void cancelRequested(OrderId id) {
+        cancelled_ = id;
+        touched_.push_back(id);
+    }
 
-    bool checkMonotonicTradeIds() const {
-        for (size_t i = 1; i < tradeIds.size(); ++i) {
-            if (tradeIds[i] <= tradeIds[i - 1]) return false;
+    // Applies one operation's trades and checks every order it touched.
+    // Returns the first violation, or "" if there is none.
+    std::string settle(const OrderBook& book, const std::vector<Trade>& trades, size_t from,
+                       uint64_t op) {
+        std::vector<OrderId> makers;
+        std::string why = applyTrades(trades, from, makers);
+        for (size_t i = 0; why.empty() && i < touched_.size(); ++i)
+            why = reconcile(book, touched_[i], op);
+        for (size_t i = 0; why.empty() && i < makers.size(); ++i) why = checkFifo(makers[i]);
+        touched_.clear();
+        cancelled_ = 0;
+        return why;
+    }
+
+    // The whole book against the whole model: orders an operation did not
+    // name must not have changed either.
+    std::string reconcileAll(const OrderBook& book) const {
+        std::string why;
+        size_t resting = 0;
+        book.forEachOrder([&](const Order& o) {
+            ++resting;
+            auto it = orders_.find(o.id);
+            if (why.empty() && (it == orders_.end() || !it->second.resting ||
+                                it->second.leaves != o.remainingQty))
+                why = "order #" + std::to_string(o.id) + " rests with " +
+                      std::to_string(o.remainingQty) + ", which the model does not hold";
+        });
+        size_t modelled = 0;
+        for (const auto& [id, e] : orders_) modelled += e.resting ? 1 : 0;
+        if (why.empty() && resting != modelled)
+            why = std::to_string(resting) + " orders rest, the model holds " +
+                  std::to_string(modelled);
+        return why;
+    }
+
+private:
+    static constexpr uint64_t kNeverRested = ~0ULL;
+    struct Expect {
+        Quantity leaves = 0;
+        uint64_t arrival = kNeverRested;
+        bool resting = false;
+        Side side = Side::Buy;
+        Price price = 0;
+    };
+    using LevelKey = std::pair<int, Price>;
+
+    std::unordered_map<OrderId, Expect> orders_;
+    std::map<LevelKey, std::map<uint64_t, OrderId>> queues_;  // resting, oldest first
+    std::vector<OrderId> touched_;
+    OrderId cancelled_ = 0;
+    uint64_t lastTradeId_ = 0;
+
+    static LevelKey key(const Expect& e) { return {e.side == Side::Buy ? 0 : 1, e.price}; }
+
+    std::string applyTrades(const std::vector<Trade>& trades, size_t from,
+                            std::vector<OrderId>& makers) {
+        for (size_t i = from; i < trades.size(); ++i) {
+            const Trade& t = trades[i];
+            if (t.quantity == 0) return "zero-quantity trade #" + std::to_string(t.tradeId);
+            if (t.tradeId <= lastTradeId_) return "trade id " + std::to_string(t.tradeId) +
+                                                  " does not exceed " + std::to_string(lastTradeId_);
+            lastTradeId_ = t.tradeId;
+            for (OrderId id : {t.buyOrderId, t.sellOrderId}) {
+                auto it = orders_.find(id);
+                if (it == orders_.end()) return "trade names unknown order #" + std::to_string(id);
+                if (t.quantity > it->second.leaves)
+                    return "order #" + std::to_string(id) + " filled " + std::to_string(t.quantity) +
+                           " with only " + std::to_string(it->second.leaves) + " left";
+                it->second.leaves -= t.quantity;
+                touched_.push_back(id);
+            }
+            makers.push_back(t.aggressorSide == Side::Buy ? t.sellOrderId : t.buyOrderId);
         }
-        return true;
+        return "";
+    }
+
+    std::string reconcile(const OrderBook& book, OrderId id, uint64_t op) {
+        Expect& e = orders_.at(id);
+        const Order* o = book.getOrder(id);
+        const std::string name = "order #" + std::to_string(id);
+        if (o && o->inBook) {
+            if (o->remainingQty == 0) return name + " rests with nothing left";
+            if (o->remainingQty != e.leaves)
+                return name + " rests with " + std::to_string(o->remainingQty) +
+                       "; size minus fills is " + std::to_string(e.leaves);
+            if (!e.resting) {
+                e.resting = true;
+                e.arrival = op;
+                e.side = o->side;
+                e.price = o->price;
+                queues_[key(e)][op] = id;
+            }
+        } else if (e.resting) {
+            if (e.leaves != 0 && id != cancelled_)
+                return name + " left the book with " + std::to_string(e.leaves) +
+                       " unfilled and was not cancelled";
+            auto q = queues_.find(key(e));
+            q->second.erase(e.arrival);
+            if (q->second.empty()) queues_.erase(q);
+            e.resting = false;
+        }
+        return "";
+    }
+
+    std::string checkFifo(OrderId maker) const {
+        const Expect& e = orders_.at(maker);
+        if (e.arrival == kNeverRested)
+            return "maker #" + std::to_string(maker) + " was never resting";
+        auto q = queues_.find(key(e));
+        if (q == queues_.end() || q->second.begin()->first >= e.arrival) return "";
+        return "FIFO: maker #" + std::to_string(maker) + " filled at " + std::to_string(e.price) +
+               " while #" + std::to_string(q->second.begin()->second) +
+               ", queued there earlier, is still waiting";
     }
 };
 
-// Property 4: Quantity conservation — filled + remaining = initial
-bool checkQuantityConservation(OrderBook& book, TradeMonitor& monitor) {
-    (void)book;
-    // For each trade, verify fill quantities are positive and don't exceed order sizes
-    for (const auto& t : monitor.trades) {
-        if (t.quantity == 0) return false;
-    }
-    return true;
-}
-
-// Property 5: FIFO within price level — earlier orders at same price fill first
-bool checkFIFOProperty(OrderBook& book) {
-    // Verify that within each price level, orders are in timestamp order
-    // We check the book state: for each level, timestamps should be non-decreasing
-    bool fifoValid = true;
-    
-    auto checkSide = [&](Side side) {
-        MarketDataSnapshot snap = book.getSnapshot(20);
-        // Snapshot verifies levels are in correct sorted order
-        if (side == Side::Buy) {
-            for (size_t i = 1; i < snap.bidCount; ++i) {
-                if (snap.bids[i].price > snap.bids[i - 1].price) {
-                    fifoValid = false; // Bids should be descending
-                }
-            }
-        } else {
-            for (size_t i = 1; i < snap.askCount; ++i) {
-                if (snap.asks[i].price < snap.asks[i - 1].price) {
-                    fifoValid = false; // Asks should be ascending
-                }
-            }
-        }
-    };
-
-    checkSide(Side::Buy);
-    checkSide(Side::Sell);
-    return fifoValid;
+void expectHolds(const std::string& why, uint64_t seed, size_t op) {
+    if (why.empty()) return;
+    std::cerr << "PROPERTY VIOLATION (seed " << seed << ", op " << op << "): " << why << std::endl;
+    assert(false && "property violated");
 }
 
 // ─── Main Test Runner ───────────────────────────────────────────────────────
@@ -124,6 +223,7 @@ void runPropertyTest(uint64_t seed, size_t numOps) {
     OrderBook book;
     TradeMonitor monitor;
     book.setEventListener(&monitor);
+    OrderModel model;
 
     std::mt19937 rng(seed);
     ZipfDistribution priceDist(200, 1.0); // 200 distinct price offsets, Zipf clustered
@@ -137,11 +237,9 @@ void runPropertyTest(uint64_t seed, size_t numOps) {
 
     Price basePrice = 100000; // Center price
 
-    size_t invariantChecks = 0;
-    size_t operationsDone = 0;
-
     for (size_t op = 0; op < numOps; ++op) {
         int action = actionDist(rng);
+        const size_t tradesBefore = monitor.trades.size();
 
         if (action < 55 || activeOrders.empty()) {
             // 55% Add order
@@ -154,50 +252,39 @@ void runPropertyTest(uint64_t seed, size_t numOps) {
             if (price == 0) price = 1;
             Quantity qty = qtyDist(rng);
 
+            model.submitted(id, qty);
             book.addOrder(id, pidDist(rng), side, price, qty, OrderType::Limit);
             activeOrders.push_back(id);
         } else if (action < 80) {
             // 25% Cancel
             size_t idx = rng() % activeOrders.size();
+            model.cancelRequested(activeOrders[idx]);
             book.cancelOrder(activeOrders[idx]);
             activeOrders[idx] = activeOrders.back();
             activeOrders.pop_back();
         } else if (action < 90) {
             // 10% Modify (reduce qty)
             size_t idx = rng() % activeOrders.size();
-            book.modifyOrder(activeOrders[idx], 1 + (rng() % 10));
+            const Quantity newQty = 1 + (rng() % 10);
+            if (book.modifyOrder(activeOrders[idx], newQty)) model.modified(activeOrders[idx], newQty);
         } else {
             // 10% Aggressive cross (market-like)
             OrderId id = nextId++;
             Side side = (rng() % 2 == 0) ? Side::Buy : Side::Sell;
             Price price = (side == Side::Buy) ? basePrice + 500 : basePrice - 500;
-            book.addOrder(id, pidDist(rng), side, price, qtyDist(rng), OrderType::Limit);
+            const Quantity qty = qtyDist(rng);
+            model.submitted(id, qty);
+            book.addOrder(id, pidDist(rng), side, price, qty, OrderType::Limit);
         }
 
-        operationsDone++;
-
-        // Check invariants every 10 operations
-        if (op % 10 == 0) {
-            assert(checkSpreadInvariant(book) && "PROPERTY VIOLATION: Best bid >= best ask!");
-            assert(checkNoPhantomOrders(book) && "PROPERTY VIOLATION: Phantom order in book!");
-            assert(monitor.checkMonotonicTradeIds() && "PROPERTY VIOLATION: Non-monotonic trade IDs!");
-            assert(checkQuantityConservation(book, monitor) && "PROPERTY VIOLATION: Zero-qty trade!");
-            assert(checkFIFOProperty(book) && "PROPERTY VIOLATION: Price levels not sorted!");
-            invariantChecks++;
-        }
+        assert(checkSpreadInvariant(book) && "PROPERTY VIOLATION: Best bid >= best ask!");
+        assert(checkLevelsSorted(book) && "PROPERTY VIOLATION: Price levels not sorted!");
+        expectHolds(model.settle(book, monitor.trades, tradesBefore, op), seed, op);
     }
+    expectHolds(model.reconcileAll(book), seed, numOps);
 
-    // Final check
-    assert(checkSpreadInvariant(book));
-    assert(checkNoPhantomOrders(book));
-    assert(monitor.checkMonotonicTradeIds());
-    assert(checkQuantityConservation(book, monitor));
-    assert(checkFIFOProperty(book));
-    invariantChecks++;
-
-    std::cout << "  Seed " << seed << ": " << operationsDone << " ops, "
-              << monitor.trades.size() << " trades, "
-              << invariantChecks * 5 << " invariant checks — PASSED" << std::endl;
+    std::cout << "  Seed " << seed << ": " << numOps << " ops, " << monitor.trades.size()
+              << " trades, every property checked after every op — PASSED" << std::endl;
 }
 
 // ─── Edge Case Tests ────────────────────────────────────────────────────────

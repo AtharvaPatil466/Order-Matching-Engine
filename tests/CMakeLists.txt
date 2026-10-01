@@ -277,6 +277,13 @@ enable_assertions(KillJournalTest)
 add_test(NAME KillJournalTest COMMAND KillJournalTest)
 set_tests_properties(KillJournalTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# An elected stop stays elected across checkpoint + replay (D8).
+add_executable(StopLatchCheckpointTest StopLatchCheckpointTest.cpp)
+target_link_libraries(StopLatchCheckpointTest PRIVATE OrderMatcher)
+enable_assertions(StopLatchCheckpointTest)
+add_test(NAME StopLatchCheckpointTest COMMAND StopLatchCheckpointTest)
+set_tests_properties(StopLatchCheckpointTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Gateway Integration Tests
 add_executable(GatewayIntegrationTest GatewayIntegrationTest.cpp)
 target_link_libraries(GatewayIntegrationTest PRIVATE OrderMatcher)

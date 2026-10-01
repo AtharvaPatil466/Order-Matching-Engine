@@ -124,6 +124,12 @@ inline constexpr uint32_t JOURNAL_FORMAT_V1   = 1;
 // split as fileIsOverlyPermissive, where Journal reports and the caller judges.
 // Journal reports the epoch; the boot path, which owns the operator's override
 // flag, chooses.
+// Snapshot records use newQty — meaningful only to Modify and CancelReplace — as
+// flags, so the record layout stays put and older readers simply ignore it.
+// STOP_ELECTED: a stop already elected and waiting for execution budget; it
+// must fire on the next sweep wherever the price is (PRIOR-9).
+inline constexpr Quantity SNAPSHOT_STOP_ELECTED = 1;
+
 inline constexpr uint64_t JOURNAL_EPOCH_LEGACY     = 0;  // may hold seeded orders
 inline constexpr uint64_t JOURNAL_EPOCH_NO_SEEDING = 1;  // writer seeded nothing
 static_assert(sizeof(JournalFileHeader) == 24,
@@ -310,9 +316,10 @@ public:
                      uint64_t expiry = 0, Price stopPrice = 0, Price stopLimitPrice = 0,
                      Quantity displayQty = 0, PegType pegType = PegType::None,
                      Price pegOffset = 0, Price trailAmount = 0, Quantity minQty = 0,
-                     bool hidden = false) {
+                     bool hidden = false, bool stopElected = false) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Snapshot;
+        entry.newQty = stopElected ? SNAPSHOT_STOP_ELECTED : 0;
         entry.timestamp = now();
         entry.orderId = id;
         entry.participantId = pid;

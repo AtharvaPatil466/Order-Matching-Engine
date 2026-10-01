@@ -3106,6 +3106,19 @@ const Order* OrderBook::getOrder(OrderId orderId) const {
     return ptr ? *ptr : nullptr;
 }
 
+void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    Order** found = orderLookup_.find(orderId);
+    Order* o = found ? *found : nullptr;
+    if (!o || (o->type != OrderType::Stop && o->type != OrderType::StopLimit &&
+               o->type != OrderType::MIT && o->type != OrderType::TrailingStop))
+        return;
+    o->isStopTriggered = true;
+    // A trailing stop's trigger moved with the price until it was elected;
+    // replay re-derived it from scratch, so put back the one it was elected at.
+    o->stopPrice = stopPrice;
+}
+
 size_t OrderBook::getBidLevelsCount() const { return bids_.size(); }
 size_t OrderBook::getAskLevelsCount() const { return asks_.size(); }
 

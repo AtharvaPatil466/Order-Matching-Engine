@@ -2123,6 +2123,8 @@ size_t MatchingEngine::replayJournal() {
                                entry.expiryTime, entry.stopLimitPrice, entry.pegType,
                                entry.pegOffset, entry.trailAmount, entry.minQty,
                                entry.hidden);
+                if (entry.newQty & SNAPSHOT_STOP_ELECTED)
+                    book->restoreStopElection(entry.orderId, entry.stopPrice);
             }
             break;
         }
@@ -2186,6 +2188,7 @@ void MatchingEngine::streamSnapshot(
             e.trailAmount  = o.trailAmount;
             e.minQty       = o.minQty;
             e.hidden       = o.isHidden;
+            e.newQty       = o.isStopTriggered ? SNAPSHOT_STOP_ELECTED : 0;
             fn(e);
         });
     }
@@ -2267,6 +2270,8 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                            entry.expiryTime, entry.stopLimitPrice, entry.pegType,
                            entry.pegOffset, entry.trailAmount, entry.minQty,
                            entry.hidden);
+            if (entry.newQty & SNAPSHOT_STOP_ELECTED)
+                book->restoreStopElection(entry.orderId, entry.stopPrice);
         }
         applied = true;
         break;
@@ -2307,7 +2312,8 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                                   entry.stopPrice, entry.stopLimitPrice,
                                   entry.displayQty, entry.pegType,
                                   entry.pegOffset, entry.trailAmount,
-                                  entry.minQty, entry.hidden);
+                                  entry.minQty, entry.hidden,
+                                  (entry.newQty & SNAPSHOT_STOP_ELECTED) != 0);
             break;
         }
     }
@@ -2416,7 +2422,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.stopPrice, order.stopLimitPrice,
                                             order.displayQty, order.pegType,
                                             order.pegOffset, order.trailAmount,
-                                            order.minQty, order.isHidden);
+                                            order.minQty, order.isHidden,
+                                            order.isStopTriggered);
             }
         };
 

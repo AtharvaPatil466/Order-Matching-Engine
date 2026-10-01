@@ -486,6 +486,12 @@ public:
     // getOrder() remains for single-threaded tests and read-only inspection.
     const Order* getOrder(OrderId orderId) const;
 
+    // Recovery only: mark a parked stop as already elected, frozen at
+    // `stopPrice`, the state a checkpoint found it in (see
+    // kMaxStopExecutionsPerSweep). It fires on the next sweep. No-op for an
+    // order that is not a parked stop.
+    void restoreStopElection(OrderId orderId, Price stopPrice);
+
     // Position-relevant fields of an order, returned BY VALUE so no pointer
     // escapes the lock. `found` false means the order was already gone.
     struct OrderExposure {

@@ -851,6 +851,14 @@ add_test(NAME MdFeedSchemaCompatTest COMMAND MdFeedSchemaCompatTest)
 set_tests_properties(MdFeedSchemaCompatTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;schema")
 
+# A lapped shared-memory subscriber must never accept a torn entry (LF-1).
+add_executable(MarketDataTornReadTest MarketDataTornReadTest.cpp)
+target_link_libraries(MarketDataTornReadTest PRIVATE OrderMatcher)
+enable_assertions(MarketDataTornReadTest)
+add_test(NAME MarketDataTornReadTest COMMAND MarketDataTornReadTest)
+set_tests_properties(MarketDataTornReadTest PROPERTIES TIMEOUT 60
+                     LABELS "project;protocol;concurrency")
+
 # Config system tests
 add_executable(ConfigTest ConfigTest.cpp)
 target_link_libraries(ConfigTest PRIVATE OrderMatcher)

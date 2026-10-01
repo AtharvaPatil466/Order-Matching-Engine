@@ -50,6 +50,10 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
         return 1;
     }
     std::cout << "[Engine] Journal enabled at " << journalPath << "\n";
+    // This process is the journal's writer, so cut a torn final write now: the
+    // first append would anyway, but here the log says so before anything is
+    // accepted. Not in enableJournal, which read-only tools also call.
+    if (Journal* j = engine.getJournal()) j->cutTornTail();
 
     // RECOVER. The engine binary used to write a write-ahead log and never read
     // it back: replayJournal() existed, was covered by tests, and was called by

@@ -1,5 +1,6 @@
 #!/bin/sh
-# The engine must refuse to start on a journal it cannot safely append to.
+# The engine must refuse to start on a journal it cannot safely append to, and
+# must NOT refuse one whose only damage is a torn final write.
 #
 # Journal::recoveryFailed() already stops the file being appended to, so the
 # data on disk is safe either way. What this pins is the other half: that the
@@ -10,16 +11,16 @@
 #
 # Two cases:
 #   1. Bytes that decode as no record at all — several records' worth, which is
-#      what a layout change looks like from the reader's side.
-#   2. A good journal followed by a torn final write (less than one record).
-#      This used to be accepted: the engine appended behind the torn bytes,
-#      where replay never reaches, so every order after the restart was lost at
-#      the next one (JRN-2). It must refuse, keep the bytes, and print a repair
-#      that cuts the file exactly where the good data ends.
+#      what a layout change looks like from the reader's side. Refused.
+#   2. A good journal followed by a torn final write (less than one record),
+#      what a crash partway through a write leaves. Appending behind it lost
+#      every later order at the next restart (JRN-2); refusing it (0.3) stopped
+#      every restart after a crash. The engine must cut it at boot, keep the
+#      bytes in <journal>.torn, and an order taken after the restart must
+#      survive the next one (roadmap D2).
 #
-# Run against the real binary rather than the engine API, because the decision
-# being pinned lives in bootJournal(), called from main. Case 2 runs under a
-# deadline: before the fix the engine STARTED, and a serving engine never exits.
+# Run against the real binary rather than the engine API, because the decisions
+# being pinned live in bootJournal(), called from main.
 #
 # Usage: refuses_unreadable_journal.sh <path-to-OrderEngine>
 
@@ -47,7 +48,7 @@ SIZE_BEFORE=$(size_of "$WAL")
 
 # --admin-no-auth so the admin port's own required-by-default check is not what
 # ends the process; the journal gate has to be the reason for the exit.
-OUT=$("$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48270 2>&1)
+OUT=$("$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 2>&1)
 RC=$?
 if [ "$RC" -eq 0 ]; then
     echo "FAIL: engine started on an unreadable journal (exit 0)"; echo "$OUT"; exit 1
@@ -62,18 +63,17 @@ echo "  ok  unreadable journal: refused, file untouched"
 
 # ── Case 2: a good journal, then a torn final write ─────────────────────────
 WAL="$TMP/torn.wal"
-LOG="$TMP/first.log"
-
-# A real journal, written by the engine itself: one resting order submitted
-# through /chaos/order (the header is written with the first record, so an
-# engine that took no orders leaves an empty file), then a clean stop.
 CHAOS_TOKEN="test-only-chaos-token-not-a-secret"
-OB_CHAOS_INJECT=1 OB_CHAOS_TOKEN="$CHAOS_TOKEN" \
-    "$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48270 > "$LOG" 2>&1 &
-EPID=$!
-if ! python3 - "$CHAOS_TOKEN" <<'PY'
+
+# Start the engine on $WAL with chaos order entry, wait until it is ready, and
+# rest order $1 through /chaos/order. Leaves EPID set; output goes to $2.
+start_and_order() {
+    OB_CHAOS_INJECT=1 OB_CHAOS_TOKEN="$CHAOS_TOKEN" \
+        "$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 > "$2" 2>&1 &
+    EPID=$!
+    python3 - "$CHAOS_TOKEN" "$1" <<'PY'
 import json, sys, time, urllib.request
-base = "http://127.0.0.1:48270"
+base = "http://127.0.0.1:48650"
 def get(path, headers=None):
     return json.loads(urllib.request.urlopen(
         urllib.request.Request(base + path, headers=headers or {}), timeout=5).read())
@@ -87,51 +87,53 @@ while time.time() < deadline:
     time.sleep(0.2)
 else:
     sys.exit(1)
-r = get("/chaos/order?orderId=7&participantId=7&symbolId=0&price=100050&qty=25&side=0",
-        {"X-Chaos-Token": sys.argv[1]})
+r = get("/chaos/order?orderId=%s&participantId=7&symbolId=0&price=100050&qty=25&side=0"
+        % sys.argv[2], {"X-Chaos-Token": sys.argv[1]})
 sys.exit(0 if r.get("accepted") else 1)
 PY
-then
-    echo "FAIL: could not create the journal this case starts from"; cat "$LOG"; exit 1
+}
+stop_engine() { kill -TERM "$EPID"; wait "$EPID" 2>/dev/null; EPID=""; }
+
+# A real journal, written by the engine itself: one resting order, then a clean
+# stop (the header goes down with the first record, so an idle engine leaves an
+# empty file).
+if ! start_and_order 7 "$TMP/first.log"; then
+    echo "FAIL: could not create the journal this case starts from"; cat "$TMP/first.log"; exit 1
 fi
-kill -TERM "$EPID"; wait "$EPID" 2>/dev/null; EPID=""
+stop_engine
 
 GOOD_END=$(size_of "$WAL")
 if [ "$GOOD_END" -eq 0 ]; then
     echo "FAIL: the engine left an empty journal; there is no good data to tear after"; exit 1
 fi
 printf 'torn-final-write-30-bytes-xxxx' >> "$WAL"      # 30 bytes: less than one record
-SIZE_BEFORE=$(size_of "$WAL")
 
-"$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48270 > "$TMP/second.log" 2>&1 &
+if ! start_and_order 8 "$TMP/second.log"; then
+    echo "FAIL: the engine did not start and take an order on a journal with a torn"
+    echo "      final write"; cat "$TMP/second.log"; exit 1
+fi
+if ! grep -q "Cut a torn final write" "$TMP/second.log"; then
+    echo "FAIL: the boot log does not report the cut"; cat "$TMP/second.log"; exit 1
+fi
+if [ "$(cat "$WAL.torn" 2>/dev/null)" != "torn-final-write-30-bytes-xxxx" ]; then
+    echo "FAIL: the torn bytes were not kept in $WAL.torn"; exit 1
+fi
+stop_engine
+
+# The order taken after the cut is on disk where replay reaches it.
+"$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 > "$TMP/third.log" 2>&1 &
 EPID=$!
-state="running"
 waited=0
-while [ "$waited" -lt 60 ]; do                         # 60 x 0.25s = 15s
-    if ! kill -0 "$EPID" 2>/dev/null; then wait "$EPID"; state=$?; EPID=""; break; fi
+while [ "$waited" -lt 60 ] && ! grep -q "Replayed" "$TMP/third.log"; do  # 60 x 0.25s = 15s
     sleep 0.25; waited=$((waited + 1))
 done
-OUT=$(cat "$TMP/second.log")
-
-if [ "$state" = "running" ]; then
-    kill -9 "$EPID" 2>/dev/null; wait "$EPID" 2>/dev/null; EPID=""
-    echo "FAIL: engine STARTED on a journal with a torn final record — it appends behind"
-    echo "      bytes replay never gets past, so those orders are lost at the next restart"
+stop_engine
+if ! grep -q "Replayed 2 of 2 " "$TMP/third.log"; then
+    echo "FAIL: the order accepted after the cut did not replay:"
+    grep -E "Replayed|FATAL|REFUSING" "$TMP/third.log" || cat "$TMP/third.log"
     exit 1
 fi
-if [ "$state" -eq 0 ]; then echo "FAIL: exited 0 instead of refusing"; echo "$OUT"; exit 1; fi
-if ! printf '%s' "$OUT" | grep -q "could not be opened safely"; then
-    echo "FAIL: exited $state, but not for the journal reason:"; echo "$OUT"; exit 1
-fi
-if [ "$SIZE_BEFORE" != "$(size_of "$WAL")" ]; then
-    echo "FAIL: the damaged journal was modified"; exit 1
-fi
-if ! printf '%s' "$OUT" | grep -q "truncate -s $GOOD_END "; then
-    echo "FAIL: the printed repair does not cut the file at $GOOD_END, where the good data ends:"
-    printf '%s\n' "$OUT" | grep "truncate" || echo "      (no truncate command printed)"
-    exit 1
-fi
-echo "  ok  torn final write: refused, file untouched, repair cuts at byte $GOOD_END"
+echo "  ok  torn final write: cut at boot, bytes kept in .torn, later order replays"
 
-echo "PASS: refused to start on both, and left the journal untouched"
+echo "PASS: refused the unreadable journal, recovered past the torn one"
 exit 0

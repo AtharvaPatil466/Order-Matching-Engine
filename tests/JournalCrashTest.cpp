@@ -19,6 +19,7 @@ static const char* JOURNAL_PATH = "/tmp/test_journal_crash.bin";
 void cleanup() {
     std::remove(JOURNAL_PATH);
     std::remove((std::string(JOURNAL_PATH) + ".tmp").c_str());
+    std::remove((std::string(JOURNAL_PATH) + ".torn").c_str());
 }
 
 struct ActiveOrderView {
@@ -816,36 +817,120 @@ static void writeGoodRecords(int n) {
     j.flush();
 }
 
+// ── A torn final write is cut, not refused (D2) ─────────────────────────────
+//
+// Less than one record past the last good one is the signature of a crash
+// partway through a write, and it cannot hold a record — so cutting it loses
+// nothing replay could have used. Refusing it (0.3) stopped every restart after
+// a crash until an operator truncated by hand. The writer cuts it before its
+// first write, keeps the bytes in <path>.torn, and goes on; opening alone must
+// not touch the file, because read-only tools open live journals too.
+
+static std::vector<char> fileBytes(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+static void requireTornTailCut(size_t goodRecords, const std::vector<char>& torn,
+                               const char* what) {
+    const std::string tornPath = std::string(JOURNAL_PATH) + ".torn";
+    const size_t before = journalFileSize();
+    const size_t validEnd = before - torn.size();
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        if (j.recoveryFailed()) std::cout << "  " << what << ": refused" << std::endl;
+        assert(!j.recoveryFailed() && "a torn final write must not refuse the journal");
+        assert(j.readAll(true, true).size() == goodRecords);
+    }
+    assert(journalFileSize() == before && "opening a journal must not modify it");
+
+    {
+        Journal j(JOURNAL_PATH, Journal::SyncPolicy::Immediate, 1);
+        j.logAddOrder(9999, 1, 0, Side::Buy, 1000, 10, OrderType::Limit);
+        j.flush();
+        const size_t replayable = j.readAll(true, true).size();
+        if (replayable != goodRecords + 1)
+            std::cout << "  " << what << ": replay saw " << replayable << " of "
+                      << goodRecords + 1 << std::endl;
+        assert(replayable == goodRecords + 1 && "an entry appended after a torn write must replay");
+    }
+    // Cut at the good data; a file cut to nothing gets its header back.
+    const size_t header = validEnd == 0 ? sizeof(JournalFileHeader) : 0;
+    assert(journalFileSize() == validEnd + header + sizeof(JournalEntry));
+    assert(fileBytes(tornPath) == torn && "the torn bytes must be kept in <path>.torn");
+}
+
 // A crash partway through record one: the file holds no whole record at all.
-void testTornFirstRecordIsRefused() {
-    std::cout << "Running testTornFirstRecordIsRefused..." << std::endl;
+void testTornFirstRecordIsCut() {
+    std::cout << "Running testTornFirstRecordIsCut..." << std::endl;
     cleanup();
+    const std::vector<char> partial(sizeof(JournalEntry) / 2, '\x00');
     {
         std::ofstream out(JOURNAL_PATH, std::ios::binary);
-        std::vector<char> partial(sizeof(JournalEntry) / 2, '\x00');
         out.write(partial.data(), static_cast<std::streamsize>(partial.size()));
     }
-    requireRefusedThenRepairable(0, "torn first record");
+    requireTornTailCut(0, partial, "torn first record");
     cleanup();
-    std::cout << "testTornFirstRecordIsRefused PASSED" << std::endl;
+    std::cout << "testTornFirstRecordIsCut PASSED" << std::endl;
 }
 
 // Three good records, then a crash partway through the fourth.
-void testTornTailIsRefused() {
-    std::cout << "Running testTornTailIsRefused..." << std::endl;
+void testTornTailIsCut() {
+    std::cout << "Running testTornTailIsCut..." << std::endl;
     cleanup();
     writeGoodRecords(3);
+    const std::vector<char> garbage(sizeof(JournalEntry) / 2, '\xAB');
     {
         FILE* f = std::fopen(JOURNAL_PATH, "ab");
         assert(f != nullptr);
-        char garbage[sizeof(JournalEntry) / 2];
-        std::memset(garbage, 0xAB, sizeof(garbage));
-        std::fwrite(garbage, 1, sizeof(garbage), f);
+        std::fwrite(garbage.data(), 1, garbage.size(), f);
         std::fclose(f);
     }
-    requireRefusedThenRepairable(3, "torn tail");
+    requireTornTailCut(3, garbage, "torn tail");
     cleanup();
-    std::cout << "testTornTailIsRefused PASSED" << std::endl;
+    std::cout << "testTornTailIsCut PASSED" << std::endl;
+}
+
+// Through the engine: it boots on a torn final write, its first order cuts the
+// tail, and that order survives the next restart. enableJournal alone must not
+// cut — JournalReplayCLI calls it to inspect journals that may be live.
+void testEngineAppendsAfterTornTail() {
+    std::cout << "Running testEngineAppendsAfterTornTail..." << std::endl;
+    cleanup();
+    writeGoodRecords(3);
+    const size_t validEnd = journalFileSize();
+    {
+        FILE* f = std::fopen(JOURNAL_PATH, "ab");
+        assert(f != nullptr);
+        std::fwrite("torn-final-write", 1, 16, f);
+        std::fclose(f);
+    }
+    {
+        MatchingEngine engine;
+        engine.addSymbol(0);
+        assert(engine.enableJournal(JOURNAL_PATH, Journal::SyncPolicy::Immediate) &&
+               "a torn final write must not stop the engine booting");
+        assert(journalFileSize() == validEnd + 16 && "enableJournal must not modify the file");
+        engine.start();
+        assert(engine.replayJournal() == 3);
+        const SubmitResult r =
+            engine.submitOrder(0, 50, 100, Side::Sell, toPrice(95.0), 5, OrderType::Limit);
+        if (!r.isAccepted())
+            std::cout << "  rejected: " << static_cast<int>(r.rejectReason) << std::endl;
+        assert(r.isAccepted());
+        assert(journalFileSize() == validEnd + sizeof(JournalEntry) &&
+               "the first append cuts the torn tail");
+        engine.stop();
+    }
+    MatchingEngine restarted;
+    restarted.addSymbol(0);
+    assert(restarted.enableJournal(JOURNAL_PATH));
+    restarted.start();
+    assert(restarted.replayJournal() == 4 && "the order accepted after the cut must replay");
+    assert(restarted.getOrderBook(0)->getOrder(50) != nullptr);
+    restarted.stop();
+    cleanup();
+    std::cout << "testEngineAppendsAfterTornTail PASSED" << std::endl;
 }
 
 // Five good records, then record 3 corrupted: replay stops at 2 and never sees
@@ -1062,8 +1147,9 @@ int main() {
     testBytesOnDiskTracksTheRealFile();
     testDuplicateIdAcrossSymbols();
     testUnreadableJournalRefusesToAppend();
-    testTornFirstRecordIsRefused();
-    testTornTailIsRefused();
+    testTornFirstRecordIsCut();
+    testTornTailIsCut();
+    testEngineAppendsAfterTornTail();
     testCorruptRecordWithMoreAfterIsRefused();
     testFormatVersionMismatchIsRefused();
     testPreHeaderJournalStillReads();

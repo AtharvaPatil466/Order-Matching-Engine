@@ -14,9 +14,7 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
-#ifdef __APPLE__
 #include <fcntl.h>
-#endif
 #include <sys/stat.h>
 
 // Optional io_uring-backed journal write path (Linux only). Enabled when the
@@ -388,6 +386,7 @@ public:
         flush();
         close();
         open("wb+");
+        tornBytes_ = 0;   // the whole file was discarded on purpose
         sequence_ = 0;
         persistedEntries_.store(0, std::memory_order_relaxed);
     }
@@ -488,6 +487,9 @@ public:
     bool commitRewrite() {
         const std::string tmpPath = filePath_ + ".tmp";
 
+        // The rename discards the old file, torn tail and all; keep those bytes.
+        cutTornTail();
+
         // Commit whatever is still batched before the handle closes. Anything
         // appended since prepareRewrite() is about to be discarded by the
         // rename — that is the caller's invariant to enforce, not this one's.
@@ -534,6 +536,53 @@ public:
     // True when the journal opened a file it could not read at all and is
     // therefore refusing to append. See checkRecoverable().
     bool recoveryFailed() const { return recoveryFailed_; }
+
+    // Cut a torn final write found at open (JRN-2, roadmap D2): fewer bytes
+    // than one record after the last replayable one. That is what a crash
+    // partway through a write leaves, and it cannot hold a record, so cutting
+    // it loses nothing replay could use — while appending behind it would lose
+    // every later entry. More than one record past the prefix is NOT cut: a
+    // corrupt record may have valid ones behind it, and that stays refused
+    // (checkRecoverable) for an operator to decide.
+    //
+    // The bytes are appended to <path>.torn and synced, with the directory,
+    // before the cut, so nothing is discarded unseen. Not done at open, which
+    // must stay read-only: JournalReplayCLI and ResearchHarness open live
+    // journals, and cutting there would cut a writer's in-flight record. The
+    // write path runs this before its first byte, so no writer can skip it;
+    // bootJournal runs it at boot so the log says so then.
+    // A no-op when there is nothing to cut. Failing to cut is a write failure.
+    void cutTornTail() {
+        if (tornBytes_ == 0 || !file_ || recoveryFailed_) return;
+        const int fd = fileno(file_);
+        const std::string aside = filePath_ + ".torn";
+        char torn[sizeof(JournalEntry)];
+        if (::pread(fd, torn, tornBytes_, static_cast<off_t>(tornFrom_)) !=
+            static_cast<ssize_t>(tornBytes_))
+            failStop("reading the torn tail", errno);
+        FILE* out = std::fopen(aside.c_str(), "ab");
+        if (!out) failStop("opening " + aside, errno);
+        const bool saved = std::fwrite(torn, 1, tornBytes_, out) == tornBytes_ &&
+                           std::fflush(out) == 0 && syncFd(fileno(out));
+        const int saveErr = errno;
+        std::fclose(out);
+        if (!saved || !syncDirOf(filePath_)) failStop("saving the torn tail to " + aside, saveErr);
+        if (::ftruncate(fd, static_cast<off_t>(tornFrom_)) != 0 || !syncFd(fd))
+            failStop("cutting the torn tail", errno);
+        std::fseek(file_, 0, SEEK_END);
+        std::fprintf(stderr,
+            "[Journal] Cut a torn final write: %zu byte(s) after the last whole record\n"
+            "          of %s (byte %zu), saved to %s.\n",
+            tornBytes_, filePath_.c_str(), tornFrom_, aside.c_str());
+        bytesOnDisk_.store(tornFrom_, std::memory_order_relaxed);
+        if (tornFrom_ == 0) {
+            // Not even a header survived: this is a new file now.
+            pendingHeader_ = true;
+            dataOffset_ = sizeof(JournalFileHeader);
+            contentEpoch_ = JOURNAL_EPOCH_NO_SEEDING;
+        }
+        tornBytes_ = 0;
+    }
 
     // What the writer's records MEAN — see JOURNAL_EPOCH_* above. LEGACY says
     // the file may hold synthetic orders the engine seeded at boot, so replaying
@@ -839,9 +888,9 @@ protected:
         size_t actuallyWritten = writeBatch(toWrite);
 
         // A real short write no longer reaches here — writeBatch fail-stops
-        // on it, because retrying appends after a possibly-torn record. This
-        // rewind stays for roadmap D2, which truncates the torn tail first
-        // and so makes a retry safe.
+        // on it, because retrying appends after a possibly-torn record, and the
+        // restart cuts that torn tail (cutTornTail). This rewind stays for
+        // roadmap D4, whose halted state would retry in-process instead.
         if (actuallyWritten < toWrite) {
             sequence_ -= (toWrite - actuallyWritten);
         }
@@ -1143,8 +1192,8 @@ protected:
 
             // A real short write no longer reaches here — it fail-stops above,
             // because this path appends and a retry would land after a
-            // possibly-torn record. This requeue stays for roadmap D2, which
-            // truncates the torn tail first and so makes the retry safe.
+            // possibly-torn record; the restart cuts it (cutTornTail). This
+            // requeue stays for roadmap D4, which would retry in-process.
             if (written < slot.count) {
                 requeue_.assign(
                     slot.buf.begin() + static_cast<std::ptrdiff_t>(written),
@@ -1253,6 +1302,7 @@ private:
     // Put the header down before the first record. Called from both write
     // paths; a no-op after the first time and on pre-header files.
     void writePendingHeader() {
+        cutTornTail();   // never write behind a torn record
         if (!pendingHeader_ || !file_) return;
         JournalFileHeader h{};
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
@@ -1334,11 +1384,26 @@ private:
         // Synchronous durability barrier for commitBatchSync(). On the async
         // io_uring path the fdatasync is the SECOND link of the chain issued by
         // commitBatchAsync(), so it does not go through here.
+        return syncFd(fileno(file_));
+    }
+
+    static bool syncFd(int fd) {
 #ifdef __APPLE__
-        return ::fcntl(fileno(file_), F_FULLFSYNC) == 0;
+        return ::fcntl(fd, F_FULLFSYNC) == 0;
 #else
-        return ::fdatasync(fileno(file_)) == 0;
+        return ::fdatasync(fd) == 0;
 #endif
+    }
+
+    // Make a new directory entry next to `path` durable.
+    static bool syncDirOf(const std::string& path) {
+        const size_t slash = path.find_last_of('/');
+        const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash + 1);
+        const int fd = ::open(dir.c_str(), O_RDONLY);
+        if (fd < 0) return false;
+        const bool ok = ::fsync(fd) == 0;
+        ::close(fd);
+        return ok;
     }
 
     // ── Drain barrier (all platforms; body only on the async path) ──
@@ -1491,33 +1556,39 @@ private:
     }
 
     // Replay stops at the first record it cannot use: a torn final write, a
-    // CRC-bad record, a sequence gap. Bytes past that point are a wall.
-    // Appending behind the wall is what this refuses: the next boot's replay
-    // stops at the same place, so every entry accepted in between is lost
-    // without a word (JRN-2). The bytes are left exactly as they are, and the
-    // message gives the repair. Truncating is the operator's call because past
-    // a corrupt record there may be valid ones, and truncating discards them.
+    // CRC-bad record, a sequence gap. Bytes past that point are a wall, and
+    // appending behind it loses every entry accepted in between on the next
+    // boot, without a word (JRN-2).
+    //
+    // Less than one record past the wall is a torn final write: it holds no
+    // record, so it is noted here and cut before the first write (cutTornTail).
+    // Anything longer may be a corrupt record with valid ones behind it, which
+    // cutting would discard, so that is refused: the bytes are left exactly as
+    // they are and the message gives the repair, for an operator to decide.
     void refuseIfBytesPastReplayablePrefix() {
+        if (recoveryFailed_) return;   // already refused; do not touch the file
         const size_t validEnd = dataOffset_ + strictPrefixEntries_ * sizeof(JournalEntry);
         const size_t total = bytesOnDisk();
         if (total <= validEnd) {
             return;
         }
-        recoveryFailed_ = true;
         const size_t extra = total - validEnd;
+        if (extra < sizeof(JournalEntry)) {
+            tornFrom_ = validEnd;
+            tornBytes_ = extra;
+            return;
+        }
+        recoveryFailed_ = true;
         std::fprintf(stderr,
             "[Journal] REFUSING TO APPEND: %s has %zu byte(s) after its last replayable\n"
             "          record (%zu record(s), ending at byte %zu). Replay stops there, so\n"
             "          anything appended behind them would be lost on the next restart.\n"
-            "          %s\n"
+            "          At least one whole record: a corrupt record or a gap, possibly with valid\n"
+            "          records behind it, which truncating discards.\n"
             "          To keep the %zu replayable record(s) and continue, save a copy and\n"
             "          cut the file at that point:\n"
             "            cp '%s' '%s.damaged' && truncate -s %zu '%s'\n",
             filePath_.c_str(), extra, strictPrefixEntries_, validEnd,
-            extra < sizeof(JournalEntry)
-                ? "Less than one record: the signature of a torn final write."
-                : "More than one record: a corrupt record or a gap, possibly with valid\n"
-                  "          records behind it, which truncating discards.",
             strictPrefixEntries_, filePath_.c_str(), filePath_.c_str(), validEnd,
             filePath_.c_str());
     }
@@ -1642,6 +1713,10 @@ private:
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().
     bool   pendingHeader_{false};
+    // A torn final write still to cut: tornBytes_ bytes from offset tornFrom_.
+    // See cutTornTail().
+    size_t tornFrom_{0};
+    size_t tornBytes_{0};
 
     // Bytes of whole entries on disk. See bytesOnDisk().
     std::atomic<size_t> bytesOnDisk_{0};

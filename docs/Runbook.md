@@ -235,14 +235,19 @@ symbol keeps trading: the breaker no longer moves it into a volatility auction.
 4. Review the participant's recent order flow
 
 ### Journal Corruption Detected
+A **torn final write** — less than one record after the last whole one, what a
+crash partway through a write leaves — is not corruption and needs no action:
+the engine cuts it at boot, logs `[Journal] Cut a torn final write: N byte(s)
+... saved to <path>.torn`, and starts. The bytes are appended to `<path>.torn`
+(they cannot hold a record, so nothing replayable is lost). Anything longer is:
+
 1. The engine **refuses to start**: `[Journal] REFUSING TO APPEND: <path> has N
    byte(s) after its last replayable record`, then `[Engine] FATAL: journal ...
    could not be opened safely`. It leaves the file untouched.
 2. **Do NOT delete the journal** — it's the audit trail
 3. The message prints the exact repair: `cp '<path>' '<path>.damaged' &&
-   truncate -s <bytes> '<path>'`. More than one record past the valid prefix
-   means a corrupt record or a gap, possibly with valid records behind it,
-   which truncating discards.
+   truncate -s <bytes> '<path>'`. It means a corrupt record or a gap,
+   possibly with valid records behind it, which truncating discards.
 4. Restart the engine — it replays the records before the cut
 5. Manual reconciliation may be needed for orders after the corruption
 

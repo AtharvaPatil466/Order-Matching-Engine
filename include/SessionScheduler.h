@@ -20,7 +20,8 @@ namespace OrderMatcher {
 // ms-of-day boundaries.
 //
 // The scheduler owns no matching logic of its own — it is purely a clock
-// that sequences MatchingEngine::uncrossBatch / setTradingStateBatch. All
+// that sequences MatchingEngine::setTradingStateBatch (whose flip out of an
+// auction state is that auction's uncross). All
 // matching, locking, and state correctness lives in the engine; keeping the
 // scheduler a thin sequencer means the timetable can be tested in isolation
 // and a missed/duplicate tick can never corrupt book state, only mis-time a

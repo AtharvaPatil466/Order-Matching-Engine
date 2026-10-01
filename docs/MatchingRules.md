@@ -715,7 +715,19 @@ the rule most likely to surprise a participant, and it interacts badly with
 book without running continuous matching. All trades are produced by a single `uncross()` at
 the session boundary, at one price.
 
-> `src/OrderBook.cpp:1008-1017`
+Nothing else matches in these states. An arriving order does not run the stop / trailing-stop
+sweep, so a stop is not elected on the stale last print and matched mid-auction; a
+`cancelReplace` that crosses rests at its new price and waits for the uncross. Both used to
+print continuous trades during the call period (roadmap 1.8-H4, MATCH-6).
+
+Leaving an accumulation state for `Continuous` or `PostClose` runs `uncross()` first, under
+the same book lock as the flip: the flip *is* the opening, reopening or closing cross. The open
+used to be two calls — `uncross`, then a `setTradingState(Continuous)` that only assigned the
+field — and orders arriving between them reached continuous trading crossed, or parked as
+market orders until the close (AUCT-4, MATCH-12, TLA-3). `SessionScheduler` now issues the
+flip alone. Entering `Halted` does not cross. Pinned by `tests/AuctionOpenAtomicTest.cpp`.
+
+> `setTradingStateLocked()` and the `inAuction` gates in `addOrder` / `cancelReplace`
 > `include/Types.h:166-185` — the trading-state enum and what each state admits
 
 Market orders submitted during an auction cannot rest in a price-indexed book, so they are

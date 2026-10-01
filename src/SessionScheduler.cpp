@@ -76,10 +76,12 @@ void SessionScheduler::resetSession() {
 
 void SessionScheduler::applyPhase(SessionPhase target) {
     // Each phase issues the same engine calls a venue operator would at that
-    // boundary. The opening/closing crosses run BEFORE flipping the trading
-    // state so the auction prints against the accumulated book, then the new
-    // admission regime takes effect. Ordering matters: uncross first, then
-    // setTradingStateBatch.
+    // boundary. Leaving an accumulation state for Continuous or PostClose runs
+    // that book's uncross under the same lock as the flip (OrderBook::
+    // setTradingState), so the opening and closing crosses are the flips
+    // themselves. They used to be a separate uncrossBatch first, and orders
+    // that arrived between the two calls were carried into continuous trading
+    // still crossed (AUCT-4).
     switch (target) {
         case SessionPhase::PreOpen:
             // Pre-session accumulation. Orders rest and seed the opening
@@ -88,8 +90,7 @@ void SessionScheduler::applyPhase(SessionPhase target) {
             break;
         case SessionPhase::Continuous:
             // Opening auction: cross the accumulated book into a single set
-            // of opening prints, then switch to continuous matching.
-            engine_.uncrossBatch(symbols_);
+            // of opening prints and switch to continuous matching.
             engine_.setTradingStateBatch(symbols_, TradingState::Continuous);
             break;
         case SessionPhase::CloseAuction:
@@ -97,9 +98,8 @@ void SessionScheduler::applyPhase(SessionPhase target) {
             engine_.setTradingStateBatch(symbols_, TradingState::AuctionClose);
             break;
         case SessionPhase::PostClose:
-            // Closing auction: cross into the closing prints, then shut the
+            // Closing auction: cross into the closing prints and shut the
             // market for the day (new orders rejected; cancels still allowed).
-            engine_.uncrossBatch(symbols_);
             engine_.setTradingStateBatch(symbols_, TradingState::PostClose);
             break;
         case SessionPhase::Idle:

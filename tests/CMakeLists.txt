@@ -466,6 +466,14 @@ enable_assertions(AuctionSelfCrossTest)
 add_test(NAME AuctionSelfCrossTest COMMAND AuctionSelfCrossTest)
 set_tests_properties(AuctionSelfCrossTest PROPERTIES TIMEOUT 60 LABELS "project;auction;stp")
 
+# Roadmap 1.8-H4 (AUCT-4, MATCH-6): leaving an auction state runs the uncross
+# under the same lock as the flip, and nothing else matches in an auction.
+add_executable(AuctionOpenAtomicTest AuctionOpenAtomicTest.cpp)
+target_link_libraries(AuctionOpenAtomicTest PRIVATE OrderMatcher)
+enable_assertions(AuctionOpenAtomicTest)
+add_test(NAME AuctionOpenAtomicTest COMMAND AuctionOpenAtomicTest)
+set_tests_properties(AuctionOpenAtomicTest PROPERTIES TIMEOUT 60 LABELS "project;auction;session")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

@@ -1091,11 +1091,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // PreOpen / AuctionOpen / AuctionClose all accumulate without
     // continuous matching; uncross() at the appropriate session boundary
     // produces all trades at the single discovered uncross price.
-    const bool inAuction =
-        (tradingState_ == TradingState::AuctionOpen) ||
-        (tradingState_ == TradingState::AuctionClose) ||
-        (tradingState_ == TradingState::PreOpen) ||
-        (tradingState_ == TradingState::VolatilityAuction);
+    const bool inAuction = inAuctionState();
     if (!inAuction) {
         if (matchAlgorithm_ == MatchAlgorithm::ProRata)
             matchProRata(order);
@@ -1104,12 +1100,17 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     }
 
     // --- Trigger stops / update pegs ---
-    if (lastTradePrice_ > 0) {
-        checkStopOrders(lastTradePrice_);
-        updateTrailingStops(lastTradePrice_);
+    // Not in an auction state (H4, MATCH-6): an elected stop matches on the
+    // spot, so the sweep printed continuous trades during the call period,
+    // elected by a stale last print. Elections resume with continuous trading.
+    if (!inAuction) {
+        if (lastTradePrice_ > 0) {
+            checkStopOrders(lastTradePrice_);
+            updateTrailingStops(lastTradePrice_);
+        }
+        if (!peggedOrders_.empty())
+            updatePeggedOrders();
     }
-    if (!peggedOrders_.empty())
-        updatePeggedOrders();
 
     // C1: an order STP zeroed has remainingQty == 0 WITHOUT having traded for
     // it. This test must come first, because the remainingQty == 0 branch in
@@ -1856,7 +1857,22 @@ const char* tradingStateName(TradingState s) {
 }  // namespace
 
 void OrderBook::setTradingState(TradingState s) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    setTradingStateLocked(s);
+}
+
+// Precondition: bookLock_ held.
+void OrderBook::setTradingStateLocked(TradingState s) {
     if (tradingState_ == s) return;  // no-op transitions don't emit events
+    // H4 (AUCT-4, MATCH-12, TLA-3): leaving an accumulation state for one that
+    // trades or closes IS the cross. The open used to be two calls — uncross,
+    // then this, which only assigned the field — so an order that arrived in
+    // between was admitted under auction rules and carried into continuous
+    // trading: a bid over an ask with no trade, or a market order parked all
+    // day. Running the uncross here, under the same lock as the flip, leaves
+    // nothing in between. A Halt prints nothing, so it does not cross.
+    if (inAuctionState() && (s == TradingState::Continuous || s == TradingState::PostClose))
+        uncrossLocked();
     // Observability/audit contract: emit `trading_state_change` (symbol/from/to)
     // alongside the newer structured `trading.state_change` event so existing
     // monitoring and StructuredLogTest continue to observe the transition.
@@ -2218,7 +2234,9 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         else
             wouldCross = !bids_.empty() && newPrice <= bids_.bestPrice();
 
-        if (wouldCross) {
+        // In an auction state the repriced order rests, crossed or not, and
+        // waits for the uncross like every other order (H4, MATCH-6).
+        if (wouldCross && !inAuctionState()) {
             if (matchAlgorithm_ == MatchAlgorithm::ProRata)
                 matchProRata(order);
             else
@@ -2605,7 +2623,11 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
 
 void OrderBook::uncross() {
     std::unique_lock<std::mutex> lock(bookLock_);
+    uncrossLocked();
+}
 
+// Precondition: bookLock_ held.
+void OrderBook::uncrossLocked() {
     // H5: resolve self-crossing pairs first, exactly as discovery assumed.
     std::vector<Order*> selfCrossed;
     planAuctionSelfCrosses(selfCrossed);
@@ -3176,15 +3198,14 @@ bool OrderBook::resumeVolatilityAuction() {
     // the engine's single-writer-per-book model (same relaxed treatment
     // as isHalted()). uncross() acquires the unique lock itself, so we
     // must not be holding one across the call.
+    std::unique_lock<std::mutex> lock(bookLock_);
     if (tradingState_ != TradingState::VolatilityAuction) return false;
 
-    uncross();   // reopening cross at the discovered clearing price
-
-    std::unique_lock<std::mutex> lock(bookLock_);
+    // The reopening cross and the flip, under one lock (H4).
+    setTradingStateLocked(TradingState::Continuous);
     // Re-anchor the volatility reference to the reopening print so the
     // post-auction circuit-breaker bands measure from the fresh price.
     if (lastTradePrice_ > 0) referencePrice_ = lastTradePrice_;
-    tradingState_ = TradingState::Continuous;
     return true;
 }
 

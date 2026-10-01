@@ -397,7 +397,10 @@ public:
     // Trading state machine (regulator/engine controls; participants observe).
     // Set the trading state. Out-of-line so the structured-event sink
     // can record the transition without leaking the StructuredLog
-    // include into this header's downstream consumers.
+    // include into this header's downstream consumers. Moving from an
+    // accumulation state (PreOpen / AuctionOpen / AuctionClose /
+    // VolatilityAuction) to Continuous or PostClose runs uncross() first,
+    // under the same lock: the flip is the opening / closing cross.
     void setTradingState(TradingState s);
     TradingState getTradingState() const { return tradingState_; }
     // Convenience: legacy callers checking the binary halt flag still work.
@@ -710,6 +713,10 @@ private:
     // full venue tie-break cascade: max executable volume → min imbalance
     // → min distance to reference price → market-pressure side.
     AuctionResult discoverUncrossPrice() const;
+    // Lock-free bodies of uncross() / setTradingState(), so a transition can
+    // run the cross under the same bookLock_ as the flip (H4).
+    void uncrossLocked();
+    void setTradingStateLocked(TradingState s);
     // H5: the orders STP takes out before discovery (see the definition).
     void planAuctionSelfCrosses(std::vector<Order*>& victims) const;
     void stpCancelAuctionOrder(Order* o);

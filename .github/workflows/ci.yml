@@ -176,6 +176,49 @@ jobs:
         # runs. Not a behavioural gate — see the note above.
         run: ./build/OrderEngine --help > /dev/null
 
+  io-uring:
+    name: Ubuntu io_uring Journal
+    # No other lane installs liburing, so OB_HAVE_LIBURING was never defined in
+    # CI: the io_uring journal commit path — the one every Linux build with
+    # liburing ships — was compiled and run by nothing here (roadmap 1.3-C5,
+    # 2.9). This lane builds it and runs the suite on it.
+    #
+    # Two checks keep it honest. The configure log must say the path is enabled
+    # (a compile-time fact), and a probe must get a ring from the kernel (a
+    # runtime one): if io_uring_queue_init fails, the journal falls back to its
+    # synchronous path without a word, and this lane would quietly test that
+    # instead. Same probe as scripts/verify_linux.sh.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+
+      - name: io_uring is available at runtime
+        run: |
+          printf '#include <liburing.h>\nint main(void){struct io_uring r;if(io_uring_queue_init(8,&r,0)<0)return 1;io_uring_queue_exit(&r);return 0;}\n' \
+            | gcc -x c -o uring_probe - -luring
+          ./uring_probe
+
+      - name: Configure
+        shell: bash
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_TESTS=ON
+          -DBUILD_BENCHMARKS=OFF
+          2>&1 | tee configure.log
+
+      - name: The io_uring journal path is compiled in
+        run: grep -F 'io_uring journal path enabled' configure.log
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
+
   fault-injection:
     name: Ubuntu Fault Injection
     runs-on: ubuntu-latest

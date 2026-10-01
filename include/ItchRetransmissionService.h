@@ -337,10 +337,13 @@ private:
                 if (replayCount == 0 || replayCount > ITCH_RETRANSMIT_MAX_REPLAY) {
                     replayCount = ITCH_RETRANSMIT_MAX_REPLAY;
                 }
+                // Count, then send: a client that has the last frame must
+                // already see it counted (GTS-2 — the reverse order made
+                // tests that read the counter on receipt flaky under TSan).
                 journalPtr->replayRange(req.startSeq, replayCount,
                     [&s, messagesCtr](uint64_t /*seq*/, const uint8_t* data, size_t len) {
-                        s->sendSequenced(data, len);
                         ++*messagesCtr;
+                        s->sendSequenced(data, len);
                     });
                 // No terminator: the connection stays open so the
                 // subscriber can issue further re-requests, and closes

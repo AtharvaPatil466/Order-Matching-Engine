@@ -1150,6 +1150,8 @@ uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
     std::lock_guard<std::mutex> lock(bookMutex_);
     const bool everyone = pid == kKillAllParticipants;
     uint64_t cancelled = 0;
+    uint64_t appendOrdinal = 0;
+    durabilityGate_.beginOrder();
     for (SymbolId sym : symbolIds_) {
         auto* book = getOrderBook(sym);
         if (!book) continue;
@@ -1171,9 +1173,11 @@ uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
                 journal_->logCancelOrder(id, book->getSymbolId());
+                appendOrdinal = journal_->entriesAppended();
             }
         }
     }
+    holdUntilDurable(appendOrdinal);
     return cancelled;
 }
 
@@ -1184,6 +1188,8 @@ size_t MatchingEngine::cancelDayOrders() {
     // exclusively without re-entrancy on the non-recursive mutex.
     std::lock_guard<std::mutex> lock(bookMutex_);
     size_t cancelled = 0;
+    uint64_t appendOrdinal = 0;
+    durabilityGate_.beginOrder();
     for (SymbolId sym : symbolIds_) {
         auto* book = getOrderBook(sym);
         if (!book) continue;
@@ -1204,6 +1210,7 @@ size_t MatchingEngine::cancelDayOrders() {
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
                 journal_->logCancelOrder(id, book->getSymbolId());
+                appendOrdinal = journal_->entriesAppended();
             }
             ++cancelled;
             // "log at session end" — durable, per-order audit line.
@@ -1212,6 +1219,7 @@ size_t MatchingEngine::cancelDayOrders() {
                              .kv("order", (unsigned long long)id));
         }
     }
+    holdUntilDurable(appendOrdinal);
     return cancelled;
 }
 
@@ -1627,25 +1635,32 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
                                   pegOffset, trailAmount, minQty, hidden);
             appendOrdinal = journal_->entriesAppended();
         }
-        // Hold this order's events until that entry is durable. Note the
-        // commit may already have happened inside logAddOrder (Immediate
-        // policy, or a full batch), in which case releaseThrough has already
-        // run for this ordinal and commitOrder releases immediately.
-        durabilityGate_.commitOrder(appendOrdinal);
-        if (durabilityGate_.enabled()) {
-            const uint64_t durable = durableEntries_.load(std::memory_order_acquire);
-            if (durable >= appendOrdinal) {
-                durabilityGate_.releaseThrough(durable);
-            }
-        }
+        holdUntilDurable(appendOrdinal);
         maybeTriggerAutoCheckpoint();
     } else {
-        // No journal entry — a reject, or journalling is off. There is nothing
-        // for these events to wait on, and leaving the gate armed would spill
-        // them into the next order's group and hold them indefinitely.
-        durabilityGate_.abandonOrder();
+        holdUntilDurable(0);
     }
     return orderBookResultToSubmitResult(result, sequenceId);
+}
+
+void MatchingEngine::holdUntilDurable(uint64_t appendOrdinal) {
+    if (appendOrdinal == 0) {
+        // No journal entry — a reject, or journalling is off. There is nothing
+        // for these events to wait on, and leaving the gate armed would spill
+        // them into the next request's group and hold them indefinitely.
+        durabilityGate_.abandonOrder();
+        return;
+    }
+    // The commit may already have happened inside the append (Immediate
+    // policy, or a full batch), in which case releaseThrough has already run
+    // for this ordinal and the group is released at once.
+    durabilityGate_.commitOrder(appendOrdinal);
+    if (durabilityGate_.enabled()) {
+        const uint64_t durable = durableEntries_.load(std::memory_order_acquire);
+        if (durable >= appendOrdinal) {
+            durabilityGate_.releaseThrough(durable);
+        }
+    }
 }
 
 void MatchingEngine::cancelOrder(SymbolId symbolId, OrderId orderId,
@@ -1715,23 +1730,30 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     // One lock acquisition either way: cancelOrderReleasing() does the same
     // work as cancelOrder() plus reading three fields, which is cheaper than
     // taking bookLock_ a second time to ask about ownership separately.
+    // Every request that journals holds its events behind the entry, as
+    // submitOrder does — not only new orders (D7). Same for modify, replace,
+    // the expiry sweep and the kill and DAY sweeps.
+    durabilityGate_.beginOrder();
     const auto exposure = book->cancelOrderReleasing(orderId, requester);
     if (exposure.denied) [[unlikely]] {
+        holdUntilDurable(0);
         return rejectedAsync(RejectReason::NotOrderOwner);
     }
     if (!exposure.found) [[unlikely]] {
+        holdUntilDurable(0);
         return rejectedAsync(RejectReason::OrderNotFound);
     }
     if (positionLimitsActive_.load(std::memory_order_relaxed)) {
         releasePosition(exposure);
     }
+    uint64_t appendOrdinal = 0;
     if (journal_) {
-        {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logCancelOrder(orderId, symbolId);
-        }
-        maybeTriggerAutoCheckpoint();
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->logCancelOrder(orderId, symbolId);
+        appendOrdinal = journal_->entriesAppended();
     }
+    holdUntilDurable(appendOrdinal);
+    if (journal_) maybeTriggerAutoCheckpoint();
     return acceptedAsync(sequenceId);
 }
 
@@ -1841,14 +1863,16 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::SymbolNotFound);
     }
     RejectReason modifyReason = RejectReason::None;
+    durabilityGate_.beginOrder();
     bool modified = book->modifyOrder(orderId, newQty, modifyReason, requester);
+    uint64_t appendOrdinal = 0;
     if (modified && journal_) {
-        {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logModifyOrder(orderId, symbolId, newQty);
-        }
-        maybeTriggerAutoCheckpoint();
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->logModifyOrder(orderId, symbolId, newQty);
+        appendOrdinal = journal_->entriesAppended();
     }
+    holdUntilDurable(appendOrdinal);
+    if (appendOrdinal) maybeTriggerAutoCheckpoint();
     return modified ? SubmitResult::accepted(sequenceId)
                     : SubmitResult::rejected(modifyReason);
 }
@@ -1892,15 +1916,17 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
     }
 
     RejectReason replaceReason = RejectReason::None;
+    durabilityGate_.beginOrder();
     bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
                                         requester);
+    uint64_t appendOrdinal = 0;
     if (replaced && journal_) {
-        {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
-        }
-        maybeTriggerAutoCheckpoint();
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
+        appendOrdinal = journal_->entriesAppended();
     }
+    holdUntilDurable(appendOrdinal);
+    if (appendOrdinal) maybeTriggerAutoCheckpoint();
     return replaced ? SubmitResult::accepted(sequenceId)
                     : SubmitResult::rejected(replaceReason);
 }
@@ -1999,18 +2025,22 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     // BEFORE the cancel actually runs. Replay then reproduces these
     // expirations deterministically without needing a virtual clock —
     // the journal entries appear in their original sequence position.
+    durabilityGate_.beginOrder();
+    uint64_t appendOrdinal = 0;
     for (SymbolId symbolId : symbolIds_) {
         std::function<void(OrderId)> onExpire;
         if (journal_) {
-            onExpire = [this, symbolId](OrderId id) {
+            onExpire = [this, symbolId, &appendOrdinal](OrderId id) {
                 std::lock_guard<std::mutex> lock(journalMutex_);
                 journal_->logCancelOrder(id, symbolId);
+                appendOrdinal = journal_->entriesAppended();
             };
         }
         if (auto* book = getOrderBook(symbolId)) {
             book->expireOrders(currentTime, onExpire);
         }
     }
+    holdUntilDurable(appendOrdinal);
 }
 
 bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy policy) {

@@ -284,6 +284,13 @@ enable_assertions(StopLatchCheckpointTest)
 add_test(NAME StopLatchCheckpointTest COMMAND StopLatchCheckpointTest)
 set_tests_properties(StopLatchCheckpointTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# Durable client acks cover every journaled request, not only new orders (D7).
+add_executable(DurableGateCoverageTest DurableGateCoverageTest.cpp)
+target_link_libraries(DurableGateCoverageTest PRIVATE OrderMatcher)
+enable_assertions(DurableGateCoverageTest)
+add_test(NAME DurableGateCoverageTest COMMAND DurableGateCoverageTest)
+set_tests_properties(DurableGateCoverageTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Gateway Integration Tests
 add_executable(GatewayIntegrationTest GatewayIntegrationTest.cpp)
 target_link_libraries(GatewayIntegrationTest PRIVATE OrderMatcher)

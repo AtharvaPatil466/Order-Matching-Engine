@@ -364,8 +364,11 @@ public:
     // acted on — and it is fast.
     //
     // On, a client sees nothing about an order until the journal entry for it
-    // is on stable storage. That is what "acknowledged" ought to mean at a
-    // venue, and it costs the commit interval on every client-visible event.
+    // is on stable storage — for every request that journals: new orders,
+    // cancels, modifies, replaces, and the expiry, kill and DAY sweeps (each
+    // brackets its events with holdUntilDurable). That is what "acknowledged"
+    // ought to mean at a venue, and it costs the commit interval on every
+    // client-visible event.
     //
     // Returns false if the combination is not supported: the async submit path
     // acknowledges at enqueue, before matching has happened at all, so gating
@@ -579,6 +582,10 @@ private:
     // thread. The callback now only publishes here; draining the gate is the
     // order-processing thread's job. See enableDurableClientAcks.
     std::atomic<uint64_t>    durableEntries_{0};  // running total reported durable
+    // Close the gate group a request opened with durabilityGate_.beginOrder():
+    // hold what it emitted until journal entry `appendOrdinal` is durable, or
+    // release it now when the request journaled nothing (0).
+    void holdUntilDurable(uint64_t appendOrdinal);
     std::atomic<bool> booksFrozen_{false};
     // P3-6: set by gracefulShutdown() to refuse NEW orders while draining.
     // Reset on start()/startAsync() so an engine can be restarted in-process.

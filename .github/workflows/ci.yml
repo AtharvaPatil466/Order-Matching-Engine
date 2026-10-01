@@ -51,21 +51,24 @@ jobs:
 
       - name: Test
         if: matrix.thread_sanitizer != 'ON'
-        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest'
+        run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
 
       - name: Test under ThreadSanitizer
         # Exclusions documented:
-        #   BenchmarkRegressionTest — perf-only, no thread-safety surface
-        #   PropertyTest             — heavy fuzzer; TSan x ASan x property
-        #                              fuzzing is impractically slow in CI
-        #   AdminServerEndpointsTest — accept/recv races acceptable for an
-        #                              admin port; not on the data path
+        #   BenchmarkRegressionTest.* — perf-only, no thread-safety surface
+        #   PropertyTest               — heavy fuzzer; TSan x ASan x property
+        #                                fuzzing is impractically slow in CI
+        #   AdminServerEndpointsTest   — accept/recv races acceptable for an
+        #                                admin port; not on the data path
+        # ANCHORED, every name: ctest -E is a regex SEARCH, and the unanchored
+        # "PropertyTest" also excluded JournalReplayPropertyTest — the test that
+        # drives the async worker — from the one lane that checks it for races.
         # ReplicationProtocolTest is INCLUDED now — was previously excluded
         # for teardown races on peerFd_/listenFd_ (close-during-recv) and a
         # non-atomic sendSeq_; both fixed (atomic fds + shutdown(2) wakeup +
         # atomic sequence). Keep TSan green going forward.
         if: matrix.thread_sanitizer == 'ON'
-        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest|PropertyTest|AdminServerEndpointsTest'
+        run: ctest --test-dir build --output-on-failure -L project -E '^(PropertyTest|AdminServerEndpointsTest|BenchmarkRegressionTest\..*)$'
 
       - name: Benchmark smoke
         if: matrix.os == 'ubuntu-latest' && matrix.thread_sanitizer != 'ON'
@@ -200,4 +203,4 @@ jobs:
         # Exclusions documented:
         #   BenchmarkRegressionTest — perf-only; FI adds per-push/pop overhead,
         #                             so its thresholds are meaningless here
-        run: ctest --test-dir build --output-on-failure -L project -E 'BenchmarkRegressionTest'
+        run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'

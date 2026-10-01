@@ -442,6 +442,14 @@ enable_assertions(BreakerNoAuctionTest)
 add_test(NAME BreakerNoAuctionTest COMMAND BreakerNoAuctionTest)
 set_tests_properties(BreakerNoAuctionTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
 
+# Roadmap 1.8-H2 (AUCT-2): parked market orders fill ahead of every limit at
+# the uncross; they were queued behind limits at the clearing price.
+add_executable(AuctionMarketPriorityTest AuctionMarketPriorityTest.cpp)
+target_link_libraries(AuctionMarketPriorityTest PRIVATE OrderMatcher)
+enable_assertions(AuctionMarketPriorityTest)
+add_test(NAME AuctionMarketPriorityTest COMMAND AuctionMarketPriorityTest)
+set_tests_properties(AuctionMarketPriorityTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

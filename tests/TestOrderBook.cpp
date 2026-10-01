@@ -347,21 +347,21 @@ TEST_F(OrderBookTest, MarketInAuction_BothSidesMarketsWithLimits) {
 
     // Total buy at 1,000,000: market 40. Total sell at 1,000,000: limit
     // 100 + market 30 = 130. min = 40 → 40 fills. The 40-share market
-    // buy fills entirely; sells absorb 40 units distributed by queue
-    // order. The limit sell is at the front of the price-time queue
-    // (it was placed first), the market sell got inserted after the
-    // limit at the same price (FIFO by insertion); so the limit sell
-    // fills first.
+    // buy fills entirely; sells absorb 40 units by priority. A market
+    // order outranks every limit on its side (roadmap 1.8-H2, AUCT-2), so
+    // the market sell fills all 30 and the limit sell the remaining 10.
+    // (This test used to pin the reverse — the market sell queued behind
+    // the limit at the clearing price — which was the bug.)
     const Order* limitSell  = book.getOrder(1);
     const Order* marketBuy  = book.getOrder(2);
     const Order* marketSell = book.getOrder(3);
 
     EXPECT_EQ(marketBuy, nullptr) << "market buy 40 fully filled";
     ASSERT_NE(limitSell, nullptr);
-    EXPECT_EQ(limitSell->remainingQty, 60u)
-        << "limit sell: 40 of 100 filled (front of queue at price level)";
+    EXPECT_EQ(limitSell->remainingQty, 90u)
+        << "limit sell: 10 of 100 filled, after the market sell";
     EXPECT_EQ(marketSell, nullptr)
-        << "unfilled market sell cancelled at end of uncross";
+        << "market sell 30 fully filled ahead of the limit";
 }
 
 // ─── Time-based expiry replay determinism ───────────────────────────────────

@@ -781,12 +781,17 @@ is exhausted. Every trade prints at `bestUncrossPrice`.
 
 > `src/OrderBook.cpp:2495-2651`
 
-Parked market orders are inserted into the book at the discovered price first, so the
-execution loop treats them as limit orders queued there (`src/OrderBook.cpp:2488-2491`). Any
+Parked market orders (and released `MOC`) outrank every limit on their side, whatever the
+limit's price: each side's next order is its oldest unfilled parked market order, and only
+when none is left the front of the best limit level. They never enter the book. They used to
+be inserted at the discovered price, at the back of that level, so a later limit there — or
+any limit priced through the cross — filled first and the market order was cancelled
+unfilled (roadmap 1.8-H2, AUCT-2; pinned by `tests/AuctionMarketPriorityTest.cpp`). Any
 market-order remainder is cancelled after the cross rather than left resting — a market order
-is auction-only and does not get to become a limit at the clearing price
-(`src/OrderBook.cpp:2653-2670`). Unfilled `LOC` orders are cancelled likewise
-(`src/OrderBook.cpp:2673`, definition at `src/OrderBook.cpp:2714`).
+is auction-only and does not get to become a limit at the clearing price. Unfilled `LOC`
+orders are cancelled likewise (`cancelLocOrders()`).
+
+> `uncross()` in `src/OrderBook.cpp` — `nextParked` and the step-3 cancel pass
 
 **Status: Undocumented — no test pins this, may be incidental.** That the cross ignores
 `matchAlgorithm_` and is always FIFO is a real semantic choice — a pro-rata product would

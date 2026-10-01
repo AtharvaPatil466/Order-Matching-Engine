@@ -2593,30 +2593,46 @@ void OrderBook::uncross() {
                               o->price, displayQuantity(*o));
     };
 
-    // Insert parked market orders into the book at the discovered price so
-    // the execution loop treats them like limit orders queued there.
-    // auctionMarketOrders_ is retained to cancel any unfilled remainder.
-    for (Order* m : auctionMarketOrders_) {
-        m->price = bestUncrossPrice;
-        addToBook(m);
-    }
+    // H2 (AUCT-2): a parked market order outranks every limit on its side,
+    // whatever the limit's price — it is the most aggressive instruction there
+    // is. These used to be addToBook'd AT the clearing price, at the back of
+    // that level, so a later limit there (or any limit priced through the
+    // cross) filled first and the market order was cancelled unfilled.
+    //
+    // They stay out of the book: each side's next order is its oldest
+    // unfilled parked market order, and only then the best limit. A parked
+    // order that leaves during the cross has its slot nulled rather than
+    // erased, so the cursors stay valid and nothing below reads freed memory.
+    size_t buyCursor = 0, sellCursor = 0;
+    auto nextParked = [&](Side side, size_t& cursor) -> Order* {
+        for (; cursor < auctionMarketOrders_.size(); ++cursor) {
+            Order* m = auctionMarketOrders_[cursor];
+            if (m && m->side == side) return m;
+        }
+        return nullptr;
+    };
+    // Takes an order out of the cross: a parked one by nulling its slot, a
+    // resting one through `inBook` (stpCancelRestingOrder / retireFilled).
+    auto releaseParked = [&](size_t cursor) { auctionMarketOrders_[cursor] = nullptr; };
 
     // Execute trades at the uncross price
 
     while (remainingVolume > 0) {
-        if (bids_.empty()) break;
-        Price bestBid = bids_.bestPrice();
-        if (bestBid < bestUncrossPrice) break;
+        OrderList* bidLevel = nullptr;
+        OrderList* askLevel = nullptr;
 
-        if (asks_.empty()) break;
-        Price bestAsk = asks_.bestPrice();
-        if (bestAsk > bestUncrossPrice) break;
-
-        OrderList* bidLevel = bids_.bestLevel();
-        OrderList* askLevel = asks_.bestLevel();
-
-        Order* buyer = bidLevel->front();
-        Order* seller = askLevel->front();
+        Order* buyer = nextParked(Side::Buy, buyCursor);
+        if (!buyer) {
+            if (bids_.empty() || bids_.bestPrice() < bestUncrossPrice) break;
+            bidLevel = bids_.bestLevel();
+            buyer = bidLevel->front();
+        }
+        Order* seller = nextParked(Side::Sell, sellCursor);
+        if (!seller) {
+            if (asks_.empty() || asks_.bestPrice() > bestUncrossPrice) break;
+            askLevel = asks_.bestLevel();
+            seller = askLevel->front();
+        }
 
         if (!buyer || !seller) break;
 
@@ -2652,25 +2668,38 @@ void OrderBook::uncross() {
             Order*     newer     = buyerIsNewer ? buyer    : seller;
             OrderList* newerLvl  = buyerIsNewer ? bidLevel : askLevel;
             FlatPriceMap& newerBk = buyerIsNewer ? bids_   : asks_;
+            size_t     newerCur  = buyerIsNewer ? buyCursor : sellCursor;
             Order*     older     = buyerIsNewer ? seller   : buyer;
             OrderList* olderLvl  = buyerIsNewer ? askLevel : bidLevel;
             FlatPriceMap& olderBk = buyerIsNewer ? asks_   : bids_;
+            size_t     olderCur  = buyerIsNewer ? sellCursor : buyCursor;
+
+            // A null level means a parked market order: it was never in the
+            // book, so it leaves the cross through its slot instead.
+            auto stpCancel = [&](Order* o, OrderList* lvl, FlatPriceMap& bk, size_t cur) {
+                if (lvl) { stpCancelRestingOrder(o, lvl, bk); return; }
+                notifyOrderUpdate(o->id, OrderStatus::CancelledBySTP,
+                                  o->initialQty - o->remainingQty, 0);
+                releaseParked(cur);
+                orderLookup_.erase(o->id);
+                orderPool_.deallocate(o);
+            };
 
             switch (stp.action) {
             case STPResult::Action::NoSelfTrade:
             case STPResult::Action::CancelIncoming:
-                stpCancelRestingOrder(newer, newerLvl, newerBk);
+                stpCancel(newer, newerLvl, newerBk, newerCur);
                 break;
             case STPResult::Action::CancelResting:
-                stpCancelRestingOrder(older, olderLvl, olderBk);
+                stpCancel(older, olderLvl, olderBk, olderCur);
                 break;
             case STPResult::Action::CancelBoth:
-                stpCancelRestingOrder(newer, newerLvl, newerBk);
-                stpCancelRestingOrder(older, olderLvl, olderBk);
+                stpCancel(newer, newerLvl, newerBk, newerCur);
+                stpCancel(older, olderLvl, olderBk, olderCur);
                 break;
             case STPResult::Action::DecreaseResting:
                 if (stp.decreaseAmount >= older->remainingQty) {
-                    stpCancelRestingOrder(older, olderLvl, olderBk);
+                    stpCancel(older, olderLvl, olderBk, olderCur);
                 } else {
                     older->remainingQty -= stp.decreaseAmount;
                     // Keep visibleQty <= remainingQty or a later fill
@@ -2729,7 +2758,7 @@ void OrderBook::uncross() {
         // that no longer exists and can never trade. The level-scoped Modify
         // published below updates L2 aggregates but says nothing about the
         // order, so it cannot retire the entry either.
-        auto retireFilled = [&](Order* o, OrderList* lvl, FlatPriceMap& book) {
+        auto retireFilled = [&](Order* o, OrderList* lvl, FlatPriceMap& book, size_t cur) {
             const bool    wasDisplayed = o->inBook && !o->isHidden;
             const OrderId id           = o->id;
             const Side    side         = o->side;
@@ -2737,43 +2766,43 @@ void OrderBook::uncross() {
 
             o->status = OrderStatus::Filled;
             notifyOrderUpdate(id, OrderStatus::Filled, o->initialQty, 0, bestUncrossPrice);
-            stpNoteRemoved(o);
-            untrackOrder(o);
-            lvl->remove(o);
+            if (lvl) {
+                stpNoteRemoved(o);
+                untrackOrder(o);
+                lvl->remove(o);
+                if (lvl->empty()) book.eraseBest();
+            } else {
+                releaseParked(cur);
+            }
             orderLookup_.erase(id);
             orderPool_.deallocate(o);
-            if (lvl->empty()) book.eraseBest();
 
             if (wasDisplayed)
                 notifyBookVisible(BookVisibleUpdate::Action::Remove, id, side, px, 0);
         };
 
         if (buyer->remainingQty == 0) {
-            retireFilled(buyer, bidLevel, bids_);
+            retireFilled(buyer, bidLevel, bids_, buyCursor);
         }
 
         if (seller->remainingQty == 0) {
-            retireFilled(seller, askLevel, asks_);
+            retireFilled(seller, askLevel, asks_, sellCursor);
         }
 
         // Publish after the teardown so each level reports its settled state.
-        notifyMarketData(MarketDataUpdate::Action::Modify, Side::Buy, buyerPrice);
-        notifyMarketData(MarketDataUpdate::Action::Modify, Side::Sell, sellerPrice);
+        // A parked market order was never on a level, so it changed none.
+        if (bidLevel) notifyMarketData(MarketDataUpdate::Action::Modify, Side::Buy, buyerPrice);
+        if (askLevel) notifyMarketData(MarketDataUpdate::Action::Modify, Side::Sell, sellerPrice);
     }
 
     // Step 3: cancel any parked market orders that did not fully fill.
     // A market order is auction-only; once the uncross is done, it does
     // not get to rest as a limit at bestUncrossPrice (it would lie about
-    // its admission semantics). Walk auctionMarketOrders_ and cancel
-    // anything that still has remainingQty > 0. Fully-filled orders were
-    // deallocated by the execution loop above; skip those by checking
-    // orderLookup_ first.
+    // its admission semantics). Slots of orders that already left the
+    // cross (filled or STP-cancelled) were nulled above.
     for (Order* m : auctionMarketOrders_) {
-        auto* p = orderLookup_.find(m->id);
-        if (!p || *p != m) continue;          // already deallocated
-        if (m->remainingQty == 0) continue;   // edge: filled-but-still-queued
+        if (!m) continue;
         Quantity filled = m->initialQty - m->remainingQty;
-        removeFromBook(m);
         notifyOrderUpdate(m->id, OrderStatus::Cancelled, filled, 0);
         orderLookup_.erase(m->id);
         orderPool_.deallocate(m);

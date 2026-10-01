@@ -108,8 +108,9 @@ public:
     bool start() {
         shmSize_ = sizeof(ShmHeader) + capacity_ * sizeof(ShmEntry);
 
-        // Create or open shared memory
-        shmFd_ = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0666);
+        // Create or open shared memory. Owner writes, group reads, others
+        // nothing: whoever can write the segment can show subscribers any book.
+        shmFd_ = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0640);
         if (shmFd_ < 0) return false;
 
         // A publisher that crashed leaves its segment behind. Grow it only if

@@ -131,9 +131,29 @@ void testTruncatedBackingRejected() {
     unlinkRawFeed(name);
 }
 
+// The feed is the book; anyone on the host who can write the segment can feed
+// subscribers a fake one. It was created 0666 (0644 after the usual umask).
+void testSegmentIsNotWorldAccessible() {
+    auto name = uniqueName("mode");
+    MarketDataPublisher pub(name, 4);
+    assert(pub.start());
+
+    int fd = ::shm_open(("/" + name).c_str(), O_RDONLY, 0);
+    assert(fd >= 0);
+    struct stat st{};
+    assert(::fstat(fd, &st) == 0);
+    ::close(fd);
+    std::printf("  segment mode %03o\n", static_cast<unsigned>(st.st_mode & 0777));
+    assert((st.st_mode & 0007) == 0 && "other users can read or write the market-data segment");
+    assert((st.st_mode & 0020) == 0 && "the group can write the market-data segment");
+
+    pub.stop();
+}
+
 } // namespace
 
 int main() {
+    testSegmentIsNotWorldAccessible();
     testPublisherSubscriberRoundTrip();
     testLargerEntryStrideIsReadable();
     testUndersizedEntryRejected();

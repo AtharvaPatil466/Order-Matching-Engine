@@ -16,6 +16,7 @@
 // engine (flushing the journal), then build a fresh engine and replayJournal().
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "Journal.h"
 
 #include <cassert>
@@ -40,8 +41,8 @@ static size_t countOrders(const OrderBook& book) {
 void test_gtd_persists_day_cancelled() {
     SECTION("GTD+GTC persist, DAY cancelled + restored across restart");
 
-    const char* jpath = "/tmp/graceful_shutdown_basic.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("graceful_shutdown_basic.journal");
+    std::remove(jpath.c_str());
 
     MatchingEngine::ShutdownReport report{};
     {
@@ -90,7 +91,7 @@ void test_gtd_persists_day_cancelled() {
     assert(restarted.getOrderBook(1)->getOrder(101) == nullptr);
     assert(countOrders(*restarted.getOrderBook(1)) == 2);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -99,8 +100,8 @@ void test_gtd_persists_day_cancelled() {
 void test_partial_fill_gtd_remainder_persists() {
     SECTION("Partially-filled GTD persists remainder across restart");
 
-    const char* jpath = "/tmp/graceful_shutdown_partial.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("graceful_shutdown_partial.journal");
+    std::remove(jpath.c_str());
 
     {
         MatchingEngine engine;
@@ -133,7 +134,7 @@ void test_partial_fill_gtd_remainder_persists() {
     assert(o200 != nullptr && o200->remainingQty == 6);
     assert(countOrders(*restarted.getOrderBook(1)) == 1);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -142,8 +143,8 @@ void test_partial_fill_gtd_remainder_persists() {
 void test_partial_fill_day_cancelled() {
     SECTION("Partially-filled DAY cancelled at shutdown, not restored");
 
-    const char* jpath = "/tmp/graceful_shutdown_day_partial.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("graceful_shutdown_day_partial.journal");
+    std::remove(jpath.c_str());
 
     {
         MatchingEngine engine;
@@ -173,7 +174,7 @@ void test_partial_fill_day_cancelled() {
     assert(restarted.getOrderBook(1)->getOrder(300) == nullptr);
     assert(countOrders(*restarted.getOrderBook(1)) == 0);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -182,8 +183,8 @@ void test_partial_fill_day_cancelled() {
 void test_async_drain_ioc_and_gtd() {
     SECTION("Async: drain in-flight, IOC not persisted, GTD restored");
 
-    const char* jpath = "/tmp/graceful_shutdown_async.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("graceful_shutdown_async.journal");
+    std::remove(jpath.c_str());
 
     {
         MatchingEngine engine;
@@ -225,7 +226,7 @@ void test_async_drain_ioc_and_gtd() {
     assert(restarted.getOrderBook(1)->getOrder(402) == nullptr);
     assert(countOrders(*restarted.getOrderBook(1)) == 1);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -269,8 +270,8 @@ void test_no_journal_safe() {
 void test_routine_stop_keeps_day_orders() {
     SECTION("A routine stop keeps DAY orders, and a restart restores them");
 
-    const char* jpath = "/tmp/graceful_shutdown_routine_day.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("graceful_shutdown_routine_day.journal");
+    std::remove(jpath.c_str());
 
     MatchingEngine::ShutdownReport report{};
     {
@@ -304,7 +305,7 @@ void test_routine_stop_keeps_day_orders() {
            day->price == 980000 && "the DAY order came back altered");
     assert(restarted.getOrderBook(1)->getOrder(601) != nullptr);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 

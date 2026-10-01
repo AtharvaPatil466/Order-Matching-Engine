@@ -5,6 +5,7 @@
 // tests that can only observe the binary from outside.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "TcpGateway.h"
 
 #include <arpa/inet.h>
@@ -133,10 +134,7 @@ inline bool stopCleanly(pid_t pid) {
 }
 
 inline std::string tempJournalPath(const std::string& name) {
-    const char* dir = std::getenv("TMPDIR");
-    std::string base = (dir && *dir) ? dir : "/tmp";
-    if (base.back() != '/') base += '/';
-    return base + name + "_" + std::to_string(getpid()) + ".wal";
+    return uniqueTempPath(name + ".wal");
 }
 
 }  // namespace gwtest

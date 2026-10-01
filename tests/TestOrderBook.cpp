@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "OrderBook.h"
+#include "TempPath.h"
 #include "MatchingEngine.h"
 #include "FIXParser.h"
 #include "FixFramer.h"
@@ -2200,8 +2201,8 @@ TEST(MatchingEngineTest, FIXGateway_NewOrderAndCancel) {
 // ─── Journal Replay Test ────────────────────────────────────────────────────
 
 TEST(JournalTest, ReplayRecovery) {
-    const char* journalPath = "/tmp/test_journal_replay.bin";
-    std::remove(journalPath);
+    const std::string journalPath = uniqueTempPath("test_journal_replay.bin");
+    std::remove(journalPath.c_str());
 
     // Phase 1: Write some orders to journal
     {
@@ -2235,7 +2236,7 @@ TEST(JournalTest, ReplayRecovery) {
         engine.stop();
     }
 
-    std::remove(journalPath);
+    std::remove(journalPath.c_str());
 }
 
 // ─── Latency Tracker Tests ──────────────────────────────────────────────────

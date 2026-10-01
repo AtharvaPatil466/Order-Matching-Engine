@@ -1,4 +1,5 @@
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "Journal.h"
 #include <cassert>
 #include <iostream>
@@ -14,7 +15,8 @@
 
 using namespace OrderMatcher;
 
-static const char* JOURNAL_PATH = "/tmp/test_journal_crash.bin";
+static const std::string kJournalPath = uniqueTempPath("test_journal_crash.bin");
+static const char* JOURNAL_PATH = kJournalPath.c_str();
 
 void cleanup() {
     std::remove(JOURNAL_PATH);
@@ -275,9 +277,7 @@ void testCheckpointWithUnwritableTempKeepsTheJournal() {
         std::cout << "  SKIPPED: root ignores file modes" << std::endl;
         return;
     }
-    // Per-process path: other suites share /tmp.
-    const std::string path =
-        "/tmp/test_journal_ckpt_temp_" + std::to_string(::getpid()) + ".bin";
+    const std::string path = uniqueTempPath("test_journal_ckpt_temp.bin");
     const std::string tmpPath = path + ".tmp";
     std::remove(path.c_str());
     std::remove(tmpPath.c_str());

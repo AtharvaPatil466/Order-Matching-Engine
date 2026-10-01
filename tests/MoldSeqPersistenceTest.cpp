@@ -25,6 +25,7 @@
 //   5. The persisted value is monotonic across further commits.
 
 #include "EpochStore.h"
+#include "TempPath.h"
 #include "MoldUDP64.h"
 
 #include <cassert>
@@ -60,7 +61,7 @@ static int tests_failed = 0;
     } while (0)
 
 static std::string tmpPath() {
-    return "/tmp/mold_seq_persist_" + std::to_string(::getpid()) + ".bin";
+    return uniqueTempPath("mold_seq_persist.bin");
 }
 
 // Header sequence number of a captured MoldUDP64 packet.

@@ -27,6 +27,7 @@
 //   3. The in-flight checkpoint commits, and a restart restores every order.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "StructuredLog.h"
 
 #include <algorithm>
@@ -100,9 +101,7 @@ bool exists(const std::string& path) { return ::access(path.c_str(), F_OK) == 0;
 
 void testOneCheckpointAtATimeAndShutdownWaits() {
     std::cout << "Running testOneCheckpointAtATimeAndShutdownWaits..." << std::endl;
-    // Per-process path: other suites share /tmp.
-    const std::string path =
-        "/tmp/checkpoint_concurrency_" + std::to_string(::getpid()) + ".journal";
+    const std::string path = uniqueTempPath("checkpoint_concurrency.journal");
     const std::string tmpPath = path + ".tmp";
     std::remove(path.c_str());
     std::remove(tmpPath.c_str());

@@ -2,6 +2,7 @@
 // closing the split-brain window where a restarted node reset its epoch to 0.
 
 #include "ReplicationProtocol.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -17,7 +18,7 @@ static int tests_passed = 0;
 
 void test_epoch_survives_restart() {
     SECTION("lease epoch persists across a simulated restart");
-    const std::string p = "/tmp/lease_epoch_" + std::to_string(::getpid()) + ".bin";
+    const std::string p = uniqueTempPath("lease_epoch.bin");
     std::remove(p.c_str());
     {
         LeaderLease lease(/*nodeId=*/1, /*leaseMs=*/5000, /*epochPath=*/p);

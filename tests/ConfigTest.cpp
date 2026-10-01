@@ -1,6 +1,7 @@
 // ConfigTest — tests for the key=value config system.
 
 #include "Config.h"
+#include "TempPath.h"
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
@@ -16,7 +17,7 @@ void test_load_file() {
     TEST(LoadFile);
 
     // Write a temp config file
-    const char* path = "/tmp/ob_config_test.conf";
+    const std::string path = uniqueTempPath("ob_config_test.conf");
     {
         std::ofstream out(path);
         out << "# Comment\n";
@@ -42,7 +43,7 @@ void test_load_file() {
     assert(cfg.getString("name") == "Order Engine");
     assert(cfg.getString("spaced_key") == "spaced_value");
 
-    std::remove(path);
+    std::remove(path.c_str());
     PASS();
 }
 
@@ -140,7 +141,7 @@ void test_nonexistent_file() {
 void test_invalid_lines() {
     TEST(InvalidLines);
 
-    const char* path = "/tmp/ob_config_invalid.conf";
+    const std::string path = uniqueTempPath("ob_config_invalid.conf");
     {
         std::ofstream out(path);
         out << "valid_key = valid_value\n";
@@ -153,7 +154,7 @@ void test_invalid_lines() {
     assert(cfg.getString("valid_key") == "valid_value");
     assert(cfg.getString("another") == "good");
 
-    std::remove(path);
+    std::remove(path.c_str());
     PASS();
 }
 

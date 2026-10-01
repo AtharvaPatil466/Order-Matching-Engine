@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include "OrderBook.h"
+#include "TempPath.h"
 #include "MatchingEngine.h"
 #include "FlatHashMap.h"
 #include "RingBuffer.h"
@@ -1161,7 +1162,7 @@ TEST(AuditFixes, UncrossRetiresAFullyFilledIcebergFromTheFeed) {
 // test — the thing that made SnapshotConsistencyTest flaky. Assert the
 // property instead: the snapshot journal must not be in per-entry sync mode.
 TEST(AuditFixes, CheckpointSnapshotDoesNotSyncPerEntry) {
-    const std::string path = "/tmp/ob_ckpt_policy_test.journal";
+    const std::string path = uniqueTempPath("ob_ckpt_policy_test.journal");
     std::remove(path.c_str());
     {
         Journal j(path);
@@ -1197,7 +1198,7 @@ TEST(AuditFixes, CheckpointSnapshotDoesNotSyncPerEntry) {
 // reported success while publishing a snapshot missing entries, which for a
 // checkpoint means resting orders lost permanently.
 TEST(AuditFixes, FlushDrainsEveryAppendedEntry) {
-    const std::string path = "/tmp/ob_flush_drain_test.journal";
+    const std::string path = uniqueTempPath("ob_flush_drain_test.journal");
     std::remove(path.c_str());
     {
         Journal j(path, Journal::SyncPolicy::GroupCommit, 4096);

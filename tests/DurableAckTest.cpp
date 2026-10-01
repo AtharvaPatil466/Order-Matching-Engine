@@ -14,6 +14,7 @@
 // correct; this one is about what reaches the client.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "OrderBook.h"
 
 #include <cassert>
@@ -41,10 +42,9 @@ struct ClientView : EventListener {
 };
 
 std::string tempJournalPath(const char* tag) {
-    auto p = std::filesystem::temp_directory_path() /
-             ("durable_ack_" + std::string(tag) + ".journal");
+    std::string p = uniqueTempPath("durable_ack_" + std::string(tag) + ".journal");
     std::filesystem::remove(p);
-    return p.string();
+    return p;
 }
 
 constexpr SymbolId kSym = 1;

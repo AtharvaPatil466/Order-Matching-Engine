@@ -29,6 +29,7 @@
 // against is Linux io_uring specifically, which is where it was found.
 
 #include "Journal.h"
+#include "TempPath.h"
 
 #include <atomic>
 #include <cassert>
@@ -40,10 +41,7 @@
 using namespace OrderMatcher;
 
 int main() {
-    const char* dir = std::getenv("TMPDIR");
-    std::string path = (dir && *dir) ? dir : "/tmp";
-    if (path.back() != '/') path += '/';
-    path += "ob_journal_immediate_" + std::to_string(getpid()) + ".wal";
+    const std::string path = uniqueTempPath("ob_journal_immediate.wal");
     std::remove(path.c_str());
 
     constexpr int kEntries = 20;

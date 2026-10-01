@@ -13,6 +13,7 @@
 // honest accounting.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "Journal.h"
 #include <cassert>
 #include <chrono>
@@ -38,8 +39,8 @@ static size_t countOrders(const OrderBook& book) {
 void test_day_expire_virtual_clock() {
     SECTION("DAY orders expire under virtual clock");
 
-    const char* jpath = "/tmp/gtd_replay_test_day.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("gtd_replay_test_day.journal");
+    std::remove(jpath.c_str());
 
     // Scoped block: engine is destroyed (journal flushed) before replay
     {
@@ -86,7 +87,7 @@ void test_day_expire_virtual_clock() {
     assert(countOrders(*replayed.getOrderBook(1)) == 1);
     assert(replayed.getOrderBook(1)->getOrder(102) != nullptr);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -95,8 +96,8 @@ void test_day_expire_virtual_clock() {
 void test_gtd_staggered_expiry() {
     SECTION("GTD staggered expiry + replay");
 
-    const char* jpath = "/tmp/gtd_replay_test_stagger.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("gtd_replay_test_stagger.journal");
+    std::remove(jpath.c_str());
 
     {
         MatchingEngine engine;
@@ -145,7 +146,7 @@ void test_gtd_staggered_expiry() {
     assert(entries > 0);
     assert(countOrders(*replayed.getOrderBook(1)) == 0);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -154,8 +155,8 @@ void test_gtd_staggered_expiry() {
 void test_mixed_orders_trade_then_expire() {
     SECTION("Mixed GTC+DAY: trades then expiry + replay");
 
-    const char* jpath = "/tmp/gtd_replay_test_mixed.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("gtd_replay_test_mixed.journal");
+    std::remove(jpath.c_str());
 
     {
         MatchingEngine engine;
@@ -200,7 +201,7 @@ void test_mixed_orders_trade_then_expire() {
     // The ring buffer should have at least one trade
     assert(tradeRing.size() > 0);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 
@@ -243,8 +244,8 @@ void test_clear_expiry_clock() {
 void test_checkpoint_preserves_expiry_state() {
     SECTION("Checkpoint + replay preserves GTD orders");
 
-    const char* jpath = "/tmp/gtd_replay_test_ckpt.journal";
-    std::remove(jpath);
+    const std::string jpath = uniqueTempPath("gtd_replay_test_ckpt.journal");
+    std::remove(jpath.c_str());
 
     {
         MatchingEngine engine;
@@ -280,7 +281,7 @@ void test_checkpoint_preserves_expiry_state() {
     assert(countOrders(*replayed.getOrderBook(1)) == 1);
     assert(replayed.getOrderBook(1)->getOrder(401) != nullptr);
 
-    std::remove(jpath);
+    std::remove(jpath.c_str());
     PASS();
 }
 

@@ -10,6 +10,7 @@
 //      surviving a reopen, never rewritten.
 
 #include "AuditLog.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -34,7 +35,7 @@ static size_t countLines(const std::string& path) {
 // ── Test 1: full fill lifecycle ─────────────────────────────────────────────
 static void test_full_fill_lifecycle() {
     SECTION("full fill lifecycle: submit/accept/fills/final");
-    const std::string path = "/tmp/audit_test_fill.jsonl";
+    const std::string path = uniqueTempPath("audit_test_fill.jsonl");
     std::remove(path.c_str());
 
     AuditLog log(path);
@@ -72,7 +73,7 @@ static void test_full_fill_lifecycle() {
 // ── Test 2: reject lifecycle ────────────────────────────────────────────────
 static void test_reject_lifecycle() {
     SECTION("reject lifecycle records reason + terminal state");
-    const std::string path = "/tmp/audit_test_reject.jsonl";
+    const std::string path = uniqueTempPath("audit_test_reject.jsonl");
     std::remove(path.c_str());
 
     AuditLog log(path);
@@ -137,7 +138,7 @@ static void test_query_by_participant() {
 // ── Test 5: append-only file survives reopen ────────────────────────────────
 static void test_append_only_survives_reopen() {
     SECTION("append-only file survives reopen (never truncated)");
-    const std::string path = "/tmp/audit_test_reopen.jsonl";
+    const std::string path = uniqueTempPath("audit_test_reopen.jsonl");
     std::remove(path.c_str());
 
     {

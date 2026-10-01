@@ -6,6 +6,7 @@
 #include <deque>
 #include <cmath>
 #include "OrderBook.h"
+#include "TempPath.h"
 #include "MatchingEngine.h"
 #include "Journal.h"
 #include "FIXParser.h"
@@ -972,7 +973,7 @@ void testMultiSymbolKillSwitch() {
 void testJournal() {
     std::cout << "Running testJournal..." << std::endl;
 
-    const std::string journalPath = "/tmp/ob_test_journal.bin";
+    const std::string journalPath = uniqueTempPath("ob_test_journal.bin");
 
     // Write
     {
@@ -1010,7 +1011,7 @@ void testJournal() {
 void testJournalReplay() {
     std::cout << "Running testJournalReplay..." << std::endl;
 
-    const std::string journalPath = "/tmp/ob_test_journal_replay.bin";
+    const std::string journalPath = uniqueTempPath("ob_test_journal_replay.bin");
 
     // Record operations
     {

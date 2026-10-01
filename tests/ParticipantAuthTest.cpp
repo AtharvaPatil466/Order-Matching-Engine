@@ -14,6 +14,7 @@
 // Distinct from AdminAuthTest, which covers the admin port's bearer token.
 
 #include "ParticipantAuth.h"
+#include "TempPath.h"
 #include "SoupBinTCP.h"
 
 #include <cassert>
@@ -175,7 +176,7 @@ void test_EmptyAllowListAuthorizesNothing() {
 // ─── 10: loading credentials from a file ────────────────────────────────────
 void test_LoadsCredentialsFromFile() {
     TEST(LoadsCredentialsFromFile);
-    const std::string path = "/tmp/ob_creds_ok.txt";
+    const std::string path = uniqueTempPath("ob_creds_ok.txt");
     {
         std::ofstream out(path);
         out << "# desks for firm-a\n"
@@ -218,7 +219,7 @@ void test_MalformedCredentialLineIsFatal() {
     };
 
     for (const auto& c : cases) {
-        const std::string path = "/tmp/ob_creds_bad.txt";
+        const std::string path = uniqueTempPath("ob_creds_bad.txt");
         { std::ofstream out(path); out << c.body; }
 
         ParticipantAuth auth;

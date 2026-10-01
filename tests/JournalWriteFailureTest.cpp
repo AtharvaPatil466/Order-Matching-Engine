@@ -38,6 +38,7 @@
 //      longer tell what is on disk must not keep accepting work.
 
 #include "Journal.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <csignal>
@@ -80,10 +81,7 @@ constexpr int kSetrlimitFailed   = 90;   // child exit code: the test could not 
 }
 
 std::string tempJournalPath() {
-    const char* dir = std::getenv("TMPDIR");
-    std::string base = (dir && *dir) ? dir : "/tmp";
-    if (base.back() != '/') base += '/';
-    return base + "ob_journal_write_failure_" + std::to_string(getpid()) + ".wal";
+    return uniqueTempPath("ob_journal_write_failure.wal");
 }
 
 }  // namespace

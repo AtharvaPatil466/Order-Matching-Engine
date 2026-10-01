@@ -1,6 +1,7 @@
 // TestEpochStore — durable, monotonic epoch persistence across "restart".
 
 #include "EpochStore.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -16,7 +17,7 @@ static int tests_passed = 0;
 #define PASS()        do { ++tests_passed; std::cout << " PASS" << std::endl; } while (0)
 
 static std::string tmpPath() {
-    return "/tmp/epochstore_test_" + std::to_string(::getpid()) + ".bin";
+    return uniqueTempPath("epochstore_test.bin");
 }
 
 void test_round_trip_and_restart() {

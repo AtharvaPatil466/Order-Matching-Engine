@@ -16,6 +16,7 @@
 // check interval.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 #include "StructuredLog.h"
 
 #include <cassert>
@@ -71,7 +72,7 @@ const LogEvent* findAlert(const std::vector<LogEvent>& events,
 }
 
 std::filesystem::path tempJournalPath() {
-    return std::filesystem::temp_directory_path() / "capacity_monitor_itest.wal";
+    return uniqueTempPath("capacity_monitor_itest.wal");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

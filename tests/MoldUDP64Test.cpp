@@ -530,6 +530,45 @@ void test_SubscriberHeartbeatDuringGapKeepsItRecoverable() {
     } END
 }
 
+// MD-3. Gap tracking kept one watermark, so while one gap was open a second,
+// separate loss was never reported: the subscriber asked for the first range
+// only and the second was gone without a word.
+void test_SubscriberReportsSecondGapWhileFirstIsOpen() {
+    TEST(SubscriberReportsSecondGapWhileFirstIsOpen) {
+        std::vector<std::vector<uint8_t>> wireBuf;
+        MoldUDP64Publisher pub("FEED", [&](std::string_view b) {
+            wireBuf.emplace_back(b.begin(), b.end());
+        });
+        for (int i = 1; i <= 6; ++i) {           // wireBuf[i-1] carries seq i
+            std::string m = "m" + std::to_string(i);
+            pub.addMessage(m.data(), static_cast<uint16_t>(m.size()));
+            pub.flush();
+        }
+
+        MoldUDP64Subscriber sub;
+        DeliveryLog log;
+        sub.setOnMessage([&](uint64_t s, const uint8_t* d, size_t n) {
+            log.onMessage(s, d, n);
+        });
+        sub.setOnGapDetected([&](uint64_t a, uint64_t b) { log.onGap(a, b); });
+
+        wire(sub, wireBuf[0]);                   // 1
+        wire(sub, wireBuf[2]);                   // 3: gap [2,3)
+        wire(sub, wireBuf[4]);                   // 5: gap [4,5), first still open
+        wire(sub, wireBuf[5]);                   // 6: nothing new
+
+        CHECK(log.gaps.size() == 2 && "the second loss was not reported");
+        CHECK(log.gaps[0] == std::make_pair(uint64_t{2}, uint64_t{3}));
+        CHECK(log.gaps[1] == std::make_pair(uint64_t{4}, uint64_t{5}));
+
+        wire(sub, wireBuf[1]);                   // recovered 2
+        wire(sub, wireBuf[3]);                   // recovered 4
+        CHECK(sub.nextExpectedSequence() == 7);
+        CHECK(log.gaps.size() == 2);
+        CHECK(log.messages.size() == 6);
+    } END
+}
+
 // ─── Integration: ITCH AddOrder via MoldUDP64 ───────────────────────────────
 
 void test_ItchAddOrderRoundtripsThroughMold() {
@@ -588,6 +627,7 @@ int main() {
     test_SubscriberSinglePacketGapRecovers();
     test_SubscriberMultiPacketGapRecovers();
     test_SubscriberHeartbeatDuringGapKeepsItRecoverable();
+    test_SubscriberReportsSecondGapWhileFirstIsOpen();
 
     test_ItchAddOrderRoundtripsThroughMold();
 

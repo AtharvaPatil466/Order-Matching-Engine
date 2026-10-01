@@ -120,9 +120,8 @@ public:
     // This is load-bearing, not cosmetic. MoldUDP64Subscriber closes a hole
     // only when the missing messages flow back through feedPacket and advance
     // its contiguous front. Applying them out of band leaves the front parked
-    // at the first hole forever — and because a new gap is reported only when
-    // `expected >= gapReportedTo_`, every LATER hole is then silently
-    // suppressed. One unrecovered gap would mask all the rest.
+    // at the first hole forever, and the transport's nextExpectedSequence()
+    // never again says the feed is whole.
     template <typename Republish>
     void serviceRecovery(Republish&& republish) {
         while (!pendingGaps_.empty()) {

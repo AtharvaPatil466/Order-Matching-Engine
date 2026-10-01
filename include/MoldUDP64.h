@@ -21,6 +21,7 @@
 
 #include "OuchProtocol.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -395,20 +396,21 @@ public:
     uint64_t sessionMismatches()    const { return sessionMismatches_.load(std::memory_order_relaxed); }
 
 private:
-    // A packet or heartbeat starting at `seq` arrived. If that opens a new
-    // hole below it, report it EXACTLY ONCE. While the gap is still
-    // outstanding (the contiguous front hasn't caught up to
-    // gapReportedTo_), later live packets — and the gap packet itself if
-    // re-seen — must NOT keep re-firing onGapDetected. The hole is closed by
-    // recovered / retransmitted messages flowing back through feedPacket,
-    // which advance nextExpectedSeq_.
+    // A packet or heartbeat starting at `seq` arrived. Every sequence below
+    // accountedTo_ has been received or reported missing, so a hole between
+    // there and `seq` is new: report it EXACTLY ONCE. Later live packets — and
+    // the gap packet itself if re-seen — don't re-fire it, and a second loss
+    // while the first is still open is reported as its own range (MD-3: one
+    // watermark used to hide it). Holes close when recovered / retransmitted
+    // messages flow back through feedPacket and advance nextExpectedSeq_.
     void reportGapBelow(uint64_t seq) {
-        const uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
-        if (seq > expected && expected >= gapReportedTo_) {
-            if (onGap_) onGap_(expected, seq);
+        const uint64_t from = std::max(accountedTo_,
+                                       nextExpectedSeq_.load(std::memory_order_relaxed));
+        if (seq > from) {
+            if (onGap_) onGap_(from, seq);
             gapsObserved_.fetch_add(1, std::memory_order_relaxed);
-            gapReportedTo_ = seq;
         }
+        accountedTo_ = std::max(accountedTo_, seq);
     }
 
     // Deliver one sequenced message, maintaining the contiguous
@@ -421,6 +423,7 @@ private:
     void deliverSequenced(uint64_t seq, const uint8_t* msg, size_t mlen) {
         uint64_t front = nextExpectedSeq_.load(std::memory_order_relaxed);
         if (seq < front || receivedAhead_.count(seq)) return;  // duplicate
+        accountedTo_ = std::max(accountedTo_, seq + 1);
         if (onMessage_) onMessage_(seq, msg, mlen);
         messagesDelivered_.fetch_add(1, std::memory_order_relaxed);
         if (seq == front) {
@@ -443,7 +446,7 @@ private:
     OnEndOfSession  onEos_;
     std::atomic<uint64_t> nextExpectedSeq_{1};
     std::set<uint64_t>    receivedAhead_;     // delivered seqs above the front
-    uint64_t              gapReportedTo_{0};  // high end of last reported gap
+    uint64_t              accountedTo_{0};    // all below: received or reported
     std::atomic<uint64_t> messagesDelivered_{0};
     std::atomic<uint64_t> gapsObserved_{0};
     std::atomic<uint64_t> heartbeatsReceived_{0};

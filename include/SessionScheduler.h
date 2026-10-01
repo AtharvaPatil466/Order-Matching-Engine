@@ -3,6 +3,7 @@
 #include "MatchingEngine.h"
 #include "Types.h"
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -89,15 +90,27 @@ public:
     void tick();
 
     // Begin a fresh session: forget which phases have been applied so the
-    // full sequence can fire again. Called automatically when the clock
-    // wraps past midnight (now < lastTick), and available explicitly for a
-    // host that restarts a session out of band.
+    // full sequence can fire again. Called automatically when the trading
+    // date changes, and available explicitly for a host that restarts a
+    // session out of band.
     void resetSession();
 
     // Clock seam — mirrors setExpiryClock/clearExpiryClock on the engine.
+    // The default is monotonic: the wall clock is read once, then advanced by
+    // steady_clock, so an NTP step never moves it (AUCT-7). An injected
+    // ms-of-day clock may step backwards; tick() ignores that within a date.
     void setClock(ClockFn clock) { clock_ = std::move(clock); }
     void clearClock() { clock_ = {}; }
     uint64_t now() const;
+
+    // Trading-date seam. A new trading day is a change of this value — never
+    // a smaller ms-of-day, which is what an NTP step back looks like too.
+    // Any increasing day number works (e.g. yyyymmdd). Default: the UTC day of
+    // the default clock. With an injected clock and no date function the date
+    // never changes, so only resetSession() starts a new session.
+    using DateFn = std::function<uint32_t()>;
+    void setTradingDateFn(DateFn date) { dateFn_ = std::move(date); }
+    uint32_t tradingDate() const;
 
     // Inspect the last phase the scheduler drove the universe into. Useful
     // for tests and operational telemetry.
@@ -120,6 +133,12 @@ private:
     uint64_t intervalMs_{1000};
 
     ClockFn clock_;
+    DateFn dateFn_;
+
+    // Default clock: wall-clock epoch ms read once, advanced by steady_clock.
+    uint64_t defaultEpochMs() const;
+    const uint64_t wallAnchorMs_;
+    const std::chrono::steady_clock::time_point steadyAnchor_;
 
     // Serializes tick() against itself (timer thread vs. a manual caller) and
     // guards lastTick_. phase_ is atomic so currentPhase()/isRunning() can be
@@ -127,10 +146,12 @@ private:
     std::mutex tickMutex_;
     std::atomic<SessionPhase> phase_{SessionPhase::Idle};
 
-    // Last observed clock value, used to detect a midnight wrap (now goes
-    // backwards) so a new session resets automatically. UINT64_MAX is the
-    // "no tick yet" sentinel so the very first tick never looks like a wrap.
-    uint64_t lastTick_{UINT64_MAX};
+    // The session clock within the current trading date: the largest
+    // ms-of-day seen, so a backward step changes nothing. 0 before any tick.
+    uint64_t lastTick_{0};
+    // Trading date of the current session; kNoDate before the first tick.
+    static constexpr uint64_t kNoDate = UINT64_MAX;
+    uint64_t sessionDate_{kNoDate};
 };
 
 } // namespace OrderMatcher

@@ -482,6 +482,13 @@ enable_assertions(OnCloseSessionEndTest)
 add_test(NAME OnCloseSessionEndTest COMMAND OnCloseSessionEndTest)
 set_tests_properties(OnCloseSessionEndTest PROPERTIES TIMEOUT 60 LABELS "project;auction;session")
 
+# Roadmap 1.8-H7 (AUCT-7): a backward clock step is not a new trading day.
+add_executable(SessionClockStepTest SessionClockStepTest.cpp)
+target_link_libraries(SessionClockStepTest PRIVATE OrderMatcher)
+enable_assertions(SessionClockStepTest)
+add_test(NAME SessionClockStepTest COMMAND SessionClockStepTest)
+set_tests_properties(SessionClockStepTest PROPERTIES TIMEOUT 60 LABELS "project;session;lifecycle")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

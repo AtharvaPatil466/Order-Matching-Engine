@@ -1301,7 +1301,12 @@ Deliberately out of scope, so their absence is not mistaken for "the engine has 
   `Architecture.md`.
 - **Journalling, replay and replication determinism.** See `docs/Verification.md`.
 - **Session scheduling.** `SessionScheduler` drives the trading-state transitions that §7
-  assumes; it does not participate in matching.
+  assumes; it does not participate in matching. Its default clock reads the wall clock once
+  and then advances on `steady_clock`, and within a trading date it never runs backwards: a
+  new session starts only when the trading date changes (`setTradingDateFn`; default the UTC
+  day). It used to treat any backward clock reading as midnight, so a 1 ms NTP step in the
+  closing auction replayed the day, opening uncross included (roadmap 1.8-H7, AUCT-7; pinned
+  by `tests/SessionClockStepTest.cpp`).
 
 ## 12. Maintaining this document
 

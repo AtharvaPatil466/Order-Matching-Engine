@@ -1,5 +1,6 @@
 #include "SessionScheduler.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace OrderMatcher {
@@ -14,7 +15,11 @@ SessionScheduler::SessionScheduler(MatchingEngine& engine,
                                    SessionSchedule schedule)
     : engine_(engine),
       symbols_(std::move(symbols)),
-      schedule_(schedule) {}
+      schedule_(schedule),
+      wallAnchorMs_(static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch()).count())),
+      steadyAnchor_(std::chrono::steady_clock::now()) {}
 
 SessionScheduler::~SessionScheduler() {
     stop();
@@ -54,24 +59,34 @@ void SessionScheduler::stop() {
     }
 }
 
+// The wall clock is read once, at construction, and then advanced by
+// steady_clock, which never steps. Reading system_clock on every tick let an
+// NTP step move the session clock backwards (AUCT-7). UTC rather than local
+// time keeps this lock- and dependency-free; a venue outside UTC injects a
+// clock (and a date function) that applies its offset.
+uint64_t SessionScheduler::defaultEpochMs() const {
+    const auto elapsed = std::chrono::steady_clock::now() - steadyAnchor_;
+    return wallAnchorMs_ + static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+}
+
 uint64_t SessionScheduler::now() const {
     if (clock_) {
         return clock_();
     }
-    // Real-clock fallback: derive ms-of-day from the wall clock. We use UTC
-    // (system_clock's epoch) rather than local time so the computation is
-    // lock-free and dependency-free; a deployment in a non-UTC venue should
-    // inject a clock that applies the local offset. ms-of-day keeps the
-    // schedule date-agnostic and matches the unit tests inject.
-    const auto sinceEpoch = std::chrono::system_clock::now().time_since_epoch();
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(sinceEpoch).count();
-    return static_cast<uint64_t>(ms) % kMsPerDay;
+    return defaultEpochMs() % kMsPerDay;
+}
+
+uint32_t SessionScheduler::tradingDate() const {
+    if (dateFn_) return dateFn_();
+    if (clock_) return 0;  // injected ms-of-day clock, no date: one long day
+    return static_cast<uint32_t>(defaultEpochMs() / kMsPerDay);
 }
 
 void SessionScheduler::resetSession() {
     std::lock_guard<std::mutex> lock(tickMutex_);
     phase_.store(SessionPhase::Idle, std::memory_order_release);
-    lastTick_ = UINT64_MAX;
+    lastTick_ = 0;
 }
 
 void SessionScheduler::applyPhase(SessionPhase target) {
@@ -112,15 +127,20 @@ void SessionScheduler::applyPhase(SessionPhase target) {
 void SessionScheduler::tick() {
     std::lock_guard<std::mutex> lock(tickMutex_);
 
-    const uint64_t now = this->now();
-
-    // Detect a midnight wrap: the clock running backwards means a new
-    // calendar day, so the session restarts and the full sequence can fire
-    // again. The UINT64_MAX sentinel makes the first tick never look like a
-    // wrap.
-    if (lastTick_ != UINT64_MAX && now < lastTick_) {
-        phase_.store(SessionPhase::Idle, std::memory_order_release);
+    // A new trading date starts a new session, and only that does. This used
+    // to treat any backward clock reading as midnight, so a 1 ms NTP step in
+    // the closing auction replayed the whole day in one tick — including an
+    // opening uncross of the closing-auction book (AUCT-7).
+    const uint64_t date = tradingDate();
+    if (date != sessionDate_) {
+        if (sessionDate_ != kNoDate) {
+            phase_.store(SessionPhase::Idle, std::memory_order_release);
+        }
+        sessionDate_ = date;
+        lastTick_ = 0;
     }
+    // Within a date the session clock never runs backwards.
+    const uint64_t now = std::max(this->now(), lastTick_);
     lastTick_ = now;
 
     // Advance forward through the phase sequence, firing every boundary that

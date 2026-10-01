@@ -156,15 +156,17 @@ void test_coarse_tick_fires_all_phases_in_order() {
 // ─── Test 3: midnight wrap and explicit reset re-arm the session ────────────
 
 void test_session_reset() {
-    SECTION("midnight wrap and resetSession re-arm the sequence");
+    SECTION("a new trading date and resetSession re-arm the sequence");
 
     MatchingEngine engine;
     auto symbols = makeUniverse(engine);
 
     uint64_t vnow = 0;
+    uint32_t vdate = 1;
     SessionSchedule sched;
     SessionScheduler sched_(engine, symbols, sched);
     sched_.setClock([&]() -> uint64_t { return vnow; });
+    sched_.setTradingDateFn([&]() -> uint32_t { return vdate; });
 
     // Run a full day to PostClose.
     vnow = sched.closeMs;
@@ -184,15 +186,17 @@ void test_session_reset() {
     assert(sched_.currentPhase() == SessionPhase::PreOpen);
     assertAllState(engine, symbols, TradingState::PreOpen);
 
-    // Now simulate a midnight wrap WITHOUT an explicit reset: advance to
-    // Continuous, then make the clock jump backwards (new calendar day). The
-    // next tick should auto-reset and, since the new time is before pre-open,
-    // land on Idle.
+    // Now a new trading day WITHOUT an explicit reset: advance to Continuous,
+    // then move to the next date. The next tick should auto-reset and, since
+    // the new time is before pre-open, land on Idle. (This used to be keyed
+    // on the clock reading earlier than the last tick, which an NTP step
+    // back also does — AUCT-7; see SessionClockStepTest.)
     vnow = sched.openMs;
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::Continuous);
 
-    vnow = 60'000;  // 00:01:00 next day — earlier than lastTick (wrap)
+    vdate = 2;
+    vnow = 60'000;  // 00:01:00 next day
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::Idle);
 

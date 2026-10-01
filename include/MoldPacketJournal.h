@@ -20,6 +20,11 @@
 // on the publish hot path. (An earlier form took no internal lock and
 // made that serialisation the caller's job; the std::lock_guard at the
 // top of each method below is the contract now.)
+//
+// replayRange() copies the range under the lock and runs its callback
+// after releasing it. The service's callback is a blocking TCP send, and
+// running it under the lock let one subscriber that stopped reading stall
+// record() — the publisher — for the whole feed.
 
 #include <cstdint>
 #include <cstring>
@@ -59,38 +64,16 @@ public:
     // or are not yet recorded).
     //
     // Pass count == 0 to replay from startSeq to the end of the
-    // journal.
+    // journal. The callback runs without the journal lock held.
     size_t replayRange(uint64_t startSeq, uint16_t count,
                        std::function<void(uint64_t, const uint8_t*, size_t)> cb) const {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (entries_.empty()) return 0;
-
-        // Bound the request to what we can actually answer, expressed as
-        // an INCLUSIVE upper sequence so the window never wraps near the
-        // top of the 64-bit space. A naive half-open end (back().seq + 1
-        // or startSeq + count) wraps to a small value when the operand is
-        // at/near UINT64_MAX, which silently replays nothing.
-        constexpr uint64_t kMaxSeq = std::numeric_limits<uint64_t>::max();
-        uint64_t lastWanted;
-        if (count == 0) {
-            // "To end of journal" — inclusive of the newest entry, even
-            // when that newest sequence is UINT64_MAX itself.
-            lastWanted = entries_.back().seq;
-        } else {
-            // startSeq + (count - 1), clamped so an oversized window at
-            // the top of the space saturates instead of wrapping.
-            uint64_t span = static_cast<uint64_t>(count) - 1;
-            lastWanted = (startSeq > kMaxSeq - span) ? kMaxSeq : startSeq + span;
+        std::vector<Entry> range;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            range = copyRange(startSeq, count);
         }
-
-        size_t delivered = 0;
-        for (const auto& e : entries_) {
-            if (e.seq < startSeq) continue;
-            if (e.seq > lastWanted) break;
-            cb(e.seq, e.bytes.data(), e.bytes.size());
-            ++delivered;
-        }
-        return delivered;
+        for (const auto& e : range) cb(e.seq, e.bytes.data(), e.bytes.size());
+        return range.size();
     }
 
     bool contains(uint64_t seq) const {
@@ -119,6 +102,37 @@ private:
         uint64_t              seq{0};
         std::vector<uint8_t>  bytes;
     };
+
+    // The entries replayRange() delivers. Caller holds mu_.
+    std::vector<Entry> copyRange(uint64_t startSeq, uint16_t count) const {
+        if (entries_.empty()) return {};
+
+        // Bound the request to what we can actually answer, expressed as
+        // an INCLUSIVE upper sequence so the window never wraps near the
+        // top of the 64-bit space. A naive half-open end (back().seq + 1
+        // or startSeq + count) wraps to a small value when the operand is
+        // at/near UINT64_MAX, which silently replays nothing.
+        constexpr uint64_t kMaxSeq = std::numeric_limits<uint64_t>::max();
+        uint64_t lastWanted;
+        if (count == 0) {
+            // "To end of journal" — inclusive of the newest entry, even
+            // when that newest sequence is UINT64_MAX itself.
+            lastWanted = entries_.back().seq;
+        } else {
+            // startSeq + (count - 1), clamped so an oversized window at
+            // the top of the space saturates instead of wrapping.
+            uint64_t span = static_cast<uint64_t>(count) - 1;
+            lastWanted = (startSeq > kMaxSeq - span) ? kMaxSeq : startSeq + span;
+        }
+
+        std::vector<Entry> range;
+        for (const auto& e : entries_) {
+            if (e.seq < startSeq) continue;
+            if (e.seq > lastWanted) break;
+            range.push_back(e);
+        }
+        return range;
+    }
 
     mutable std::mutex     mu_;
     std::deque<Entry>      entries_;

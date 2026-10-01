@@ -32,6 +32,7 @@
 #include "SoupBinTCP.h"
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -185,6 +186,39 @@ void test_JournalReplayCountWrapGuard() {
         CHECK(got.size() == 2);
         CHECK(got[0] == "A");
         CHECK(got[1] == "B");
+    } END
+}
+
+// MD-4. replayRange() ran its callback under the journal mutex, and the
+// service's callback is a blocking TCP send. A subscriber that stopped reading
+// filled its socket buffer, blocked that send while it held the mutex, and so
+// stalled record() — the publisher — for every subscriber on the feed.
+void test_JournalRecordNotBlockedByStalledReplay() {
+    TEST(JournalRecordNotBlockedByStalledReplay) {
+        using namespace std::chrono_literals;
+        MoldPacketJournal j(16);
+        j.record(1, "A", 1);
+
+        std::atomic<bool> inCallback{false}, release{false}, recorded{false};
+        std::thread replayer([&] {
+            j.replayRange(1, 1, [&](uint64_t, const uint8_t*, size_t) {
+                inCallback = true;
+                while (!release) std::this_thread::sleep_for(1ms);  // a send that never drains
+            });
+        });
+        while (!inCallback) std::this_thread::sleep_for(1ms);
+
+        std::thread publisher([&] { j.record(2, "B", 1); recorded = true; });
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (!recorded && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(1ms);
+        const bool recordedWhileStalled = recorded;
+
+        release = true;
+        replayer.join();
+        publisher.join();
+        CHECK(recordedWhileStalled);
+        CHECK(j.highestSeq() == 2);
     } END
 }
 
@@ -597,6 +631,7 @@ int main() {
     test_JournalContainsReflectsWindow();
     test_JournalReplayCountZeroNearUint64Max();
     test_JournalReplayCountWrapGuard();
+    test_JournalRecordNotBlockedByStalledReplay();
 
     test_RetransmitRequestRoundtrip();
     test_RetransmitRequestRejectsBadTag();

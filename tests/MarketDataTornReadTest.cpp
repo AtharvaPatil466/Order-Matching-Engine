@@ -77,7 +77,7 @@ int main() {
     uint64_t torn = 0;
     ShmEntry e{};
     while (!done.load(std::memory_order_acquire)) {
-        if (!sub.poll(e)) continue;
+        if (sub.poll(e) != PollResult::Entry) continue;
         accepted.fetch_add(1, std::memory_order_relaxed);
         if (!isWhole(e)) {
             if (torn == 0)

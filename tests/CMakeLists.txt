@@ -859,6 +859,14 @@ add_test(NAME MarketDataTornReadTest COMMAND MarketDataTornReadTest)
 set_tests_properties(MarketDataTornReadTest PROPERTIES TIMEOUT 60
                      LABELS "project;protocol;concurrency")
 
+# A lapped or orphaned shared-memory subscriber gets an explicit Gap/Reset (MD-12).
+add_executable(MarketDataGapTest MarketDataGapTest.cpp)
+target_link_libraries(MarketDataGapTest PRIVATE OrderMatcher)
+enable_assertions(MarketDataGapTest)
+add_test(NAME MarketDataGapTest COMMAND MarketDataGapTest)
+set_tests_properties(MarketDataGapTest PROPERTIES TIMEOUT 30
+                     LABELS "project;protocol;recovery")
+
 # Config system tests
 add_executable(ConfigTest ConfigTest.cpp)
 target_link_libraries(ConfigTest PRIVATE OrderMatcher)

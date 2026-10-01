@@ -49,7 +49,7 @@ void test_v1_roundtrip() {
     pub.publishUpdate(upd);
 
     ShmEntry entry{};
-    assert(sub.poll(entry));
+    assert(sub.poll(entry) == PollResult::Entry);
     assert(entry.type == ShmEntry::Type::IncrementalUpdate);
     assert(entry.update.level.price == 1000000);
     assert(entry.update.level.totalQuantity == 50);
@@ -117,7 +117,7 @@ void test_snapshot_roundtrip() {
     pub.publishSnapshot(snap);
 
     ShmEntry entry{};
-    assert(sub.poll(entry));
+    assert(sub.poll(entry) == PollResult::Entry);
     assert(entry.type == ShmEntry::Type::Snapshot);
     assert(entry.symbolId == 42);
     assert(entry.lastTradePrice == 1005000);
@@ -158,7 +158,7 @@ void test_gap_detection() {
     // Read a few
     ShmEntry entry{};
     for (int i = 0; i < 3; ++i) {
-        assert(sub.poll(entry));
+        assert(sub.poll(entry) == PollResult::Entry);
     }
     assert(sub.gapCount() == 7);
 
@@ -191,14 +191,14 @@ void test_sequential_updates() {
 
     for (uint64_t i = 0; i < 5; ++i) {
         ShmEntry entry{};
-        assert(sub.poll(entry));
+        assert(sub.poll(entry) == PollResult::Entry);
         assert(entry.sequence == i);
         assert(entry.update.level.price == static_cast<Price>(1000000 + i * 1000));
     }
 
     // No more entries
     ShmEntry entry{};
-    assert(!sub.poll(entry));
+    assert(sub.poll(entry) == PollResult::Empty);
 
     sub.disconnect();
     pub.stop();
@@ -227,15 +227,16 @@ void test_ring_wrap() {
     MarketDataSubscriber sub(name);
     assert(sub.connect());
 
-    // Subscriber starts at seq 0, but entries 0-3 are overwritten.
-    // Gap detection should handle the jump.
+    // Subscriber starts at seq 0, but entries 0-3 are overwritten: it is told
+    // so, then reads the four that are left.
     ShmEntry entry{};
-    uint64_t readCount = 0;
-    while (sub.poll(entry)) {
-        ++readCount;
+    assert(sub.poll(entry) == PollResult::Gap);
+    for (uint64_t seq = 4; seq < 8; ++seq) {
+        assert(sub.poll(entry) == PollResult::Entry);
+        assert(entry.sequence == seq);
+        assert(entry.update.level.price == static_cast<Price>(seq));
     }
-    // Should have read at most `capacity` entries
-    assert(readCount <= 4);
+    assert(sub.poll(entry) == PollResult::Empty);
 
     sub.disconnect();
     pub.stop();

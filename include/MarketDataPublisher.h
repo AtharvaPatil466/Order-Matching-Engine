@@ -2,7 +2,9 @@
 
 #include "OrderBook.h"
 #include <string>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -27,6 +29,13 @@ namespace OrderMatcher {
 // half of one update and half of the next. Payload words are copied with
 // relaxed atomics: the copy races the writer by design, and a plain memcpy
 // would be a data race (and a TSan report) on every lap.
+//
+// ShmHeader::epoch names the publisher session: its start time in ns, set by
+// start(), and 0 once stop() has run. A subscriber remembers the epoch it
+// connected to; when it changes, poll() returns Reset rather than waiting
+// forever on a ring that a restarted publisher rewound to 0 (or that a
+// stopped one unlinked). The field sits in the header's existing padding, so
+// the layout and VERSION are unchanged; a v1 publisher leaves it 0.
 
 struct ShmHeader {
     static constexpr uint32_t MAGIC = 0x4D444658; // "MDFX"
@@ -37,9 +46,12 @@ struct ShmHeader {
     uint32_t version;
     uint32_t entrySize;      // sizeof(ShmEntry)
     uint32_t capacity;       // number of entries in ring
+    std::atomic<uint64_t> epoch;                  // publisher session; 0 = stopped
     alignas(64) std::atomic<uint64_t> writeSeq;  // next sequence to write
     char padding[64 - sizeof(std::atomic<uint64_t>)];
 };
+static_assert(offsetof(ShmHeader, epoch) == 16 && offsetof(ShmHeader, writeSeq) == 64 &&
+              sizeof(ShmHeader) == 128, "the header is shared with other processes");
 
 struct ShmEntry {
     enum class Type : uint8_t {
@@ -100,7 +112,14 @@ public:
         shmFd_ = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0666);
         if (shmFd_ < 0) return false;
 
-        if (ftruncate(shmFd_, static_cast<off_t>(shmSize_)) != 0) {
+        // A publisher that crashed leaves its segment behind. Grow it only if
+        // it is too small: macOS refuses a second ftruncate of a shm object
+        // (EINVAL) and reports its size rounded up to a page, so truncating
+        // unconditionally meant a restarted publisher could never start there.
+        struct stat st{};
+        if (fstat(shmFd_, &st) != 0 ||
+            (static_cast<size_t>(st.st_size) < shmSize_ &&
+             ftruncate(shmFd_, static_cast<off_t>(shmSize_)) != 0)) {
             close(shmFd_);
             shmFd_ = -1;
             return false;
@@ -114,13 +133,18 @@ public:
             return false;
         }
 
-        // Initialize header
+        // Initialize header. On a reused segment, epoch goes to 0 first, so a
+        // subscriber of the old session is told before the ring rewinds, and
+        // the new epoch goes in last, so one that connects and reads it also
+        // sees writeSeq == 0.
         auto* header = getHeader();
+        header->epoch.store(0, std::memory_order_release);
         header->magic = ShmHeader::MAGIC;
         header->version = ShmHeader::VERSION;
         header->entrySize = sizeof(ShmEntry);
         header->capacity = static_cast<uint32_t>(capacity_);
         header->writeSeq.store(0, std::memory_order_release);
+        header->epoch.store(newEpoch(), std::memory_order_release);
 
         running_ = true;
         return true;
@@ -129,6 +153,7 @@ public:
     void stop() {
         running_ = false;
         if (shmPtr_ && shmPtr_ != MAP_FAILED) {
+            getHeader()->epoch.store(0, std::memory_order_release);
             munmap(shmPtr_, shmSize_);
             shmPtr_ = nullptr;
         }
@@ -211,6 +236,12 @@ private:
         header->writeSeq.store(seq + 1, std::memory_order_release);
     }
 
+    static uint64_t newEpoch() {
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return ns > 0 ? static_cast<uint64_t>(ns) : 1;
+    }
+
     ShmHeader* getHeader() const {
         return static_cast<ShmHeader*>(shmPtr_);
     }
@@ -227,6 +258,16 @@ private:
     void* shmPtr_;
     size_t shmSize_;
     bool running_{false};
+};
+
+// What MarketDataSubscriber::poll found. `out` is written only for Entry.
+enum class PollResult : uint8_t {
+    Empty,  // nothing new yet
+    Entry,  // `out` holds the next entry
+    Gap,    // the publisher lapped us and entries are lost; readSequence()
+            // jumped to the oldest one left. Resync the book from a snapshot.
+    Reset,  // the publisher restarted or stopped (its epoch changed). The
+            // subscriber has disconnected: connect() again, then resync.
 };
 
 // Subscriber: read-only access to shared memory market data feed.
@@ -281,6 +322,8 @@ public:
 
         capacity_ = header->capacity;
         entrySize_ = header->entrySize;
+        epoch_ = header->epoch.load(std::memory_order_acquire);
+        readSeq_ = 0;
         size_t requiredSize = sizeof(ShmHeader) + capacity_ * entrySize_;
         if (shmSize_ < requiredSize) {
             disconnect();
@@ -300,18 +343,19 @@ public:
         }
     }
 
-    // Poll for next entry. Returns true if a new entry was read.
-    bool poll(ShmEntry& out) {
-        if (!shmPtr_) return false;
+    // Poll for the next entry; see PollResult.
+    PollResult poll(ShmEntry& out) {
+        if (!shmPtr_) return PollResult::Empty;
 
         auto* header = getHeader();
+        if (header->epoch.load(std::memory_order_acquire) != epoch_) return reset();
+
         uint64_t writeSeq = header->writeSeq.load(std::memory_order_acquire);
+        if (readSeq_ >= writeSeq) return PollResult::Empty;
 
-        if (readSeq_ >= writeSeq) return false;
-
-        // Gap detection: if we're too far behind, skip ahead
         if (writeSeq - readSeq_ > capacity_) {
-            readSeq_ = writeSeq - capacity_; // oldest available
+            readSeq_ = writeSeq - capacity_; // oldest still in the ring
+            return PollResult::Gap;
         }
 
         // Seqlock read: the slot must hold readSeq_ before and after the copy.
@@ -322,16 +366,19 @@ public:
                 dst[i] = shm_detail::word(slot, i).load(std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_acquire);
             if (shm_detail::word(slot, 0).load(std::memory_order_relaxed) == readSeq_) {
+                // A restarted publisher may have rewritten this slot with the
+                // same sequence; its new epoch is visible by now if so.
+                if (header->epoch.load(std::memory_order_relaxed) != epoch_) return reset();
                 out.sequence = readSeq_;
                 readSeq_++;
-                return true;
+                return PollResult::Entry;
             }
         }
 
-        // The writer lapped us while we read; skip to the oldest entry left.
+        // The writer lapped us while we read: readSeq_ is gone.
         writeSeq = header->writeSeq.load(std::memory_order_acquire);
-        readSeq_ = writeSeq > capacity_ ? writeSeq - capacity_ : 0;
-        return false;
+        readSeq_ = std::max(readSeq_ + 1, writeSeq > capacity_ ? writeSeq - capacity_ : 0);
+        return PollResult::Gap;
     }
 
     uint64_t readSequence() const { return readSeq_; }
@@ -344,6 +391,11 @@ public:
     }
 
 private:
+    PollResult reset() {
+        disconnect();
+        return PollResult::Reset;
+    }
+
     const ShmHeader* getHeader() const {
         return static_cast<const ShmHeader*>(shmPtr_);
     }
@@ -360,6 +412,7 @@ private:
     size_t shmSize_;
     size_t capacity_{0};
     size_t entrySize_{0};
+    uint64_t epoch_{0};
     uint64_t readSeq_;
 };
 

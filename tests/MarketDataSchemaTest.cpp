@@ -79,7 +79,7 @@ void testPublisherSubscriberRoundTrip() {
     pub.publishUpdate(update);
 
     ShmEntry out{};
-    assert(sub.poll(out));
+    assert(sub.poll(out) == PollResult::Entry);
     assert(out.sequence == 0);
     assert(out.type == ShmEntry::Type::IncrementalUpdate);
     assert(out.update.side == Side::Sell);
@@ -100,7 +100,7 @@ void testLargerEntryStrideIsReadable() {
     assert(sub.connect());
 
     ShmEntry out{};
-    assert(sub.poll(out));
+    assert(sub.poll(out) == PollResult::Entry);
     assert(out.sequence == 0);
     assert(out.update.level.price == toPrice(101.25));
     assert(out.update.level.totalQuantity == 40);

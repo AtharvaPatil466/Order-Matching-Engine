@@ -26,9 +26,12 @@ int main(int argc, char* argv[]) {
     std::cout << "Connecting to shared memory: /" << shmName << std::endl;
 
     // Wait for publisher to start
-    while (running && !sub.connect()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    auto waitForPublisher = [&sub] {
+        while (running && !sub.connect()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    };
+    waitForPublisher();
 
     if (!running) return 0;
     std::cout << "Connected. Listening for market data..." << std::endl;
@@ -37,7 +40,19 @@ int main(int argc, char* argv[]) {
     uint64_t updateCount = 0;
 
     while (running) {
-        if (sub.poll(entry)) {
+        const uint64_t before = sub.readSequence();
+        const PollResult r = sub.poll(entry);
+        if (r == PollResult::Gap) {
+            std::cout << "[GAP] lost " << (sub.readSequence() - before)
+                      << " entries; book is stale until the next snapshot" << std::endl;
+            continue;
+        }
+        if (r == PollResult::Reset) {
+            std::cout << "[RESET] publisher restarted or stopped; reconnecting..." << std::endl;
+            waitForPublisher();
+            continue;
+        }
+        if (r == PollResult::Entry) {
             updateCount++;
 
             if (entry.type == ShmEntry::Type::IncrementalUpdate) {

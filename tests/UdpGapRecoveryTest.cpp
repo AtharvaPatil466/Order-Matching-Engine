@@ -241,6 +241,57 @@ void testNakTxDropDoesNotStallRx() {
     std::printf("testNakTxDropDoesNotStallRx PASSED\n");
 }
 
+// ── Test 8 (MD-13) ───────────────────────────────────────────────────────────
+// One loss, then a burst longer than the reorder window. The datagrams past the
+// window were dropped (overflow) but still moved highestSeen_, so once the
+// first hole was filled nothing ever asked for them: expected_ parked at the
+// first overflowed sequence and every later datagram was buffered or dropped,
+// forever. The sender here answers every NAK at once and live traffic goes on.
+void testBurstPastWindowRecovers() {
+    std::printf("Running testBurstPastWindowRecovers...\n");
+    RxHarness<8> h;
+    h.rb.setNakDelayDatagrams(4);
+    h.feed(1);
+    for (uint64_t s = 3; s <= 20; ++s) h.feed(s);   // 2 lost; 18 > 8-slot window
+
+    size_t served = 0;
+    for (uint64_t live = 21; live <= 80; ++live) {
+        while (served < h.naks.size()) {
+            const auto nak = h.naks[served++];
+            for (uint32_t i = 0; i < nak.second; ++i) h.feed(nak.first + i);
+        }
+        h.feed(live);
+    }
+
+    bool inOrder = true;
+    for (size_t i = 0; i < h.delivered.size(); ++i) inOrder &= (h.delivered[i] == i + 1);
+    std::printf("  delivered %zu, expected %llu\n", h.delivered.size(),
+                static_cast<unsigned long long>(h.rb.expected()));
+    assert(inOrder && "delivery out of order");
+    assert(h.delivered.size() >= 40 && "the receiver stalled behind datagrams it dropped");
+    std::printf("testBurstPastWindowRecovers PASSED\n");
+}
+
+// ── Test 9 (MD-13) ───────────────────────────────────────────────────────────
+// A NAK — or the retransmission it asked for — can be lost too. A hole was
+// NAK'd exactly once, so after that loss it stayed open forever. It must be
+// asked for again while it stays open.
+void testLostNakIsRepeated() {
+    std::printf("Running testLostNakIsRepeated...\n");
+    RxHarness<8> h;
+    h.rb.setNakDelayDatagrams(2);
+    h.nakAlwaysDrops = true;                         // nothing is ever answered
+    h.feed(1);
+    for (uint64_t s = 3; s <= 30; ++s) h.feed(s);    // 2 lost
+
+    size_t naksForTwo = 0;
+    for (const auto& n : h.naks)
+        if (n.first <= 2 && 2 < n.first + n.second) ++naksForTwo;
+    std::printf("  NAKs covering seq 2: %zu\n", naksForTwo);
+    assert(naksForTwo >= 2 && "a hole whose NAK went unanswered was never asked for again");
+    std::printf("testLostNakIsRepeated PASSED\n");
+}
+
 }  // namespace
 
 int main() {
@@ -253,6 +304,8 @@ int main() {
     testDuplicateDropped();
     testRetransmitBufferMiss();
     testNakTxDropDoesNotStallRx();
+    testLostNakIsRepeated();
+    testBurstPastWindowRecovers();
     std::printf("\nUdpGapRecoveryTest passed\n");
     return 0;
 }

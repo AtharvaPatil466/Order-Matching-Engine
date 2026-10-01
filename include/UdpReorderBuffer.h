@@ -33,6 +33,15 @@
 // [highestSeen_+1, seq), never the whole [expected_, seq). Example: after holes
 // at 3,4 were NAK'd (on receiving 5), receiving 7 NAKs only [6,7), not [3,7).
 //
+// A datagram that arrives past the window is dropped, so it is NOT seen:
+// highestSeen_ stops just below it, and the next arrival past it discovers it
+// as missing and NAKs it like any lost datagram. (It used to count as seen, so
+// after one loss and a burst longer than the window nothing ever asked for the
+// dropped datagrams and the receiver stalled for good — MD-13.)
+//
+// A NAK'd hole stays tracked and is NAK'd again every kReNakDatagrams arrivals
+// while it is still open: the NAK or the retransmission can be lost as well.
+//
 // Threading: single-consumer. onDatagram() is called only from the DPDK poll
 // thread. No internal synchronization (a lock would defeat the isolated poll
 // core). Read counters from another thread as approximate telemetry only.
@@ -133,8 +142,11 @@ public:
             recordPendingGap(nakStart, nakCount);
         }
 
-        bufferFuture(seq, data, len);
-        if (seq > highestSeen_) highestSeen_ = seq;
+        // A datagram past the window is dropped: everything below it is
+        // accounted for, but not the datagram itself.
+        const bool held = bufferFuture(seq, data, len);
+        const uint64_t seen = held ? seq : seq - 1;
+        if (seen > highestSeen_) highestSeen_ = seen;
 
         // One more datagram has gone by without the hole closing. Anything that
         // has now waited out the window is genuinely lost, not reordered.
@@ -146,7 +158,8 @@ public:
     void setNakDelayDatagrams(uint32_t n) { nakDelayDatagrams_ = n; }
     uint32_t nakDelayDatagrams() const { return nakDelayDatagrams_; }
 
-    // Gaps discovered but not yet NAK'd — still inside the reorder window.
+    // Gaps still open: inside the reorder window, or NAK'd and awaiting the
+    // retransmission (re-NAK'd every kReNakDatagrams arrivals).
     uint32_t pendingGaps() const { return pendingCount_; }
     // Gaps that closed on their own before the window expired: reordering that
     // would previously have produced a spurious retransmission request.
@@ -182,33 +195,35 @@ private:
     // is not what recovery needs.
     static constexpr uint32_t kMaxPendingGaps = 16;
 
+    // A hole NAK'd this many arrivals ago and still open is NAK'd again.
+    static constexpr uint32_t kReNakDatagrams = Depth;
+
     struct PendingGap {
         uint64_t start;
         uint32_t count;
-        uint32_t age;      // datagrams observed since discovery
+        uint32_t age;      // datagrams observed since discovery / last NAK
+        bool     naked;    // NAK'd at least once; now waiting to re-NAK
     };
 
+    void nak(uint64_t start, uint32_t count) {
+        if (nakHook_) nakHook_(start, count);
+    }
+
     void recordPendingGap(uint64_t start, uint32_t count) {
-        if (nakDelayDatagrams_ == 0) {               // NAK-on-sight
-            if (nakHook_) nakHook_(start, count);
-            return;
-        }
-        // A hole at least as wide as the reorder window cannot close by
-        // reordering: the missing datagrams could not be buffered even if they
-        // arrived. Waiting would only delay recovery, so NAK it now. Deferral
-        // is for holes small enough that in-flight reordering could still fill
-        // them.
-        if (count >= Depth) {
-            if (nakHook_) nakHook_(start, count);
-            return;
-        }
+        // NAK-on-sight, or a hole at least as wide as the reorder window: it
+        // cannot close by reordering (the missing datagrams could not be
+        // buffered even if they arrived), so waiting would only delay recovery.
+        // Deferral is for holes small enough that in-flight reordering could
+        // still fill them.
+        const bool nakNow = nakDelayDatagrams_ == 0 || count >= Depth;
+        if (nakNow) nak(start, count);
         if (pendingCount_ == kMaxPendingGaps) {
             const PendingGap oldest = pending_[0];
-            if (nakHook_) nakHook_(oldest.start, oldest.count);
+            nak(oldest.start, oldest.count);
             for (uint32_t i = 1; i < pendingCount_; ++i) pending_[i - 1] = pending_[i];
             --pendingCount_;
         }
-        pending_[pendingCount_++] = PendingGap{start, count, 0};
+        pending_[pendingCount_++] = PendingGap{start, count, 0, nakNow};
     }
 
     // Drop any pending gap the ring has since filled, and NAK any that has now
@@ -218,15 +233,16 @@ private:
         for (uint32_t i = 0; i < pendingCount_; ++i) {
             PendingGap g = pending_[i];
 
-            // Fully delivered while we waited: pure reordering, no NAK. expected_
-            // only advances past a sequence once it has been delivered.
+            // Fully delivered: closed. Before any NAK that was pure reordering.
+            // expected_ only advances past a sequence once it has been delivered.
             if (expected_ > g.start + g.count - 1) {
-                ++naksAvoided_;
+                if (!g.naked) ++naksAvoided_;
                 continue;
             }
-            if (++g.age >= nakDelayDatagrams_) {
-                if (nakHook_) nakHook_(g.start, g.count);
-                continue;
+            if (++g.age >= (g.naked ? kReNakDatagrams : nakDelayDatagrams_)) {
+                nak(g.start, g.count);
+                g.naked = true;
+                g.age = 0;
             }
             pending_[out++] = g;
         }
@@ -239,16 +255,17 @@ private:
 
     // Store a future datagram into its slot if within the window and the slot is
     // free or stale. Outside the window, or colliding with a live in-window
-    // occupant, it is dropped and counted as an overflow.
-    void bufferFuture(uint64_t seq, const void* data, uint16_t len) {
+    // occupant, it is dropped and counted as an overflow. True if it is held
+    // (now, or already as a duplicate).
+    bool bufferFuture(uint64_t seq, const void* data, uint16_t len) {
         if (seq >= expected_ + Depth) {              // outside reorder window
             ++reorderOverflow_;
-            return;
+            return false;
         }
         Slot& s = ring_[seq & kMask];
         if (s.expectedSeq == seq) {                  // already buffered (dup future)
             ++duplicates_;
-            return;
+            return true;
         }
         // A slot is stale if it holds a seq already delivered/abandoned
         // (< expected_). Any occupant that is itself a live in-window future would
@@ -258,12 +275,13 @@ private:
             s.expectedSeq != 0 && s.expectedSeq >= expected_;
         if (occupiedLive) {
             ++reorderOverflow_;
-            return;
+            return false;
         }
         s.expectedSeq = seq;
         s.msg.len = len;
         std::memcpy(s.msg.bytes, data, len);
         ++reorderBuffered_;
+        return true;
     }
 
     // After an in-order delivery, deliver any contiguous run now sitting in the

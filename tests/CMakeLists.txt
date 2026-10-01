@@ -489,6 +489,16 @@ add_test(NAME GatewayJournalRestartTest
          COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
 set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
+# Roadmap 1.3-C4 (2.8): kill -9 GatewayServer at a random point in a stream of
+# adds and cancels, restart on the same journal, and require every acknowledged
+# order present and every acknowledged cancel still applied.
+add_executable(CrashRecoveryE2ETest CrashRecoveryE2ETest.cpp)
+target_link_libraries(CrashRecoveryE2ETest PRIVATE OrderMatcher)
+enable_assertions(CrashRecoveryE2ETest)
+add_test(NAME CrashRecoveryE2ETest
+         COMMAND CrashRecoveryE2ETest $<TARGET_FILE:GatewayServer>)
+set_tests_properties(CrashRecoveryE2ETest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+
 # A GTD order must be gone once its time passes. Neither binary ran the expiry
 # sweep, so GatewayServer let GTD orders rest and trade forever. Black-box: a GTD
 # due in 1 s, a GTD due in 1 h and a GTC; after the wait, a cancel for each —

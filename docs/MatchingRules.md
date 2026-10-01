@@ -384,10 +384,19 @@ the **later-arriving** order by `timestamp`, on the grounds that price-time is t
 own ordering and the newer order is the one that created the self-cross. Equal timestamps
 fall to the buyer.
 
-> `src/OrderBook.cpp:2519-2571`, with the mapping at `src/OrderBook.cpp:2540`
+The pairs are resolved **before** price discovery, not as they meet in the cross. Per
+participant, buys and sells are walked most aggressive first (parked market orders in arrival
+order, then limits in price-time order); every pair that crosses — either side priceless, or
+bid ≥ ask — is resolved by the owner's mode with this mapping. `DecreaseAndCancel` cuts the
+older order, which is where the cross's repeated decrements always ended. The published
+indicative already excludes these orders, and `uncross()` cancels them (`CancelledBySTP`)
+before it discovers the price, so a participant's own buy and sell can no longer move the
+print or inflate the paired volume (roadmap 1.8-H5, AUCT-3; this closed defect B3).
 
-**Status: Deliberate — commented and pinned** (`tests/StpSemanticsTest.cpp`, auction section),
-**and carrying an acknowledged defect** — see [B3](#b3--auction-price-discovery-runs-before-auction-stp).
+> `planAuctionSelfCrosses()` and `stpCancelAuctionOrder()` in `src/OrderBook.cpp`
+
+**Status: Deliberate — commented and pinned** (`tests/StpSemanticsTest.cpp`, auction section;
+`tests/AuctionSelfCrossTest.cpp`).
 
 ---
 
@@ -1124,19 +1133,13 @@ amount; cancel if zero"*) both describe the intended behaviour, not the actual o
 This engine's version is not that. A participant configuring `DecreaseAndCancel` expecting the
 published semantics will lose their entire resting order instead of the overlapping part.
 
-### B3 — Auction price discovery runs before auction STP
+### B3 — Auction price discovery runs before auction STP (fixed)
 
-`uncross()` discovers `bestUncrossPrice` and `pairedVolume` from a book that still contains
-the self-crossing orders, then removes them during execution. The printed price and volume can
-therefore exceed what the post-STP book actually supports.
-
-> `src/OrderBook.cpp:2528-2532` — the code's own `KNOWN LIMITATION` comment
-
-The code states the correct fix (filter self-crossing pairs *before* discovery) and states
-that it was out of scope for the change that introduced the mode-aware auction STP. It remains
-undone. This is a **published-price correctness** issue, not a book-integrity one: the book
-ends consistent, but the indicative that went out and the print that resulted can both be
-wrong.
+Fixed by roadmap 1.8-H5: self-crossing pairs are resolved before discovery
+([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order-by-timestamp)).
+Discovery used to count them and STP removed them only in the execution loop, so a
+participant's buy and sell of 1000 at 99 moved an honest 105 cross to 99 and published 1100
+paired instead of 100.
 
 ### B4 — Pegged orders can rest at a crossing price
 

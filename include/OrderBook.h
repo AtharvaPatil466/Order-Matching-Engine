@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <variant>
+#include <vector>
 #include <cstdint>
 #include <limits>
 
@@ -709,6 +710,9 @@ private:
     // full venue tie-break cascade: max executable volume → min imbalance
     // → min distance to reference price → market-pressure side.
     AuctionResult discoverUncrossPrice() const;
+    // H5: the orders STP takes out before discovery (see the definition).
+    void planAuctionSelfCrosses(std::vector<Order*>& victims) const;
+    void stpCancelAuctionOrder(Order* o);
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
     bool checkCircuitBreaker(Price price);
 

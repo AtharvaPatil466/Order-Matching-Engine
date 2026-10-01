@@ -458,6 +458,14 @@ enable_assertions(AuctionCapacityTest)
 add_test(NAME AuctionCapacityTest COMMAND AuctionCapacityTest)
 set_tests_properties(AuctionCapacityTest PROPERTIES TIMEOUT 120 LABELS "project;auction")
 
+# Roadmap 1.8-H5 (AUCT-3): self-crossing pairs are resolved by STP before
+# price discovery, so they cannot move the indicative or the print.
+add_executable(AuctionSelfCrossTest AuctionSelfCrossTest.cpp)
+target_link_libraries(AuctionSelfCrossTest PRIVATE OrderMatcher)
+enable_assertions(AuctionSelfCrossTest)
+add_test(NAME AuctionSelfCrossTest COMMAND AuctionSelfCrossTest)
+set_tests_properties(AuctionSelfCrossTest PROPERTIES TIMEOUT 60 LABELS "project;auction;stp")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

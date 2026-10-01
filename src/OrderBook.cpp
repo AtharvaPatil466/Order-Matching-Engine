@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -2605,6 +2606,11 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
 void OrderBook::uncross() {
     std::unique_lock<std::mutex> lock(bookLock_);
 
+    // H5: resolve self-crossing pairs first, exactly as discovery assumed.
+    std::vector<Order*> selfCrossed;
+    planAuctionSelfCrosses(selfCrossed);
+    for (Order* o : selfCrossed) stpCancelAuctionOrder(o);
+
     // Discover the clearing price via the shared, non-destructive core —
     // the same logic computeAuctionState() publishes pre-cross, so the
     // indicative feed and the executed price can never disagree.
@@ -2696,12 +2702,10 @@ void OrderBook::uncross() {
         // both orders belong to the same participant, so the two lookups are
         // the same lookup.
         //
-        // KNOWN LIMITATION (pre-existing, widened by CancelBoth): bestUncrossPrice
-        // and remainingVolume were discovered from a book that still contained
-        // these orders. Removing them here means the printed price and volume
-        // can exceed what the post-STP book supports. A correct fix filters
-        // self-crossing pairs BEFORE price discovery; that is a larger change
-        // than making this path mode-aware.
+        // H5: planAuctionSelfCrosses already removed every pair that could
+        // meet here (an eligible bid and an eligible ask always cross), before
+        // the price was discovered. This branch is therefore unreachable; it
+        // stays so a self-trade can never print if that invariant breaks.
         if (checkSMP(*buyer, *seller)) {
             const STPMode stpMode = getSTPMode(buyer->participantId);
             const STPResult stp = SelfTradeProtection::check(
@@ -2938,13 +2942,107 @@ void OrderBook::cancelLocOrders() {
 // execution from it; computeAuctionState() publishes it as the indicative.
 // Both routing through here is what guarantees the pre-cross indicative the
 // market sees equals the price the cross actually executes at.
+// H5 (AUCT-3): the orders STP removes before price discovery. Discovery used to
+// count every resting order, including a participant's own buy and sell that
+// STP would never let trade with each other, and STP only ran inside the
+// execution loop — after the price was fixed. One participant's buy and sell
+// of 1000 at 99 moved an honest 105 cross to 99, published 1100 paired instead
+// of 100, and were then cancelled unfilled, so they cost their owner nothing.
+//
+// Per participant, its buys and sells are walked most aggressive first —
+// parked market orders in arrival order, then limits in price-time order — and
+// each pair that crosses (either side priceless, or bid >= ask) is resolved by
+// the owner's mode, with the same newer/older mapping the cross has always
+// used: "incoming" is the later arrival, ties go to the buyer. DecreaseResting
+// cuts the older order: in the cross it was decremented by the newer order's
+// size, pair after pair, until it was gone. A pair that does not cross ends
+// the walk, since every later pair is less aggressive.
+//
+// Pure read. Discovery excludes the result; uncross() cancels it first, after
+// which the plan is empty — so the published indicative equals the print.
+// ponytail: allocates a map and per-owner vectors per call; the auction runs
+// once per session and the admin indicative is on demand.
+void OrderBook::planAuctionSelfCrosses(std::vector<Order*>& victims) const {
+    struct Sides { std::vector<Order*> buys, sells; };
+    std::map<ParticipantId, Sides> byOwner;  // ordered: deterministic cancel order
+    auto note = [&](Order* o) {
+        Sides& s = byOwner[o->participantId];
+        (o->side == Side::Buy ? s.buys : s.sells).push_back(o);
+    };
+    for (Order* m : auctionMarketOrders_) note(m);
+    bids_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
+    asks_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
+
+    auto priceless = [](const Order* o) {
+        return o->type == OrderType::Market || o->type == OrderType::MOC;
+    };
+    for (const auto& [owner, s] : byOwner) {
+        size_t bi = 0, si = 0;
+        while (bi < s.buys.size() && si < s.sells.size()) {
+            Order* buy = s.buys[bi];
+            Order* sell = s.sells[si];
+            if (!priceless(buy) && !priceless(sell) && buy->price < sell->price) break;
+
+            const bool buyIsNewer = buy->timestamp >= sell->timestamp;
+            const STPResult stp = SelfTradeProtection::check(
+                owner, owner, getSTPMode(owner), std::min(buy->remainingQty, sell->remainingQty));
+            bool cutBuy = false, cutSell = false;
+            switch (stp.action) {
+            case STPResult::Action::NoSelfTrade:
+            case STPResult::Action::CancelIncoming:
+                (buyIsNewer ? cutBuy : cutSell) = true;
+                break;
+            case STPResult::Action::CancelResting:
+            case STPResult::Action::DecreaseResting:
+                (buyIsNewer ? cutSell : cutBuy) = true;
+                break;
+            case STPResult::Action::CancelBoth:
+                cutBuy = cutSell = true;
+                break;
+            }
+            if (cutBuy)  { victims.push_back(buy);  ++bi; }
+            if (cutSell) { victims.push_back(sell); ++si; }
+        }
+    }
+}
+
+// Cancels an order the self-cross plan picked, wherever it sits: on any level
+// of either side, or parked. CancelledBySTP, never Cancelled — the owner did
+// not ask for this. Precondition: bookLock_ held.
+void OrderBook::stpCancelAuctionOrder(Order* o) {
+    const bool    wasDisplayed = o->inBook && !o->isHidden;
+    const OrderId id           = o->id;
+    const Side    side         = o->side;
+    const Price   px           = o->price;
+
+    o->status = OrderStatus::CancelledBySTP;
+    notifyOrderUpdate(id, OrderStatus::CancelledBySTP, o->initialQty - o->remainingQty, 0);
+    untrackOrder(o);     // parked market / MOC / LOC lists
+    removeFromBook(o);   // no-op for a parked order
+    orderLookup_.erase(id);
+    orderPool_.deallocate(o);
+
+    if (wasDisplayed) {
+        notifyMarketData(MarketDataUpdate::Action::Delete, side, px);
+        notifyBookVisible(BookVisibleUpdate::Action::Remove, id, side, px, 0);
+    }
+}
+
 AuctionResult OrderBook::discoverUncrossPrice() const {
+    // Orders STP takes out before the cross count for nothing (H5).
+    std::vector<Order*> selfCrossed;
+    planAuctionSelfCrosses(selfCrossed);
+    std::sort(selfCrossed.begin(), selfCrossed.end());
+    auto qtyOf = [&](const Order* o) -> Quantity {
+        return std::binary_search(selfCrossed.begin(), selfCrossed.end(), o) ? 0 : o->remainingQty;
+    };
+
     // Parked market orders participate at every candidate price — they have
     // no limit to anchor on, so they add uniformly to both cumulants.
     Quantity marketBuyTotal = 0, marketSellTotal = 0;
     for (Order* m : auctionMarketOrders_) {
-        if (m->side == Side::Buy) marketBuyTotal += m->remainingQty;
-        else                      marketSellTotal += m->remainingQty;
+        if (m->side == Side::Buy) marketBuyTotal += qtyOf(m);
+        else                      marketSellTotal += qtyOf(m);
     }
 
     // H6 (AUCT-6): the candidates are every populated price on either side,
@@ -2953,30 +3051,37 @@ AuctionResult OrderBook::discoverUncrossPrice() const {
     // bids-first, so past 4096 levels the ask levels were dropped and the true
     // clearing price was never evaluated — one participant's 4095 one-lot bids
     // moved the print. Merged per-price quantities also turn the cumulative
-    // curves into one sweep instead of a full re-scan per candidate.
+    // curves into one sweep instead of a full re-scan per candidate. A level
+    // whose every order is self-crossed is no candidate: the cross removes it.
     struct Level { Price price; Quantity buy; Quantity sell; };
-    auto levelQty = [](const OrderList& list) {
+    auto levelQty = [&](const OrderList& list) {
         Quantity q = 0;
-        for (Order* o = list.front(); o; o = o->next) q += o->remainingQty;
+        for (const Order* o : list) q += qtyOf(o);
         return q;
     };
-    std::vector<Level> bidLevels, levels;
+    std::vector<Level> bidLevels, askLevels, levels;
     bidLevels.reserve(bids_.size());
-    levels.reserve(bids_.size() + asks_.size());
+    askLevels.reserve(asks_.size());
     bids_.forEachLevel([&](Price p, const OrderList& list) {
-        bidLevels.push_back({p, levelQty(list), 0});
+        if (const Quantity q = levelQty(list)) bidLevels.push_back({p, q, 0});
     });
-    auto bidIt = bidLevels.rbegin();  // ascending
     asks_.forEachLevel([&](Price p, const OrderList& list) {
-        for (; bidIt != bidLevels.rend() && bidIt->price < p; ++bidIt) levels.push_back(*bidIt);
-        if (bidIt != bidLevels.rend() && bidIt->price == p) {
-            levels.push_back({p, bidIt->buy, levelQty(list)});
-            ++bidIt;
-        } else {
-            levels.push_back({p, 0, levelQty(list)});
-        }
+        if (const Quantity q = levelQty(list)) askLevels.push_back({p, 0, q});
     });
-    for (; bidIt != bidLevels.rend(); ++bidIt) levels.push_back(*bidIt);
+    std::reverse(bidLevels.begin(), bidLevels.end());  // ascending, like asks
+    levels.reserve(bidLevels.size() + askLevels.size());
+    size_t b = 0, a = 0;
+    while (b < bidLevels.size() || a < askLevels.size()) {
+        if (a == askLevels.size() ||
+            (b < bidLevels.size() && bidLevels[b].price < askLevels[a].price)) {
+            levels.push_back(bidLevels[b++]);
+        } else if (b == bidLevels.size() || askLevels[a].price < bidLevels[b].price) {
+            levels.push_back(askLevels[a++]);
+        } else {
+            levels.push_back({bidLevels[b].price, bidLevels[b].buy, askLevels[a].sell});
+            ++b; ++a;
+        }
+    }
 
     // Book-wide totals — the imbalance to publish when nothing crosses (a
     // one-sided book still carries a meaningful NOII imbalance figure).

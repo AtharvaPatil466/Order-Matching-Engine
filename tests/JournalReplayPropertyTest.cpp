@@ -3,47 +3,51 @@
 //
 // Property under test:
 //
-//     For any sequence of order-mutating operations applied to a live
-//     OrderBook with Journal recording, replaying that journal into a
-//     fresh OrderBook produces a state byte-for-byte equivalent to the
-//     live book at the same point.
+//     For any sequence of operations a MatchingEngine with a journal
+//     accepts, a fresh engine that runs MatchingEngine::replayJournal() on
+//     that journal holds the same resting orders.
 //
 // Why: real venues depend on this for crash recovery and for replicating
 // state to standby books. If replay diverges from live, every
-// after-recovery decision is suspect. The hardcoded testJournalReplay in
-// ManualTest.cpp covers a 4-operation sequence; this test sweeps random
-// sequences across many seeds to find divergence the hardcoded test
-// can't see.
+// after-recovery decision is suspect.
 //
-// Operations exercised: AddOrder (Limit / Stop / StopLimit /
-// TrailingStop), Cancel, Modify, CancelReplace.
+// BOTH SIDES ARE THE PRODUCTION CODE. This test used to write the journal
+// itself (journal.logAddOrder after each book call) and replay it with its
+// own switch over entry types, so it tested a copy of replay that nothing
+// ships, against a journal no engine wrote (ENGTEST-7). Now the engine
+// journals its own operations and replayJournal() rebuilds the book. Each
+// seed runs twice: synchronously, and on the async worker path that both
+// binaries run — where CancelReplace, Modify and the expiry sweep
+// (OrderRequest::ExpireCheck) are executed and journaled by a worker
+// thread (GTS-3).
 //
-// Why these stop-family types belong in the replay test even though
-// they're "time-dependent": their triggers fire on lastTradePrice_, not
-// on wall-clock time. Replay re-runs every operation in order, so the
-// sequence of trades — and therefore the sequence of stop triggers —
-// is the same across live and replay runs.
-//
-// Still excluded: expiring TIFs (Day, GTD). Those depend on real-time
-// `now` via expireOrders() and would need a virtual clock for
-// deterministic replay. Out of scope here.
+// Operations exercised: AddOrder (Limit / Stop / StopLimit / TrailingStop,
+// GTC or GTD), Cancel, Modify, CancelReplace, and expiry sweeps on a virtual
+// clock. Stop triggers fire on lastTradePrice_ and expiry is journaled as a
+// cancel at its position in the sequence, so replay reproduces both.
 
 #include "Journal.h"
+#include "MatchingEngine.h"
 #include "OrderBook.h"
+#include "TempPath.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
 
 using namespace OrderMatcher;
-namespace fs = std::filesystem;
 
 namespace {
+
+constexpr SymbolId kSym = 1;
+constexpr int kOps = 200;
+
+enum class Mode { Sync, Async };
+const char* modeName(Mode m) { return m == Mode::Sync ? "sync" : "async"; }
 
 struct OrderSnapshot {
     OrderId id;
@@ -53,11 +57,12 @@ struct OrderSnapshot {
     Price price;
     Quantity remainingQty;
     OrderType type;
+    uint64_t expiryTime;
     bool operator==(const OrderSnapshot& o) const {
         return id == o.id && participantId == o.participantId &&
                symbolId == o.symbolId && side == o.side &&
                price == o.price && remainingQty == o.remainingQty &&
-               type == o.type;
+               type == o.type && expiryTime == o.expiryTime;
     }
 };
 
@@ -71,7 +76,7 @@ std::vector<OrderSnapshot> snapshotBook(const OrderBook& book) {
     for (size_t i = 0; i < n; ++i) {
         const Order* o = ptrs[i];
         snaps.push_back({o->id, o->participantId, o->symbolId, o->side,
-                         o->price, o->remainingQty, o->type});
+                         o->price, o->remainingQty, o->type, o->expiryTime});
     }
     std::sort(snaps.begin(), snaps.end(),
               [](const auto& a, const auto& b) { return a.id < b.id; });
@@ -82,195 +87,152 @@ void dumpDiff(const std::vector<OrderSnapshot>& live,
               const std::vector<OrderSnapshot>& rep) {
     std::fprintf(stderr,
         "live size=%zu replayed size=%zu\n", live.size(), rep.size());
-    size_t n = std::min(live.size(), rep.size());
+    size_t n = std::max(live.size(), rep.size());
     for (size_t i = 0; i < n; ++i) {
-        if (!(live[i] == rep[i])) {
-            std::fprintf(stderr,
-                "  [%zu] LIVE id=%llu rem=%llu price=%lld type=%d  vs  "
-                "REP id=%llu rem=%llu price=%lld type=%d\n",
-                i,
-                (unsigned long long)live[i].id,
-                (unsigned long long)live[i].remainingQty,
-                (long long)live[i].price, int(live[i].type),
-                (unsigned long long)rep[i].id,
-                (unsigned long long)rep[i].remainingQty,
-                (long long)rep[i].price, int(rep[i].type));
-        }
+        if (i < live.size() && i < rep.size() && live[i] == rep[i]) continue;
+        auto show = [](const char* who, const std::vector<OrderSnapshot>& v, size_t k) {
+            if (k >= v.size()) { std::fprintf(stderr, "%s <none>", who); return; }
+            std::fprintf(stderr, "%s id=%llu rem=%llu price=%lld type=%d", who,
+                         (unsigned long long)v[k].id, (unsigned long long)v[k].remainingQty,
+                         (long long)v[k].price, int(v[k].type));
+        };
+        std::fprintf(stderr, "  [%zu] ", i);
+        show("LIVE", live, i);
+        show("  vs  REP", rep, i);
+        std::fprintf(stderr, "\n");
     }
 }
 
-void runSeed(uint64_t seed) {
-    std::mt19937_64 rng(seed);
-    auto journalPath = fs::temp_directory_path() /
-        ("replay_prop_" + std::to_string(::getpid()) + "_" +
-         std::to_string(seed) + ".log");
-    fs::remove(journalPath);
+// The live engine under test, in either mode. In async mode every call
+// returns once the worker has processed it, so the generator can read the
+// book between operations without racing the worker.
+class LiveEngine {
+public:
+    LiveEngine(const std::string& journalPath, Mode mode, const uint64_t* clock) : mode_(mode) {
+        engine_.addSymbol(kSym);
+        const bool ok = engine_.enableJournal(journalPath);
+        assert(ok && "enableJournal failed");
+        (void)ok;
+        engine_.setExpiryClock([clock] { return *clock; });
+        if (mode_ == Mode::Sync) engine_.start();
+        else engine_.startAsync(1, 1024);
+    }
+    ~LiveEngine() {
+        if (mode_ == Mode::Sync) engine_.stop();
+        else engine_.stopAsync();
+    }
 
-    constexpr SymbolId kSym = 1;
-    constexpr int kOps = 200;
+    MatchingEngine& engine() { return engine_; }
+    const OrderBook& book() { return *engine_.getOrderBook(kSym); }
+    void settle() { if (mode_ == Mode::Async) engine_.waitForDrain(); }
 
-    std::vector<OrderId> liveIds;       // currently in book per simulation
+private:
+    MatchingEngine engine_;
+    Mode mode_;
+};
+
+struct Generator {
+    std::mt19937_64 rng;
     OrderId nextOrderId = 1;
+    std::vector<OrderId> liveIds;
 
-    OrderBook live(kSym);
-    Journal journal(journalPath.string(), Journal::SyncPolicy::Immediate, 1);
+    explicit Generator(uint64_t seed) : rng(seed) {}
+    Side side() { return (rng() & 1) ? Side::Buy : Side::Sell; }
+    // Narrow grid keeps crosses common but stays within breaker tolerance
+    // (default 5%).
+    Price price() { return Price(990 + int(rng() % 21)); }
+    Quantity qty() { return Quantity(1 + int(rng() % 10)); }
+    ParticipantId pid() { return ParticipantId(1 + int(rng() % 4)); }
+    OrderId pickLive() { return liveIds[rng() % liveIds.size()]; }
+};
 
-    auto pickSide  = [&]() { return (rng() & 1) ? Side::Buy : Side::Sell; };
-    auto pickPrice = [&]() {
-        // Narrow grid keeps crosses common but stays within breaker
-        // tolerance (default 5%). Reference price establishes around 1000.
-        return Price(990 + int(rng() % 21));
-    };
-    auto pickQty   = [&]() { return Quantity(1 + int(rng() % 10)); };
-    auto pickPid   = [&]() { return ParticipantId(1 + int(rng() % 4)); };
+void addOrder(LiveEngine& live, Generator& g, uint64_t now) {
+    // Skewed toward Limit so trades happen often enough to trigger stops.
+    const OrderId id = g.nextOrderId++;
+    const uint32_t roll = g.rng() % 10;
+    OrderType ot = OrderType::Limit;
+    Price stopPrice = 0, stopLimitPrice = 0, trailAmount = 0;
+    if (roll == 7) {
+        ot = OrderType::Stop;  // becomes a Market on trigger
+        stopPrice = g.price();
+    } else if (roll == 8) {
+        ot = OrderType::StopLimit;
+        stopPrice = g.price();
+        stopLimitPrice = g.price();
+    } else if (roll == 9) {
+        ot = OrderType::TrailingStop;
+        trailAmount = Price(1 + int(g.rng() % 3));
+    }
+    // A third of the limits are GTD, expiring a few clock ticks from now.
+    const bool gtd = ot == OrderType::Limit && g.rng() % 3 == 0;
+    const TimeInForce tif = gtd ? TimeInForce::GTD : TimeInForce::GTC;
+    const uint64_t expiry = gtd ? now + 1 + g.rng() % 40 : 0;
+    live.engine().submitOrder(kSym, id, g.pid(), g.side(), g.price(), g.qty(), ot, stopPrice,
+                              /*displayQty=*/0, tif, expiry, stopLimitPrice, PegType::None,
+                              /*pegOffset=*/0, trailAmount);
+    live.settle();
+    if (live.book().getOrder(id) != nullptr) g.liveIds.push_back(id);
+}
 
-    for (int op = 0; op < kOps; ++op) {
-        int kind = int(rng() % 4);
+void runSeed(uint64_t seed, Mode mode) {
+    const std::string journalPath = uniqueTempPath(
+        "replay_prop_" + std::to_string(seed) + "_" + modeName(mode) + ".log");
+    std::remove(journalPath.c_str());
 
-        // Bias toward AddOrder when book is small so operations have
-        // targets to act on; otherwise distribute uniformly.
-        if (liveIds.empty()) kind = 0;
+    std::vector<OrderSnapshot> liveSnap;
+    size_t expirySweeps = 0;
+    {
+        uint64_t now = 1;
+        LiveEngine live(journalPath, mode, &now);
+        Generator g(seed);
 
-        if (kind == 0) {
-            // AddOrder — pick from {Limit, Stop, StopLimit, TrailingStop}
-            // with weights skewed toward Limit so trades happen often
-            // enough to actually trigger stops.
-            OrderId id = nextOrderId++;
-            ParticipantId pid = pickPid();
-            Side side = pickSide();
-            Price price = pickPrice();
-            Quantity qty = pickQty();
-            uint32_t roll = rng() % 10;
-            OrderType ot;
-            Price stopPrice = 0;
-            Price stopLimitPrice = 0;
-            Price trailAmount = 0;
-            if (roll < 7) {
-                ot = OrderType::Limit;
-            } else if (roll == 7) {
-                ot = OrderType::Stop;
-                // Stop trigger near current price grid; Stop becomes a
-                // Market on trigger.
-                stopPrice = pickPrice();
-            } else if (roll == 8) {
-                ot = OrderType::StopLimit;
-                stopPrice = pickPrice();
-                stopLimitPrice = pickPrice();
+        for (int op = 0; op < kOps; ++op) {
+            // Fills and expiry remove orders behind the generator's back.
+            g.liveIds.erase(std::remove_if(g.liveIds.begin(), g.liveIds.end(),
+                                           [&](OrderId id) { return !live.book().getOrder(id); }),
+                            g.liveIds.end());
+            // Half adds, so the book keeps enough resting orders for the final
+            // comparison to mean something.
+            const int kind = g.liveIds.empty() ? 0 : int(g.rng() % 10);
+
+            if (kind < 5) {
+                addOrder(live, g, now);
+            } else if (kind == 5) {
+                live.engine().cancelOrder(kSym, g.pickLive());
+            } else if (kind == 6) {
+                live.engine().modifyOrder(kSym, g.pickLive(), g.qty());
+            } else if (kind < 9) {
+                live.engine().cancelReplace(kSym, g.pickLive(), g.price(), g.qty());
             } else {
-                ot = OrderType::TrailingStop;
-                // Small trail (1-3 ticks).
-                trailAmount = Price(1 + int(rng() % 3));
+                now += 1 + g.rng() % 5;
+                live.engine().expireOrdersFromClock();  // async: an ExpireCheck request
+                ++expirySweeps;
             }
-            auto result = live.addOrder(id, pid, side, price, qty, ot,
-                                         stopPrice, /*displayQty=*/0,
-                                         TimeInForce::GTC, /*expiry=*/0,
-                                         stopLimitPrice,
-                                         PegType::None, /*pegOffset=*/0,
-                                         trailAmount);
-            if (std::holds_alternative<OrderId>(result)) {
-                journal.logAddOrder(id, pid, kSym, side, price, qty, ot,
-                                     TimeInForce::GTC, /*expiry=*/0,
-                                     stopPrice, stopLimitPrice,
-                                     /*displayQty=*/0, PegType::None,
-                                     /*pegOffset=*/0, trailAmount);
-                if (live.getOrder(id) != nullptr) {
-                    liveIds.push_back(id);
-                }
-            }
-            // Sync liveIds with reality — fills can have removed other
-            // resting orders. Walk book once a while to refresh.
-            if ((op & 15) == 0) {
-                liveIds.clear();
-                auto snap = snapshotBook(live);
-                for (auto& s : snap) liveIds.push_back(s.id);
-            }
-        } else if (kind == 1 && !liveIds.empty()) {
-            // Cancel a random existing order
-            size_t i = rng() % liveIds.size();
-            OrderId id = liveIds[i];
-            if (live.getOrder(id) != nullptr) {
-                live.cancelOrder(id);
-                journal.logCancelOrder(id, kSym);
-            }
-            liveIds.erase(liveIds.begin() + i);
-        } else if (kind == 2 && !liveIds.empty()) {
-            // Modify (decrease qty)
-            size_t i = rng() % liveIds.size();
-            OrderId id = liveIds[i];
-            const Order* o = live.getOrder(id);
-            if (o && o->remainingQty > 1) {
-                Quantity newQty = pickQty();
-                if (newQty < o->remainingQty) {
-                    if (live.modifyOrder(id, newQty)) {
-                        journal.logModifyOrder(id, kSym, newQty);
-                    }
-                }
-            }
-        } else if (kind == 3 && !liveIds.empty()) {
-            // CancelReplace
-            size_t i = rng() % liveIds.size();
-            OrderId id = liveIds[i];
-            const Order* o = live.getOrder(id);
-            if (o) {
-                Price newPrice = pickPrice();
-                Quantity newQty = pickQty();
-                if (live.cancelReplace(id, newPrice, newQty)) {
-                    journal.logCancelReplace(id, kSym, newPrice, newQty);
-                }
-            }
+            live.settle();
         }
+        liveSnap = snapshotBook(live.book());
     }
 
-    journal.flush();
-
-    // Snapshot the live book.
-    auto liveSnap = snapshotBook(live);
-
-    // Replay into a fresh book with replayMode on.
-    OrderBook replayed(kSym);
-    replayed.setReplayMode(true);
-    Journal replayJ(journalPath.string());
-    auto entries = replayJ.readAll(/*validateCRC=*/true,
-                                    /*validateSequence=*/true);
-
-    for (const auto& e : entries) {
-        switch (e.entryType) {
-        case JournalEntry::Type::AddOrder:
-            replayed.addOrder(e.orderId, e.participantId, e.side, e.price,
-                              e.quantity, e.orderType, e.stopPrice,
-                              e.displayQty, e.timeInForce, e.expiryTime,
-                              e.stopLimitPrice, e.pegType, e.pegOffset,
-                              e.trailAmount, e.minQty, e.hidden);
-            break;
-        case JournalEntry::Type::CancelOrder:
-            replayed.cancelOrder(e.orderId);
-            break;
-        case JournalEntry::Type::ModifyOrder:
-            replayed.modifyOrder(e.orderId, e.newQty);
-            break;
-        case JournalEntry::Type::CancelReplace:
-            replayed.cancelReplace(e.orderId, e.newPrice, e.newQty);
-            break;
-        case JournalEntry::Type::Snapshot:
-            replayed.addOrder(e.orderId, e.participantId, e.side, e.price,
-                              e.quantity, e.orderType);
-            break;
-        }
-    }
-
-    auto repSnap = snapshotBook(replayed);
+    MatchingEngine replayed;
+    replayed.addSymbol(kSym);
+    const bool ok = replayed.enableJournal(journalPath);
+    assert(ok && "enableJournal failed on replay");
+    (void)ok;
+    replayed.start();
+    const size_t entries = replayed.replayJournal();
+    const auto repSnap = snapshotBook(*replayed.getOrderBook(kSym));
+    replayed.stop();
 
     if (liveSnap != repSnap) {
-        std::fprintf(stderr, "REPLAY DIVERGENCE seed=0x%llx ops=%d\n",
-                     (unsigned long long)seed, kOps);
+        std::fprintf(stderr, "REPLAY DIVERGENCE seed=0x%llx mode=%s ops=%d\n",
+                     (unsigned long long)seed, modeName(mode), kOps);
         dumpDiff(liveSnap, repSnap);
         std::abort();
     }
 
-    std::printf("seed=0x%llx: %zu live entries, %zu journal entries — match\n",
-                (unsigned long long)seed, liveSnap.size(), entries.size());
-
-    fs::remove(journalPath);
+    std::printf("seed=0x%llx %-5s: %zu resting, %zu journal entries, %zu expiry sweeps — match\n",
+                (unsigned long long)seed, modeName(mode), liveSnap.size(), entries, expirySweeps);
+    std::remove(journalPath.c_str());
 }
 
 }  // namespace
@@ -278,7 +240,8 @@ void runSeed(uint64_t seed) {
 int main() {
     for (uint64_t seed : {uint64_t{1}, uint64_t{0xC0FFEE}, uint64_t{0xDEADBEEF},
                           uint64_t{0x123456}, uint64_t{0xABCDEF}}) {
-        runSeed(seed);
+        runSeed(seed, Mode::Sync);
+        runSeed(seed, Mode::Async);
     }
     std::puts("JournalReplayPropertyTest passed");
     return 0;

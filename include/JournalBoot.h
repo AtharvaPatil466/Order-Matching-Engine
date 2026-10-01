@@ -138,9 +138,6 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
     // that was journaled. Closing that needs replay to check its own results
     // against an integrity oracle that can see a wrong book, which
     // validateIntegrity() currently cannot.
-    //
-    // Per-participant kill cancels are also not journaled (THR-2), so an operator
-    // must re-issue any kill after a restart. The runbook says so.
     return 0;
 }
 

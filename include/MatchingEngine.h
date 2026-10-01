@@ -816,8 +816,10 @@ private:
     void releasePosition(const OrderBook::OrderExposure& e);
     // Per-fill accrual: last-trade price, taker position, OTR trade counts.
     void onRiskFill(const Trade& t);
-    // Cancel every resting order across all books (sync path of the kill switch).
-    void cancelAllRestingOrders();
+    // Cancel every resting order of `pid` across all books, or every resting
+    // order when pid is kKillAllParticipants — journaling each cancel and
+    // releasing its exposure. Sync path of both kill switches. Returns the count.
+    uint64_t cancelAllRestingOrders(ParticipantId pid);
     // P3-6: cancel every DAY order across all books (session end), journaling +
     // logging each so a restart does not restore them. Returns the count.
     size_t cancelDayOrders();

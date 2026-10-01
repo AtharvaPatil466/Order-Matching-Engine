@@ -224,11 +224,8 @@ symbol keeps trading: the breaker no longer moves it into a volatility auction.
 1. All resting orders for the participant are cancelled immediately. It is a
    one-shot sweep, **not sticky**: the participant can submit new orders
    straight away, and nothing needs re-enabling.
-2. The cancels are **not journaled**. The kill switch arrives through
-   GatewayServer's order port, and GatewayServer replays its journal on every
-   restart without checkpointing at shutdown, so any restart restores the
-   killed orders unless an automatic checkpoint ran after the kill. Re-issue
-   the kill after a restart.
+2. Each cancel is journaled and releases the order's working exposure, so a
+   restart does not bring the killed orders back.
 3. GatewayServer, where the kill switch is, has no admin port, so there is
    no `/otr` to check for its participants (OrderEngine's `/otr` reports
    symbol 0 of its own engine only)

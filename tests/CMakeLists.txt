@@ -270,6 +270,13 @@ enable_assertions(JournalCrashTest)
 add_test(NAME JournalCrashTest COMMAND JournalCrashTest)
 set_tests_properties(JournalCrashTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
+# A per-participant kill journals its cancels and releases exposure (D6).
+add_executable(KillJournalTest KillJournalTest.cpp)
+target_link_libraries(KillJournalTest PRIVATE OrderMatcher)
+enable_assertions(KillJournalTest)
+add_test(NAME KillJournalTest COMMAND KillJournalTest)
+set_tests_properties(KillJournalTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Gateway Integration Tests
 add_executable(GatewayIntegrationTest GatewayIntegrationTest.cpp)
 target_link_libraries(GatewayIntegrationTest PRIVATE OrderMatcher)

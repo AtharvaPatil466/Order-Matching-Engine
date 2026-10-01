@@ -908,31 +908,33 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         for (SymbolId symbolId : symbolsByThread_[threadIndex]) {
             auto* book = getOrderBook(symbolId);
             if (!book) continue;
-            if (req.participantId == kKillAllParticipants) {
-                // P2-8: engine kill switch — cancel EVERY resting order on this
-                // worker's books. The worker owns these books, so the non-locking
-                // forEachOrder walk is safe; ids are collected first, then
-                // cancelled (cancelOrder takes bookLock_, so it must run outside
-                // the walk).
-                std::vector<OrderId> ids;
-                book->forEachOrder([&](const Order& o) { ids.push_back(o.id); });
-                for (OrderId id : ids) {
-                    // H1: read the exposure inside cancelOrderReleasing's own critical
-                    // section. The previous form dereferenced an UNLOCKED getOrder()
-                    // pointer into orderPool_, with no guarantee the order was still
-                    // alive — a concurrent fill or a shutdown sweep frees that slot.
-                    if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                        releasePosition(book->cancelOrderReleasing(id));
-                    } else {
-                        book->cancelOrder(id);
-                    }
-                    if (journal_) {
-                        std::lock_guard<std::mutex> lock(journalMutex_);
-                        journal_->logCancelOrder(id, book->getSymbolId());
-                    }
+            // P2-8: kill switch — cancel every resting order on this worker's
+            // books, or every one of a participant's. One path for both (D6):
+            // the participant kill used cancelAllForParticipant, which neither
+            // journals nor releases exposure, so a restart put the killed
+            // orders back and the position limit kept counting them. The
+            // worker owns these books, so the non-locking forEachOrder walk is
+            // safe; ids are collected first, then cancelled (cancelOrder takes
+            // bookLock_, so it must run outside the walk).
+            const bool everyone = req.participantId == kKillAllParticipants;
+            std::vector<OrderId> ids;
+            book->forEachOrder([&](const Order& o) {
+                if (everyone || o.participantId == req.participantId) ids.push_back(o.id);
+            });
+            for (OrderId id : ids) {
+                // H1: read the exposure inside cancelOrderReleasing's own critical
+                // section. The previous form dereferenced an UNLOCKED getOrder()
+                // pointer into orderPool_, with no guarantee the order was still
+                // alive — a concurrent fill or a shutdown sweep frees that slot.
+                if (positionLimitsActive_.load(std::memory_order_relaxed)) {
+                    releasePosition(book->cancelOrderReleasing(id));
+                } else {
+                    book->cancelOrder(id);
                 }
-            } else {
-                book->cancelAllForParticipant(req.participantId);
+                if (journal_) {
+                    std::lock_guard<std::mutex> lock(journalMutex_);
+                    journal_->logCancelOrder(id, book->getSymbolId());
+                }
             }
         }
         break;
@@ -1134,11 +1136,11 @@ void MatchingEngine::setKillSwitch(bool engaged) {
         // orders were rejected by the flag above.
         sweepAndVerify(kKillAllParticipants);
     } else {
-        cancelAllRestingOrders();
+        cancelAllRestingOrders(kKillAllParticipants);
     }
 }
 
-void MatchingEngine::cancelAllRestingOrders() {
+uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
     // Sync-mode kill-switch sweep. Lock order bookMutex_ -> bookLock_ ->
     // journalMutex_, matching expireOrders()/driveOco(). Ids are collected under
     // the book's own lock (forEachOrderLocked), then cancelled outside it so
@@ -1146,11 +1148,16 @@ void MatchingEngine::cancelAllRestingOrders() {
     // non-recursive std::mutex, so collecting and cancelling in one pass would
     // self-deadlock.
     std::lock_guard<std::mutex> lock(bookMutex_);
+    const bool everyone = pid == kKillAllParticipants;
+    uint64_t cancelled = 0;
     for (SymbolId sym : symbolIds_) {
         auto* book = getOrderBook(sym);
         if (!book) continue;
         std::vector<OrderId> ids;
-        book->forEachOrderLocked([&](const Order& o) { ids.push_back(o.id); });
+        book->forEachOrderLocked([&](const Order& o) {
+            if (everyone || o.participantId == pid) ids.push_back(o.id);
+        });
+        cancelled += ids.size();
         for (OrderId id : ids) {
             // H1: read the exposure inside cancelOrderReleasing's own critical
             // section. The previous form dereferenced an UNLOCKED getOrder()
@@ -1167,6 +1174,7 @@ void MatchingEngine::cancelAllRestingOrders() {
             }
         }
     }
+    return cancelled;
 }
 
 size_t MatchingEngine::cancelDayOrders() {
@@ -1904,17 +1912,10 @@ uint64_t MatchingEngine::killSwitch(ParticipantId participantId) {
         return 0;
     }
 
-    // Sync path: iterate symbolIds_ under bookMutex_ so a concurrent addSymbol
-    // (e.g. a sync-mode replication apply) cannot reallocate the vector / books_
-    // map mid-iteration. Lock order bookMutex_ -> bookLock_.
-    uint64_t total = 0;
-    std::lock_guard<std::mutex> lock(bookMutex_);
-    for (SymbolId symbolId : symbolIds_) {
-        if (auto* book = getOrderBook(symbolId)) {
-            total += book->cancelAllForParticipant(participantId);
-        }
-    }
-    return total;
+    // The engine-wide sweep, scoped to one participant, so each cancel is
+    // journaled and its exposure released (D6). cancelAllForParticipant did
+    // neither: a restart replayed the killed orders back onto the book.
+    return cancelAllRestingOrders(participantId);
 }
 
 void MatchingEngine::setRiskLimits(SymbolId symbolId, ParticipantId participantId,

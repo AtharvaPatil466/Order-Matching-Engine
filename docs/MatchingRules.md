@@ -812,6 +812,12 @@ market-order remainder is cancelled after the cross rather than left resting —
 is auction-only and does not get to become a limit at the clearing price. Unfilled `LOC`
 orders are cancelled likewise (`cancelLocOrders()`).
 
+An `MOC` / `LOC` sent before the close waits in `onCloseOrders_` until the book enters
+`AuctionClose`. Any still waiting when the book enters `PostClose` — the close never ran: a
+halt over it, or a volatility auction run into it — is cancelled. It used to wait for the next
+day's close and execute there (roadmap 1.8-H3, AUCT-8 / OTM-9; pinned by
+`tests/OnCloseSessionEndTest.cpp`).
+
 > `uncross()` in `src/OrderBook.cpp` — `nextParked` and the step-3 cancel pass
 
 **Status: Undocumented — no test pins this, may be incidental.** That the cross ignores

@@ -474,6 +474,14 @@ enable_assertions(AuctionOpenAtomicTest)
 add_test(NAME AuctionOpenAtomicTest COMMAND AuctionOpenAtomicTest)
 set_tests_properties(AuctionOpenAtomicTest PROPERTIES TIMEOUT 60 LABELS "project;auction;session")
 
+# Roadmap 1.8-H3 (AUCT-8, OTM-9): on-close orders still parked when the
+# session ends are cancelled, not carried into tomorrow's close.
+add_executable(OnCloseSessionEndTest OnCloseSessionEndTest.cpp)
+target_link_libraries(OnCloseSessionEndTest PRIVATE OrderMatcher)
+enable_assertions(OnCloseSessionEndTest)
+add_test(NAME OnCloseSessionEndTest COMMAND OnCloseSessionEndTest)
+set_tests_properties(OnCloseSessionEndTest PROPERTIES TIMEOUT 60 LABELS "project;auction;session")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

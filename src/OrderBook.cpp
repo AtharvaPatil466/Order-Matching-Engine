@@ -1885,6 +1885,21 @@ void OrderBook::setTradingStateLocked(TradingState s) {
     if (s == TradingState::AuctionClose) {
         releaseOnCloseOrders();
     }
+    // H3 (AUCT-8, OTM-9): an on-close order is for THIS session's close. One
+    // still parked at session end — the close never ran: halted over it, or a
+    // volatility auction ran into it — used to wait for the next transition
+    // into AuctionClose and execute at tomorrow's close, an overnight
+    // position nobody asked for. Released ones are gone by now: the closing
+    // cross fills or cancels them.
+    if (s == TradingState::PostClose) {
+        while (!onCloseOrders_.empty()) {
+            const size_t last = onCloseOrders_.size() - 1;
+            Order* o = onCloseOrders_[last];
+            cancelOrderImpl(o->id);  // untrackOrder drops it from the list
+            if (onCloseOrders_.size() > last && onCloseOrders_[last] == o)
+                onCloseOrders_.erase_swap(last);  // not in the lookup: just drop it
+        }
+    }
 }
 
 // Drop `order` from every tracking list that holds a raw pointer to it.

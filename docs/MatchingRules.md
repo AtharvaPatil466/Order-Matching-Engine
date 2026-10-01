@@ -402,11 +402,11 @@ data, no depth contribution.
 > `src/OrderBook.cpp:824-829` (`parkNonMatchingOrder`)
 > `include/OrderBook.h:878` — `FixedVector<Order*, 16384> stopOrders_;`
 
-The arming capacity is 16,384 per book. A 16,385th stop is silently dropped by
-`FixedVector::push_back` returning `false`, which nothing checks
-(`include/OrderBook.h:196-200`) — the client still receives an `Accepted`, and the order still
-exists in `orderLookup_`, so it is cancellable but will never trigger. **Status:
-Undocumented — no test pins this, may be incidental.**
+The arming capacity is 16,384 per book. A 16,385th stop is rejected with `CapacityExhausted`
+before it is acked, as is an order that would overflow any other parked list (auction market
+orders, on-close orders, trailing stops). It used to be acked and then dropped by an unchecked
+`FixedVector::push_back`, leaving an order in no list (roadmap 1.8-H6, AUCT-6). `push_back` is
+now `[[nodiscard]]`. Pinned by `tests/AuctionCapacityTest.cpp`.
 
 A `Stop` must carry a positive `price`, or it is rejected with `InvalidPrice`. An elected
 `Stop` becomes a `Limit` at that price, so a `Stop` at price 0 used to sweep the book to zero
@@ -716,8 +716,8 @@ parked separately and folded into discovery.
 
 ### Rule 7.2 — The clearing price is discovered by a four-step tie-break cascade
 
-Candidate prices are every populated limit level on either side, deduplicated and sorted
-ascending. For each candidate `p`:
+Candidate prices are every populated limit level on either side, merged from the two level
+maps into one ascending list with no cap. For each candidate `p`:
 
 - `cumBuy` = all buy quantity at limits `≥ p`, plus every parked market buy
 - `cumSell` = all sell quantity at limits `≤ p`, plus every parked market sell
@@ -732,9 +732,12 @@ The winner is selected by this cascade, applied as a strict ordering:
 4. **Market pressure.** On a remaining tie — or when no reference price exists — a buy surplus
    clears **higher** and a sell surplus clears **lower**.
 
-> `src/OrderBook.cpp:2757-2860` — `discoverUncrossPrice()`
-> `src/OrderBook.cpp:2819-2842` — the cascade, with the four steps named in a comment
-> `src/OrderBook.cpp:2791` — candidate prices, capped at `FixedVector<Price, 4096>`
+> `discoverUncrossPrice()` in `src/OrderBook.cpp`, with the four cascade steps named in a
+> comment
+
+The candidates used to be a `FixedVector<Price, 4096>` filled bids first, so past 4096
+levels the ask levels were dropped and the true clearing price was never evaluated (roadmap
+1.8-H6, AUCT-6; pinned by `tests/AuctionCapacityTest.cpp`).
 
 Parked market orders participate at **every** candidate price, since they have no limit to
 anchor on, and so add uniformly to both cumulants (`src/OrderBook.cpp:2759-2765`).
@@ -753,11 +756,8 @@ disagree.
 
 > `src/OrderBook.cpp:2864-2867`, `src/OrderBook.cpp:2453-2456`
 
-**Complexity.** For each of `L` candidate prices the discovery walks *every* level on *both*
-sides. That is **O(L²)** level visits plus O(L × orders) order visits — a full quadratic
-re-scan, not a cumulative sweep. An auction runs once per session so this is defensible, and
-the code says as much about the *publishing* being per-fill, but **nothing comments on the
-quadratic discovery itself and nothing bounds it beyond the 4096-candidate array cap.**
+**Complexity.** Each level's quantity is summed once and the cumulative curves come from one
+ascending sweep: O(orders + L), with a heap-allocated list of `L` levels per call.
 
 **Status: Deliberate — commented, thinly pinned.** The cascade is named in a comment at both
 the declaration (`include/OrderBook.h:692-697`) and the implementation.

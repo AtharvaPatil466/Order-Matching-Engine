@@ -450,6 +450,14 @@ enable_assertions(AuctionMarketPriorityTest)
 add_test(NAME AuctionMarketPriorityTest COMMAND AuctionMarketPriorityTest)
 set_tests_properties(AuctionMarketPriorityTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
 
+# Roadmap 1.8-H6 (AUCT-6): clearing candidates have no cap, and an order that
+# would overflow a parked list is refused before it is acked.
+add_executable(AuctionCapacityTest AuctionCapacityTest.cpp)
+target_link_libraries(AuctionCapacityTest PRIVATE OrderMatcher)
+enable_assertions(AuctionCapacityTest)
+add_test(NAME AuctionCapacityTest COMMAND AuctionCapacityTest)
+set_tests_properties(AuctionCapacityTest PROPERTIES TIMEOUT 120 LABELS "project;auction")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

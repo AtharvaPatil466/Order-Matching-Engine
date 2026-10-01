@@ -193,7 +193,9 @@ class FixedVector {
 public:
     FixedVector() : size_(0) {}
 
-    bool push_back(const T& val) {
+    // [[nodiscard]]: a full vector refuses the element. Every auction call site
+    // once ignored that, and order 16385 was acked into no list at all (AUCT-6).
+    [[nodiscard]] bool push_back(const T& val) {
         if (size_ >= MaxSize) [[unlikely]] return false;
         data_[size_++] = val;
         return true;
@@ -221,6 +223,7 @@ public:
     const T& operator[](size_t i) const { return data_[i]; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
+    bool full() const { return size_ >= MaxSize; }
     T* begin() { return data_; }
     T* end() { return data_ + size_; }
     const T* begin() const { return data_; }
@@ -754,6 +757,16 @@ private:
 #endif
     std::optional<RejectReason> admitPostOnly(OrderId orderId, ParticipantId participantId,
                                               Side side, Price price, Quantity qty, OrderType type);
+    std::optional<RejectReason> admitParkCapacity(OrderId orderId, ParticipantId participantId,
+                                                  Quantity qty, OrderType type);
+    // The accumulation states: orders are admitted but nothing matches until
+    // the uncross.
+    bool inAuctionState() const {
+        return tradingState_ == TradingState::PreOpen      ||
+               tradingState_ == TradingState::AuctionOpen  ||
+               tradingState_ == TradingState::AuctionClose ||
+               tradingState_ == TradingState::VolatilityAuction;
+    }
     OB_ALWAYS_INLINE Order* allocateAndRegisterOrder(OrderId orderId, ParticipantId participantId, Side side,
                                     Price price, Quantity qty, OrderType type, Price stopPrice,
                                     Quantity displayQty, TimeInForce tif, uint64_t expiryTime,

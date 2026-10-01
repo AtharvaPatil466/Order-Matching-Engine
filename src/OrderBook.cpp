@@ -12,6 +12,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace OrderMatcher {
 
@@ -705,6 +706,46 @@ std::optional<RejectReason> OrderBook::admitPostOnly(OrderId orderId, Participan
     return std::nullopt;
 }
 
+// --- Parked-list capacity ---  Precondition: bookLock_ held.
+// H6 (AUCT-6): every parked list is a fixed 16384-slot FixedVector, and no
+// call site looked at push_back's "full" result. Order 16385 was allocated,
+// ACKED and put in orderLookup_, then belonged to no list: it never traded,
+// was never cancelled and was never reported again. Refuse it here, before
+// allocateAndRegisterOrder acks it. The park sites below then cannot fail.
+std::optional<RejectReason> OrderBook::admitParkCapacity(OrderId orderId,
+                                                         ParticipantId participantId,
+                                                         Quantity qty, OrderType type) {
+    const bool closing = tradingState_ == TradingState::AuctionClose;
+    bool full = false;
+    switch (type) {
+        case OrderType::MOC:
+            full = closing ? auctionMarketOrders_.full() : onCloseOrders_.full();
+            break;
+        case OrderType::LOC:
+            full = closing ? locActiveIds_.full() : onCloseOrders_.full();
+            break;
+        case OrderType::Market:
+            full = inAuctionState() && auctionMarketOrders_.full();
+            break;
+        case OrderType::Stop:
+        case OrderType::StopLimit:
+        case OrderType::MIT:
+            full = stopOrders_.full();
+            break;
+        case OrderType::TrailingStop:
+            full = trailingStopOrders_.full();
+            break;
+        case OrderType::Pegged:
+            full = peggedOrders_.full();
+            break;
+        default:
+            break;
+    }
+    if (full) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::CapacityExhausted);
+    return std::nullopt;
+}
+
 // --- Allocate order from pool + register for O(1) lookup ---
 // Shared by the MOC/LOC park path and the main path: both allocated through the
 // same fault-injection point, filled the SAME fields in the SAME order, inserted
@@ -788,19 +829,20 @@ std::optional<AddOrderResult> OrderBook::parkOnCloseOrder(OrderId orderId,
         return AddOrderResult{rejectOrder(orderId, participantId, qty,
                                           RejectReason::CapacityExhausted)};
 
+    // Each push has a slot: admitParkCapacity checked before the ack.
     if (tradingState_ == TradingState::AuctionClose) {
         if (type == OrderType::MOC) {
-            auctionMarketOrders_.push_back(order);
+            (void)auctionMarketOrders_.push_back(order);
         } else {
             if (!addToBook(order)) {
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 return AddOrderResult{RejectReason::CapacityExhausted};
             }
-            locActiveIds_.push_back(orderId);
+            (void)locActiveIds_.push_back(orderId);
         }
     } else {
-        onCloseOrders_.push_back(order);
+        (void)onCloseOrders_.push_back(order);
     }
     return AddOrderResult{orderId};
 }
@@ -827,7 +869,7 @@ void OrderBook::restPeggedOrder(Order* order, OrderId orderId, Side side, Price 
         }
     }
     order->price = pegPrice;
-    peggedOrders_.push_back(order);
+    (void)peggedOrders_.push_back(order);  // slot checked by admitParkCapacity
     if (!addToBook(order)) {
         notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
         peggedOrders_.erase_value(order);
@@ -858,14 +900,14 @@ std::optional<OrderId> OrderBook::parkNonMatchingOrder(Order* order, OrderId ord
          tradingState_ == TradingState::AuctionOpen       ||
          tradingState_ == TradingState::AuctionClose      ||
          tradingState_ == TradingState::VolatilityAuction)) [[unlikely]] {
-        auctionMarketOrders_.push_back(order);
+        (void)auctionMarketOrders_.push_back(order);  // slot checked by admitParkCapacity
         return orderId;
     }
 
     // --- Stop / StopLimit: park until triggered ---
     if (type == OrderType::Stop || type == OrderType::StopLimit
         || type == OrderType::MIT) [[unlikely]] {
-        stopOrders_.push_back(order);
+        (void)stopOrders_.push_back(order);  // slot checked by admitParkCapacity
         return orderId;
     }
 
@@ -881,7 +923,7 @@ std::optional<OrderId> OrderBook::parkNonMatchingOrder(Order* order, OrderId ord
             order->stopPrice = (trailAmount <= order->trailRefPrice)
                                ? order->trailRefPrice - trailAmount : 0;
         }
-        trailingStopOrders_.push_back(order);
+        (void)trailingStopOrders_.push_back(order);  // slot checked by admitParkCapacity
         return orderId;
     }
 
@@ -1026,6 +1068,8 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     if (auto r = admitCircuitBreaker(orderId, price, qty, type)) return *r;
 #endif
     if (auto r = admitPostOnly(orderId, participantId, side, price, qty, type)) return *r;
+
+    if (auto r = admitParkCapacity(orderId, participantId, qty, type)) return *r;
 
     if (auto res = parkOnCloseOrder(orderId, participantId, side, price, qty, type, tif, expiryTime))
         return *res;
@@ -2835,18 +2879,18 @@ void OrderBook::cancelAuctionMarketOrders() {
 
 void OrderBook::releaseOnCloseOrders() {
     for (Order* o : onCloseOrders_) {
+        // Already acked, so a list with no room cannot refuse it: cancel it
+        // and say so, rather than leave it in no list at all (AUCT-6).
         if (o->type == OrderType::MOC) {
-            auctionMarketOrders_.push_back(o);
-        } else {
-            if (addToBook(o)) {
-                locActiveIds_.push_back(o->id);
-            } else {
-                Quantity filled = o->initialQty - o->remainingQty;
-                notifyOrderUpdate(o->id, OrderStatus::Cancelled, filled, 0);
-                orderLookup_.erase(o->id);
-                orderPool_.deallocate(o);
-            }
+            if (auctionMarketOrders_.push_back(o)) continue;
+        } else if (!locActiveIds_.full() && addToBook(o)) {
+            (void)locActiveIds_.push_back(o->id);
+            continue;
         }
+        Quantity filled = o->initialQty - o->remainingQty;
+        notifyOrderUpdate(o->id, OrderStatus::Cancelled, filled, 0);
+        orderLookup_.erase(o->id);
+        orderPool_.deallocate(o);
     }
     onCloseOrders_.clear();
 }
@@ -2903,15 +2947,41 @@ AuctionResult OrderBook::discoverUncrossPrice() const {
         else                      marketSellTotal += m->remainingQty;
     }
 
+    // H6 (AUCT-6): the candidates are every populated price on either side,
+    // merged from the two level maps (bids arrive descending, asks
+    // ascending), with no cap. They used to go into a FixedVector<Price, 4096>
+    // bids-first, so past 4096 levels the ask levels were dropped and the true
+    // clearing price was never evaluated — one participant's 4095 one-lot bids
+    // moved the print. Merged per-price quantities also turn the cumulative
+    // curves into one sweep instead of a full re-scan per candidate.
+    struct Level { Price price; Quantity buy; Quantity sell; };
+    auto levelQty = [](const OrderList& list) {
+        Quantity q = 0;
+        for (Order* o = list.front(); o; o = o->next) q += o->remainingQty;
+        return q;
+    };
+    std::vector<Level> bidLevels, levels;
+    bidLevels.reserve(bids_.size());
+    levels.reserve(bids_.size() + asks_.size());
+    bids_.forEachLevel([&](Price p, const OrderList& list) {
+        bidLevels.push_back({p, levelQty(list), 0});
+    });
+    auto bidIt = bidLevels.rbegin();  // ascending
+    asks_.forEachLevel([&](Price p, const OrderList& list) {
+        for (; bidIt != bidLevels.rend() && bidIt->price < p; ++bidIt) levels.push_back(*bidIt);
+        if (bidIt != bidLevels.rend() && bidIt->price == p) {
+            levels.push_back({p, bidIt->buy, levelQty(list)});
+            ++bidIt;
+        } else {
+            levels.push_back({p, 0, levelQty(list)});
+        }
+    });
+    for (; bidIt != bidLevels.rend(); ++bidIt) levels.push_back(*bidIt);
+
     // Book-wide totals — the imbalance to publish when nothing crosses (a
     // one-sided book still carries a meaningful NOII imbalance figure).
     Quantity totalBuy = marketBuyTotal, totalSell = marketSellTotal;
-    bids_.forEachLevel([&](Price, const OrderList& list) {
-        for (Order* o = list.front(); o; o = o->next) totalBuy += o->remainingQty;
-    });
-    asks_.forEachLevel([&](Price, const OrderList& list) {
-        for (Order* o = list.front(); o; o = o->next) totalSell += o->remainingQty;
-    });
+    for (const Level& l : levels) { totalBuy += l.buy; totalSell += l.sell; }
 
     AuctionResult res{};
     auto fillNoCross = [&]() {
@@ -2922,35 +2992,25 @@ AuctionResult OrderBook::discoverUncrossPrice() const {
 
     // No limit levels on either side → no candidate prices to discover.
     // (Market orders alone cannot anchor a price.)
-    if (bids_.empty() && asks_.empty()) {
+    if (levels.empty()) {
         fillNoCross();
         return res;
     }
-
-    // Candidate prices: every populated limit level on either side.
-    FixedVector<Price, 4096> prices;
-    bids_.forEachLevel([&](Price p, const OrderList&) { prices.push_back(p); });
-    asks_.forEachLevel([&](Price p, const OrderList&) { prices.push_back(p); });
-    std::sort(prices.begin(), prices.end());
-    auto* newEnd = std::unique(prices.begin(), prices.end());
-    size_t uniqueCount = static_cast<size_t>(newEnd - prices.begin());
 
     bool     haveBest = false;
     Price    bestPrice = 0;
     Quantity bestVol = 0, bestImb = 0;
     bool     bestBuySurplus = true;
 
-    for (size_t pi = 0; pi < uniqueCount; ++pi) {
-        Price p = prices[pi];
-        Quantity cumBuy  = marketBuyTotal;
-        Quantity cumSell = marketSellTotal;
-
-        bids_.forEachLevel([&](Price bp, const OrderList& list) {
-            if (bp >= p) for (Order* o = list.front(); o; o = o->next) cumBuy += o->remainingQty;
-        });
-        asks_.forEachLevel([&](Price ap, const OrderList& list) {
-            if (ap <= p) for (Order* o = list.front(); o; o = o->next) cumSell += o->remainingQty;
-        });
+    // Ascending sweep: cumSell(p) = market sells + asks at or below p,
+    // cumBuy(p) = market buys + bids at or above p = totalBuy - bids below p.
+    Quantity sellUpTo = marketSellTotal, buyBelow = 0;
+    for (const Level& level : levels) {
+        const Price p = level.price;
+        sellUpTo += level.sell;
+        const Quantity cumBuy  = totalBuy - buyBelow;
+        const Quantity cumSell = sellUpTo;
+        buyBelow += level.buy;
 
         Quantity vol = std::min(cumBuy, cumSell);
         Quantity imb = (cumBuy >= cumSell) ? cumBuy - cumSell : cumSell - cumBuy;

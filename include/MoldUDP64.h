@@ -352,14 +352,12 @@ public:
         }
         if (hdr.messageCount == MOLD_HEARTBEAT) {
             // Heartbeat carries no messages and does NOT consume a
-            // sequence number. Use the seq field as the "next expected"
-            // to detect long-duration silence gaps.
-            uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
-            if (hdr.sequenceNumber > expected) {
-                if (onGap_) onGap_(expected, hdr.sequenceNumber);
-                nextExpectedSeq_.store(hdr.sequenceNumber, std::memory_order_relaxed);
-                gapsObserved_.fetch_add(1, std::memory_order_relaxed);
-            }
+            // sequence number. Its seq is the publisher's next one, so a
+            // value past what we hold reveals a silent gap. Report it like
+            // any other, but never move the front: a gap is closed only by
+            // the missing messages arriving (MD-1 — moving it here made the
+            // retransmission look like duplicates and dropped it).
+            reportGapBelow(hdr.sequenceNumber);
             heartbeatsReceived_.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
@@ -367,19 +365,7 @@ public:
         // Real-data packet. The header's sequence is the seq of the
         // FIRST message in this packet.
         uint64_t firstSeq = hdr.sequenceNumber;
-        uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
-        if (firstSeq > expected && expected >= gapReportedTo_) {
-            // A genuine new hole opens below this packet — report it
-            // EXACTLY ONCE. While the gap is still outstanding (the
-            // contiguous front hasn't caught up to gapReportedTo_),
-            // later live packets — and the gap packet itself if re-seen
-            // — must NOT keep re-firing onGapDetected. The hole is
-            // closed by recovered / retransmitted messages flowing back
-            // through feedPacket below, which advance nextExpectedSeq_.
-            if (onGap_) onGap_(expected, firstSeq);
-            gapsObserved_.fetch_add(1, std::memory_order_relaxed);
-            gapReportedTo_ = firstSeq;
-        }
+        reportGapBelow(firstSeq);
         // NOTE: nextExpectedSeq_ is deliberately NOT bumped to firstSeq
         // here. Messages ahead of the hole are still delivered, but the
         // contiguous "next expected" front only advances once the
@@ -409,6 +395,22 @@ public:
     uint64_t sessionMismatches()    const { return sessionMismatches_.load(std::memory_order_relaxed); }
 
 private:
+    // A packet or heartbeat starting at `seq` arrived. If that opens a new
+    // hole below it, report it EXACTLY ONCE. While the gap is still
+    // outstanding (the contiguous front hasn't caught up to
+    // gapReportedTo_), later live packets — and the gap packet itself if
+    // re-seen — must NOT keep re-firing onGapDetected. The hole is closed by
+    // recovered / retransmitted messages flowing back through feedPacket,
+    // which advance nextExpectedSeq_.
+    void reportGapBelow(uint64_t seq) {
+        const uint64_t expected = nextExpectedSeq_.load(std::memory_order_relaxed);
+        if (seq > expected && expected >= gapReportedTo_) {
+            if (onGap_) onGap_(expected, seq);
+            gapsObserved_.fetch_add(1, std::memory_order_relaxed);
+            gapReportedTo_ = seq;
+        }
+    }
+
     // Deliver one sequenced message, maintaining the contiguous
     // "next expected" front. Both live and recovered / retransmitted
     // messages flow through here: a message that fills the current hole

@@ -368,12 +368,20 @@ void test_SubscriberHeartbeatDetectsSilentGap() {
         CHECK(log.gaps.size() == 1);
         CHECK(log.gaps[0].first == 1);
         CHECK(log.gaps[0].second == 3);
-        CHECK(sub.nextExpectedSequence() == 3);
+        // The front stays at the hole: only the missing messages close it.
+        CHECK(sub.nextExpectedSequence() == 1);
 
         // The post-heartbeat real packet (seq=3) arrives; delivered.
         wire(sub, wireBuf[3]);
         CHECK(log.messages.size() == 1);
         CHECK(log.messages[0].seq == 3);
+
+        // The retransmitted 1 and 2 are delivered and close the gap.
+        wire(sub, wireBuf[0]);
+        wire(sub, wireBuf[1]);
+        CHECK(log.messages.size() == 3);
+        CHECK(sub.nextExpectedSequence() == 4);
+        CHECK(log.gaps.size() == 1);
     } END
 }
 
@@ -488,6 +496,40 @@ void test_SubscriberMultiPacketGapRecovers() {
     } END
 }
 
+// MD-1. A heartbeat's sequence is the publisher's next one, which is past any
+// open gap. The subscriber used to make it the new contiguous front, so the
+// retransmitted messages that arrived afterwards were all below the front and
+// were thrown away as duplicates: the gap could never be filled.
+void test_SubscriberHeartbeatDuringGapKeepsItRecoverable() {
+    TEST(SubscriberHeartbeatDuringGapKeepsItRecoverable) {
+        std::vector<std::vector<uint8_t>> wireBuf;
+        MoldUDP64Publisher pub("FEED", [&](std::string_view b) {
+            wireBuf.emplace_back(b.begin(), b.end());
+        });
+        pub.addMessage("A", 1); pub.flush();   // [0] seq=1
+        pub.addMessage("B", 1); pub.flush();   // [1] seq=2 (lost)
+        pub.addMessage("C", 1); pub.flush();   // [2] seq=3
+        pub.sendHeartbeat();                   // [3] heartbeat, seq=4
+
+        MoldUDP64Subscriber sub;
+        DeliveryLog log;
+        sub.setOnMessage([&](uint64_t s, const uint8_t* d, size_t n) {
+            log.onMessage(s, d, n);
+        });
+        sub.setOnGapDetected([&](uint64_t a, uint64_t b) { log.onGap(a, b); });
+
+        wire(sub, wireBuf[0]);
+        wire(sub, wireBuf[2]);                 // gap [2,3) opens
+        wire(sub, wireBuf[3]);                 // heartbeat while it is open
+        wire(sub, wireBuf[1]);                 // the retransmitted seq=2
+
+        CHECK(log.messages.size() == 3 && "the retransmitted message was dropped");
+        CHECK(log.gaps.size() == 1 && "the heartbeat reported the open gap again");
+        CHECK(log.messages.back().seq == 2);
+        CHECK(sub.nextExpectedSequence() == 4);
+    } END
+}
+
 // ─── Integration: ITCH AddOrder via MoldUDP64 ───────────────────────────────
 
 void test_ItchAddOrderRoundtripsThroughMold() {
@@ -545,6 +587,7 @@ int main() {
     test_SubscriberHeartbeatDetectsSilentGap();
     test_SubscriberSinglePacketGapRecovers();
     test_SubscriberMultiPacketGapRecovers();
+    test_SubscriberHeartbeatDuringGapKeepsItRecoverable();
 
     test_ItchAddOrderRoundtripsThroughMold();
 

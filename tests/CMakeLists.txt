@@ -379,7 +379,7 @@ set_tests_properties(PropertyTest PROPERTIES TIMEOUT 180 LABELS "project;propert
 # deterministic and quick. The soak is a flag, not something every push pays
 # for: --seeds N --ops M (and --stats for measured generator bias).
 # The corpus argument replays every recorded finding in tests/fuzz_corpus
-# before fuzzing; see runCorpus() for the .known.flow convention.
+# before fuzzing; any case that diverges fails the run.
 add_executable(DifferentialFuzzTest DifferentialFuzzTest.cpp)
 target_link_libraries(DifferentialFuzzTest PRIVATE OrderMatcher)
 enable_assertions(DifferentialFuzzTest)

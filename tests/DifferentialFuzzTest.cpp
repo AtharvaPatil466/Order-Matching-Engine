@@ -437,16 +437,11 @@ std::vector<Op> loadFlow(const std::string& path) {
     return flow;
 }
 
-// Naming convention, so one directory carries both kinds of case:
-//
-//   <name>.flow        a divergence that has been FIXED. It must stay fixed;
-//                      if it diverges again the run fails.
-//   <name>.known.flow  a divergence that is real and NOT yet fixed. It is
-//                      replayed and reported on every run, but does not fail
-//                      the build — otherwise the only way to land this test
-//                      would be to delete the finding. If one of these stops
-//                      diverging, that is reported too: the bug was fixed and
-//                      the case should be promoted by dropping ".known".
+// Every *.flow case must replay without divergence; any one that diverges
+// fails the run. There is no "known divergence" class: a found defect lands
+// with its fix (or an admission reject) in the same change, never as a case
+// the build is told to ignore. A ".known.flow" suppression class used to
+// exist here and the modify-to-zero defect shipped through it (ENGTEST-4).
 int runCorpus(const std::string& dir) {
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec)) {
@@ -461,23 +456,12 @@ int runCorpus(const std::string& dir) {
     int failures = 0;
     for (const auto& f : files) {
         const std::string name = f.filename().string();
-        const bool known = name.find(".known.") != std::string::npos;
         const std::vector<Op> flow = loadFlow(f.string());
         const auto d = replay(flow);
 
-        if (d && known) {
-            std::printf("corpus: %-52s KNOWN DIVERGENCE, still open (%zu ops)\n", name.c_str(),
-                        flow.size());
-            std::printf("          op #%zu %s | %s\n", d->opIndex, d->op.c_str(), d->what.c_str());
-            std::printf("          engine=%s  reference=%s\n", d->engine.c_str(),
-                        d->reference.c_str());
-        } else if (d) {
+        if (d) {
             reportDivergence(*d, flow, ("corpus regression: " + name).c_str());
             failures++;
-        } else if (known) {
-            std::printf("corpus: %-52s NO LONGER DIVERGES — the engine defect appears "
-                        "fixed; rename this case to drop \".known\".\n",
-                        name.c_str());
         } else {
             std::printf("corpus: %-52s ok (%zu ops)\n", name.c_str(), flow.size());
         }

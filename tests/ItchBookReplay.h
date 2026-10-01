@@ -69,6 +69,7 @@ public:
             break;
         }
         case ITCH_MT_ORDER_EXECUTED:
+        case ITCH_MT_ORDER_EXECUTED_PX:   // same shares field; the price is not book state
             reduce(ref, static_cast<Quantity>(readU32BE(p + 19)));
             break;
         case ITCH_MT_ORDER_CANCEL:

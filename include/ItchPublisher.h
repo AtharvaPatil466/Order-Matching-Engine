@@ -13,7 +13,10 @@
 //                                            the new slice is a new arrival at
 //                                            the back of the queue)
 //   onBookVisible(Reduce)                 → 'X' OrderCancel (shares removed)
-//   onTrade                               → 'E' Executed (per live side)
+//   onTrade                               → 'E' Executed (per live side), or
+//                                            'C' Executed With Price when the
+//                                            fill is away from the announced
+//                                            price (an auction cross)
 //   onOrderUpdate(Filled, remaining=0)    → 'D' Delete (order off the book)
 //   onOrderUpdate(Cancelled)              → 'D' Delete
 //   onOrderUpdate(Rejected)               → nothing (rejects are private)
@@ -272,6 +275,7 @@ public:
         buy.kind         = RawEvent::Kind::Executed;
         buy.orderId      = t.buyOrderId;
         buy.shares       = t.quantity;
+        buy.price        = t.price;
         buy.tradeOrMatch = t.tradeId;
         buy.ts           = now();
         dispatch(buy);
@@ -280,6 +284,7 @@ public:
         sell.kind         = RawEvent::Kind::Executed;
         sell.orderId      = t.sellOrderId;
         sell.shares       = t.quantity;
+        sell.price        = t.price;
         sell.tradeOrMatch = t.tradeId;
         sell.ts           = buy.ts;
         dispatch(sell);
@@ -325,7 +330,8 @@ private:
         OrderId  orderId{0};         // Add / Executed / Cancel / Delete order ref
         Quantity shares{0};          // Add displayed qty / Executed trade qty /
                                      // Cancel shares removed / CrossTrade shares
-        Price    price{0};           // Add price / CrossTrade cross price
+        Price    price{0};           // Add price / Executed trade price /
+                                     // CrossTrade cross price
         uint64_t tradeOrMatch{0};    // Executed tradeId / CrossTrade matchNumber
         uint64_t ts{0};              // timestamp captured at event time
     };
@@ -381,10 +387,20 @@ private:
             Quantity prev   = it->second.shares;
             Quantity filled = (e.shares > prev) ? prev : e.shares;
             it->second.shares = prev - filled;
-            uint8_t buf[ITCH_SIZE_ORDER_EXECUTED];
-            size_t n = encodeOrderExecuted(buf, locateOf(), nextTracking(),
-                                           e.ts, static_cast<uint64_t>(e.orderId),
-                                           filled, e.tradeOrMatch);
+            // 'E' tells subscribers the order traded at the price it was
+            // announced with. At an auction uncross everything fills at the
+            // clearing price instead, so say the price ('C') — MD-6.
+            // ponytail: printable 'Y' keeps today's volume semantics; a cross
+            // still prints both sides (see the MD-6 note in the report).
+            uint8_t buf[ITCH_SIZE_ORDER_EXECUTED_PX];
+            size_t n = (e.price == it->second.price)
+                ? encodeOrderExecuted(buf, locateOf(), nextTracking(), e.ts,
+                                      static_cast<uint64_t>(e.orderId),
+                                      filled, e.tradeOrMatch)
+                : encodeOrderExecutedWithPrice(buf, locateOf(), nextTracking(), e.ts,
+                                               static_cast<uint64_t>(e.orderId),
+                                               filled, e.tradeOrMatch,
+                                               /*printable=*/true, e.price);
             emit(buf, n);
             executedEmitted_.fetch_add(1, std::memory_order_relaxed);
             messagesEmitted_.fetch_add(1, std::memory_order_relaxed);

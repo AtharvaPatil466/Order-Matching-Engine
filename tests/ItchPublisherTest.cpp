@@ -19,6 +19,7 @@
 //    11. MultiplexListener fan-out: ITCH and OUCH coexist on same book
 //    12. System event manual emission
 
+#include "ItchBookReplay.h"
 #include "ItchProtocol.h"
 #include "ItchPublisher.h"
 #include "MatchingEngine.h"
@@ -30,6 +31,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -266,6 +268,61 @@ void test_PublisherEmitsExecutedOnMakerFill() {
         CHECK(p[0] == ITCH_MT_ORDER_EXECUTED);
         CHECK(readU64BE(p + 11) == 300ULL);
         CHECK(readU32BE(p + 19) == 20);
+    } END
+}
+
+// MD-6 (price). An 'E' carries no price: a subscriber books the execution at
+// the price the order was announced with. In a continuous match the maker
+// trades at its own price, so that holds; at an auction uncross every order
+// fills at the clearing price, and the feed announced each side's own limit.
+// A fill away from the announced price must go out as 'C' with the price.
+void test_PublisherReportsCrossExecutionPrice() {
+    TEST(PublisherReportsCrossExecutionPrice) {
+        MatchingEngine engine;
+        engine.addSymbol(7);
+        engine.start();
+        auto* book = engine.getOrderBook(7);
+
+        std::string sent;
+        ItchPublisher pub(*book, [&](std::string_view b) { sent.append(b); });
+        struct TradeTap : EventListener {
+            EventListener* next;
+            std::vector<Price> prices;
+            explicit TradeTap(EventListener* n) : next(n) {}
+            void onTrade(const Trade& t) override { prices.push_back(t.price); next->onTrade(t); }
+            void onOrderUpdate(const OrderUpdate& u) override { next->onOrderUpdate(u); }
+            void onBookVisible(const BookVisibleUpdate& u) override { next->onBookVisible(u); }
+        } tap(&pub);
+        book->setEventListener(&tap);
+
+        book->setTradingState(TradingState::PreOpen);
+        CHECK(engine.submitOrder(7, 500, 1, Side::Buy, 1010, 100, OrderType::Limit).isAccepted());
+        CHECK(engine.submitOrder(7, 501, 2, Side::Sell, 990, 100, OrderType::Limit).isAccepted());
+        book->uncross();
+        CHECK(tap.prices.size() == 1);
+        const Price clearing = tap.prices[0];
+
+        std::map<uint64_t, Price> announced;
+        int executions = 0;
+        for (size_t off = 0; off < sent.size();) {
+            const auto* m = reinterpret_cast<const uint8_t*>(sent.data()) + off;
+            const size_t size = testing::itchMessageSize(m[0]);
+            CHECK(size != 0);
+            const uint64_t ref = readU64BE(m + 11);
+            if (m[0] == ITCH_MT_ADD_ORDER) announced[ref] = static_cast<Price>(readU32BE(m + 32));
+            if (m[0] == ITCH_MT_ORDER_EXECUTED || m[0] == ITCH_MT_ORDER_EXECUTED_PX) {
+                ++executions;
+                const Price px = (m[0] == ITCH_MT_ORDER_EXECUTED_PX)
+                                     ? static_cast<Price>(readU32BE(m + 32))
+                                     : announced.at(ref);
+                if (px != clearing)
+                    throw std::runtime_error("order " + std::to_string(ref) + " executed at " +
+                                             std::to_string(px) + " on the feed; the cross printed at " +
+                                             std::to_string(clearing));
+            }
+            off += size;
+        }
+        CHECK(executions == 2);
     } END
 }
 
@@ -536,6 +593,7 @@ int main() {
     test_PublisherEmitsAddOnResting();
     test_PublisherSuppressesNeverDisplayedIOC();
     test_PublisherEmitsExecutedOnMakerFill();
+    test_PublisherReportsCrossExecutionPrice();
     test_PublisherEmitsDeleteOnCancel();
     test_PublisherEmitsExecutedThenDeleteOnFullFill();
     test_StockDirectoryLayout();

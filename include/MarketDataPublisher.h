@@ -147,6 +147,7 @@ public:
         header->writeSeq.store(0, std::memory_order_release);
         header->epoch.store(newEpoch(), std::memory_order_release);
 
+        nextSeq_ = 0;
         running_ = true;
         return true;
     }
@@ -165,9 +166,9 @@ public:
         shm_unlink(shmName_.c_str());
     }
 
-    // Publish an incremental market data update
+    // Publish an incremental market data update. Single writer: see nextSeq_.
     void publishUpdate(const MarketDataUpdate& update) {
-        if (!running_) return;
+        if (!running_.load(std::memory_order_relaxed)) return;
 
         ShmEntry entry{};
         entry.type = ShmEntry::Type::IncrementalUpdate;
@@ -177,7 +178,7 @@ public:
 
     // Publish a full L2 snapshot
     void publishSnapshot(const MarketDataSnapshot& snap) {
-        if (!running_) return;
+        if (!running_.load(std::memory_order_relaxed)) return;
 
         ShmEntry entry{};
         entry.type = ShmEntry::Type::Snapshot;
@@ -224,7 +225,7 @@ private:
     // Seqlock write of the next entry (see the layout comment).
     void commit(const ShmEntry& entry) {
         auto* header = getHeader();
-        const uint64_t seq = header->writeSeq.load(std::memory_order_relaxed);
+        const uint64_t seq = nextSeq_++;
         ShmEntry* slot = getEntry(seq);
 
         shm_detail::word(slot, 0).store(shm_detail::SLOT_WRITING, std::memory_order_relaxed);
@@ -258,7 +259,16 @@ private:
     int shmFd_;
     void* shmPtr_;
     size_t shmSize_;
-    bool running_{false};
+    // The ring has ONE writer: every publish must come from the same thread, or
+    // from threads handing off with a happens-before edge. Two writers would
+    // claim the same slot and lose an entry with no gap a subscriber can see.
+    // nextSeq_ is a plain field on purpose — the slot and header accesses are
+    // atomics, so this is what makes a second writer a data race that
+    // ThreadSanitizer reports.
+    uint64_t nextSeq_{0};
+    // Atomic so isRunning()/getSequence() may be asked from any thread. It does
+    // not make stop() safe against a concurrent publish: stop the writer first.
+    std::atomic<bool> running_{false};
 };
 
 // What MarketDataSubscriber::poll found. `out` is written only for Entry.

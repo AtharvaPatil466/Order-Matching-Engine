@@ -633,17 +633,26 @@ int main(int argc, char* argv[]) {
         // Start TCP gateway
         TcpGateway gateway(engine);
         gateway.setParticipantAuth(participantAuth.enabled() ? &participantAuth : nullptr);
-        // GTD/DAY expiry, once a second. Nothing ran it, so GTD orders rested
-        // and traded forever. Not engine.startExpiryTimer(): this engine is
-        // synchronous, orders run on the gateway's event thread, and a sweep
-        // from the timer's own thread would race them through the durability
-        // gate and the market-data publisher, neither of which locks. The tick
-        // runs on the event thread, between orders.
-        gateway.setTickHandler([&engine, next = std::chrono::steady_clock::now()]() mutable {
+        // Once a second, on the event thread, between orders:
+        //   - GTD/DAY expiry. Nothing ran it, so GTD orders rested and traded
+        //     forever. Not engine.startExpiryTimer(): this engine is
+        //     synchronous, orders run on the gateway's event thread, and a sweep
+        //     from the timer's own thread would race them through the
+        //     durability gate and the market-data publisher, neither of which
+        //     locks.
+        //   - L2 snapshots. They were published from main()'s loop, a second
+        //     writer on a ring that has one: both threads claimed the same slot
+        //     and an entry was lost with no gap to show for it.
+        gateway.setTickHandler([&engine, &mdPub, mdStarted,
+                                next = std::chrono::steady_clock::now()]() mutable {
             const auto now = std::chrono::steady_clock::now();
             if (now < next) return;
             next = now + std::chrono::seconds(1);
             engine.expireOrdersFromClock();
+            if (!mdStarted) return;
+            for (uint32_t sym = 0; sym < 2; ++sym) {
+                if (auto* book = engine.getOrderBook(sym)) mdPub.publishSnapshot(book->getSnapshot(5));
+            }
         });
         if (!gateway.start(port)) {
             std::cerr << "Failed to start gateway on port " << port << std::endl;
@@ -653,18 +662,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Order Gateway listening on port " << gateway.port() << std::endl;
         std::cout << "Press Ctrl+C to stop." << std::endl;
 
-        // Periodic snapshot publishing
         while (running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (mdStarted) {
-                for (uint32_t sym = 0; sym < 2; ++sym) {
-                    auto* book = engine.getOrderBook(sym);
-                    if (book) {
-                        auto snap = book->getSnapshot(5);
-                        mdPub.publishSnapshot(snap);
-                    }
-                }
-            }
         }
 
         std::cout << "\nShutting down..." << std::endl;

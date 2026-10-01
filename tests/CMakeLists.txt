@@ -509,6 +509,17 @@ add_test(NAME GatewayExpiresGtdTest
          COMMAND GatewayExpiresGtdTest $<TARGET_FILE:GatewayServer>)
 set_tests_properties(GatewayExpiresGtdTest PROPERTIES TIMEOUT 120 LABELS "project;lifecycle")
 
+# GatewayServer's market-data ring must have one writer (LF-2): snapshots were
+# published, and the book read, from main() while the event thread published
+# updates. Black-box; the race shows as a non-zero exit under ThreadSanitizer.
+add_executable(GatewayMarketDataThreadTest GatewayMarketDataThreadTest.cpp)
+target_link_libraries(GatewayMarketDataThreadTest PRIVATE OrderMatcher)
+enable_assertions(GatewayMarketDataThreadTest)
+add_test(NAME GatewayMarketDataThreadTest
+         COMMAND GatewayMarketDataThreadTest $<TARGET_FILE:GatewayServer>)
+set_tests_properties(GatewayMarketDataThreadTest PROPERTIES TIMEOUT 120
+                     LABELS "project;concurrency")
+
 # Immediate means durable when the append RETURNS, on every commit path. The
 # io_uring path submitted the fsync and returned before it completed, so on Linux
 # the order-entry Ack could precede durability. Passes on the synchronous path

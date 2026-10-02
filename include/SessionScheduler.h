@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -40,6 +42,11 @@ struct SessionSchedule {
     uint64_t closeMs        = 57600000;  // 16:00:00 — closing cross, then post-close
     uint64_t postCloseMs    = 57600000;  // 16:00:00 — post-close (== closeMs by default)
 };
+
+// Parses "HH:MM,HH:MM,HH:MM,HH:MM" — pre-open, open, closing auction, close —
+// in the scheduler's clock (UTC ms-of-day by default). Strictly increasing;
+// anything else is nullopt. OrderEngine's --session-schedule.
+std::optional<SessionSchedule> parseSessionSchedule(const std::string& spec);
 
 // The phase the scheduler has most recently driven the universe into.
 // Ordering is significant: the scheduler only ever advances forward through

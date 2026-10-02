@@ -982,11 +982,15 @@ config reload or crash-restart cancelled every client's `DAY` orders mid-session
 defaults to keeping them, and a restart restores them (`GracefulShutdownTest`, "A routine
 stop keeps DAY orders").
 
-That leaves a real gap, stated rather than hidden: nothing retires a `DAY` order at the end
-of the day. Neither binary runs `SessionScheduler` (which drives trading states but never
-touches time-in-force), and nothing derives a session-end `expiryTime`. Both binaries run the
-expiry sweep (Rule 8.1), so a `DAY` order that carries an `expiryTime` expires like `GTD`;
-one with `expiryTime == 0` behaves exactly like `GTC`.
+The session end is a separate, explicit command: `MatchingEngine::endTradingSession(symbols)`
+moves those symbols to `PostClose` (running the closing cross) and then cancels and journals
+every `DAY` order on them, and only them. `SessionScheduler`'s close calls it (roadmap 1.8-H8,
+1.4-D9; pinned by `tests/SessionEndTest.cpp`). `OrderEngine` runs the scheduler only when
+started with `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` (HH:MM UTC, or
+`OB_SESSION_SCHEDULE`); without it, which is the default, nothing ends a session and a `DAY`
+order with `expiryTime == 0` behaves exactly like `GTC`, as before. `GatewayServer` never
+runs one. Both binaries run the expiry sweep (Rule 8.1), so a `DAY` order that carries an
+`expiryTime` expires like `GTD` either way.
 
 **How venues specify it.** Every venue publishes DAY as "cancelled at the end of the trading
 session", and deriving the session-end timestamp from the session calendar is how I would

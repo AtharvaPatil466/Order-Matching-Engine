@@ -83,6 +83,31 @@ uint32_t SessionScheduler::tradingDate() const {
     return static_cast<uint32_t>(defaultEpochMs() / kMsPerDay);
 }
 
+std::optional<SessionSchedule> parseSessionSchedule(const std::string& spec) {
+    // Exactly "HH:MM,HH:MM,HH:MM,HH:MM": four times, strictly increasing.
+    constexpr size_t kTimes = 4, kLen = kTimes * 5 + (kTimes - 1);
+    if (spec.size() != kLen) return std::nullopt;
+    uint64_t ms[kTimes];
+    for (size_t i = 0; i < kTimes; ++i) {
+        const char* p = spec.data() + i * 6;
+        auto digit = [](char c) { return c >= '0' && c <= '9'; };
+        if (!digit(p[0]) || !digit(p[1]) || p[2] != ':' || !digit(p[3]) || !digit(p[4]) ||
+            (i + 1 < kTimes && p[5] != ','))
+            return std::nullopt;
+        const int hh = (p[0] - '0') * 10 + (p[1] - '0');
+        const int mm = (p[3] - '0') * 10 + (p[4] - '0');
+        if (hh > 23 || mm > 59) return std::nullopt;
+        ms[i] = (static_cast<uint64_t>(hh) * 60 + static_cast<uint64_t>(mm)) * 60000;
+        if (i > 0 && ms[i] <= ms[i - 1]) return std::nullopt;
+    }
+    SessionSchedule s;
+    s.preOpenMs = ms[0];
+    s.openMs = ms[1];
+    s.closeAuctionMs = ms[2];
+    s.closeMs = s.postCloseMs = ms[3];
+    return s;
+}
+
 void SessionScheduler::resetSession() {
     std::lock_guard<std::mutex> lock(tickMutex_);
     phase_.store(SessionPhase::Idle, std::memory_order_release);
@@ -115,7 +140,8 @@ void SessionScheduler::applyPhase(SessionPhase target) {
         case SessionPhase::PostClose:
             // Closing auction: cross into the closing prints and shut the
             // market for the day (new orders rejected; cancels still allowed).
-            engine_.setTradingStateBatch(symbols_, TradingState::PostClose);
+            // This is the session end, so DAY orders go too (1.8-H8).
+            engine_.endTradingSession(symbols_);
             break;
         case SessionPhase::Idle:
             // Idle is a sentinel, never a transition target. No-op.

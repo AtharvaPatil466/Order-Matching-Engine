@@ -1186,6 +1186,23 @@ uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
 }
 
 size_t MatchingEngine::cancelDayOrders() {
+    std::vector<SymbolId> all;
+    {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        all = symbolIds_;
+    }
+    return cancelDayOrders(all);
+}
+
+size_t MatchingEngine::endTradingSession(const std::vector<SymbolId>& symbols) {
+    // The explicit session-end command (roadmap 1.8-H8 / 1.4-D9): the close,
+    // then DAY orders. Process stop is not session end (gracefulShutdown keeps
+    // them by default); this is the only other path that retires them.
+    setTradingStateBatch(symbols, TradingState::PostClose);
+    return cancelDayOrders(symbols);
+}
+
+size_t MatchingEngine::cancelDayOrders(const std::vector<SymbolId>& symbols) {
     // Session-end DAY sweep. Same lock discipline as cancelAllRestingOrders()
     // (bookMutex_ -> book->bookLock_ -> journalMutex_): collect ids under each
     // book's lock, then cancel outside it so cancelOrder can take bookLock_
@@ -1194,7 +1211,7 @@ size_t MatchingEngine::cancelDayOrders() {
     size_t cancelled = 0;
     uint64_t appendOrdinal = 0;
     durabilityGate_.beginOrder();
-    for (SymbolId sym : symbolIds_) {
+    for (SymbolId sym : symbols) {
         auto* book = getOrderBook(sym);
         if (!book) continue;
         std::vector<OrderId> dayIds;

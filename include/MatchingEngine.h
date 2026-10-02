@@ -331,6 +331,13 @@ public:
     // to invoke this; the engine just performs the reopening crosses.
     size_t resumeVolatilityAuctions();
 
+    // End the trading session for `symbols`: move them to PostClose (which
+    // runs the closing cross from AuctionClose), then cancel — and journal —
+    // every DAY order on them. The explicit session-end command; a process
+    // stop is not one. SessionScheduler's close calls it. Returns the number
+    // of DAY orders cancelled.
+    size_t endTradingSession(const std::vector<SymbolId>& symbols);
+
     // Time management
     void expireOrders(uint64_t currentTime);
 
@@ -843,6 +850,7 @@ private:
     // P3-6: cancel every DAY order across all books (session end), journaling +
     // logging each so a restart does not restore them. Returns the count.
     size_t cancelDayOrders();
+    size_t cancelDayOrders(const std::vector<SymbolId>& symbols);
     uint64_t riskNow() const;
     void logRiskReject(const char* control, SymbolId sym, ParticipantId pid,
                        RejectReason reason);

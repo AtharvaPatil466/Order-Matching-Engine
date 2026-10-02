@@ -8,6 +8,7 @@
 #include "Journal.h"
 #include "JournalBoot.h"
 #include "Metrics.h"
+#include "SessionScheduler.h"
 #ifdef OB_HAVE_DPDK
 #include "DpdkGateway.h"
 #endif
@@ -62,6 +63,10 @@ int main(int argc, char* argv[]) {
                 << "  --port P       Admin HTTP port (default: 8080)\n"
                 << "  --admin-bind A Admin listen address (default: 127.0.0.1; OB_ADMIN_BIND)\n"
                 << "  --symbols S    Number of symbols (default: 4)\n"
+                << "  --session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE\n"
+                << "                 Run the trading session on this timetable, HH:MM UTC\n"
+                << "                 (e.g. 13:00,13:30,19:55,20:00; OB_SESSION_SCHEDULE).\n"
+                << "                 The close cancels DAY orders. Off when unset.\n"
                 << "\n"
                 << "Replication (DISABLED unless acknowledged — known defects REPL-1..6):\n"
                 << "  --allow-unsafe-replication  required with a role (OB_ALLOW_UNSAFE_REPLICATION=1)\n"
@@ -250,12 +255,41 @@ int main(int argc, char* argv[]) {
                   << " (format=" << fmtStr << ", min_level=" << lvlStr << ")\n";
     }
 
+    // Session timetable (roadmap 1.8-H8). Off unless asked for: the hours,
+    // the timezone, the calendar and what a late start does are venue
+    // decisions this binary does not make on its own. Parsed before the
+    // engine starts so a bad value refuses to boot rather than running
+    // without a close.
+    const std::string sessionSpec =
+        flagOrEnv(argc, argv, "--session-schedule", "OB_SESSION_SCHEDULE");
+    std::optional<SessionSchedule> sessionSchedule;
+    if (!sessionSpec.empty()) {
+        sessionSchedule = parseSessionSchedule(sessionSpec);
+        if (!sessionSchedule) {
+            std::cerr << "FATAL: --session-schedule '" << sessionSpec
+                      << "' is not HH:MM,HH:MM,HH:MM,HH:MM (pre-open, open, closing"
+                         " auction, close; UTC, strictly increasing)\n";
+            return 1;
+        }
+    }
+
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
     engine.startAsync(numThreads, 8192);
     // GTD/DAY expiry. Nothing started this, so GTD orders rested and traded
     // forever. Safe in async mode: each sweep is posted to every worker as an
     // in-band control message, never run against a book from this thread.
     engine.startExpiryTimer();
+
+    std::unique_ptr<SessionScheduler> scheduler;
+    if (sessionSchedule) {
+        std::vector<SymbolId> universe;
+        for (size_t s = 0; s < numSymbols; ++s) universe.push_back(static_cast<SymbolId>(s));
+        scheduler = std::make_unique<SessionScheduler>(engine, std::move(universe),
+                                                       *sessionSchedule);
+        scheduler->start();
+        std::cout << "[Session] Scheduler on: " << sessionSpec
+                  << " UTC (pre-open, open, closing auction, close)\n";
+    }
 
     // ── Replication wiring (env-driven) ──────────────────────────────
     // The OrderEngine binary used to read these env vars only via its
@@ -554,6 +588,7 @@ int main(int argc, char* argv[]) {
 #ifdef OB_HAVE_DPDK
     if (dpdk) dpdk->stop();
 #endif
+    if (scheduler) scheduler->stop();  // no session transition during the drain
     const auto shutdownReport = engine.gracefulShutdown();
     std::cout << "[Engine] Queues drained. DAY orders cancelled: "
               << shutdownReport.dayOrdersCancelled

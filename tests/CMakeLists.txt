@@ -497,6 +497,14 @@ enable_assertions(AuctionJournalReplayTest)
 add_test(NAME AuctionJournalReplayTest COMMAND AuctionJournalReplayTest)
 set_tests_properties(AuctionJournalReplayTest PROPERTIES TIMEOUT 60 LABELS "project;auction;journal")
 
+# Roadmap 1.8-H8 (with 1.4-D9): the explicit session-end command retires DAY
+# orders, SessionScheduler's close calls it, and --session-schedule parses.
+add_executable(SessionEndTest SessionEndTest.cpp)
+target_link_libraries(SessionEndTest PRIVATE OrderMatcher)
+enable_assertions(SessionEndTest)
+add_test(NAME SessionEndTest COMMAND SessionEndTest)
+set_tests_properties(SessionEndTest PROPERTIES TIMEOUT 60 LABELS "project;session;lifecycle")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

@@ -59,7 +59,7 @@
 
 | Feature | Standard | Implementation | File | Status |
 |---------|----------|---------------|------|--------|
-| Market-on-Close (MOC) | Exchange rules | MOC orders park in `onCloseOrders_` during Continuous/PreOpen/AuctionOpen; released to auction market orders at `AuctionClose`; fill at uncross clearing price. Neither binary ever moves a book to `AuctionClose` (no `setTradingState` caller, no `SessionScheduler`), so MOC orders are accepted and never execute. | [OrderBook.h](../include/OrderBook.h) | ⚠️ Library only, not enabled |
+| Market-on-Close (MOC) | Exchange rules | MOC orders park in `onCloseOrders_` during Continuous/PreOpen/AuctionOpen; released to auction market orders at `AuctionClose`; fill at uncross clearing price. `OrderEngine` moves books to `AuctionClose` only when started with `--session-schedule` (off by default); otherwise neither binary does, so MOC orders are accepted, never execute, and are not cancelled until a session end. | [OrderBook.h](../include/OrderBook.h) | ⚠️ Library only, not enabled |
 | Limit-on-Close (LOC) | Exchange rules | LOC orders park until `AuctionClose`; admitted to limit book; unfilled remainder cancelled via `cancelLocOrders()` after uncross completes. Same as MOC: no binary drives `AuctionClose`. | [OrderBook.h](../include/OrderBook.h) | ⚠️ Library only, not enabled |
 
 ### Market Integrity

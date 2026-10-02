@@ -28,6 +28,7 @@
 #include "OuchSession.h"
 
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -326,6 +327,31 @@ void test_PublisherReportsCrossExecutionPrice() {
     } END
 }
 
+// MD-16. ITCH timestamps are nanoseconds since midnight. Without an injected
+// clock the publisher stamped steady_clock — time since boot — truncated to 48
+// bits, which is no time of day at all.
+void test_PublisherDefaultTimestampIsTimeSinceMidnight() {
+    TEST(PublisherDefaultTimestampIsTimeSinceMidnight) {
+        constexpr uint64_t kDayNs = 86'400'000'000'000ULL;
+        MatchingEngine engine;
+        engine.addSymbol(7);
+        auto* book = engine.getOrderBook(7);
+        std::string sent;
+        ItchPublisher pub(*book, [&](std::string_view b) { sent.append(b); });
+
+        pub.publishSystemEvent('O');
+        const auto wallNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const uint64_t stamped = readU48BE(reinterpret_cast<const uint8_t*>(sent.data()) + 5);
+        const uint64_t sinceMidnight = wallNs % kDayNs;
+        const uint64_t apart = (sinceMidnight + kDayNs - stamped) % kDayNs;  // wraps at midnight
+        std::cout << "(stamped " << stamped / 1'000'000'000ULL << " s, UTC time of day "
+                  << sinceMidnight / 1'000'000'000ULL << " s) ";
+        CHECK(stamped < kDayNs);
+        CHECK(apart < 60'000'000'000ULL && "the default timestamp is not the time of day");
+    } END
+}
+
 void test_PublisherEmitsDeleteOnCancel() {
     TEST(PublisherEmitsDeleteOnCancel) {
         MatchingEngine engine;
@@ -594,6 +620,7 @@ int main() {
     test_PublisherSuppressesNeverDisplayedIOC();
     test_PublisherEmitsExecutedOnMakerFill();
     test_PublisherReportsCrossExecutionPrice();
+    test_PublisherDefaultTimestampIsTimeSinceMidnight();
     test_PublisherEmitsDeleteOnCancel();
     test_PublisherEmitsExecutedThenDeleteOnFullFill();
     test_StockDirectoryLayout();

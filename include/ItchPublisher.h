@@ -83,12 +83,14 @@ public:
     ItchPublisher(const ItchPublisher&)            = delete;
     ItchPublisher& operator=(const ItchPublisher&) = delete;
 
-    // Inject a clock for deterministic test assertions. Default uses
-    // steady_clock::now() in nanoseconds. Real ITCH expects
-    // nanoseconds since UTC midnight — the production caller wires
-    // that timestamp source. The timestamp is captured on the caller
-    // thread at event time (so async serialization preserves it); set
-    // the clock before any traffic / before enableAsyncPublishing().
+    // Inject a clock for deterministic test assertions. The default is
+    // nanoseconds since UTC midnight from system_clock — the time of day
+    // ITCH's 48-bit timestamp carries. (It was steady_clock: time since
+    // boot, which is no time of day — MD-16.) A venue on another day
+    // boundary (Nasdaq uses US Eastern) injects its own. The timestamp is
+    // captured on the caller thread at event time (so async serialization
+    // preserves it); set the clock before any traffic / before
+    // enableAsyncPublishing().
     void setClock(ClockFn clock) { clock_ = std::move(clock); }
 
     // ── P3-1: off-thread (decoupled) publishing ─────────────────────
@@ -390,8 +392,9 @@ private:
             // 'E' tells subscribers the order traded at the price it was
             // announced with. At an auction uncross everything fills at the
             // clearing price instead, so say the price ('C') — MD-6.
-            // ponytail: printable 'Y' keeps today's volume semantics; a cross
-            // still prints both sides (see the MD-6 note in the report).
+            // ponytail: printable 'Y', so a cross still counts both sides as
+            // volume. ITCH's form is non-printable 'C's plus one 'Q' per
+            // uncross, which needs the uncross volume — nothing reports it yet.
             uint8_t buf[ITCH_SIZE_ORDER_EXECUTED_PX];
             size_t n = (e.price == it->second.price)
                 ? encodeOrderExecuted(buf, locateOf(), nextTracking(), e.ts,
@@ -517,8 +520,9 @@ private:
 
     uint64_t now() const {
         if (clock_) return clock_();
-        return static_cast<uint64_t>(
-            std::chrono::steady_clock::now().time_since_epoch().count());
+        constexpr uint64_t kDayNs = 86'400'000'000'000ULL;
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::system_clock::now().time_since_epoch()).count()) % kDayNs;
     }
 
     static constexpr std::chrono::microseconds kIdleSleep{50};

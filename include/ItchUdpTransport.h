@@ -101,9 +101,11 @@ public:
         mold_.reset(new MoldUDP64Publisher(
             session_,
             [this](std::string_view bytes) {
-                ::sendto(fd_, bytes.data(), bytes.size(), 0,
-                         reinterpret_cast<sockaddr*>(&dest_), sizeof(dest_));
-                datagramsSent_.fetch_add(1, std::memory_order_relaxed);
+                const ssize_t n = ::sendto(fd_, bytes.data(), bytes.size(), 0,
+                                           reinterpret_cast<sockaddr*>(&dest_), sizeof(dest_));
+                auto& counter = (n == static_cast<ssize_t>(bytes.size())) ? datagramsSent_
+                                                                          : sendFailures_;
+                counter.fetch_add(1, std::memory_order_relaxed);
             },
             mtu_));
         // A restart continues the sequence under the same session. Starting
@@ -142,6 +144,10 @@ public:
         return mold_ ? mold_->nextSequence() : resumeSeq_;
     }
     uint64_t datagramsSent() const { return datagramsSent_.load(std::memory_order_relaxed); }
+    // sendto() refusals (EMSGSIZE, ENOBUFS, unreachable...). The sequence the
+    // datagram carried is still consumed, so subscribers see a gap and recover
+    // it from the retransmission journal.
+    uint64_t sendFailures()  const { return sendFailures_.load(std::memory_order_relaxed); }
 
 private:
     std::string                              session_;
@@ -152,6 +158,7 @@ private:
     std::unique_ptr<MoldUDP64Publisher>      mold_;
     uint64_t                                 resumeSeq_{1};  // next seq after a restart
     std::atomic<uint64_t>                    datagramsSent_{0};
+    std::atomic<uint64_t>                    sendFailures_{0};
 };
 
 // ─── Subscriber ─────────────────────────────────────────────────────────────

@@ -247,6 +247,27 @@ void test_UdpPublisherRestartContinuesSequence() {
     } END
 }
 
+// MD-18. The sink ignored sendto()'s result and counted every datagram as
+// sent, so a feed that was failing to send looked healthy. A datagram past the
+// largest UDP payload (65,507 bytes) is refused by every kernel.
+void test_UdpSendFailureIsNotCountedAsSent() {
+    TEST(UdpSendFailureIsNotCountedAsSent) {
+        ItchUdpSubscriber sub;
+        CHECK(sub.start("127.0.0.1", 0));
+        ItchUdpPublisher pub("FEED", /*mtu=*/100000);
+        CHECK(pub.start("127.0.0.1", sub.boundPort()));
+
+        std::vector<uint8_t> big(40000, 'x');
+        pub.publish(big.data(), static_cast<uint16_t>(big.size()));
+        pub.publish(big.data(), static_cast<uint16_t>(big.size()));
+        pub.flush();                          // one 80,044-byte datagram
+
+        CHECK(pub.datagramsSent() == 0 && "a refused datagram was counted as sent");
+        CHECK(pub.sendFailures() == 1);
+        pub.stop(); sub.stop();
+    } END
+}
+
 int main() {
     std::cout << "Running ItchUdpTransportTest\n";
 
@@ -256,6 +277,7 @@ int main() {
     test_UdpEndOfSession();
     test_UdpItchAddOrderEndToEnd();
     test_UdpPublisherRestartContinuesSequence();
+    test_UdpSendFailureIsNotCountedAsSent();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

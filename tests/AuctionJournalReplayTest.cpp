@@ -17,6 +17,7 @@
 
 #include "Journal.h"
 #include "MatchingEngine.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -52,8 +53,7 @@ BookState capture(MatchingEngine& e) {
 }
 
 fs::path freshPath(const char* tag) {
-    fs::path p = fs::temp_directory_path() /
-        (std::string("auction_journal_") + tag + "_" + std::to_string(::getpid()) + ".bin");
+    fs::path p = uniqueTempPath(std::string("auction_journal_") + tag + ".bin");
     fs::remove(p);
     fs::remove(fs::path(p.string() + ".tmp"));
     return p;

@@ -15,6 +15,7 @@
 
 #include "EventListener.h"
 #include "SessionScheduler.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -57,8 +58,7 @@ void schedulerCloseCancelsDayOrders() {
 }
 
 void endTradingSessionIsJournaledAndScoped() {
-    const fs::path path = fs::temp_directory_path() /
-        ("session_end_" + std::to_string(::getpid()) + ".bin");
+    const fs::path path = uniqueTempPath("session_end.bin");
     fs::remove(path);
     {
         MatchingEngine engine;

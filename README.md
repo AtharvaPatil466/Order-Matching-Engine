@@ -41,7 +41,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ### Concurrency & Networking
 - **Thread-Per-Symbol Partitioning**: N worker threads with independent lock-free `MpscQueue` ring buffers, routed by `hash(symbolId) % numThreads`
 - **TCP Gateway**: the native binary protocol (`GatewayProtocol.h`) with non-blocking I/O via `epoll`/`kqueue` — the only order-entry protocol a shipped binary serves. FIX 4.4 session management (version negotiation, numeric `OrdRejReason` mapping, `TransactTime` enforcement) lives in the library-only `FixSession`/`FixTcpGateway`
-- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades
+- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer (GatewayServer publishes updates and its once-a-second L2 snapshots from the event thread); each slot is a seqlock, so a lapped reader never takes a torn entry. `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
 - **Binary Protocol Versioning**: `GatewayProtocol.h` — 16-byte fixed header with V1/V2 payload evolution, forward+backward compatibility, and `GatewayResponse` ack frames
 
 ### Multi-Protocol Order Entry
@@ -55,7 +55,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ### Market Data Stack
 **Library code.** Neither binary publishes ITCH or MoldUDP64 or runs the retransmission service; `GatewayServer` publishes to shared memory (`MarketDataPublisher`), and `OrderEngine` publishes no market data.
 - **ITCH 5.0 publisher** (`ItchPublisher.h`): 10 message types — `S` SystemEvent, `R` Stock Directory, `H` Trading Action (engine `TradingState` → wire halt/resume), `A` AddOrder, `E`/`C` Executed, `X` Cancel, `D` Delete, `P` Trade, `Q` Cross Trade. Per-`OrderBook` `EventListener` that looks up resting orders via `book.getOrder()` to populate side/price fields the listener path doesn't carry.
-- **MoldUDP64 multicast** (`MoldUDP64.h`): batched publisher with MTU auto-flush + gap-detecting subscriber. Heartbeat with `nextExpectedSeq` lets subscribers detect silent gaps even during quiet markets. Session-ID mismatch reported separately from gap.
+- **MoldUDP64 multicast** (`MoldUDP64.h`): batched publisher with MTU auto-flush (default bound 1472 bytes, so a full packet fits one Ethernet frame unfragmented) + gap-detecting subscriber. Heartbeat with `nextExpectedSeq` lets subscribers detect silent gaps even during quiet markets. Session-ID mismatch reported separately from gap.
 - **Real UDP transport** (`ItchUdpTransport.h`): `ItchUdpPublisher` writes via `sendto`, `ItchUdpSubscriber` joins multicast group via `IP_ADD_MEMBERSHIP` and runs a recv thread feeding `MoldUDP64Subscriber`. Tested over real 127.0.0.1 sockets (`ItchUdpTransportTest`).
 - **Integrated publish pipeline** (`ItchMarketDataFeed.h`): engine event → ITCH frame → [UDP datagram + journal record]. One per-frame `flush()` so each event lands as its own datagram with a deterministic sequence number.
 - **Gap recovery** (`MoldPacketJournal.h` + `ItchRetransmissionService.h`): bounded ring of journaled MoldUDP64 messages backs a SoupBinTCP-over-TCP retransmission service. End-to-end test exercises: publisher records → subscriber gap → SoupBinTCP login + re-request → byte-exact replay.
@@ -480,7 +480,7 @@ The wire-protocol codecs (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retra
 |------|--------|---------|
 | x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
 | `Replication.tla` TLC run | Passes at MaxEntries=10, but **vacuously**: the backup can never promote under either cfg. When promotion is reachable, split brain appears; the spec has no primary step-down | Spec rework (step-down, bounded skew, a liveness property) |
-| io_uring async journal writes | Implemented behind `#ifdef __linux__` (`fdatasync`/`F_FULLFSYNC` fallback elsewhere); pending x86 validation | Linux + `liburing` — **no special NIC** |
+| io_uring async journal writes | Implemented behind `#ifdef __linux__` (`fdatasync`/`F_FULLFSYNC` fallback elsewhere); the `Ubuntu io_uring Journal` CI lane builds it and runs the suite on it (with a runtime probe, so a silent fallback cannot pass); latency not yet measured on x86 | Linux + `liburing` — **no special NIC** |
 | DPDK kernel bypass | **Written, never executed** — no run, no measurement, no demonstrated benefit. Not hardware-blocked: it targets commodity AWS ENA | Linux + a secondary ENI + hugepages + the DPDK/F-Stack toolchain |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |

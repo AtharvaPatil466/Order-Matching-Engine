@@ -28,6 +28,11 @@ impossible.
 Override with `-DOB_ARCH=<value>` at configure time, or `--build-arg OB_ARCH=`
 for the image.
 
+`-Wall -Wextra -Werror` apply to every build type — Debug, the sanitizer and
+ThreadSanitizer lanes, fault injection and Release alike. Warnings that depend
+on the host rather than on the code stay non-fatal: `character-conversion`
+always (it fires inside googletest on newer Clang), and:
+
 Note `-Wno-error=invalid-feature-combination` is applied only under
 `OB_ARCH=native`: its cause is `-march=native` on newer silicon, so a pinned
 build carries no arch-related warning demotions and `-Werror` is absolute there.
@@ -93,7 +98,7 @@ cmake --build build-pgo -j --target HonestBenchmark
   50K/seed=42 order flow — representative for that benchmark, not a guarantee
   for arbitrary production flow. Re-profile with a workload that matches your
   real traffic if that differs materially.
-- **`-Werror` interaction:** the Release build uses `-Werror`. In use-mode
+- **`-Werror` interaction:** every build type uses `-Wall -Wextra -Werror`. In use-mode
   Clang emits `-Wprofile-instr-unprofiled` (functions the benchmark never
   exercised — gateways, research, etc.) and `-Wprofile-instr-out-of-date`
   (source drift vs. profile). CMake demotes exactly those two to warnings so

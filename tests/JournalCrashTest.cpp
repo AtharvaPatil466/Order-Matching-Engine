@@ -225,7 +225,9 @@ void testCorruptedCRC() {
                                         3 * sizeof(JournalEntry) + 20);
         std::fseek(f, offset, SEEK_SET);
         uint8_t byte;
-        std::fread(&byte, 1, 1, f);
+        const size_t got = std::fread(&byte, 1, 1, f);
+        assert(got == 1 && "could not read the byte to corrupt");
+        (void)got;
         byte ^= 0xFF; // flip all bits
         std::fseek(f, offset, SEEK_SET);
         std::fwrite(&byte, 1, 1, f);
@@ -946,7 +948,9 @@ void testCorruptRecordWithMoreAfterIsRefused() {
                                               2 * sizeof(JournalEntry) + 20);
         std::fseek(f, offset, SEEK_SET);
         uint8_t byte = 0;
-        std::fread(&byte, 1, 1, f);
+        const size_t got = std::fread(&byte, 1, 1, f);
+        assert(got == 1 && "could not read the byte to corrupt");
+        (void)got;
         byte ^= 0xFF;
         std::fseek(f, offset, SEEK_SET);
         std::fwrite(&byte, 1, 1, f);

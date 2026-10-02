@@ -126,7 +126,9 @@ public:
     void stop() {
         if (!running_.exchange(false)) return;
         // Wake the loop.
-        if (wake_[1] >= 0) { char c = 1; (void)::write(wake_[1], &c, 1); }
+        // A full pipe (EAGAIN) means the loop is already awake. Not (void): glibc
+        // marks write() warn_unused_result, which a cast does not silence on GCC.
+        if (wake_[1] >= 0) { char c = 1; if (::write(wake_[1], &c, 1) < 0) {} }
         if (loopThread_.joinable()) loopThread_.join();
 
         // After the loop exits, no other thread touches connections_.

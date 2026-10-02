@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <type_traits>
 
 // POSIX shared memory
 #include <sys/mman.h>
@@ -26,9 +27,16 @@ namespace OrderMatcher {
 // it to SLOT_WRITING, writes the payload, then stores the entry's sequence. A
 // reader accepts a slot only if it reads the sequence it wants both before and
 // after copying the payload, so a writer that laps it mid-copy can't hand it
-// half of one update and half of the next. Payload words are copied with
-// relaxed atomics: the copy races the writer by design, and a plain memcpy
-// would be a data race (and a TSan report) on every lap.
+// half of one update and half of the next. Payload words are atomics — the
+// copy races the writer by design, and a plain memcpy would be a data race
+// (and a TSan report) on every lap — stored with release and loaded with
+// acquire, so a reader that sees any new word also sees SLOT_WRITING when it
+// re-reads the lock word. That ordering is usually written with two fences;
+// GCC's ThreadSanitizer does not model fences and refuses them (-Werror=tsan),
+// and on x86 these orderings cost nothing over relaxed. Entries go in and out
+// of the word buffers by memcpy: reading or writing a ShmEntry through a
+// uint64_t* breaks strict aliasing, and GCC at -O2 took the fields as never
+// written (-Wmaybe-uninitialized).
 //
 // ShmHeader::epoch names the publisher session: its start time in ns, set by
 // start(), and 0 once stop() has run. A subscriber remembers the epoch it
@@ -85,6 +93,7 @@ inline constexpr size_t ENTRY_WORDS = sizeof(ShmEntry) / sizeof(uint64_t);
 static_assert(sizeof(ShmEntry) % sizeof(uint64_t) == 0 && alignof(ShmEntry) >= alignof(uint64_t),
               "the seqlock copies ShmEntry as whole 64-bit words");
 static_assert(offsetof(ShmEntry, sequence) == 0, "the lock word is the first word");
+static_assert(std::is_trivially_copyable_v<ShmEntry>, "entries are memcpy'd to and from words");
 
 inline std::atomic_ref<uint64_t> word(const void* base, size_t i) {
     return std::atomic_ref<uint64_t>(
@@ -230,11 +239,11 @@ private:
         const uint64_t seq = nextSeq_++;
         ShmEntry* slot = getEntry(seq);
 
+        uint64_t src[shm_detail::ENTRY_WORDS];
+        std::memcpy(src, &entry, sizeof(src));
         shm_detail::word(slot, 0).store(shm_detail::SLOT_WRITING, std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_release);
-        const auto* src = reinterpret_cast<const uint64_t*>(&entry);
         for (size_t i = 1; i < shm_detail::ENTRY_WORDS; ++i)
-            shm_detail::word(slot, i).store(src[i], std::memory_order_relaxed);
+            shm_detail::word(slot, i).store(src[i], std::memory_order_release);
         shm_detail::word(slot, 0).store(seq, std::memory_order_release);
 
         header->writeSeq.store(seq + 1, std::memory_order_release);
@@ -395,14 +404,14 @@ public:
         // Seqlock read: the slot must hold readSeq_ before and after the copy.
         const ShmEntry* slot = getEntry(readSeq_);
         if (shm_detail::word(slot, 0).load(std::memory_order_acquire) == readSeq_) {
-            auto* dst = reinterpret_cast<uint64_t*>(&out);
+            uint64_t words[shm_detail::ENTRY_WORDS];
             for (size_t i = 0; i < shm_detail::ENTRY_WORDS; ++i)
-                dst[i] = shm_detail::word(slot, i).load(std::memory_order_relaxed);
-            std::atomic_thread_fence(std::memory_order_acquire);
+                words[i] = shm_detail::word(slot, i).load(std::memory_order_acquire);
             if (shm_detail::word(slot, 0).load(std::memory_order_relaxed) == readSeq_) {
                 // A restarted publisher may have rewritten this slot with the
                 // same sequence; its new epoch is visible by now if so.
                 if (header->epoch.load(std::memory_order_relaxed) != epoch_) return reset();
+                std::memcpy(&out, words, sizeof(words));
                 out.sequence = readSeq_;
                 readSeq_++;
                 return PollResult::Entry;

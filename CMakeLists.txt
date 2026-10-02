@@ -67,7 +67,27 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
         set(_ob_arch_flags "-march=${OB_ARCH}")
     endif()
     message(STATUS "Enabling HFT Optimizations: -O3 ${_ob_arch_flags} (OB_ARCH=${OB_ARCH})")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 ${_ob_arch_flags} -Wall -Wextra -Werror")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 ${_ob_arch_flags}")
+    
+    if(ENABLE_LTO)
+        # Link Time Optimization (LTO)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT result OUTPUT output)
+        if(result)
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+            message(STATUS "LTO Enabled")
+        else()
+            message(WARNING "LTO not supported: ${output}")
+        endif()
+    endif()
+endif()
+
+# ─── Warnings ───────────────────────────────────────────────────────────────
+# -Wall -Wextra -Werror in EVERY build type. They used to live in
+# CMAKE_CXX_FLAGS_RELEASE only, so the Debug, sanitizer, ThreadSanitizer and
+# fault-injection lanes compiled with no warnings enabled at all.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(-Wall -Wextra -Werror)
     # Warnings that depend on the HOST rather than on our code must not be
     # fatal, because -Werror would turn them into a build that fails only on
     # some machines.
@@ -91,28 +111,16 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
     #                                stays absolute there.
     include(CheckCXXCompilerFlag)
     set(_host_warns character-conversion)
-    if(OB_ARCH STREQUAL "native")
+    if(CMAKE_BUILD_TYPE MATCHES "Release" AND OB_ARCH STREQUAL "native")
         list(APPEND _host_warns invalid-feature-combination)
     endif()
     foreach(_host_warn IN LISTS _host_warns)
         string(MAKE_C_IDENTIFIER "HAS_WNO_ERROR_${_host_warn}" _host_warn_var)
         check_cxx_compiler_flag("-Wno-error=${_host_warn}" ${_host_warn_var})
         if(${_host_warn_var})
-            set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wno-error=${_host_warn}")
+            add_compile_options(-Wno-error=${_host_warn})
         endif()
     endforeach()
-    
-    if(ENABLE_LTO)
-        # Link Time Optimization (LTO)
-        include(CheckIPOSupported)
-        check_ipo_supported(RESULT result OUTPUT output)
-        if(result)
-            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-            message(STATUS "LTO Enabled")
-        else()
-            message(WARNING "LTO not supported: ${output}")
-        endif()
-    endif()
 endif()
 
 # ─── Profile-Guided Optimization (Clang IR-based PGO) ───────────────────────

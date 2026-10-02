@@ -1873,6 +1873,12 @@ void OrderBook::setTradingStateLocked(TradingState s) {
     // nothing in between. A Halt prints nothing, so it does not cross.
     if (inAuctionState() && (s == TradingState::Continuous || s == TradingState::PostClose))
         uncrossLocked();
+    // A volatility auction's reopening print re-anchors the breaker reference,
+    // so the post-auction bands measure from the fresh price. Here rather than
+    // in resumeVolatilityAuction() so a replayed state change does it too.
+    if (tradingState_ == TradingState::VolatilityAuction && s == TradingState::Continuous &&
+        lastTradePrice_ > 0)
+        referencePrice_ = lastTradePrice_;
     // Observability/audit contract: emit `trading_state_change` (symbol/from/to)
     // alongside the newer structured `trading.state_change` event so existing
     // monitoring and StructuredLogTest continue to observe the transition.
@@ -3209,18 +3215,11 @@ AuctionResult OrderBook::computeAuctionState() const {
 }
 
 bool OrderBook::resumeVolatilityAuction() {
-    // Pre-check without the lock: tradingState_ is a plain field read in
-    // the engine's single-writer-per-book model (same relaxed treatment
-    // as isHalted()). uncross() acquires the unique lock itself, so we
-    // must not be holding one across the call.
     std::unique_lock<std::mutex> lock(bookLock_);
     if (tradingState_ != TradingState::VolatilityAuction) return false;
 
-    // The reopening cross and the flip, under one lock (H4).
+    // The reopening cross, the re-anchor and the flip, under one lock (H4).
     setTradingStateLocked(TradingState::Continuous);
-    // Re-anchor the volatility reference to the reopening print so the
-    // post-auction circuit-breaker bands measure from the fresh price.
-    if (lastTradePrice_ > 0) referencePrice_ = lastTradePrice_;
     return true;
 }
 

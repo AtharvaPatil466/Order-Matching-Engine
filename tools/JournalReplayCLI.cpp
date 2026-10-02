@@ -29,7 +29,7 @@ void printStats(const std::string& journalPath) {
     auto entries = journal.readAll(true, false);
 
     uint64_t addOrders = 0, cancels = 0, modifies = 0;
-    uint64_t cancelReplaces = 0, snapshots = 0;
+    uint64_t cancelReplaces = 0, snapshots = 0, sessionRecords = 0;
 
     for (const auto& e : entries) {
         switch (e.entryType) {
@@ -38,6 +38,8 @@ void printStats(const std::string& journalPath) {
         case JournalEntry::Type::ModifyOrder:    modifies++; break;
         case JournalEntry::Type::CancelReplace:  cancelReplaces++; break;
         case JournalEntry::Type::Snapshot:       snapshots++; break;
+        case JournalEntry::Type::TradingStateChange:
+        case JournalEntry::Type::Uncross:        sessionRecords++; break;
         default: break;
         }
     }
@@ -50,6 +52,7 @@ void printStats(const std::string& journalPath) {
     std::printf("  Modifies:      %llu\n", (unsigned long long)modifies);
     std::printf("  CancelReplace: %llu\n", (unsigned long long)cancelReplaces);
     std::printf("  Snapshots:     %llu\n", (unsigned long long)snapshots);
+    std::printf("  Session ctl:   %llu\n", (unsigned long long)sessionRecords);
 }
 
 // ─── Tail mode: show last N entries ──────────────────────────────────────────
@@ -73,6 +76,8 @@ void printTail(const std::string& journalPath, size_t count) {
         case JournalEntry::Type::ModifyOrder:    typeName = "ModifyOrder"; break;
         case JournalEntry::Type::CancelReplace:  typeName = "CancelReplace"; break;
         case JournalEntry::Type::Snapshot:       typeName = "Snapshot"; break;
+        case JournalEntry::Type::TradingStateChange: typeName = "TradingState"; break;
+        case JournalEntry::Type::Uncross:        typeName = "Uncross"; break;
         default: break;
         }
 

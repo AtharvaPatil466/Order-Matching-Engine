@@ -446,6 +446,10 @@ private:
         case JournalEntry::Type::CancelReplace:
             book->cancelReplace(e.orderId, e.newPrice, e.newQty);
             break;
+        case JournalEntry::Type::TradingStateChange:
+        case JournalEntry::Type::Uncross:
+            applySessionRecord(*book, e);
+            break;
         case JournalEntry::Type::Snapshot:
             // Same shape as MatchingEngine::replayJournal and
             // applyReplicatedEntry, which apply this record type from disk and

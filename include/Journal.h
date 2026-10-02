@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -86,7 +87,7 @@ inline uint32_t computeCRC32(const void* data, size_t length) {
 // ever written here".
 //
 // LEGACY DISCRIMINATION. A pre-header file begins with a JournalEntry, whose
-// first byte is entryType — always 1..5. `magic` begins with 'O' (0x4F), which
+// first byte is entryType — always 1..7. `magic` begins with 'O' (0x4F), which
 // no entryType can be, so "starts with the magic" separates a headered file
 // from a pre-header one with certainty rather than by probability. Files
 // written before this header are still read, as bare records.
@@ -101,6 +102,13 @@ struct JournalFileHeader {
 
 inline constexpr char     JOURNAL_MAGIC[8]    = {'O','B','J','R','N','L','\0','\0'};
 inline constexpr uint32_t JOURNAL_FORMAT_V1   = 1;
+// v2 adds the TradingStateChange and Uncross records (roadmap 1.8-H1, AUCT-1).
+// The record layout is unchanged, so this build reads v1 too. The bump is for
+// the other direction: a v1 build replaying a v2 file would skip the records it
+// does not know and re-run every auction order as a continuous one, so it must
+// refuse the file instead. A v1 file is marked v2 before its first new record.
+inline constexpr uint32_t JOURNAL_FORMAT_V2      = 2;
+inline constexpr uint32_t JOURNAL_FORMAT_CURRENT = JOURNAL_FORMAT_V2;
 
 // contentEpoch answers a different question from formatVersion, and conflating
 // the two would be a lie in both directions. formatVersion is the LAYOUT
@@ -142,7 +150,12 @@ struct JournalEntry {
         CancelOrder = 2,
         ModifyOrder = 3,
         CancelReplace = 4,
-        Snapshot = 5
+        Snapshot = 5,
+        // Format v2. A book's trading state changed to TradingState(quantity),
+        // including the uncross that leaving an auction state runs.
+        TradingStateChange = 6,
+        // An explicit uncross that does not change the state.
+        Uncross = 7
     };
 
     Type entryType;
@@ -170,6 +183,21 @@ struct JournalEntry {
     uint32_t checksum;
 };
 #pragma pack(pop)
+
+// The state a TradingStateChange record carries.
+inline TradingState journaledTradingState(const JournalEntry& e) {
+    return static_cast<TradingState>(e.quantity);
+}
+
+// Replays a session-control record onto a book: every journal reader applies
+// these the same way. A template so this header need not include OrderBook.h.
+template <typename Book>
+void applySessionRecord(Book& book, const JournalEntry& e) {
+    if (e.entryType == JournalEntry::Type::TradingStateChange)
+        book.setTradingState(journaledTradingState(e));
+    else if (e.entryType == JournalEntry::Type::Uncross)
+        book.uncross();
+}
 
 class Journal {
 public:
@@ -338,6 +366,25 @@ public:
         entry.trailAmount = trailAmount;
         entry.minQty = minQty;
         entry.hidden = hidden;
+        appendEntry(entry);
+    }
+
+    // Session control. Replay applies them to the book in journal order, so
+    // the orders around an auction are re-run under the same states (AUCT-1).
+    void logTradingState(SymbolId symbolId, TradingState state) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::TradingStateChange;
+        entry.timestamp = now();
+        entry.symbolId = symbolId;
+        entry.quantity = static_cast<Quantity>(state);
+        appendEntry(entry);
+    }
+
+    void logUncross(SymbolId symbolId) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Uncross;
+        entry.timestamp = now();
+        entry.symbolId = symbolId;
         appendEntry(entry);
     }
 
@@ -1310,10 +1357,11 @@ private:
     // paths; a no-op after the first time and on pre-header files.
     void writePendingHeader() {
         cutTornTail();   // never write behind a torn record
+        upgradeV1Header();
         if (!pendingHeader_ || !file_) return;
         JournalFileHeader h{};
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
-        h.formatVersion = JOURNAL_FORMAT_V1;
+        h.formatVersion = JOURNAL_FORMAT_CURRENT;
         h.recordSize    = static_cast<uint32_t>(sizeof(JournalEntry));
         // This journal's own epoch: NO_SEEDING for a file this build created,
         // since it seeds no synthetic orders. A checkpoint rewrite comes through
@@ -1333,6 +1381,23 @@ private:
             failStop("writing the journal header", errno);
         pendingHeader_ = false;
         bytesOnDisk_.fetch_add(sizeof(JournalFileHeader), std::memory_order_relaxed);
+    }
+
+    // Mark a v1 file v2 before anything is appended to it, since what is
+    // appended may be a record a v1 build cannot read. In place, through its
+    // own descriptor: file_ is O_APPEND, where a positioned write lands at EOF.
+    void upgradeV1Header() {
+        if (!headerIsV1_) return;
+        const uint32_t v = JOURNAL_FORMAT_CURRENT;
+        const int fd = ::open(filePath_.c_str(), O_WRONLY);
+        const bool ok = fd >= 0 &&
+            ::pwrite(fd, &v, sizeof(v), offsetof(JournalFileHeader, formatVersion)) ==
+                static_cast<ssize_t>(sizeof(v)) &&
+            syncFd(fd);
+        const int err = errno;
+        if (fd >= 0) ::close(fd);
+        if (!ok) failStop("upgrading the journal header to format v2", err);
+        headerIsV1_ = false;
     }
 
     size_t writeBatch(size_t toWrite) {
@@ -1470,7 +1535,7 @@ private:
         const bool got = std::fread(&h, sizeof(h), 1, file_) == 1;
         if (!got || std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) != 0) {
             // Pre-header file: a bare array of records, still readable. Its
-            // first byte is an entryType (1..5) and the magic starts with 'O',
+            // first byte is an entryType (1..7) and the magic starts with 'O',
             // so this is a definite answer, not a guess.
             dataOffset_ = 0;
             // Older than the header itself, so certainly older than the build
@@ -1481,7 +1546,8 @@ private:
 
         dataOffset_ = sizeof(JournalFileHeader);
         contentEpoch_ = h.contentEpoch;
-        if (h.formatVersion != JOURNAL_FORMAT_V1 ||
+        headerIsV1_ = h.formatVersion == JOURNAL_FORMAT_V1;
+        if ((h.formatVersion != JOURNAL_FORMAT_V1 && h.formatVersion != JOURNAL_FORMAT_CURRENT) ||
             h.recordSize != sizeof(JournalEntry)) {
             recoveryFailed_ = true;
             std::fprintf(stderr,
@@ -1495,7 +1561,7 @@ private:
                 "that wrote it, or\n"
                 "          start from a checkpoint.\n",
                 filePath_.c_str(), h.formatVersion, h.recordSize,
-                JOURNAL_FORMAT_V1, sizeof(JournalEntry));
+                JOURNAL_FORMAT_CURRENT, sizeof(JournalEntry));
         }
     }
 
@@ -1720,6 +1786,8 @@ private:
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().
     bool   pendingHeader_{false};
+    // The existing header says v1; upgradeV1Header() marks it before a write.
+    bool   headerIsV1_{false};
     // A torn final write still to cut: tornBytes_ bytes from offset tornFrom_.
     // See cutTornTail().
     size_t tornFrom_{0};

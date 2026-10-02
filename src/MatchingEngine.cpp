@@ -939,6 +939,10 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         }
         break;
     }
+    case OrderRequest::Type::TradingState:
+    case OrderRequest::Type::Uncross:
+        (void)applySessionControl(req);
+        break;
     case OrderRequest::Type::ExpireCheck: {
         if (threadIndex >= symbolsByThread_.size()) {
             return;
@@ -1967,49 +1971,107 @@ MarketDataSnapshot MatchingEngine::getSnapshot(SymbolId symbolId, size_t depth) 
     return {};
 }
 
-void MatchingEngine::uncross(SymbolId symbolId) {
-    if (auto* book = getOrderBook(symbolId)) {
+// Session control. Each transition and uncross is applied by the book's
+// owning thread and journaled there, so the record lands in the journal in
+// order with that book's orders and replay re-runs the auction exactly
+// (roadmap 1.8-H1, AUCT-1). These used to mutate worker-owned books from the
+// caller's thread (THR-1) and journal nothing: replay ran every auction order
+// as a continuous one.
+//
+// In async mode the requests ride the workers' own queues and the caller
+// waits for the drain. bookMutex_ only covers the enqueue: waitForDrain() may
+// run a checkpoint, which takes it. A batch is therefore applied per book in
+// that book's order flow, not as one instant across books.
+uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
+    auto* book = getOrderBook(req.symbolId);
+    if (!book) return 0;
+    if (req.type == OrderRequest::Type::TradingState) {
+        book->setTradingState(static_cast<TradingState>(req.newQty));
+    } else {
         book->uncross();
     }
+    uint64_t appendOrdinal = 0;
+    if (journal_) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        if (req.type == OrderRequest::Type::TradingState) {
+            journal_->logTradingState(req.symbolId, static_cast<TradingState>(req.newQty));
+        } else {
+            journal_->logUncross(req.symbolId);
+        }
+        appendOrdinal = journal_->entriesAppended();
+    }
+    // An uncross fills OCO legs like any match does.
+    if (ocoActive_.load(std::memory_order_relaxed) ||
+        observersActive_.load(std::memory_order_relaxed)) {
+        driveOco(req.symbolId, book);
+    }
+    return appendOrdinal;
+}
+
+void MatchingEngine::routeSessionControl(SymbolId symbolId, OrderRequest::Type type,
+                                         TradingState state) {
+    OrderRequest req{};
+    req.type = type;
+    req.symbolId = symbolId;
+    req.newQty = static_cast<Quantity>(state);
+    if (async_) {
+        enqueueControl(getThreadIndex(symbolId), req);
+        return;
+    }
+    // Sync: hold the cross's fills until the record behind them is durable,
+    // as every other sync path does.
+    durabilityGate_.beginOrder();
+    holdUntilDurable(applySessionControl(req));
+}
+
+void MatchingEngine::uncross(SymbolId symbolId) {
+    (void)uncrossBatch({symbolId});
 }
 
 size_t MatchingEngine::setTradingStateBatch(
         const std::vector<SymbolId>& symbols, TradingState state) {
-    // Hold booksMutex_ for the whole batch. Per-book setTradingState is
-    // a single atomic field assignment, so the lock just enforces that
-    // any concurrent observer sees either the pre-batch or post-batch
-    // configuration — never a mix.
-    std::lock_guard<std::mutex> lock(bookMutex_);
     size_t transitioned = 0;
-    for (SymbolId s : symbols) {
-        if (auto* book = getOrderBook(s)) {
-            book->setTradingState(state);
+    {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        for (SymbolId s : symbols) {
+            if (!getOrderBook(s)) continue;
+            routeSessionControl(s, OrderRequest::Type::TradingState, state);
             ++transitioned;
         }
     }
+    waitForDrain();
     return transitioned;
 }
 
 size_t MatchingEngine::uncrossBatch(const std::vector<SymbolId>& symbols) {
-    std::lock_guard<std::mutex> lock(bookMutex_);
     size_t crossed = 0;
-    for (SymbolId s : symbols) {
-        if (auto* book = getOrderBook(s)) {
-            book->uncross();
+    {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        for (SymbolId s : symbols) {
+            if (!getOrderBook(s)) continue;
+            routeSessionControl(s, OrderRequest::Type::Uncross);
             ++crossed;
         }
     }
+    waitForDrain();
     return crossed;
 }
 
 size_t MatchingEngine::resumeVolatilityAuctions() {
-    std::lock_guard<std::mutex> lock(bookMutex_);
+    // Only session control changes a trading state, and it is serialized by
+    // bookMutex_, so the state read here is the one the worker will see.
+    // Leaving VolatilityAuction for Continuous is the reopening cross.
     size_t resumed = 0;
-    for (SymbolId s : symbolIds_) {
-        if (auto* book = getOrderBook(s)) {
-            if (book->resumeVolatilityAuction()) ++resumed;
+    {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        for (SymbolId s : symbolIds_) {
+            auto* book = getOrderBook(s);
+            if (!book || book->getTradingState() != TradingState::VolatilityAuction) continue;
+            routeSessionControl(s, OrderRequest::Type::TradingState, TradingState::Continuous);
+            ++resumed;
         }
     }
+    waitForDrain();
     return resumed;
 }
 
@@ -2137,6 +2199,19 @@ size_t MatchingEngine::replayJournal() {
             }
             break;
         }
+        case JournalEntry::Type::TradingStateChange:
+        case JournalEntry::Type::Uncross: {
+            auto* book = getOrderBook(entry.symbolId);
+            if (!book) {
+                addSymbol(entry.symbolId);
+                book = getOrderBook(entry.symbolId);
+                if (book) {
+                    book->setReplayMode(true);
+                }
+            }
+            if (book) applySessionRecord(*book, entry);
+            break;
+        }
         case JournalEntry::Type::Snapshot: {
             auto* book = getOrderBook(entry.symbolId);
             if (!book) {
@@ -2194,6 +2269,14 @@ void MatchingEngine::streamSnapshot(
     for (SymbolId symbolId : symbolIds_) {
         const auto* book = getOrderBook(symbolId);
         if (!book) continue;
+        // The state before the orders, as the checkpoint writes it (AUCT-1).
+        if (book->getTradingState() != TradingState::Continuous) {
+            JournalEntry st{};
+            st.entryType = JournalEntry::Type::TradingStateChange;
+            st.symbolId  = symbolId;
+            st.quantity  = static_cast<Quantity>(book->getTradingState());
+            fn(st);
+        }
         book->forEachOrderLocked([&](const Order& o) {
             JournalEntry e{};
             e.entryType    = JournalEntry::Type::Snapshot;
@@ -2290,6 +2373,14 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
         }
         break;
     }
+    case JournalEntry::Type::TradingStateChange:
+    case JournalEntry::Type::Uncross: {
+        auto* book = ensureBook(entry.symbolId);
+        if (!book) return false;
+        applySessionRecord(*book, entry);
+        applied = true;
+        break;
+    }
     case JournalEntry::Type::Snapshot: {
         auto* book = ensureBook(entry.symbolId);
         if (!book) return false;
@@ -2333,6 +2424,12 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
         case JournalEntry::Type::CancelReplace:
             journal_->logCancelReplace(entry.orderId, entry.symbolId,
                                        entry.newPrice, entry.newQty);
+            break;
+        case JournalEntry::Type::TradingStateChange:
+            journal_->logTradingState(entry.symbolId, journaledTradingState(entry));
+            break;
+        case JournalEntry::Type::Uncross:
+            journal_->logUncross(entry.symbolId);
             break;
         case JournalEntry::Type::Snapshot:
             journal_->logSnapshot(entry.orderId, entry.participantId,
@@ -2431,6 +2528,11 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // ExpireCheck. Order copies are read-only value snapshots — the
         // intrusive next/prev are never dereferenced.
         std::vector<std::pair<SymbolId, Order>> resting;
+        // A book's trading state goes in before its orders: replay restores
+        // them under it, and an accumulated auction book restored into a
+        // Continuous one would trade on arrival (AUCT-1). Continuous is the
+        // default, so it needs no record.
+        std::vector<std::pair<SymbolId, TradingState>> states;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
             for (SymbolId symbolId : symbolIds_) {
@@ -2438,6 +2540,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (!book) {
                     continue;
                 }
+                if (book->getTradingState() != TradingState::Continuous)
+                    states.emplace_back(symbolId, book->getTradingState());
                 book->forEachOrderLocked([&](const Order& order) {
                     resting.emplace_back(symbolId, order);
                 });
@@ -2445,6 +2549,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         }
 
         const auto writeSnapshot = [&](Journal& snapshotJournal) {
+            for (const auto& [symbolId, state] : states)
+                snapshotJournal.logTradingState(symbolId, state);
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,

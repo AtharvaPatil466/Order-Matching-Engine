@@ -39,7 +39,12 @@ struct OrderRequest {
         CancelReplace = 4,
         KillSwitch = 5,
         Shutdown = 6,
-        ExpireCheck = 7
+        ExpireCheck = 7,
+        // Session control (roadmap 1.8-H1 / G1): applied and journaled by the
+        // book's owning worker, in order with that book's order flow.
+        // TradingState carries the target state in newQty.
+        TradingState = 8,
+        Uncross = 9
     };
 
     Type type;
@@ -559,6 +564,14 @@ private:
     void addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo = MatchAlgorithm::PriceTime);
     void workerLoop(size_t threadIndex);
     void processRequest(size_t threadIndex, const OrderRequest& req);
+    // Session control: apply a TradingState / Uncross request to its book,
+    // journal it, and run OCO on the cross's fills. Returns the journal append
+    // ordinal (0 = not journaled). Runs on the book's owning thread.
+    uint64_t applySessionControl(const OrderRequest& req);
+    // Route one session-control request: to the owning worker in async mode
+    // (the caller then waitForDrain()s), applied here in sync mode.
+    void routeSessionControl(SymbolId symbolId, OrderRequest::Type type,
+                             TradingState state = TradingState::Continuous);
     void maybeTriggerAutoCheckpoint();
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);

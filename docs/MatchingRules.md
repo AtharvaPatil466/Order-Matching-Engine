@@ -727,6 +727,15 @@ field — and orders arriving between them reached continuous trading crossed, o
 market orders until the close (AUCT-4, MATCH-12, TLA-3). `SessionScheduler` now issues the
 flip alone. Entering `Halted` does not cross. Pinned by `tests/AuctionOpenAtomicTest.cpp`.
 
+Every trading-state change and every explicit uncross is journaled (`TradingStateChange`,
+`Uncross`; journal format v2, which still reads v1 and marks a v1 file v2 before appending), and
+replay applies them in journal order, so recovery re-runs each auction exactly. Through
+`MatchingEngine` they are applied and journaled by the book's owning worker, in order with that
+book's orders; a checkpoint writes each non-`Continuous` book's state before its orders. Before
+this, replay ran every order accumulated in an auction as a continuous one (roadmap 1.8-H1,
+AUCT-1; pinned by `tests/AuctionJournalReplayTest.cpp`). Leaving `VolatilityAuction` for
+`Continuous` re-anchors the breaker reference to the reopening print, however it is reached.
+
 > `setTradingStateLocked()` and the `inAuction` gates in `addOrder` / `cancelReplace`
 > `include/Types.h:166-185` — the trading-state enum and what each state admits
 

@@ -489,6 +489,14 @@ enable_assertions(SessionClockStepTest)
 add_test(NAME SessionClockStepTest COMMAND SessionClockStepTest)
 set_tests_properties(SessionClockStepTest PROPERTIES TIMEOUT 60 LABELS "project;session;lifecycle")
 
+# Roadmap 1.8-H1 (AUCT-1): trading-state changes and uncrosses are journaled
+# and replayed, so the recovered book equals the live one after an auction.
+add_executable(AuctionJournalReplayTest AuctionJournalReplayTest.cpp)
+target_link_libraries(AuctionJournalReplayTest PRIVATE OrderMatcher)
+enable_assertions(AuctionJournalReplayTest)
+add_test(NAME AuctionJournalReplayTest COMMAND AuctionJournalReplayTest)
+set_tests_properties(AuctionJournalReplayTest PROPERTIES TIMEOUT 60 LABELS "project;auction;journal")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

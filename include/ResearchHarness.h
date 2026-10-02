@@ -221,6 +221,14 @@ private:
                                                 e.newPrice, e.newQty);
                 }
                 break;
+
+            // Session control carries its symbol.
+            case JournalEntry::Type::TradingStateChange:
+                engine_.setTradingStateBatch({e.symbolId}, journaledTradingState(e));
+                break;
+            case JournalEntry::Type::Uncross:
+                engine_.uncrossBatch({e.symbolId});
+                break;
         }
     }
 

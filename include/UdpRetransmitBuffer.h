@@ -22,6 +22,7 @@
 
 #include "RxMessage.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -61,22 +62,34 @@ public:
         s.seq = seq;
         s.payload.len = n;
         std::memcpy(s.payload.bytes, data, n);
+        if (seq > newest_) newest_ = seq;
     }
 
     // Replay [seqStart, seqStart+count). For each sequence whose slot still holds
-    // it, invoke sendFn with the recorded payload. For any sequence the ring has
-    // since overwritten, log a "retransmit miss" and continue (never crash).
+    // it, invoke sendFn with the recorded payload. A sequence the ring has since
+    // overwritten counts as a miss (misses()); one not yet sent is skipped.
     // Returns the number of datagrams actually replayed.
+    //
+    // The count comes off the wire in a NAK, so the work is bounded by the ring,
+    // not by the count: only the newest Depth sequences can be held, the part of
+    // the range below them is counted as missed without walking it, and nothing
+    // is printed per miss. (A 4-billion count used to be walked one sequence and
+    // one stderr line at a time on the TX thread — MD-17.)
     uint32_t replay(uint64_t seqStart, uint32_t count, const TxFn& sendFn) {
+        if (count == 0 || newest_ == 0) return 0;
+        const uint64_t span = static_cast<uint64_t>(count) - 1;
+        const uint64_t reqLast = (seqStart > UINT64_MAX - span) ? UINT64_MAX : seqStart + span;
+        const uint64_t oldest = (newest_ >= Depth) ? newest_ - Depth + 1 : 1;
+        if (seqStart < oldest) misses_ += std::min(reqLast, oldest - 1) - seqStart + 1;
+
         uint32_t replayed = 0;
-        for (uint64_t seq = seqStart; seq < seqStart + count; ++seq) {
+        const uint64_t last = std::min(reqLast, newest_);
+        for (uint64_t seq = std::max(seqStart, oldest); seq <= last; ++seq) {
             const Slot& s = ring_[seq & kMask];
             if (s.seq == seq) {                       // slot still holds this seq
                 sendFn(s.payload.bytes, s.payload.len);
                 ++replayed;
             } else {
-                std::fprintf(stderr, "[retransmit] retransmit miss seq=%llu\n",
-                             static_cast<unsigned long long>(seq));
                 ++misses_;
             }
         }
@@ -96,6 +109,7 @@ private:
     };
 
     Slot     ring_[Depth];
+    uint64_t newest_{0};   // highest sequence recorded
     uint64_t misses_{0};
 };
 

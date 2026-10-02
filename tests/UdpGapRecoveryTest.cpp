@@ -292,6 +292,29 @@ void testLostNakIsRepeated() {
     std::printf("testLostNakIsRepeated PASSED\n");
 }
 
+// ── Test 10 (MD-17) ──────────────────────────────────────────────────────────
+// replay() walked every sequence of a NAK-supplied count — up to 4 billion — and
+// wrote a stderr line for each one it no longer held. One bogus NAK pinned the
+// sender's TX thread. Work per NAK is now bounded by the ring.
+void testReplayWorkIsBoundedByTheRing() {
+    std::printf("Running testReplayWorkIsBoundedByTheRing...\n");
+    UdpRetransmitBuffer<8> tb;
+    for (uint64_t s = 1; s <= 8; ++s) {
+        uint8_t p[8];
+        encodeSeqPayload(s, p);
+        tb.record(s, p, sizeof(p));
+    }
+    std::vector<uint64_t> replayed;
+    const uint32_t n = tb.replay(1, 1u << 20, [&](const void* d, uint16_t) {
+        replayed.push_back(UdpSequencer::readSeqBE(static_cast<const uint8_t*>(d)));
+    });
+    std::printf("  replayed %u, misses %llu\n", n,
+                static_cast<unsigned long long>(tb.misses()));
+    assert(n == 8 && orderIs(replayed, {1, 2, 3, 4, 5, 6, 7, 8}));
+    assert(tb.misses() == 0 && "a request past the ring was walked sequence by sequence");
+    std::printf("testReplayWorkIsBoundedByTheRing PASSED\n");
+}
+
 }  // namespace
 
 int main() {
@@ -306,6 +329,7 @@ int main() {
     testNakTxDropDoesNotStallRx();
     testLostNakIsRepeated();
     testBurstPastWindowRecovers();
+    testReplayWorkIsBoundedByTheRing();
     std::printf("\nUdpGapRecoveryTest passed\n");
     return 0;
 }

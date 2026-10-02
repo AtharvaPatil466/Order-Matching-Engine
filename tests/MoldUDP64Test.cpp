@@ -29,6 +29,7 @@
 #include "ItchProtocol.h"
 #include "MoldUDP64.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -109,6 +110,27 @@ void test_PublisherEmitsSingleMessagePacket() {
         CHECK(hdr.messageCount == 1);
         CHECK(readU16BE(&p[MOLD_HEADER_BYTES]) == 10);
         CHECK(std::memcmp(&p[MOLD_HEADER_BYTES + 2], msg, 10) == 0);
+    } END
+}
+
+// MD-15. The default bound applies to the UDP payload, and was 1500 — the
+// Ethernet MTU itself. With the 20-byte IP and 8-byte UDP headers on top, every
+// full packet was 1528 bytes on the wire and went out as two IP fragments; lose
+// either and the whole packet is gone.
+void test_PublisherDefaultPacketFitsEthernetUnfragmented() {
+    TEST(PublisherDefaultPacketFitsEthernetUnfragmented) {
+        constexpr size_t kEthernetMtu = 1500, kIpUdpHeaders = 20 + 8;
+        size_t largest = 0;
+        MoldUDP64Publisher pub("S", [&](std::string_view b) {
+            largest = std::max(largest, b.size());
+        });
+        // 72-byte messages (74 with the length prefix) fill a 1500-byte bound
+        // exactly: 20 + 20 x 74.
+        uint8_t msg[72] = {0};
+        for (int i = 0; i < 500; ++i) pub.addMessage(msg, sizeof(msg));
+        pub.flush();
+        std::cout << "(largest packet " << largest << " B) ";
+        CHECK(largest + kIpUdpHeaders <= kEthernetMtu);
     } END
 }
 
@@ -614,6 +636,7 @@ int main() {
 
     test_PublisherEmitsSingleMessagePacket();
     test_PublisherAutoFlushesAtMtu();
+    test_PublisherDefaultPacketFitsEthernetUnfragmented();
     test_PublisherHeartbeat();
     test_PublisherEndOfSession();
     test_PublisherSequenceAdvances();

@@ -42,11 +42,13 @@ constexpr size_t   MOLD_HEADER_BYTES    = MOLD_SESSION_BYTES + 8 + 2;  // 20
 constexpr uint16_t MOLD_HEARTBEAT       = 0;
 constexpr uint16_t MOLD_END_OF_SESSION  = 0xFFFF;
 
-// Bound on packet size. The protocol is byte-addressable up to 64KB,
-// but typical multicast MTU is ~1500; venues usually flush far below
-// that to avoid IP fragmentation. We use 1500 by default but allow
-// callers to override.
-constexpr size_t MOLD_DEFAULT_MTU = 1500;
+// Bound on packet size — the UDP payload, header included. The protocol is
+// byte-addressable up to 64KB, but a datagram larger than the link MTU is
+// IP-fragmented, and losing any fragment loses the packet. The default is the
+// largest payload a 1500-byte Ethernet MTU carries whole: 1500 minus the
+// 20-byte IPv4 and 8-byte UDP headers. (It was 1500, so every full packet
+// went out as two fragments — MD-15.) Callers on other links override it.
+constexpr size_t MOLD_DEFAULT_MTU = 1500 - 20 - 8;  // 1472
 
 // ─── Header read/write ──────────────────────────────────────────────────────
 

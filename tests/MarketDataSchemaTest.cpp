@@ -150,10 +150,35 @@ void testSegmentIsNotWorldAccessible() {
     pub.stop();
 }
 
+// shm_open's mode applies only when it creates the segment. One left behind
+// by an older build (0666) or created first by someone else kept its mode,
+// so a restarted publisher went on writing a book any local user could write.
+void testReusedSegmentIsTightened() {
+    auto name = uniqueName("reuse");
+    int fd = ::shm_open(("/" + name).c_str(), O_CREAT | O_RDWR, 0666);
+    assert(fd >= 0);
+    ::fchmod(fd, 0666);   // past the umask, as an older build left it on macOS
+    ::close(fd);
+
+    MarketDataPublisher pub(name, 4);
+    assert(pub.start());
+
+    fd = ::shm_open(("/" + name).c_str(), O_RDONLY, 0);
+    assert(fd >= 0);
+    struct stat st{};
+    assert(::fstat(fd, &st) == 0);
+    ::close(fd);
+    std::printf("  reused segment mode %03o\n", static_cast<unsigned>(st.st_mode & 0777));
+    assert((st.st_mode & 0027) == 0 && "a reused segment kept a mode others can use");
+
+    pub.stop();
+}
+
 } // namespace
 
 int main() {
     testSegmentIsNotWorldAccessible();
+    testReusedSegmentIsTightened();
     testPublisherSubscriberRoundTrip();
     testLargerEntryStrideIsReadable();
     testUndersizedEntryRejected();

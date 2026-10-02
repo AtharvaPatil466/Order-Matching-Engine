@@ -110,17 +110,19 @@ public:
 
         // Create or open shared memory. Owner writes, group reads, others
         // nothing: whoever can write the segment can show subscribers any book.
-        shmFd_ = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0640);
+        // The mode applies only when shm_open creates the segment, so one left
+        // by an older build (0666) or created first by another user kept its
+        // own: openOwnSegment() refuses the second and replaces the first.
+        struct stat st{};
+        shmFd_ = openOwnSegment(st);
         if (shmFd_ < 0) return false;
 
         // A publisher that crashed leaves its segment behind. Grow it only if
         // it is too small: macOS refuses a second ftruncate of a shm object
         // (EINVAL) and reports its size rounded up to a page, so truncating
         // unconditionally meant a restarted publisher could never start there.
-        struct stat st{};
-        if (fstat(shmFd_, &st) != 0 ||
-            (static_cast<size_t>(st.st_size) < shmSize_ &&
-             ftruncate(shmFd_, static_cast<off_t>(shmSize_)) != 0)) {
+        if (static_cast<size_t>(st.st_size) < shmSize_ &&
+            ftruncate(shmFd_, static_cast<off_t>(shmSize_)) != 0) {
             close(shmFd_);
             shmFd_ = -1;
             return false;
@@ -236,6 +238,27 @@ private:
         shm_detail::word(slot, 0).store(seq, std::memory_order_release);
 
         header->writeSeq.store(seq + 1, std::memory_order_release);
+    }
+
+    // The segment, mode 0640 and owned by this user, or -1. `st` describes it.
+    // An existing one with another mode is chmodded, or — on macOS, which
+    // refuses fchmod on shm objects (EINVAL) — unlinked and created afresh.
+    int openOwnSegment(struct stat& st) const {
+        int fd = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0640);
+        if (fd < 0) return -1;
+        if (fstat(fd, &st) != 0 || st.st_uid != geteuid()) {
+            close(fd);
+            return -1;
+        }
+        if ((st.st_mode & 0777) == 0640 || fchmod(fd, 0640) == 0) return fd;
+        close(fd);
+        shm_unlink(shmName_.c_str());
+        fd = shm_open(shmName_.c_str(), O_CREAT | O_EXCL | O_RDWR, 0640);
+        if (fd >= 0 && fstat(fd, &st) != 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
     }
 
     static uint64_t newEpoch() {

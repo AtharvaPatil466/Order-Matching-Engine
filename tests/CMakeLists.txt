@@ -50,16 +50,15 @@ gtest_discover_tests(UnitTests
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
 
-# enable_assertions(target) — applied per-test-binary to force
-# assertion-rich, debug-friendly builds of TEST bodies. Note: this
-# only affects the test executable's own .cpp files; the linked
-# OrderMatcher library uses whatever the top-level CMake build_type
-# selected (which itself enables -UNDEBUG when ENABLE_ASSERTIONS=ON,
-# the default). So in a Release build the test body runs at -O0/-g
-# while library calls stay at -O3 — inlining boundaries are at the
-# call site, which matters when reading sanitized stacks.
+# enable_assertions(target) — applied per-test-binary so a test's own
+# assert()s fire in every build type. It keeps the build type's
+# optimisation level: it used to append -O0, and since the last -O wins
+# that compiled every test TU at -O0 in the Release lane — including all
+# the header-only engine code those TUs instantiate (Journal.h,
+# FlatPriceMap, IntrusiveList, the queues), so the "Release" lane tested
+# that code unoptimised (ENGTEST-6).
 function(enable_assertions target)
-    target_compile_options(${target} PRIVATE -UNDEBUG -O0 -g)
+    target_compile_options(${target} PRIVATE -UNDEBUG -g)
     set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
 endfunction()
 

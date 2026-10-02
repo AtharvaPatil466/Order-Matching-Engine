@@ -210,6 +210,43 @@ void test_UdpItchAddOrderEndToEnd() {
     } END
 }
 
+// MD-7. stop() then start() built a new MoldUDP64Publisher at sequence 1 under
+// the same session. A subscriber already past 1 took every new message for a
+// duplicate and dropped it — a silent blackout until the counter climbed back
+// past where it was — and the feed's journal then held two different messages
+// under each reused sequence number.
+void test_UdpPublisherRestartContinuesSequence() {
+    TEST(UdpPublisherRestartContinuesSequence) {
+        ItchUdpSubscriber sub;
+        std::vector<uint64_t> seqs;
+        std::mutex mtx;
+        sub.mold().setOnMessage([&](uint64_t seq, const uint8_t*, size_t) {
+            std::lock_guard<std::mutex> lk(mtx);
+            seqs.push_back(seq);
+        });
+        CHECK(sub.start("127.0.0.1", 0));
+
+        ItchUdpPublisher pub("FEED");
+        CHECK(pub.start("127.0.0.1", sub.boundPort()));
+        for (const char* m : {"A", "B", "C"}) { pub.publish(m, 1); pub.flush(); }
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return seqs.size() == 3; }));
+
+        pub.stop();
+        CHECK(pub.start("127.0.0.1", sub.boundPort()));
+        pub.publish("D", 1);
+        pub.flush();
+
+        CHECK(waitFor([&] { std::lock_guard<std::mutex> lk(mtx); return seqs.size() == 4; })
+              && "the subscriber dropped the restarted publisher's message");
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            CHECK(seqs[3] == 4);
+        }
+        CHECK(pub.nextSequence() == 5);
+        pub.stop(); sub.stop();
+    } END
+}
+
 int main() {
     std::cout << "Running ItchUdpTransportTest\n";
 
@@ -218,6 +255,7 @@ int main() {
     test_UdpHeartbeatDelivered();
     test_UdpEndOfSession();
     test_UdpItchAddOrderEndToEnd();
+    test_UdpPublisherRestartContinuesSequence();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

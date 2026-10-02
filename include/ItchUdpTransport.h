@@ -106,6 +106,12 @@ public:
                 datagramsSent_.fetch_add(1, std::memory_order_relaxed);
             },
             mtu_));
+        // A restart continues the sequence under the same session. Starting
+        // again at 1 made every subscriber drop the new messages as
+        // duplicates, and the feed's journal hold two messages per reused
+        // number (MD-7). A new process resumes the same way only if the
+        // caller persists nextSequence() (MoldSeqPersistenceTest, P3-3).
+        mold_->setNextSequence(resumeSeq_);
 
         running_.store(true, std::memory_order_relaxed);
         return true;
@@ -116,6 +122,7 @@ public:
         running_.store(false, std::memory_order_relaxed);
         if (mold_) {
             mold_->flush();          // don't lose buffered messages
+            resumeSeq_ = mold_->nextSequence();
         }
         if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
         mold_.reset();
@@ -132,7 +139,7 @@ public:
     void sendHeartbeat()     { if (mold_) mold_->sendHeartbeat(); }
     void sendEndOfSession()  { if (mold_) mold_->sendEndOfSession(); }
     uint64_t nextSequence() const {
-        return mold_ ? mold_->nextSequence() : 1;
+        return mold_ ? mold_->nextSequence() : resumeSeq_;
     }
     uint64_t datagramsSent() const { return datagramsSent_.load(std::memory_order_relaxed); }
 
@@ -143,6 +150,7 @@ private:
     sockaddr_in                              dest_{};
     std::atomic<bool>                        running_{false};
     std::unique_ptr<MoldUDP64Publisher>      mold_;
+    uint64_t                                 resumeSeq_{1};  // next seq after a restart
     std::atomic<uint64_t>                    datagramsSent_{0};
 };
 

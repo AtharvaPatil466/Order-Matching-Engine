@@ -424,7 +424,11 @@ void test_sbe_v2_reader_reads_v1_with_defaults() {
     v1.orderId = 11; v1.price = 555; v1.quantity = 9;
     v1.side = 1; v1.orderType = 1;
 
-    uint8_t buf[SBE_MESSAGE_HEADER_BYTES + SBE_NEW_ORDER_V1_BLOCK_BYTES];
+    // Sized for a v2 block although it holds a v1 message: GCC cannot see the
+    // header's blockLength (24) through the byte decode, so it takes the v2
+    // branch of readSbeNewOrderV2Block as reachable and reports its reads as
+    // past a v1-sized buffer (-Werror=array-bounds).
+    uint8_t buf[SBE_MESSAGE_HEADER_BYTES + SBE_NEW_ORDER_V2_BLOCK_BYTES] = {};
     encodeSbeNewOrderV1(buf, v1);
     auto h = readSbeMessageHeader(buf);
     assert(h.version == SBE_NEW_ORDER_V1);

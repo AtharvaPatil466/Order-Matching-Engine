@@ -13,6 +13,7 @@
 // them again. Only the snapshot loses it, so the test checkpoints first.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -51,9 +52,7 @@ std::pair<size_t, size_t> parkedStops(const MatchingEngine& engine) {
 }  // namespace
 
 int main() {
-    const char* tmp = std::getenv("TMPDIR");
-    const std::string path = std::string(tmp ? tmp : "/tmp") + "/stop_latch_" +
-                             std::to_string(::getpid()) + ".wal";
+    const std::string path = uniqueTempPath("stop_latch.wal");
     std::remove(path.c_str());
 
     {

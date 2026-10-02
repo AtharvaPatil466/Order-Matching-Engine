@@ -11,6 +11,7 @@
 // were separate copies of the same omission.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <cstdio>
@@ -36,9 +37,7 @@ size_t resting(const MatchingEngine& engine, ParticipantId pid) {
 
 void runKill(bool async) {
     const char* mode = async ? "async" : "sync";
-    const char* tmp = std::getenv("TMPDIR");
-    const std::string path = std::string(tmp ? tmp : "/tmp") + "/kill_journal_" +
-                             std::to_string(::getpid()) + "_" + mode + ".wal";
+    const std::string path = uniqueTempPath(std::string("kill_journal_") + mode + ".wal");
     std::remove(path.c_str());
 
     {

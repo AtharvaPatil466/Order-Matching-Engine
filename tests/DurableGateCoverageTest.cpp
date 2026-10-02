@@ -13,6 +13,7 @@
 // requires its events to be held until the journal is flushed, then released.
 
 #include "MatchingEngine.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <chrono>
@@ -45,9 +46,7 @@ const uint64_t kExpiry = static_cast<uint64_t>(
     3'600'000'000'000ull;
 
 bool held(const char* what, const std::function<void(MatchingEngine&)>& request) {
-    const char* tmp = std::getenv("TMPDIR");
-    const std::string path = std::string(tmp ? tmp : "/tmp") + "/durable_gate_" +
-                             std::to_string(::getpid()) + "_" + what + ".wal";
+    const std::string path = uniqueTempPath(std::string("durable_gate_") + what + ".wal");
     std::remove(path.c_str());
 
     Seen seen;

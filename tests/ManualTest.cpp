@@ -1054,6 +1054,10 @@ void testJournalReplay() {
                                   e.expiryTime, e.stopLimitPrice, e.pegType, e.pegOffset,
                                   e.trailAmount, e.minQty, e.hidden);
                     break;
+                case JournalEntry::Type::TradingStateChange:
+                case JournalEntry::Type::Uncross:
+                    applySessionRecord(book, e);
+                    break;
             }
         }
 

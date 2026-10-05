@@ -283,6 +283,8 @@ public:
     // gone OR because newQty is not a reduction (this engine only shrinks in
     // place); callers that surface a reject reason to a client must be able to
     // tell those apart instead of answering "order not found" to a live order.
+    // Unlike cancelReplace, newQty here is the new LEAVES; the order's total
+    // drops by the same amount, so nothing executed is misreported.
     bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
                      ParticipantId requester = kAnyParticipant);
 
@@ -308,10 +310,14 @@ public:
     bool validateIntegrity(std::string* err = nullptr) const;
 
 
-    // Cancel/Replace. Quantity may change only on a completely unfilled order
-    // and never above its size; otherwise newQty must equal remainingQty
-    // (InvalidQuantity). Until roadmap 1.5-E1 defines newQty as the new total.
-    // A price change loses time priority.
+    // Cancel/Replace. newQty is the order's new TOTAL (FIX OrderQty), shares
+    // already executed included — not its new leaves. With cumQty executed:
+    //   newQty <= cumQty  -> refused, InvalidQuantity, order untouched;
+    //   otherwise         -> initialQty = newQty, remainingQty = newQty - cumQty.
+    // A price change, or leaves that stay the same or grow, loses time
+    // priority; leaves that shrink at the same price keep it. Journal replay
+    // passes the recorded newQty back through this same contract.
+    // See docs/MatchingRules.md rule 9.2.
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                        ParticipantId requester = kAnyParticipant);
     // Same, but reports why. A replace can fail because the order is gone,

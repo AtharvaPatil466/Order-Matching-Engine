@@ -21,8 +21,8 @@ namespace OrderMatcher {
 // single line per order instead of straying across the struct.
 //
 // Hot set (read inside the match loop): id, next, prev, price, remainingQty,
-// initialQty (fill calc), visibleQty (iceberg available), side, type, status,
-// isHidden. The eight 8-byte hot fields plus the four 1-byte enums/bool fill
+// cumQty (bumped on every fill), visibleQty (iceberg available), side, type,
+// status, isHidden. The eight 8-byte hot fields plus the four 1-byte enums/bool fill
 // the line exactly (56 + 4 + 4 pad = 64). displayQty (iceberg slice refill
 // only) is the first cold field and therefore the first byte of line 2; the
 // common path never reads it. timestamp is write-once at creation and is read
@@ -43,8 +43,12 @@ struct alignas(64) Order {
     Order* prev = nullptr;
 
     Price price;
-    Quantity remainingQty;
-    Quantity initialQty;        // fill calc: filled = initialQty - remainingQty
+    Quantity remainingQty;      // leaves: what can still execute
+    // What this order has executed. RECORDED on every fill, never derived:
+    // deriving it as initialQty - remainingQty made every path that changes
+    // remainingQty without a trade (modify, replace, an STP decrease) report
+    // a fill that never happened, or wrap to ~2^64 (MATCH-4, GTDIFF-1).
+    Quantity cumQty = 0;
     Quantity visibleQty = 0;    // iceberg: displayed quantity available to match
 
     Side side;
@@ -55,6 +59,11 @@ struct alignas(64) Order {
 
     // ─── COLD (rarely touched on the hot path) ──────────────────────────────
     Quantity displayQty = 0;    // Iceberg: amount to refresh each slice
+
+    // The order's total size (FIX OrderQty). Invariant on every live order:
+    // cumQty + remainingQty == initialQty. A replace sets it to the new total;
+    // a modify or an STP decrease lowers it with the leaves.
+    Quantity initialQty;
 
     // Participant
     ParticipantId participantId;

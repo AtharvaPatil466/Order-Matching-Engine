@@ -397,7 +397,8 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
 
 #ifndef OB_LEAN_MODE
     // Risk limits (maxOrderSize / maxOrderNotional / maxPositionSize). A
-    // replace cannot grow an order, but a reprice can raise its notional.
+    // replace passes its new total, so growing an order and repricing it both
+    // face the same caps as a new order of that size.
     if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty))
         return RejectReason::RiskLimitBreached;
 #else
@@ -830,6 +831,7 @@ Order* OrderBook::allocateAndRegisterOrder(OrderId orderId, ParticipantId partic
     order->price = price;
     order->initialQty = qty;
     order->remainingQty = qty;
+    order->cumQty = 0;
     order->type = type;
     order->status = OrderStatus::Accepted;
     order->timeInForce = tif;
@@ -1050,14 +1052,13 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
 }
 
 // --- Post-match: handle remaining quantity ---  Precondition: bookLock_ held.
-// The caller MUST have run finalizeIfStpCancelled() first: the remainingQty == 0
-// branch below reports Filled at full initialQty, which is a phantom fill for an
-// order STP zeroed without trading.
+// The caller MUST have run finalizeIfStpCancelled() first: an order STP
+// stopped must report CancelledBySTP, not rest or report a fill.
 void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
                                      OrderType type) {
     if (order->remainingQty > 0) [[likely]] {
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
-            Quantity filled = order->initialQty - order->remainingQty;
+            const Quantity filled = order->cumQty;
             OrderStatus st = (filled > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Cancelled;
             notifyOrderUpdate(orderId, st, filled, 0);
             orderLookup_.erase(orderId);
@@ -1068,12 +1069,11 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
                 order->visibleQty = std::min(order->remainingQty, order->displayQty);
             if (!addToBook(order)) {
                 // Depth limit or price range exceeded — cancel the order
-                Quantity filled = order->initialQty - order->remainingQty;
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, filled, 0);
+                notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else {
-                order->status = (order->remainingQty < order->initialQty)
+                order->status = (order->cumQty > 0)
                                 ? OrderStatus::PartiallyFilled : OrderStatus::Accepted;
                 if (!order->isHidden)
                     notifyMarketData(MarketDataUpdate::Action::Add, side, price);
@@ -1081,7 +1081,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
         }
     } else {
         order->status = OrderStatus::Filled;
-        notifyOrderUpdate(orderId, OrderStatus::Filled, order->initialQty, 0, lastTradePrice_);
+        notifyOrderUpdate(orderId, OrderStatus::Filled, order->cumQty, 0, lastTradePrice_);
         orderLookup_.erase(orderId);
         orderPool_.deallocate(order);
     }
@@ -1170,11 +1170,10 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             updatePeggedOrders();
     }
 
-    // C1: an order STP zeroed has remainingQty == 0 WITHOUT having traded for
-    // it. This test must come first, because the remainingQty == 0 branch in
-    // finalizeRemainingQty reports Filled at full initialQty — the phantom fill
-    // that won OCO groups and cancelled innocent siblings for an order that
-    // traded nothing.
+    // C1: an order STP stopped must report CancelledBySTP (or the fills it
+    // really made), never rest and never report Filled — the phantom fill that
+    // won OCO groups and cancelled innocent siblings for an order that traded
+    // nothing. So this test comes first.
     if (finalizeIfStpCancelled(order)) return orderId;
 
     finalizeRemainingQty(order, orderId, side, price, type);
@@ -1191,8 +1190,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 // owner did not ask for this. `lvl` must be `book`'s current best level.
 void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMap& book) {
     victim->status = OrderStatus::CancelledBySTP;
-    notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP,
-                      victim->initialQty - victim->remainingQty, 0);
+    notifyOrderUpdate(victim->id, OrderStatus::CancelledBySTP, victim->cumQty, 0);
 
     // Capture before the teardown frees the node.
     const bool     wasDisplayed = victim->inBook && !victim->isHidden;
@@ -1233,7 +1231,7 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
 bool OrderBook::finalizeIfStpCancelled(Order* order) {
     if (order->status != OrderStatus::CancelledBySTP) [[likely]] return false;
 
-    const Quantity filled = order->initialQty - order->remainingQty;
+    const Quantity filled = order->cumQty;
     // Fills against OTHER participants before the self-cross are real: they
     // must still count as an execution so the client sees the quantity and an
     // OCO leg that genuinely traded can still win. Only a zero-fill STP
@@ -1443,11 +1441,9 @@ void OrderBook::match(Order* incoming) {
             case STPResult::Action::CancelIncoming:
                 // NOTE: remainingQty is deliberately left ALONE. The pre-fix
                 // code zeroed it to mean "stop matching", but remainingQty == 0
-                // already means "fully filled", and post-match computes
-                // filledQty as initialQty - remainingQty. Zeroing therefore
-                // reported the ENTIRE order quantity as executed — that is
-                // where C1's `filledQty == initialQty` came from, and it also
-                // erased how much a partially-filled order had really traded.
+                // already means "fully filled", and post-match then reported
+                // the ENTIRE order quantity as executed — that is where C1's
+                // `filledQty == initialQty` came from.
                 // The `break` after this switch exits the match loop on its
                 // own, so the status alone is sufficient to stop and to tell
                 // post-match not to rest the order.
@@ -1464,7 +1460,10 @@ void OrderBook::match(Order* incoming) {
                 if (stp.decreaseAmount >= bookOrder->remainingQty) {
                     stpCancelResting(bookOrder, level);
                 } else {
+                    // A decrease is not a fill: the order's total shrinks
+                    // with its leaves, so cumQty stays what really executed.
                     bookOrder->remainingQty -= stp.decreaseAmount;
+                    bookOrder->initialQty   -= stp.decreaseAmount;
                     // Preserve the iceberg invariant visibleQty <= remainingQty
                     // (no-op for non-iceberg, where visibleQty == 0). Without it
                     // a later fill underflows remainingQty to UINT64_MAX.
@@ -1481,7 +1480,9 @@ void OrderBook::match(Order* incoming) {
         Quantity fillQty = std::min(incoming->remainingQty, available);
 
         incoming->remainingQty -= fillQty;
+        incoming->cumQty += fillQty;
         bookOrder->remainingQty -= fillQty;
+        bookOrder->cumQty += fillQty;
         if (bookOrder->type == OrderType::Iceberg) [[unlikely]] bookOrder->visibleQty -= fillQty;
 
         lastTradePrice_ = bestPrice;
@@ -1521,7 +1522,7 @@ void OrderBook::match(Order* incoming) {
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
-            notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->initialQty, 0, bestPrice);
+            notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->cumQty, 0, bestPrice);
             stpNoteRemoved(bookOrder);
             untrackOrder(bookOrder);
             level->remove(bookOrder);
@@ -1605,8 +1606,8 @@ void OrderBook::matchProRata(Order* incoming) {
         // pre-fix code tested checkSMP inside the allocation loop and, on a
         // hit, zeroed remainingQty and returned — which (a) ignored the
         // configured mode entirely and always behaved CancelIncoming,
-        // (b) produced the C1 phantom fill, since post-match reads
-        // filledQty as initialQty - remainingQty, (c) abandoned the whole
+        // (b) produced the C1 phantom fill, since post-match read a zero
+        // remainingQty as a full fill, (c) abandoned the whole
         // sweep including levels holding no same-participant order, and
         // (d) fired even for a resting order due a zero pro-rata share.
         //
@@ -1646,6 +1647,7 @@ void OrderBook::matchProRata(Order* incoming) {
                         stpCancelRestingOrder(o, &level, opposite);
                     } else {
                         o->remainingQty -= stp.decreaseAmount;
+                        o->initialQty   -= stp.decreaseAmount;  // not a fill
                         // Keep visibleQty <= remainingQty or a later fill
                         // underflows remainingQty to UINT64_MAX.
                         o->visibleQty = std::min(o->visibleQty, o->remainingQty);
@@ -1784,7 +1786,9 @@ void OrderBook::matchProRata(Order* incoming) {
             Quantity fillQty = allocs[i].qty;
 
             incoming->remainingQty -= fillQty;
+            incoming->cumQty += fillQty;
             bookOrder->remainingQty -= fillQty;
+            bookOrder->cumQty += fillQty;
             if (bookOrder->type == OrderType::Iceberg) bookOrder->visibleQty -= fillQty;
 
             lastTradePrice_ = bestPrice;
@@ -1818,7 +1822,7 @@ void OrderBook::matchProRata(Order* incoming) {
 
             if (bookOrder->remainingQty == 0) {
                 bookOrder->status = OrderStatus::Filled;
-                notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->initialQty, 0, bestPrice);
+                notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->cumQty, 0, bestPrice);
                 toRemove[removeCount++] = bookOrder;
             } else if (bookOrder->type == OrderType::Iceberg && bookOrder->visibleQty == 0) {
                 // Pro-rata iceberg refresh: the slice is replenished in
@@ -2154,8 +2158,7 @@ void OrderBook::cancelOrderImpl(OrderId orderId) {
     if (wasDisplayed)
         notifyMarketData(MarketDataUpdate::Action::Delete, order->side, order->price);
 
-    Quantity filledQty = order->initialQty - order->remainingQty;
-    notifyOrderUpdate(orderId, OrderStatus::Cancelled, filledQty, 0);
+    notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
     obSink().log(logOrderCancelled(orderId, symbolId_, order->participantId));
 
     orderLookup_.erase(orderId);
@@ -2202,6 +2205,9 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
 
     if (newQty < order->remainingQty) {
         const Quantity displayBefore = displayQuantity(*order);
+        // newQty is the new LEAVES; the total drops by the same cut. Leaving
+        // initialQty alone used to report the cut as a fill (GTDIFF-1).
+        order->initialQty -= order->remainingQty - newQty;
         order->remainingQty = newQty;
         // Preserve the iceberg invariant visibleQty <= remainingQty (the same
         // clamp the match loop applies). Without it a modify-down below the
@@ -2292,16 +2298,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         return false;
     }
 
-    // MATCH-4, until 1.5-E1 defines newQty as the new TOTAL (FIX). newQty used
-    // to become remainingQty with initialQty untouched: 100 with 60 filled,
-    // replaced "to 100", executed 160, and growing past initialQty wrapped
-    // every later filled = initialQty - remainingQty to ~2^64. Now a quantity
-    // change is allowed only on a completely unfilled order (where total ==
-    // leaves, so both readings agree) and never above its original size.
-    // newQty == remainingQty (price-only) is always fine.
-    const bool unfilled = order->remainingQty == order->initialQty;
-    if (newQty != order->remainingQty && !(unfilled && newQty <= order->initialQty))
-        [[unlikely]] {
+    // newQty is the order's new TOTAL (FIX OrderQty), executed shares
+    // included (1.5-E1, MATCH-4). It used to become the leaves with the size
+    // left alone: 100 with 60 filled, replaced "to 100", executed 160. A total
+    // that does not exceed what already executed leaves nothing to work, so it
+    // is refused rather than read as a cancel.
+    if (newQty <= order->cumQty) [[unlikely]] {
         reason = RejectReason::InvalidQuantity;
         return false;
     }
@@ -2326,10 +2328,8 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
     }
 
     reason = RejectReason::None;
-    // An unfilled resize is a new instruction for newQty, so it becomes the
-    // order's size. Without this, filled = initialQty - remainingQty reported
-    // the cut as a phantom fill, and the order no longer looked unfilled.
-    if (unfilled) order->initialQty = newQty;
+    const Quantity newLeaves = newQty - order->cumQty;
+    order->initialQty = newQty;
     Price oldPrice = order->price;
     bool priceChanged = (newPrice != oldPrice);
 
@@ -2347,7 +2347,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         }
 
         order->price = newPrice;
-        order->remainingQty = newQty;
+        order->remainingQty = newLeaves;
         order->timestamp = nowNs();
 
         // Check if new price crosses — if so, match first
@@ -2377,8 +2377,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             if (order->type == OrderType::Iceberg)
                 order->visibleQty = std::min(order->remainingQty, order->displayQty);
             if (!addToBook(order)) {
-                Quantity filled = order->initialQty - order->remainingQty;
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, filled, 0);
+                notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else {
@@ -2387,19 +2386,19 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             }
         } else {
             order->status = OrderStatus::Filled;
-            notifyOrderUpdate(orderId, OrderStatus::Filled, order->initialQty, 0, lastTradePrice_);
+            notifyOrderUpdate(orderId, OrderStatus::Filled, order->cumQty, 0, lastTradePrice_);
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
         }
     } else {
         // Same price
         const Quantity displayBefore = displayQuantity(*order);
-        if (newQty < order->remainingQty) {
+        if (newLeaves < order->remainingQty) {
             // Shrink in place: the order keeps its queue position, so this is
             // a reduction rather than a re-add. Same shape as modifyOrder —
             // and it needs the same order-level event, or the displayed feed
             // keeps the old size forever while the L2 feed sees the modify.
-            order->remainingQty = newQty;
+            order->remainingQty = newLeaves;
             if (order->type == OrderType::Iceberg)
                 order->visibleQty = std::min(order->visibleQty, order->remainingQty);
             const Quantity displayAfter = displayQuantity(*order);
@@ -2408,10 +2407,10 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                                   order->side, order->price,
                                   displayBefore - displayAfter);
         } else {
-            // Same quantity (a replace cannot grow an order): re-add, which
-            // loses time priority
+            // Same or larger leaves: re-add at the back, which loses time
+            // priority — a growth must not jump the queue it joined smaller.
             removeFromBook(order);
-            order->remainingQty = newQty;
+            order->remainingQty = newLeaves;
             // Re-slice an iceberg against its new size, the same way the
             // initial rest and the refresh path do.
             if (order->type == OrderType::Iceberg)
@@ -2583,8 +2582,7 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
                 // A triggered MIT is a market order — its unfilled remainder
                 // must not rest; cancel it (also the addToBook-failure path).
                 if (becameMarket || !addToBook(order)) {
-                    Quantity filled = order->initialQty - order->remainingQty;
-                    notifyOrderUpdate(order->id, OrderStatus::Cancelled, filled, 0);
+                    notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
                     orderLookup_.erase(order->id);
                     orderPool_.deallocate(order);
                 }
@@ -2656,8 +2654,7 @@ void OrderBook::updateTrailingStops(Price lastTradePrice) {
 
             if (order->remainingQty > 0) {
                 if (!addToBook(order)) {
-                    Quantity filled = order->initialQty - order->remainingQty;
-                    notifyOrderUpdate(order->id, OrderStatus::Cancelled, filled, 0);
+                    notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
                     orderLookup_.erase(order->id);
                     orderPool_.deallocate(order);
                 }
@@ -2899,6 +2896,7 @@ void OrderBook::uncrossLocked() {
                     stpCancel(older, olderLvl, olderBk, olderCur);
                 } else {
                     older->remainingQty -= stp.decreaseAmount;
+                    older->initialQty   -= stp.decreaseAmount;  // not a fill
                     // Keep visibleQty <= remainingQty or a later fill
                     // underflows remainingQty to UINT64_MAX.
                     older->visibleQty = std::min(older->visibleQty, older->remainingQty);
@@ -2911,7 +2909,9 @@ void OrderBook::uncrossLocked() {
         Quantity fillQty = std::min({buyer->remainingQty, seller->remainingQty, remainingVolume});
 
         buyer->remainingQty -= fillQty;
+        buyer->cumQty += fillQty;
         seller->remainingQty -= fillQty;
+        seller->cumQty += fillQty;
         remainingVolume -= fillQty;
 
         lastTradePrice_ = bestUncrossPrice;

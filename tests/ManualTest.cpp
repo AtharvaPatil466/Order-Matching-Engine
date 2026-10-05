@@ -440,13 +440,13 @@ void testCancelReplace() {
     assert(ok);
     assert(book.getOrder(1)->remainingQty == 50);
 
-    // Cancel/Replace: same price, same qty (re-add, loses priority). This
-    // grew the order 50 -> 200 until roadmap 0.11: growth past the order's
-    // size is refused now (it wrapped filledQty), so re-add at 50.
+    // Cancel/Replace: same price, same qty (re-add, loses priority), then a
+    // growth to a new total of 200, which re-adds at the back as well.
     book.addOrder(2, 2, Side::Buy, 1010000, 100, OrderType::Limit);
     ok = book.cancelReplace(1, 1010000, 50);
     assert(ok);
-    assert(!book.cancelReplace(1, 1010000, 200));  // growth refused
+    assert(book.cancelReplace(1, 1010000, 200));
+    assert(book.getOrder(1)->remainingQty == 200);
     // Order 2 should now have priority over order 1
 
     // Sell 50 -> should match order 2 first (has priority)

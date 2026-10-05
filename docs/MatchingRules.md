@@ -306,8 +306,9 @@ that permits a self-cross, and the unconfigured default prevents.
 
 A distinct terminal status exists precisely so an STP removal cannot be mistaken for either a
 client cancel or an execution. Critically, `remainingQty` is **left intact** when the incoming
-order is STP-cancelled: zeroing it would make `filled = initialQty − remainingQty` report the
-entire order as executed.
+order is STP-cancelled: zeroing it made the order look fully filled, and it was reported as
+executed in full. What an order executed is recorded in `cumQty` on every fill, never derived
+from its size (see [rule 9.2](#rule-92--cancelreplace-loses-priority-on-a-price-change-or-a-same-size-re-add-keeps-it-on-a-shrink)).
 
 > `include/Types.h:50-60` — why the status exists
 > `include/Types.h:64-71` — `isExecution()`, the single predicate for "did this order trade?"
@@ -1085,7 +1086,12 @@ A quantity reduction is applied in place; the order keeps its queue position. A 
 *increase* is refused with `InvalidQuantity` — growing in place would forfeit priority anyway,
 so it is a cancel-replace, not a modify.
 
-> `src/OrderBook.cpp:1933-1954` (the shrink), `src/OrderBook.cpp:1956-1960` (the refusal)
+`modifyOrder`'s `newQty` is the new **leaves**, unlike `cancelReplace` (rule 9.2). The order's
+total drops by the same cut, so `cumQty + remainingQty == initialQty` still holds and the cut
+is never reported as a fill. Before 1.5-E1 the total stayed put, and a 50 cut to 30 reported
+`filledQty` 20 on its cancel with nothing traded (GTDIFF-1).
+
+> `OrderBook::modifyOrder` in `src/OrderBook.cpp`
 
 An iceberg's slice is clamped to the new leaves, and only the *displayed* shrink is published.
 A modify-down that consumes hidden reserve without touching the slice emits nothing the market
@@ -1093,36 +1099,32 @@ can see (`src/OrderBook.cpp:1936-1952`).
 
 ### Rule 9.2 — `cancelReplace` loses priority on a price change or a same-size re-add, keeps it on a shrink
 
-First, which quantities a replace may ask for. This is roadmap 0.11 (MATCH-4) and holds until
-1.5-E1 defines `newQty` as the new total:
+First, what `newQty` means. It is the order's new **total** (FIX `OrderQty`), shares already
+executed included, not its new leaves (roadmap 1.5-E1, MATCH-4). Every order records what it
+executed in `cumQty`, and `cumQty + remainingQty == initialQty` holds on every live order.
 
-| Order state | `newQty` accepted |
+| `newQty` against `cumQty` | Result |
 |---|---|
-| Any | `newQty == remainingQty`, a price-only replace |
-| Completely unfilled (`remainingQty == initialQty`) | Any `newQty <= initialQty`. The new size becomes `initialQty`, so later reports show no phantom fill and the order still counts as unfilled |
-| Partially filled | Only `newQty == remainingQty` |
+| `newQty <= cumQty` | Refused with `InvalidQuantity` (FIX OrdRejReason 13, OUCH invalid-quantity reject). Nothing is left to work; the order is untouched |
+| `newQty > cumQty` | Accepted. `initialQty = newQty`, `remainingQty = newQty - cumQty`. Growth and shrink both work on a partially filled order |
 
-Anything else is refused with `InvalidQuantity` (FIX OrdRejReason 13, OUCH invalid-quantity
-reject), and the order is left untouched. A replace can never grow an order.
+So an order for 100 with 60 filled, replaced "to 100", has 40 left and executes 100 in all.
+Before 1.5-E1, `newQty` became the leaves while the size stayed put: the same replace
+executed 160, and growing an unfilled 100 to 120 reported `filledQty` 18446744073709551596 on
+its cancel. Roadmap 0.11 had stopped that by refusing any quantity change on a partially
+filled order and any growth; that restriction is gone. Risk limits judge the new total, as
+they would a new order of that size (rule 9.3).
 
-`newQty` used to become `remainingQty` with `initialQty` left unchanged. Two things went wrong:
-
-- An order for 100 with 60 filled, replaced "to 100", executed 160.
-- Growing an unfilled order past its size wrapped the derived `filledQty` (100→120 reported
-  18446744073709551596).
-
-On an unfilled order the FIX total and the leaves are the same number, so a resize there means
-the same thing under either reading. That keeps resize-down for OUCH and FIX clients, whose
-gateways have no modify message. A FIX client repricing a partially filled order must send the
-leaves quantity, because the original total is refused. "Unfilled" is `remainingQty ==
-initialQty`, so an order cut by `modifyOrder` counts as partially filled until E1 records fills.
+Every ingress passes the client's quantity through unchanged: FIX `OrderQty` (38) on a `G`,
+OUCH `Shares` on a Replace, and the native gateway's `newQty`. Journal replay passes the
+recorded `newQty` back through the same contract.
 Pinned by `tests/ReplaceQuantityTest.cpp`.
 
 | Change | Priority |
 |---|---|
 | Price changed | Lost. Removed, repriced, timestamped, matched if it now crosses, then re-rested at the tail. |
-| Same price, quantity down | **Kept.** In-place reduction. |
-| Same price, same quantity | Lost. Removed and re-added at the tail with a fresh timestamp. |
+| Same price, leaves down | **Kept.** In-place reduction. |
+| Same price, leaves the same or up | Lost. Removed and re-added at the tail with a fresh timestamp. |
 
 A repriced order is **off the book while it matches** and acts as an aggressor. Its display
 entry is removed before the match so its fills surface through the resting maker's execution

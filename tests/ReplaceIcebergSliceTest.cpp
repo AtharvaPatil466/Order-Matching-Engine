@@ -72,7 +72,7 @@ void nonCrossingRepriceTakesAFreshSlice() {
     book.addOrder(30, 2, Side::Sell, kPx + 100, 100, OrderType::Iceberg, 0, /*displayQty=*/10);
     book.addOrder(31, 4, Side::Buy, kPx + 100, 7, OrderType::IOC);     // slice 10 -> 3
     assert(book.getOrder(30)->remainingQty == 93);
-    assert(book.cancelReplace(30, kPx + 200, 93));
+    assert(book.cancelReplace(30, kPx + 200, 100));  // same total: price-only
     assert(book.getOrder(30)->visibleQty == 10 &&
            "a repriced iceberg re-enters the book with min(remaining, displayQty)");
     std::puts("  non-crossing reprice: fresh slice of min(remaining, displayQty)");

@@ -465,7 +465,6 @@ promote. Past the lease the primary never steps down (REPL-1..6).
 | [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results (MatchingEngine + Replication) |
 | [deploy/chaos/README.md](./deploy/chaos/README.md) | Live chaos suite — 19 scenarios, how to run, scenario catalog |
 | [docs/Compliance.md](./docs/Compliance.md) | Regulatory mapping (MiFID II / SEC Rule 15c3-5 / Reg NMS) |
-| [docs/MemoryOrderingAudit.md](./docs/MemoryOrderingAudit.md) | Per-site memory-order analysis |
 | [docs/Runbook.md](./docs/Runbook.md) | Operational procedures, incident response |
 | [docs/CapacityPlanning.md](./docs/CapacityPlanning.md) | Memory, CPU, disk, network sizing |
 | [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) | Remaining production checklist |

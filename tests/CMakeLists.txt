@@ -567,6 +567,15 @@ enable_assertions(SessionTransitionTest)
 add_test(NAME SessionTransitionTest COMMAND SessionTransitionTest)
 set_tests_properties(SessionTransitionTest PROPERTIES TIMEOUT 60 LABELS "project;session;auction")
 
+# Roadmap 1.7-G1 (THR-1): a scheduler thread drives every session phase while
+# the async workers take orders. Meaningful under TSan.
+add_executable(SessionControlRaceTest SessionControlRaceTest.cpp)
+target_link_libraries(SessionControlRaceTest PRIVATE OrderMatcher)
+enable_assertions(SessionControlRaceTest)
+add_test(NAME SessionControlRaceTest COMMAND SessionControlRaceTest)
+set_tests_properties(SessionControlRaceTest PROPERTIES TIMEOUT 120
+                     LABELS "project;session;concurrency")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

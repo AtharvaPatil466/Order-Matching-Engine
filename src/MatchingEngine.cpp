@@ -596,14 +596,27 @@ void MatchingEngine::waitForDrain() {
     // kDrainPollSleep late. If a caller ever needs tighter drain latency, add a
     // waiter count the workers test before notifying — do NOT put the
     // unconditional notify back.
-    const uint64_t target = getSubmittedCount();
-    for (uint64_t spins = 0; getProcessedCount() < target; ++spins) {
-        if (spins < kDrainSpins) {
-            cpuRelax();
-        } else if (spins < kDrainSpins + kDrainYields) {
-            std::this_thread::yield();
-        } else {
-            std::this_thread::sleep_for(kDrainPollSleep);
+    //
+    // Per worker, never summed. A fast worker that has already run orders
+    // submitted after this snapshot pushes the TOTAL past the target while a
+    // slow worker has not yet reached the message the caller is waiting on —
+    // so setTradingStateBatch returned with books still unflipped, and the
+    // caller then read state the worker was writing (THR-1).
+    std::vector<uint64_t> targets(numThreads_);
+    for (size_t i = 0; i < numThreads_; ++i) {
+        targets[i] = threadStats_[i].submitted.load(std::memory_order_acquire);
+    }
+    uint64_t spins = 0;
+    for (size_t i = 0; i < numThreads_; ++i) {
+        while (threadStats_[i].processed.load(std::memory_order_acquire) < targets[i]) {
+            if (spins < kDrainSpins) {
+                cpuRelax();
+            } else if (spins < kDrainSpins + kDrainYields) {
+                std::this_thread::yield();
+            } else {
+                std::this_thread::sleep_for(kDrainPollSleep);
+            }
+            ++spins;
         }
     }
 

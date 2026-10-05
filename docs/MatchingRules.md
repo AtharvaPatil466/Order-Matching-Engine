@@ -762,6 +762,13 @@ The winner is selected by this cascade, applied as a strict ordering:
 4. **Market pressure.** On a remaining tie — or when no reference price exists — a buy surplus
    clears **higher** and a sell surplus clears **lower**.
 
+**Zero imbalance with no reference clears at the highest tied price.** A candidate with zero
+imbalance counts as a buy surplus (`cumBuy >= cumSell`), so when every tied candidate pairs its
+whole volume and no reference price is set, step 4 keeps moving up and the highest of them wins.
+This is the rule, kept deliberately; it is the same code path as [B7](#b7--the-auctions-final-tie-break-reads-the-incumbents-surplus-side-not-the-candidates),
+which reads the surplus side of the incumbent rather than the candidate. Pinned with the
+step-3 cases by `tests/AuctionReferencePriceTest.cpp`.
+
 > `discoverUncrossPrice()` in `src/OrderBook.cpp`, with the four cascade steps named in a
 > comment
 
@@ -771,6 +778,12 @@ levels the ask levels were dropped and the true clearing price was never evaluat
 
 Parked market orders participate at **every** candidate price, since they have no limit to
 anchor on, and so add uniformly to both cumulants (`src/OrderBook.cpp:2759-2765`).
+
+**Market orders alone cross at the last trade price.** With no limit level on either side
+there is no candidate price, but parked market orders on both sides still pair: they cross for
+`min(buy, sell)` at the last trade price (the book keeps no separate prior close), and the
+surplus side's remainder is cancelled. Before any trade there is no reference and nothing
+crosses. They used to be cancelled unfilled whatever the reference (roadmap 1.8-H7, AUCT-14).
 
 If no candidate produces crossing volume — one-sided book, or a spread that never closes —
 there is no cross. Parked market orders and unfilled LOC orders are cancelled, and a book-wide
@@ -791,8 +804,8 @@ ascending sweep: O(orders + L), with a heap-allocated list of `L` levels per cal
 
 **Status: Deliberate — commented, thinly pinned.** The cascade is named in a comment at both
 the declaration (`include/OrderBook.h:692-697`) and the implementation.
-`tests/TestAuctionSession.cpp` covers the lifecycle; I did not find a test that discriminates
-step 3 from step 4, so the *position of the reference-price step in the cascade* is not pinned.
+`tests/TestAuctionSession.cpp` covers the lifecycle; `tests/AuctionReferencePriceTest.cpp`
+discriminates step 3 from step 4 on a zero-imbalance tie.
 
 **How venues specify it.** The shape — volume, then imbalance, then a reference — is the
 standard auction cascade. The engine's ordering resembles the **Nasdaq** opening/closing
@@ -1273,6 +1286,10 @@ of the candidate, and it is implemented as a property of the incumbent.
 **Severity: low** — it requires an exact double tie with opposed surplus — but it means the
 cascade as *documented* and the cascade as *implemented* are not the same function. Either the
 comment or the code is wrong, and a rulebook cannot state which without a decision.
+
+The same read decides the zero-imbalance case: a candidate that pairs its whole volume counts as
+a buy surplus, so with no reference price a zero-imbalance tie clears at the highest tied price.
+That consequence is kept as the rule (Rule 7.2).
 
 ### B8 — `LULDManager` is dead code
 

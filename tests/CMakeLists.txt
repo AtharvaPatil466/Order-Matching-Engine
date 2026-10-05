@@ -468,6 +468,14 @@ enable_assertions(AuctionCapacityTest)
 add_test(NAME AuctionCapacityTest COMMAND AuctionCapacityTest)
 set_tests_properties(AuctionCapacityTest PROPERTIES TIMEOUT 120 LABELS "project;auction")
 
+# Roadmap 1.8-H7 (AUCT-14): market orders alone cross at the last trade price;
+# the zero-imbalance tie rules of docs/MatchingRules.md Rule 7.2.
+add_executable(AuctionReferencePriceTest AuctionReferencePriceTest.cpp)
+target_link_libraries(AuctionReferencePriceTest PRIVATE OrderMatcher)
+enable_assertions(AuctionReferencePriceTest)
+add_test(NAME AuctionReferencePriceTest COMMAND AuctionReferencePriceTest)
+set_tests_properties(AuctionReferencePriceTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
+
 # Roadmap 1.8-H5 (AUCT-3): self-crossing pairs are resolved by STP before
 # price discovery, so they cannot move the indicative or the print.
 add_executable(AuctionSelfCrossTest AuctionSelfCrossTest.cpp)

@@ -3138,10 +3138,18 @@ AuctionResult OrderBook::discoverUncrossPrice() const {
         res.imbalanceSide = (totalBuy >= totalSell) ? Side::Buy : Side::Sell;
     };
 
-    // No limit levels on either side → no candidate prices to discover.
-    // (Market orders alone cannot anchor a price.)
+    // No limit levels on either side → no candidate prices to discover. Market
+    // orders on both sides still cross, at the reference: the last trade price
+    // (the book keeps no separate prior close). They used to be cancelled
+    // unfilled (AUCT-14). Before any trade there is no price to cross at.
     if (levels.empty()) {
         fillNoCross();
+        const Quantity vol = std::min(marketBuyTotal, marketSellTotal);
+        if (vol > 0 && lastTradePrice_ > 0) {
+            res.hasCross        = true;
+            res.indicativePrice = lastTradePrice_;
+            res.pairedVolume    = vol;
+        }
         return res;
     }
 

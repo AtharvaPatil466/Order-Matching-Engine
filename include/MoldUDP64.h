@@ -315,6 +315,17 @@ private:
 // subscriber would also drive the gap-recovery TCP request channel
 // when a gap is detected; that's wired by the caller from the
 // onGapDetected callback.
+//
+// DELIVERY IS IN ARRIVAL ORDER, NOT SEQUENCE ORDER (MD-2). onMessage fires
+// for each message the first time it arrives. Messages that land ahead of a
+// hole are delivered at once, before the missing ones; the missing ones are
+// delivered later, when the retransmission brings them back through
+// feedPacket. Duplicates are never delivered twice. So the `seq` passed to
+// onMessage can go backwards after a gap. A consumer whose state depends on
+// order — an ITCH order book, where an 'E' for an order whose 'A' sits in the
+// hole cannot be applied — must buffer by `seq` and apply messages only up
+// to nextExpectedSequence(), the contiguous front. This class does not hold
+// messages back, so a consumer that only counts or logs pays nothing.
 
 class MoldUDP64Subscriber {
 public:

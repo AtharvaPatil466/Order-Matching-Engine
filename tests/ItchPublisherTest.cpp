@@ -327,6 +327,65 @@ void test_PublisherReportsCrossExecutionPrice() {
     } END
 }
 
+// MD-6 (volume). A subscriber counts volume from printable executions plus
+// trade and cross messages. Every uncross fill went out as a printable 'C' on
+// BOTH sides, so a 100-share cross counted as 200 shares, and no 'Q' ever
+// reported the cross. Now each cross execution is a non-printable 'C' at the
+// cross price and the cross itself is exactly one 'Q' with its volume.
+void test_UncrossVolumeCountedOnce() {
+    TEST(UncrossVolumeCountedOnce) {
+        MatchingEngine engine;
+        engine.addSymbol(7);
+        engine.start();
+        auto* book = engine.getOrderBook(7);
+        book->setCircuitBreakerThreshold(1e9);
+
+        std::string sent;
+        ItchPublisher pub(*book, [&](std::string_view b) { sent.append(b); });
+        book->setEventListener(&pub);
+
+        book->setTradingState(TradingState::PreOpen);
+        CHECK(engine.submitOrder(7, 600, 1, Side::Buy, 1010, 100, OrderType::Limit).isAccepted());
+        CHECK(engine.submitOrder(7, 601, 2, Side::Sell, 990, 60, OrderType::Limit).isAccepted());
+        CHECK(engine.submitOrder(7, 602, 3, Side::Sell, 1000, 40, OrderType::Limit).isAccepted());
+        book->setTradingState(TradingState::Continuous);  // the opening cross
+        const Price clearing = book->getSnapshot().lastTradePrice;
+
+        uint64_t volume = 0;
+        int crosses = 0;
+        for (size_t off = 0; off < sent.size();) {
+            const auto* m = reinterpret_cast<const uint8_t*>(sent.data()) + off;
+            const size_t size = testing::itchMessageSize(m[0]);
+            CHECK(size != 0);
+            switch (m[0]) {
+            case ITCH_MT_ORDER_EXECUTED:
+                volume += readU32BE(m + 19);
+                break;
+            case ITCH_MT_ORDER_EXECUTED_PX:
+                CHECK(static_cast<Price>(readU32BE(m + 32)) == clearing);
+                if (m[31] == 'Y') volume += readU32BE(m + 19);
+                break;
+            case ITCH_MT_TRADE:
+                volume += readU32BE(m + 20);
+                break;
+            case ITCH_MT_CROSS_TRADE:
+                ++crosses;
+                volume += readU64BE(m + 11);
+                CHECK(static_cast<Price>(readU32BE(m + 27)) == clearing);
+                CHECK(m[39] == ITCH_CROSS_TYPE_OPENING);
+                break;
+            default:
+                break;
+            }
+            off += size;
+        }
+        if (volume != 100)
+            throw std::runtime_error("the feed counted " + std::to_string(volume) +
+                                     " shares for a 100-share cross");
+        CHECK(crosses == 1);
+    } END
+}
+
 // MD-16. ITCH timestamps are nanoseconds since midnight. Without an injected
 // clock the publisher stamped steady_clock — time since boot — truncated to 48
 // bits, which is no time of day at all.
@@ -620,6 +679,7 @@ int main() {
     test_PublisherSuppressesNeverDisplayedIOC();
     test_PublisherEmitsExecutedOnMakerFill();
     test_PublisherReportsCrossExecutionPrice();
+    test_UncrossVolumeCountedOnce();
     test_PublisherDefaultTimestampIsTimeSinceMidnight();
     test_PublisherEmitsDeleteOnCancel();
     test_PublisherEmitsExecutedThenDeleteOnFullFill();

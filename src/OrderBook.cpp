@@ -2705,6 +2705,10 @@ void OrderBook::uncrossLocked() {
 
     const Price bestUncrossPrice = res.indicativePrice;
     Quantity remainingVolume = res.pairedVolume;
+    UncrossReport report;
+    report.symbolId  = symbolId_;
+    report.price     = bestUncrossPrice;
+    report.fromState = tradingState_;
 
     // An auction fills against an order's FULL remaining size, not its
     // displayed slice, so an iceberg's slice has to be re-derived after every
@@ -2861,6 +2865,9 @@ void OrderBook::uncrossLocked() {
         t.timestamp = nowNs();
         t.sequenceNumber = nextSequenceNumber_++;
         t.symbolId = symbolId_;
+        t.auctionCross = true;
+        if (report.volume == 0) report.firstTradeId = t.tradeId;
+        report.volume += fillQty;
         tradeHistory_.pushOverwrite(t);
         if (!replayMode_ && hasTradeListener_) { listener_->onTrade(t); engineListener_->onTrade(t); }
 
@@ -2938,6 +2945,8 @@ void OrderBook::uncrossLocked() {
 
     // Cancel any LOC orders that did not fill at the uncross price.
     cancelLocOrders();
+
+    if (report.volume > 0 && !replayMode_) listener_->onUncross(report);
 }
 
 void OrderBook::cancelAuctionMarketOrders() {

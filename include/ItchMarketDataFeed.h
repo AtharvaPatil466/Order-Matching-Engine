@@ -125,6 +125,8 @@ public:
     void onBookVisible(const BookVisibleUpdate& u) override {
         itch_.onBookVisible(u);
     }
+    // The cross's one 'Q' (MD-6).
+    void onUncross(const UncrossReport& r) override { itch_.onUncross(r); }
 
 private:
     void dispatchFrame(std::string_view bytes) {

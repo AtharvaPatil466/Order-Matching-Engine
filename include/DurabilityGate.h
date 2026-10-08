@@ -49,7 +49,7 @@
 // lock-free handoff that does not exist yet — the engine refuses that
 // combination rather than pretending.
 
-// OrderBook.h, not EventListener.h: the latter only forward-declares the four
+// OrderBook.h, not EventListener.h: the latter only forward-declares the
 // event structs, and this buffers them by value.
 #include "EventListener.h"
 #include "OrderBook.h"
@@ -76,19 +76,24 @@ public:
     // ── EventListener ───────────────────────────────────────────────────────
     void onTrade(const Trade& t) override {
         if (!capturing_) { if (downstream_) downstream_->onTrade(t); return; }
-        current_.push_back(Event{Event::Kind::Trade, t, {}, {}, {}});
+        current_.push_back(Event{Event::Kind::Trade, t, {}, {}, {}, {}});
     }
     void onOrderUpdate(const OrderUpdate& u) override {
         if (!capturing_) { if (downstream_) downstream_->onOrderUpdate(u); return; }
-        current_.push_back(Event{Event::Kind::OrderUpdate, {}, u, {}, {}});
+        current_.push_back(Event{Event::Kind::OrderUpdate, {}, u, {}, {}, {}});
     }
     void onMarketData(const MarketDataUpdate& u) override {
         if (!capturing_) { if (downstream_) downstream_->onMarketData(u); return; }
-        current_.push_back(Event{Event::Kind::MarketData, {}, {}, u, {}});
+        current_.push_back(Event{Event::Kind::MarketData, {}, {}, u, {}, {}});
     }
     void onBookVisible(const BookVisibleUpdate& u) override {
         if (!capturing_) { if (downstream_) downstream_->onBookVisible(u); return; }
-        current_.push_back(Event{Event::Kind::BookVisible, {}, {}, {}, u});
+        current_.push_back(Event{Event::Kind::BookVisible, {}, {}, {}, u, {}});
+    }
+    // Held with the cross's executions, so the report never overtakes them.
+    void onUncross(const UncrossReport& r) override {
+        if (!capturing_) { if (downstream_) downstream_->onUncross(r); return; }
+        current_.push_back(Event{Event::Kind::Uncross, {}, {}, {}, {}, r});
     }
 
     // ── Engine-side control ─────────────────────────────────────────────────
@@ -151,12 +156,13 @@ public:
 
 private:
     struct Event {
-        enum class Kind : uint8_t { Trade, OrderUpdate, MarketData, BookVisible };
+        enum class Kind : uint8_t { Trade, OrderUpdate, MarketData, BookVisible, Uncross };
         Kind              kind;
         Trade             trade;
         OrderUpdate       orderUpdate;
         MarketDataUpdate  marketData;
         BookVisibleUpdate bookVisible;
+        UncrossReport     uncross;
     };
 
     void dispatchAll(const std::vector<Event>& events) {
@@ -167,6 +173,7 @@ private:
                 case Event::Kind::OrderUpdate: downstream_->onOrderUpdate(e.orderUpdate); break;
                 case Event::Kind::MarketData:  downstream_->onMarketData(e.marketData);   break;
                 case Event::Kind::BookVisible: downstream_->onBookVisible(e.bookVisible); break;
+                case Event::Kind::Uncross:     downstream_->onUncross(e.uncross);         break;
             }
         }
     }

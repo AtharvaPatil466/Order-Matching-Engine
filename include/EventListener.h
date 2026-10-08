@@ -7,6 +7,7 @@ struct Trade;
 struct OrderUpdate;
 struct MarketDataUpdate;
 struct BookVisibleUpdate;
+struct UncrossReport;
 
 // Virtual interface replacing std::function callbacks.
 // Zero-cost dispatch via vtable — no heap allocation, no type erasure overhead.
@@ -38,6 +39,10 @@ public:
     // slice. An order-level market-data feed (ITCH) must be driven from HERE,
     // not from onOrderUpdate, or it rebroadcasts private state to the world.
     virtual void onBookVisible(const BookVisibleUpdate& /*update*/) {}
+
+    // Called once per uncross that printed, after its onTrade calls (each of
+    // which carries Trade::auctionCross). Not called in replay.
+    virtual void onUncross(const UncrossReport& /*report*/) {}
 };
 
 // Null listener singleton — avoids nullptr checks on hot path.

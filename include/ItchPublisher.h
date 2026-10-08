@@ -16,7 +16,10 @@
 //   onTrade                               → 'E' Executed (per live side), or
 //                                            'C' Executed With Price when the
 //                                            fill is away from the announced
-//                                            price (an auction cross)
+//                                            price; an auction-cross fill is
+//                                            always a non-printable 'C'
+//   onUncross                             → one 'Q' Cross Trade: the cross's
+//                                            price and volume, counted once
 //   onOrderUpdate(Filled, remaining=0)    → 'D' Delete (order off the book)
 //   onOrderUpdate(Cancelled)              → 'D' Delete
 //   onOrderUpdate(Rejected)               → nothing (rejects are private)
@@ -279,6 +282,7 @@ public:
         buy.shares       = t.quantity;
         buy.price        = t.price;
         buy.tradeOrMatch = t.tradeId;
+        buy.cross        = t.auctionCross;
         buy.ts           = now();
         dispatch(buy);
 
@@ -288,8 +292,25 @@ public:
         sell.shares       = t.quantity;
         sell.price        = t.price;
         sell.tradeOrMatch = t.tradeId;
+        sell.cross        = t.auctionCross;
         sell.ts           = buy.ts;
         dispatch(sell);
+    }
+
+    // MD-6: the cross is reported once, as a 'Q' with its price and volume;
+    // its executions went out as non-printable 'C's, so a subscriber that
+    // sums printable executions, 'P' and 'Q' counts the cross's volume once.
+    // The match number is the cross's first execution's.
+    void onUncross(const UncrossReport& r) override {
+        char type = ITCH_CROSS_TYPE_INTRADAY;
+        switch (r.fromState) {
+        case TradingState::PreOpen:
+        case TradingState::AuctionOpen:       type = ITCH_CROSS_TYPE_OPENING; break;
+        case TradingState::AuctionClose:      type = ITCH_CROSS_TYPE_CLOSING; break;
+        case TradingState::VolatilityAuction: type = ITCH_CROSS_TYPE_HALT;    break;
+        default: break;
+        }
+        publishCrossTrade(r.volume, r.price, r.firstTradeId, type);
     }
 
     void onMarketData(const MarketDataUpdate&) override {
@@ -324,6 +345,7 @@ private:
         Kind     kind{Kind::Add};
         Side     side{Side::Buy};    // Add
         bool     fromFill{false};    // Delete: true iff driven by Filled (vs Cancel)
+        bool     cross{false};       // Executed: an auction-cross fill (MD-6)
         char     c0{' '};            // SystemEvent code / StockDir marketCat /
                                      // TradingAction wireState / CrossTrade type
         char     c1{' '};            // StockDir financialStatus
@@ -390,20 +412,17 @@ private:
             Quantity filled = (e.shares > prev) ? prev : e.shares;
             it->second.shares = prev - filled;
             // 'E' tells subscribers the order traded at the price it was
-            // announced with. At an auction uncross everything fills at the
-            // clearing price instead, so say the price ('C') — MD-6.
-            // ponytail: printable 'Y', so a cross still counts both sides as
-            // volume. ITCH's form is non-printable 'C's plus one 'Q' per
-            // uncross, which needs the uncross volume — nothing reports it yet.
+            // announced with. A cross fill says its price ('C') and is
+            // non-printable: the cross's one 'Q' carries the volume (MD-6).
             uint8_t buf[ITCH_SIZE_ORDER_EXECUTED_PX];
-            size_t n = (e.price == it->second.price)
+            size_t n = (e.price == it->second.price && !e.cross)
                 ? encodeOrderExecuted(buf, locateOf(), nextTracking(), e.ts,
                                       static_cast<uint64_t>(e.orderId),
                                       filled, e.tradeOrMatch)
                 : encodeOrderExecutedWithPrice(buf, locateOf(), nextTracking(), e.ts,
                                                static_cast<uint64_t>(e.orderId),
                                                filled, e.tradeOrMatch,
-                                               /*printable=*/true, e.price);
+                                               /*printable=*/!e.cross, e.price);
             emit(buf, n);
             executedEmitted_.fetch_add(1, std::memory_order_relaxed);
             messagesEmitted_.fetch_add(1, std::memory_order_relaxed);

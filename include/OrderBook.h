@@ -56,6 +56,20 @@ struct Trade {
     // Set for continuous-match trades; auction-cross trades keep the default
     // (a call auction has no single aggressor — fees treat the buyer as taker).
     Side aggressorSide = Side::Buy;
+    // One execution of an auction uncross. The cross as a whole is reported
+    // once, by EventListener::onUncross (MD-6).
+    bool auctionCross = false;
+};
+
+// One uncross that printed, reported after its executions so a market-data
+// feed can publish the cross once (ITCH 'Q') instead of counting every
+// execution's volume on both sides (MD-6).
+struct UncrossReport {
+    SymbolId     symbolId = 0;
+    Price        price = 0;          // the clearing price
+    Quantity     volume = 0;         // shares executed in the cross
+    uint64_t     firstTradeId = 0;   // tradeId of the cross's first execution
+    TradingState fromState = TradingState::Continuous;  // the auction it ended
 };
 
 // A single continuous-match fill, buffered on the stack inside OrderBook::match

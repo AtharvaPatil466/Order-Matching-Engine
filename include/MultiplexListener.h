@@ -65,6 +65,11 @@ public:
         for (auto* l : listeners_) l->onBookVisible(u);
     }
 
+    // The cross report ('Q' on ITCH) — same hazard as onBookVisible.
+    void onUncross(const UncrossReport& r) override {
+        for (auto* l : listeners_) l->onUncross(r);
+    }
+
 private:
     std::vector<EventListener*> listeners_;
 };

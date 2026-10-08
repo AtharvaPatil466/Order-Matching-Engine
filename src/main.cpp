@@ -274,13 +274,16 @@ int main(int argc, char* argv[]) {
     // decisions this binary does not make on its own. Parsed before the
     // engine starts so a bad value refuses to boot rather than running
     // without a close.
-    const std::string sessionSpec =
+    // The flag, then OB_SESSION_SCHEDULE, then `session_schedule` in the
+    // config file (Config::getString reads that same env name first).
+    std::string sessionSpec =
         flagOrEnv(argc, argv, "--session-schedule", "OB_SESSION_SCHEDULE");
+    if (sessionSpec.empty()) sessionSpec = cfg.getString("session_schedule");
     std::optional<SessionSchedule> sessionSchedule;
     if (!sessionSpec.empty()) {
         sessionSchedule = parseSessionSchedule(sessionSpec);
         if (!sessionSchedule) {
-            std::cerr << "FATAL: --session-schedule '" << sessionSpec
+            std::cerr << "FATAL: --session-schedule / session_schedule '" << sessionSpec
                       << "' is not HH:MM,HH:MM,HH:MM,HH:MM (pre-open, open, closing"
                          " auction, close; UTC, strictly increasing)\n";
             return 1;
@@ -302,7 +305,7 @@ int main(int argc, char* argv[]) {
                                                        *sessionSchedule);
         scheduler->start();
         std::cout << "[Session] Scheduler on: " << sessionSpec
-                  << " UTC (pre-open, open, closing auction, close)\n";
+                  << " UTC, Monday to Friday (pre-open, open, closing auction, close)\n";
     }
 
     // ── Replication wiring (env-driven) ──────────────────────────────

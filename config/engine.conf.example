@@ -7,8 +7,9 @@
 # MANY KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
 # changes nothing: no risk limit, rate limit, checkpoint threshold, port or
 # replication timing is taken from this file. What is read: log_sink, the
-# alert_* keys, order_pool_capacity / trade_history_capacity, and, on SIGHUP
-# only, rate_limit.default_rate / rate_limit.default_burst. journal_path,
+# alert_* keys, session_schedule, order_pool_capacity / trade_history_capacity
+# and volatility_auction_dwell_ms, and, on SIGHUP only,
+# rate_limit.default_rate / rate_limit.default_burst. journal_path,
 # instruments and participants are validated at startup but not applied.
 
 # ── Core Engine ──────────────────────────────────────────────────────────────
@@ -75,6 +76,13 @@ otr_threshold    = 100
 volatility_auction_dwell_ms = 300000
 # not read: the price band stays off
 price_band_pct   = 0.05
+
+# ── Trading Session ──────────────────────────────────────────────────────────
+# Pre-open, open, closing auction, close: HH:MM UTC, strictly increasing.
+# Sessions run Monday to Friday by UTC date; a weekend fires nothing. The close
+# cancels DAY orders. --session-schedule and OB_SESSION_SCHEDULE win over this
+# key; a malformed value refuses to boot. Off when unset. OrderEngine only.
+# session_schedule = 13:00,13:30,19:55,20:00
 
 # ── High Availability ────────────────────────────────────────────────────────
 # not read: replication uses --role / OB_NODE_ROLE (plus

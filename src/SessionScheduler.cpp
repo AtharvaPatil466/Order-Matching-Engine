@@ -8,6 +8,12 @@ namespace OrderMatcher {
 namespace {
 // Milliseconds in a calendar day — the modulus for ms-of-day.
 constexpr uint64_t kMsPerDay = 24ULL * 60ULL * 60ULL * 1000ULL;
+
+// `daysSinceEpoch` is a UTC date; 1970-01-01 was a Thursday.
+bool isWeekend(uint64_t daysSinceEpoch) {
+    const uint64_t weekday = (daysSinceEpoch + 4) % 7;  // 0 = Sunday
+    return weekday == 0 || weekday == 6;
+}
 } // namespace
 
 SessionScheduler::SessionScheduler(MatchingEngine& engine,
@@ -168,6 +174,11 @@ void SessionScheduler::tick() {
     // Within a date the session clock never runs backwards.
     const uint64_t now = std::max(this->now(), lastTick_);
     lastTick_ = now;
+
+    // Monday to Friday only (1.8-H8). A weekend date has already reset the
+    // phase above; it fires nothing, so Friday's PostClose holds until
+    // Monday's pre-open.
+    if (isWeekend(date)) return;
 
     // Advance forward through the phase sequence, firing every boundary that
     // has been reached but not yet applied. The loop (rather than a single

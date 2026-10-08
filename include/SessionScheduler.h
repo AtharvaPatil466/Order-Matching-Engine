@@ -110,11 +110,13 @@ public:
     void clearClock() { clock_ = {}; }
     uint64_t now() const;
 
-    // Trading-date seam. A new trading day is a change of this value — never
-    // a smaller ms-of-day, which is what an NTP step back looks like too.
-    // Any increasing day number works (e.g. yyyymmdd). Default: the UTC day of
-    // the default clock. With an injected clock and no date function the date
-    // never changes, so only resetSession() starts a new session.
+    // Trading-date seam: days since 1970-01-01, UTC. A new trading day is a
+    // change of this value — never a smaller ms-of-day, which is what an NTP
+    // step back looks like too. The weekday is derived from it: sessions run
+    // Monday to Friday, and a Saturday or Sunday fires no phase. Default: the
+    // UTC day of the default clock. With an injected clock and no date
+    // function the date stays 0 (a Thursday) and never changes, so only
+    // resetSession() starts a new session.
     using DateFn = std::function<uint32_t()>;
     void setTradingDateFn(DateFn date) { dateFn_ = std::move(date); }
     uint32_t tradingDate() const;

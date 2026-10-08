@@ -12,6 +12,8 @@
 //      each intervening phase, in order.
 //   4. A midnight wrap (clock running backwards) and an explicit
 //      resetSession() both re-arm the full sequence.
+//   5. Sessions run Monday to Friday only: a weekend date fires nothing,
+//      not even after Friday's close (roadmap 1.8-H8).
 //
 // The test drives tick() manually rather than relying on the timer thread,
 // so it is fully deterministic and fast; a separate section exercises the
@@ -162,7 +164,7 @@ void test_session_reset() {
     auto symbols = makeUniverse(engine);
 
     uint64_t vnow = 0;
-    uint32_t vdate = 1;
+    uint32_t vdate = 4;  // days since 1970-01-01: Monday 1970-01-05
     SessionSchedule sched;
     SessionScheduler sched_(engine, symbols, sched);
     sched_.setClock([&]() -> uint64_t { return vnow; });
@@ -195,7 +197,7 @@ void test_session_reset() {
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::Continuous);
 
-    vdate = 2;
+    vdate = 5;      // Tuesday
     vnow = 60'000;  // 00:01:00 next day
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::Idle);
@@ -204,6 +206,47 @@ void test_session_reset() {
     vnow = sched.preOpenMs;
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::PreOpen);
+
+    engine.stopAsync();
+    PASS();
+}
+
+// ─── Test 5: weekends fire nothing ───────────────────────────────────────────
+
+void test_weekend_fires_nothing() {
+    SECTION("Saturday and Sunday fire no phase; Monday opens normally");
+
+    MatchingEngine engine;
+    auto symbols = makeUniverse(engine);
+
+    uint64_t vnow = 0;
+    uint32_t vdate = 8;  // Friday 1970-01-09
+    SessionSchedule sched;
+    SessionScheduler sched_(engine, symbols, sched);
+    sched_.setClock([&]() -> uint64_t { return vnow; });
+    sched_.setTradingDateFn([&]() -> uint32_t { return vdate; });
+
+    vnow = sched.closeMs;  // Friday runs to its close
+    sched_.tick();
+    assert(sched_.currentPhase() == SessionPhase::PostClose);
+    assertAllState(engine, symbols, TradingState::PostClose);
+
+    for (uint32_t weekend : {9u, 10u}) {  // Saturday, Sunday
+        vdate = weekend;
+        vnow = sched.preOpenMs;
+        sched_.tick();
+        vnow = sched.openMs;
+        sched_.tick();
+        assert(sched_.currentPhase() == SessionPhase::Idle &&
+               "a weekend date ran the trading session");
+        assertAllState(engine, symbols, TradingState::PostClose);
+    }
+
+    vdate = 11;  // Monday
+    vnow = sched.preOpenMs;
+    sched_.tick();
+    assert(sched_.currentPhase() == SessionPhase::PreOpen);
+    assertAllState(engine, symbols, TradingState::PreOpen);
 
     engine.stopAsync();
     PASS();
@@ -252,6 +295,7 @@ int main() {
     test_full_day_sequence();
     test_coarse_tick_fires_all_phases_in_order();
     test_session_reset();
+    test_weekend_fires_nothing();
     test_timer_thread_lifecycle();
 
     std::cout << "\nAll " << tests_passed << " SessionScheduler test sections passed."

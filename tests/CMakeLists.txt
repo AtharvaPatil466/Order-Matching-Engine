@@ -237,6 +237,16 @@ set_tests_properties(AdminBindsLoopbackTest PROPERTIES
     SKIP_RETURN_CODE 77
     LABELS "project;security")
 
+# Roadmap 1.8-H8: `session_schedule` in the --config file drives OrderEngine's
+# SessionScheduler like --session-schedule / OB_SESSION_SCHEDULE; it was read
+# by nothing. A malformed value refuses to boot.
+add_test(NAME EngineSessionScheduleConfigTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_session_schedule_config.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineSessionScheduleConfigTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;session;lifecycle")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)

@@ -1013,7 +1013,8 @@ moves those symbols to `PostClose` (running the closing cross) and then cancels 
 every `DAY` order on them, and only them. `SessionScheduler`'s close calls it (roadmap 1.8-H8,
 1.4-D9; pinned by `tests/SessionEndTest.cpp`). `OrderEngine` runs the scheduler only when
 started with `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` (HH:MM UTC, or
-`OB_SESSION_SCHEDULE`); without it, which is the default, nothing ends a session and a `DAY`
+`OB_SESSION_SCHEDULE`, or `session_schedule` in the `--config` file), and runs it Monday to
+Friday by UTC date; without it, which is the default, nothing ends a session and a `DAY`
 order with `expiryTime == 0` behaves exactly like `GTC`, as before. `GatewayServer` never
 runs one. Both binaries run the expiry sweep (Rule 8.1), so a `DAY` order that carries an
 `expiryTime` expires like `GTD` either way.

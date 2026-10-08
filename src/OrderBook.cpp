@@ -276,25 +276,16 @@ void OrderBook::ensurePriceRange(Price price) {
 }
 
 bool OrderBook::addToBook(Order* order) {
-    // An iceberg must never rest with nothing displayed. Enforced HERE, at the
-    // choke point every add path funnels through, rather than trusted to the
-    // eleven callers — because the trust already failed once. screenMinQty
-    // rested a minQty order via a direct addToBook without slicing it, and
-    // orders are allocated with visibleQty = 0, so an iceberg taking that route
-    // entered the book at ZERO displayed quantity with its full size behind it.
-    //
-    // That is the second route to the MATCH-1 livelock (modify-to-zero was the
-    // first). Price-time printed a zero-size trade before re-slicing; pro-rata
-    // summed the level to 0, and eraseBest will not deactivate a populated
-    // level, so the matching thread spun forever. Reachable by one client alone:
-    // a buy iceberg with minQty against an empty ask side.
-    //
-    // Slicing rather than refusing, because three callers ignore this function's
-    // return value, and a refusal they drop is its own bug. It cannot change any
-    // correct path: admission rejects displayQty == 0 and a resting order has
-    // remainingQty > 0, so every caller that already slices arrives with
-    // visibleQty > 0 and never reaches this branch.
-    if (order->type == OrderType::Iceberg && order->visibleQty == 0) [[unlikely]]
+    // The iceberg slice is taken HERE and nowhere else on the way into the
+    // book (1.5-E2). Every rest path funnels through this function, and each
+    // one entering with a fresh slice of min(remainingQty, displayQty) is the
+    // rule; leaving it to the callers is how two of them broke it. screenMinQty
+    // rested an iceberg unsliced, at ZERO displayed quantity — the second route
+    // to the MATCH-1 livelock (494e5ae) — and a repriced iceberg rested with
+    // its pre-match slice, more than it held, and the next fill wrapped
+    // remainingQty (MATCH-3). Admission rejects displayQty == 0 and a resting
+    // order has remainingQty > 0, so the slice is never zero.
+    if (order->type == OrderType::Iceberg) [[unlikely]]
         order->visibleQty = std::min(order->remainingQty, order->displayQty);
 
     if (!canAddToBook(order)) return false;
@@ -1064,9 +1055,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
         } else {
-            // Rest in book (Limit, PostOnly, Hidden, Iceberg)
-            if (type == OrderType::Iceberg) [[unlikely]]
-                order->visibleQty = std::min(order->remainingQty, order->displayQty);
+            // Rest in book (Limit, PostOnly, Hidden, Iceberg; addToBook slices)
             if (!addToBook(order)) {
                 // Depth limit or price range exceeded — cancel the order
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
@@ -2392,12 +2381,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         if (finalizeIfStpCancelled(order)) return true;
 
         if (order->remainingQty > 0) {
-            // Re-slice, as every other rest path does (MATCH-3). The match
-            // above can leave remainingQty below the old slice; resting that
-            // slice made visibleQty > remainingQty, and the next aggressor was
-            // filled for more than the order held — remainingQty wrapped.
-            if (order->type == OrderType::Iceberg)
-                order->visibleQty = std::min(order->remainingQty, order->displayQty);
+            // addToBook re-slices an iceberg against what the match left.
             if (!addToBook(order)) {
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
                 orderLookup_.erase(orderId);
@@ -2433,10 +2417,6 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             // priority — a growth must not jump the queue it joined smaller.
             removeFromBook(order);
             order->remainingQty = newLeaves;
-            // Re-slice an iceberg against its new size, the same way the
-            // initial rest and the refresh path do.
-            if (order->type == OrderType::Iceberg)
-                order->visibleQty = std::min(order->remainingQty, order->displayQty);
             order->timestamp = nowNs();
             addToBook(order);  // re-announces: back of the queue, new size
         }

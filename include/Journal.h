@@ -1199,6 +1199,7 @@ protected:
             slot.startBytes = bytesOnDisk_.load(std::memory_order_relaxed);
             slot.writeRes = INT32_MIN;
             slot.fsyncRes = INT32_MIN;
+            slot.submitErr = 0;
             slot.wantAck = wantAck;
             slot.pendingCqes = wantAck ? 2 : 1;
             slot.active = true;
@@ -1218,7 +1219,31 @@ protected:
             }
             inflightCount_ = 1;
         }
-        io_uring_submit(&ring_);  // return ignored, matching the prior code path
+        // JRN-11: this return was ignored with inflightCount_ already 1, so a
+        // submission the kernel refused left the writer waiting on chainDone_
+        // for a chain that would never complete — forever. Now a refusal fails
+        // the chain like a failed write: the reaper's finalizeChain halts the
+        // journal and hands the entries back, run here when no CQE is coming.
+        const int want = wantAck ? 2 : 1;
+        int submitErr = 0;
+        const int taken = submitPrepared(want, submitErr);
+        if (taken < want) {
+            // What the kernel did not take is still in the ring, where any
+            // later submit — the shutdown NOP — would put it on the disk behind
+            // the halt. Turn it into a NOP the reaper ignores. (prep_nop also
+            // clears the link flag.)
+            if (taken < 1) neuter(wsqe);
+            if (wantAck) neuter(fsqe);
+            bool finalizeNow = false;
+            {
+                std::lock_guard<std::mutex> lk(ringMu_);
+                Inflight& slot = inflight_[slotIdx];
+                slot.submitErr = submitErr != 0 ? submitErr : EIO;
+                slot.pendingCqes = static_cast<uint16_t>(slot.pendingCqes - (want - taken));
+                finalizeNow = slot.pendingCqes == 0;
+            }
+            if (finalizeNow) finalizeChain(slotIdx);
+        }
 
         // Pop the submitted prefix; the slot owns the copy now. A fault-injected
         // short-write tail stays in batch_, renumbered on the next commit.
@@ -1242,6 +1267,34 @@ protected:
         // while this thread is blocked, and chainDone_ orders it before this
         // thread resumes. Callbacks must therefore not re-enter the journal.
         if (syncPolicy_ == SyncPolicy::Immediate) drainCompletions();
+    }
+
+    // Submit the `want` SQEs just prepared and return how many the kernel took
+    // (JRN-11). Transient refusals — EINTR, EAGAIN, EBUSY (a full CQ, which the
+    // reaper is draining) — are retried a bounded number of times; `err` is
+    // the last refusal's errno.
+    int submitPrepared(int want, int& err) {
+        constexpr int kSubmitAttempts = 1000;
+        int taken = 0;
+        for (int attempt = 0; taken < want && attempt < kSubmitAttempts; ++attempt) {
+            const int rc = FaultInjector::instance().shouldFail("journal.uring.submit_fail")
+                               ? -EBUSY : io_uring_submit(&ring_);
+            if (rc > 0) {
+                taken += rc;
+                continue;
+            }
+            err = -rc;
+            if (rc != 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY) break;
+            std::this_thread::yield();
+        }
+        return taken;
+    }
+
+    // Make a prepared, unsubmitted SQE harmless: a NOP whose completion the
+    // reaper discards (kStopUserData outside shutdown).
+    static void neuter(struct io_uring_sqe* sqe) {
+        io_uring_prep_nop(sqe);
+        io_uring_sqe_set_data64(sqe, kStopUserData);
     }
 
     // Reaper thread loop: reap CQEs, finalize chains, fire onCommit. Runs until
@@ -1316,7 +1369,10 @@ protected:
             // sets wantAck = false so no fsync is issued and fsyncRes is never
             // set, which is why the fsync check is gated on wantAck.
             const size_t wantBytes = slot.count * sizeof(JournalEntry);
-            if (slot.writeRes < 0) {
+            if (slot.submitErr != 0) {
+                failed = "io_uring_submit";
+                failedErr = slot.submitErr;
+            } else if (slot.writeRes < 0) {
                 failed = "io_uring write";
                 failedErr = -slot.writeRes;
             } else if (static_cast<size_t>(slot.writeRes) != wantBytes) {
@@ -1985,6 +2041,7 @@ private:
         size_t   startBytes{0};          // file size before this chain: a failure cuts back to it
         int32_t  writeRes{INT32_MIN};    // write CQE res (bytes, or -errno)
         int32_t  fsyncRes{INT32_MIN};    // fdatasync CQE res (0, or -errno)
+        int      submitErr{0};           // errno when io_uring_submit refused part of the chain
         uint16_t pendingCqes{0};         // CQEs still to reap for this chain
         bool     wantAck{true};          // false when fsync_fail fault armed
         bool     active{false};          // slot occupied

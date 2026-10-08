@@ -658,6 +658,16 @@ enable_assertions(JournalHaltTest)
 add_test(NAME JournalHaltTest COMMAND JournalHaltTest)
 set_tests_properties(JournalHaltTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# JRN-11: a refused io_uring_submit halts the journal instead of leaving the
+# writer waiting forever on a chain the kernel never saw, and the refused SQEs
+# never reach the disk. Fault-injection build on Linux with liburing; skips
+# elsewhere.
+add_executable(JournalSubmitFailureTest JournalSubmitFailureTest.cpp)
+target_link_libraries(JournalSubmitFailureTest PRIVATE OrderMatcher)
+enable_assertions(JournalSubmitFailureTest)
+add_test(NAME JournalSubmitFailureTest COMMAND JournalSubmitFailureTest)
+set_tests_properties(JournalSubmitFailureTest PROPERTIES TIMEOUT 60 LABELS "project;recovery;chaos")
+
 # The order-entry port must journal what it acknowledges: GatewayServer had no
 # journal at all, so a restart lost every order it had accepted. Driven against
 # the real binary through the order port — acknowledge, restart, then cancel the

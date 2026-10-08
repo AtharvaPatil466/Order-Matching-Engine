@@ -3479,6 +3479,16 @@ void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
     o->stopPrice = stopPrice;
 }
 
+void OrderBook::restoreExecutedQty(OrderId orderId, Quantity cumQty) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    Order** found = orderLookup_.find(orderId);
+    Order* o = found ? *found : nullptr;
+    if (!o || cumQty == 0) return;
+    o->cumQty = cumQty;
+    o->initialQty = cumQty + o->remainingQty;
+    o->status = OrderStatus::PartiallyFilled;
+}
+
 size_t OrderBook::getBidLevelsCount() const { return bids_.size(); }
 size_t OrderBook::getAskLevelsCount() const { return asks_.size(); }
 

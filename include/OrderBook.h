@@ -567,6 +567,11 @@ public:
     // order that is not a parked stop.
     void restoreStopElection(OrderId orderId, Price stopPrice);
 
+    // Recovery only: give a snapshot-restored order back the quantity it had
+    // executed. A snapshot re-adds the order at its leaves; without its fills
+    // a later replace (newQty = new total) would be applied against zero.
+    void restoreExecutedQty(OrderId orderId, Quantity cumQty);
+
     // Position-relevant fields of an order, returned BY VALUE so no pointer
     // escapes the lock. `found` false means the order was already gone.
     struct OrderExposure {

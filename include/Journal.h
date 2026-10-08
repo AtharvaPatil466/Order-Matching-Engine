@@ -184,6 +184,15 @@ struct JournalEntry {
 };
 #pragma pack(pop)
 
+// Snapshot records also reuse newPrice, otherwise unused by them, for the
+// order's executed quantity (cumQty). A replace's newQty is the order's new
+// total, so it can only be re-applied against the fills the order had; a
+// snapshot that kept only remainingQty restored a partially filled order as
+// unfilled (1.5-E1). Older files carry 0 here: restored as unfilled, as before.
+inline Quantity snapshotCumQty(const JournalEntry& e) {
+    return static_cast<Quantity>(e.newPrice);
+}
+
 // The state a TradingStateChange record carries, and for PreOpen its trading
 // date (expiryTime; 0 = undated, which is also what older records hold).
 inline TradingState journaledTradingState(const JournalEntry& e) {
@@ -349,10 +358,12 @@ public:
                      uint64_t expiry = 0, Price stopPrice = 0, Price stopLimitPrice = 0,
                      Quantity displayQty = 0, PegType pegType = PegType::None,
                      Price pegOffset = 0, Price trailAmount = 0, Quantity minQty = 0,
-                     bool hidden = false, bool stopElected = false) {
+                     bool hidden = false, bool stopElected = false,
+                     Quantity cumQty = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Snapshot;
         entry.newQty = stopElected ? SNAPSHOT_STOP_ELECTED : 0;
+        entry.newPrice = static_cast<Price>(cumQty);  // see snapshotCumQty
         entry.timestamp = now();
         entry.orderId = id;
         entry.participantId = pid;

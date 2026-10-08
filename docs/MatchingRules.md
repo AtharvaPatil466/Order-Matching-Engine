@@ -1117,7 +1117,9 @@ they would a new order of that size (rule 9.3).
 
 Every ingress passes the client's quantity through unchanged: FIX `OrderQty` (38) on a `G`,
 OUCH `Shares` on a Replace, and the native gateway's `newQty`. Journal replay passes the
-recorded `newQty` back through the same contract.
+recorded `newQty` back through the same contract, and a checkpoint's Snapshot records carry
+each order's `cumQty`, so a replace after a restore is applied against the fills the order
+really had (`tests/ReplaceAfterCheckpointTest.cpp`).
 Pinned by `tests/ReplaceQuantityTest.cpp`.
 
 | Change | Priority |

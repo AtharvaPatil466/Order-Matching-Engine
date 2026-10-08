@@ -303,6 +303,14 @@ enable_assertions(StopLatchCheckpointTest)
 add_test(NAME StopLatchCheckpointTest COMMAND StopLatchCheckpointTest)
 set_tests_properties(StopLatchCheckpointTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A replace after a checkpoint applies against the order's executed quantity:
+# Snapshot records carry cumQty (1.5-E1).
+add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)
+target_link_libraries(ReplaceAfterCheckpointTest PRIVATE OrderMatcher)
+enable_assertions(ReplaceAfterCheckpointTest)
+add_test(NAME ReplaceAfterCheckpointTest COMMAND ReplaceAfterCheckpointTest)
+set_tests_properties(ReplaceAfterCheckpointTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Durable client acks cover every journaled request, not only new orders (D7).
 add_executable(DurableGateCoverageTest DurableGateCoverageTest.cpp)
 target_link_libraries(DurableGateCoverageTest PRIVATE OrderMatcher)

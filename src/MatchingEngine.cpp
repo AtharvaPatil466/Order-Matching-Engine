@@ -2302,6 +2302,7 @@ size_t MatchingEngine::replayJournal() {
                                entry.hidden);
                 if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                     book->restoreStopElection(entry.orderId, entry.stopPrice);
+                book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
             }
             break;
         }
@@ -2374,6 +2375,7 @@ void MatchingEngine::streamSnapshot(
             e.minQty       = o.minQty;
             e.hidden       = o.isHidden;
             e.newQty       = o.isStopTriggered ? SNAPSHOT_STOP_ELECTED : 0;
+            e.newPrice     = static_cast<Price>(o.cumQty);  // see snapshotCumQty
             fn(e);
         });
     }
@@ -2465,6 +2467,7 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                            entry.hidden);
             if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                 book->restoreStopElection(entry.orderId, entry.stopPrice);
+            book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
         }
         applied = true;
         break;
@@ -2513,7 +2516,8 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                                   entry.displayQty, entry.pegType,
                                   entry.pegOffset, entry.trailAmount,
                                   entry.minQty, entry.hidden,
-                                  (entry.newQty & SNAPSHOT_STOP_ELECTED) != 0);
+                                  (entry.newQty & SNAPSHOT_STOP_ELECTED) != 0,
+                                  snapshotCumQty(entry));
             break;
         }
     }
@@ -2638,7 +2642,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.displayQty, order.pegType,
                                             order.pegOffset, order.trailAmount,
                                             order.minQty, order.isHidden,
-                                            order.isStopTriggered);
+                                            order.isStopTriggered, order.cumQty);
             }
         };
 

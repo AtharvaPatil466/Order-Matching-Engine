@@ -310,18 +310,34 @@ private:
         // not a wire claim. OUCH's real protection here is structural (the
         // token map is per-session, so a client cannot name another firm's
         // order at all); this is the belt to that's braces.
+        //
+        // Shares is the new TOTAL (1.5-E1): the engine works Shares minus what
+        // already executed, and so must this session's leaves. Set them BEFORE
+        // the submit, so a replace that crosses decrements the new leaves, and
+        // put the old ones back if it is refused (the engine refuses Shares at
+        // or below what executed). The entry is looked up again afterwards
+        // rather than through `it`: a replace that fills out, or that STP
+        // cancels, reaps it during the submit.
+        const Quantity oldLeaves = it->second.shares;
+        const Quantity executed  = it->second.executed;
+        it->second.shares = r.shares > executed ? r.shares - executed : 0;
         SubmitResult res = engine_.submitCancelReplace(
             symbol, engineId, r.price, r.shares, firm);
+        auto old = tokenToOrderId_.find(r.existingOrderToken);
         if (!res.isAccepted()) {
+            if (old != tokenToOrderId_.end()) old->second.shares = oldLeaves;
             ++replacesRejected_;
             sendReject(r.newOrderToken, ouchRejectCode(res.rejectReason));
             return;
         }
 
-        tokenToOrderId_.erase(r.existingOrderToken);
-        tokenToOrderId_[r.newOrderToken] =
-            TokenEntry{engineId, symbol, side, r.shares, r.price};
-        engineIdToToken_[engineId] = r.newOrderToken;
+        if (old != tokenToOrderId_.end()) {
+            TokenEntry moved = old->second;
+            moved.price = r.price;
+            tokenToOrderId_.erase(old);
+            tokenToOrderId_[r.newOrderToken] = moved;
+            engineIdToToken_[engineId] = r.newOrderToken;
+        }
 
         ++replacesAccepted_;
         sendReplaced(r, side, symbol, firm, engineId);
@@ -390,6 +406,7 @@ private:
         Quantity prevLeaves = it->second.shares;
         Quantity filled = (t.quantity > prevLeaves) ? prevLeaves : t.quantity;
         it->second.shares = prevLeaves - filled;
+        it->second.executed += filled;
 
         if (send_) {
             uint8_t buf[OUCH_SIZE_ORDER_EXECUTED];
@@ -469,8 +486,9 @@ private:
         OrderId       orderId{0};
         SymbolId      symbol{0};
         Side          side{Side::Buy};
-        Quantity      shares{0};
+        Quantity      shares{0};    // leaves
         Price         price{0};
+        Quantity      executed{0};  // a Replace's Shares counts these
     };
 
     MatchingEngine&                              engine_;

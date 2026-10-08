@@ -558,6 +558,41 @@ void test_SessionFillsOnReplacedTokenUseNewToken() {
     } END
 }
 
+// A Replace's Shares is the order's new TOTAL (1.5-E1), executed shares
+// included, and the engine works total - executed. The session keeps its own
+// leaves for the Canceled message; it set them to Shares, so after
+// "enter 50, 20 executed, replace to 40" it reported 40 canceled while the
+// engine had 20 working.
+void test_SessionReplaceOfPartiallyFilledOrderTracksLeaves() {
+    TEST(SessionReplaceOfPartiallyFilledOrderTracksLeaves) {
+        MatchingEngine engine;
+        engine.addSymbol(7);
+        engine.start();
+
+        std::string sent;
+        OuchSession session(engine, [&](std::string_view b) { sent.append(b); });
+        CHECK(session.attachFillListener(7));
+
+        auto place = buildEnterOrder(700, 'B', 50, 7, 1000, OUCH_TIF_DAY, 1);
+        CHECK(session.feed(reinterpret_cast<const char*>(place.data()), place.size()));
+        engine.submitOrder(7, 9100, 2, Side::Sell, 1000, 20, OrderType::Limit);
+
+        auto rep = buildReplaceOrder(/*existing=*/700, /*new=*/701, /*shares=*/40, 1000);
+        CHECK(session.feed(reinterpret_cast<const char*>(rep.data()), rep.size()));
+        CHECK(session.replacesAccepted() == 1);
+        CHECK(engine.getOrderBook(7)->getOrder(700)->remainingQty == 20);
+
+        sent.clear();
+        auto cancel = buildCancelOrder(701, 0);
+        CHECK(session.feed(reinterpret_cast<const char*>(cancel.data()), cancel.size()));
+        CHECK(sent.size() == OUCH_SIZE_ORDER_CANCELED);
+        const auto* resp = reinterpret_cast<const uint8_t*>(sent.data());
+        CHECK(resp[0] == OUCH_MT_ORDER_CANCELED);
+        CHECK(readU32BE(resp + 23) == 20
+              && "Canceled must carry the engine's leaves (40 total - 20 executed)");
+    } END
+}
+
 // ─── Fill-emission tests ────────────────────────────────────────────────────
 // All exercise the EventListener → 'E' (OrderExecuted) path. The
 // pattern: place a resting order via OUCH so it lands in the session's
@@ -775,6 +810,7 @@ int main() {
     test_SessionReplaceUpdatesPriceAndQty();
     test_SessionReplaceUnknownTokenIsRejected();
     test_SessionFillsOnReplacedTokenUseNewToken();
+    test_SessionReplaceOfPartiallyFilledOrderTracksLeaves();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

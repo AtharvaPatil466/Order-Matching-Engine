@@ -949,6 +949,15 @@ add_test(NAME ItchPublisherAsyncTest COMMAND ItchPublisherAsyncTest)
 set_tests_properties(ItchPublisherAsyncTest PROPERTIES TIMEOUT 60
                      LABELS "project;protocol;concurrency")
 
+# Roadmap 1.7-G2 (LF-5): stopAsyncPublishing() under a live producer — no push
+# into a freed ring, no event lost. Meaningful under ASan/TSan.
+add_executable(ItchTeardownRaceTest ItchTeardownRaceTest.cpp)
+target_link_libraries(ItchTeardownRaceTest PRIVATE OrderMatcher)
+enable_assertions(ItchTeardownRaceTest)
+add_test(NAME ItchTeardownRaceTest COMMAND ItchTeardownRaceTest)
+set_tests_properties(ItchTeardownRaceTest PROPERTIES TIMEOUT 120
+                     LABELS "project;protocol;concurrency")
+
 # P3-2: 10k-packet burst gap recovery — service keeps up, live UDP feed not
 # stalled by TCP retransmit, journal ring holds the backlog without overflow
 add_executable(MoldUDP64BurstRecoveryTest MoldUDP64BurstRecoveryTest.cpp)

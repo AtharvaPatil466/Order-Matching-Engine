@@ -44,8 +44,9 @@
 // the live-order state machine, serializes, and invokes the sink. MPSC because
 // the matching thread (A/E/D) and control thread (S/R/H/Q) are independent
 // producers; the single consumer keeps the live-order map lock-free.
-// Lifecycle: quiesce all event sources BEFORE stopAsyncPublishing()/destruction
-// so no producer races ring teardown; the worker drains buffered events on stop.
+// Lifecycle: stopAsyncPublishing() may race live producers — an admission gate
+// keeps them out of the ring while it is drained and freed (LF-5). Destruction
+// still needs every event source quiesced first; the worker drains on stop.
 //
 // Loss (MD-9): an event that finds the ring full is dropped and marks a resync.
 // The worker then takes the book's lock (the book dispatches under it, so the
@@ -130,8 +131,17 @@ public:
     // Stop the worker and revert to inline publishing. Drains whatever
     // is still queued (single-threaded once the worker is joined) so no
     // captured event is lost. Safe to call when async was never enabled.
+    //
+    // LF-5: closes the ring's admission gate first and waits out producers
+    // already inside a push, so none can push into the ring once it is
+    // drained and freed. A producer that arrives meanwhile waits in dispatch()
+    // until this returns, then publishes inline after the drained backlog.
     void stopAsyncPublishing() {
         if (!async_.load(std::memory_order_acquire)) return;
+        ringGate_.fetch_or(kRingClosed, std::memory_order_acq_rel);
+        while (ringGate_.load(std::memory_order_acquire) != kRingClosed) {
+            std::this_thread::yield();
+        }
         running_.store(false, std::memory_order_release);
         if (worker_.joinable()) worker_.join();
         if (ring_) {
@@ -141,6 +151,7 @@ public:
             ring_.reset();
         }
         async_.store(false, std::memory_order_release);
+        ringGate_.store(0, std::memory_order_release);
     }
 
     bool     asyncEnabled()   const { return async_.load(std::memory_order_acquire); }
@@ -381,15 +392,25 @@ private:
     };
 
     // Route an event: non-blocking ring push when decoupled, else inline.
+    // ponytail: two RMWs per event on the gate, async mode only; no binary
+    // runs async publishing today. Fold the gate into the ring if it matters.
     void dispatch(const RawEvent& e) {
         if (async_.load(std::memory_order_acquire)) {
-            if (!ring_->push(e)) {
-                droppedEvents_.fetch_add(1, std::memory_order_relaxed);
-                resyncPending_.store(true, std::memory_order_release);
+            if (!(ringGate_.fetch_add(1, std::memory_order_acquire) & kRingClosed)) {
+                if (!ring_->push(e)) {
+                    droppedEvents_.fetch_add(1, std::memory_order_relaxed);
+                    resyncPending_.store(true, std::memory_order_release);
+                }
+                ringGate_.fetch_sub(1, std::memory_order_release);
+                return;
             }
-        } else {
-            serializeAndSend(e);
+            // Teardown in progress: wait for its drain, then publish inline.
+            ringGate_.fetch_sub(1, std::memory_order_release);
+            while (ringGate_.load(std::memory_order_acquire) & kRingClosed) {
+                std::this_thread::yield();
+            }
         }
+        serializeAndSend(e);
     }
 
     // Worker loop (async mode): single consumer of the MPSC ring.
@@ -612,6 +633,10 @@ private:
     std::thread                                  worker_;
     std::atomic<bool>                            async_{false};
     std::atomic<bool>                            running_{false};
+    // LF-5 admission gate: producers inside a ring push, plus kRingClosed
+    // while stopAsyncPublishing() tears the ring down.
+    std::atomic<uint64_t>                        ringGate_{0};
+    static constexpr uint64_t                    kRingClosed = uint64_t{1} << 63;
     std::atomic<uint64_t>                        droppedEvents_{0};
     std::atomic<bool>                            resyncPending_{false};  // MD-9
     std::atomic<uint64_t>                        eventsProcessed_{0};

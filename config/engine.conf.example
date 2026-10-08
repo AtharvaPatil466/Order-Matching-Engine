@@ -67,10 +67,14 @@ max_position     = 5000000
 otr_threshold    = 100
 
 # ── Circuit Breakers ─────────────────────────────────────────────────────────
-# not read: the breaker is fixed at 5% and nothing resumes a tripped book;
-# the price band stays off
+# The breaker is fixed at 5% of the reference price, tested against the price
+# an order's first fill would print at. A breach puts the symbol into a
+# volatility auction, which reopens with a cross after this dwell. Read like
+# order_pool_capacity: from the file named by OB_CONFIG_PATH, or from
+# OB_VOLATILITY_AUCTION_DWELL_MS. Default 300000 (5 minutes).
+volatility_auction_dwell_ms = 300000
+# not read: the price band stays off
 price_band_pct   = 0.05
-halt_duration_ms = 30000
 
 # ── High Availability ────────────────────────────────────────────────────────
 # not read: replication uses --role / OB_NODE_ROLE (plus

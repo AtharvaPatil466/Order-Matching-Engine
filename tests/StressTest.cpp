@@ -62,8 +62,8 @@ void testConcurrentProducers() {
     std::cout << "  Submitted: " << totalOrders << " orders, Trades: " << tradeCount.load() << std::endl;
 
     // Verify bid/ask invariant: best bid < best ask (or one side is empty).
-    // A circuit-breaker trip no longer parks the book in VolatilityAuction
-    // (roadmap 0.14), so the book is always Continuous here.
+    // Prices span 2%, inside the 5% volatility breaker, so nothing trips and
+    // the book is Continuous here.
     assert(book->getTradingState() == TradingState::Continuous);
     Price bestBid = book->getBestBid();
     Price bestAsk = book->getBestAsk();
@@ -96,6 +96,10 @@ void testMixedWorkloadContention() {
     };
     TradeCounter counter(tradeCount);
     book->setEventListener(&counter);
+    // Prices span 10%: the volatility breaker would trip (roadmap 1.8-H3) and
+    // leave the book accumulating in an auction. This stresses the queues, not
+    // the breaker.
+    book->setCircuitBreakerThreshold(1e9);
 
     auto worker = [&](int threadId) {
         std::mt19937 rng(threadId * 54321 + 1);

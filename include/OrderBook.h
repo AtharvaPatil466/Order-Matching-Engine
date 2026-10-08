@@ -328,6 +328,18 @@ public:
     // TradingState::VolatilityAuction. A manual Halt is unaffected.
     bool resumeVolatilityAuction();
 
+    // Volatility-auction dwell (roadmap 1.8-H3). A book in VolatilityAuction
+    // — tripped by the breaker or entered explicitly — is due to reopen once
+    // it has been there for the dwell, measured on the CALLER's clock: the
+    // first call after the book entered the state starts it. The engine's
+    // periodic expiry hook calls this on the owning thread and reopens a due
+    // book through a journaled state change. The dwell clock is not
+    // journaled: after a restart into a volatility auction it starts again at
+    // the first tick. Default 5 minutes, or `volatility_auction_dwell_ms`.
+    bool volatilityAuctionDue(uint64_t now);
+    void setVolatilityAuctionDwellNs(uint64_t ns) { volatilityDwellNs_ = ns; }
+    uint64_t getVolatilityAuctionDwellNs() const { return volatilityDwellNs_; }
+
     // Time-based expiry: call periodically to expire GTD/DAY orders
     // Cancel any DAY/GTD orders whose expiryTime has elapsed. The
     // optional onExpire callback is invoked once per order BEFORE the
@@ -412,9 +424,10 @@ public:
     void setReferencePrice(Price price) { referencePrice_ = price; }
 
     // Price-band (LULD-style) admission filter. Distinct from the
-    // volatility circuit breaker (a threshold on the same reference, reported
-    // as VolatilityCircuitBreaker and logged as breaker_trip — it does not
-    // change the trading state; see admitCircuitBreaker). The band REJECTS
+    // volatility circuit breaker (a threshold on the same reference, tested
+    // against the price an order's FIRST fill would print at; a breach moves
+    // the book into VolatilityAuction and logs breaker_trip — see
+    // tripBreakerOnFirstFill). The band REJECTS
     // individual orders
     // priced outside [ref*(1-pct), ref*(1+pct)] without affecting market
     // state. Both can be active simultaneously.
@@ -722,13 +735,21 @@ private:
     void stpCancelAuctionOrder(Order* o);
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
     bool checkCircuitBreaker(Price price);
+    // H3: the price `in`'s first fill would print at, or nullopt if it would
+    // not fill on arrival. Precondition: bookLock_ held.
+    std::optional<Price> firstFillPrice(const Order& in) const;
+    // H3: in Continuous, an order whose first fill would print outside the
+    // breaker threshold moves the book into VolatilityAuction before it
+    // matches. True if it tripped. Never evaluated in replay: a trip is
+    // journaled and replayed as a state change. Precondition: bookLock_ held.
+    bool tripBreakerOnFirstFill(const Order& in);
 
     // H2: the PURE admission checks — no state mutation, no events, no
     // reject notifications. Returns RejectReason::None if the order may be
     // admitted. Shared so cancelReplace applies the same gates as a new
     // order; addOrder still runs its own inline copies because those are
-    // interleaved with side effects (breaker_trip event,
-    // referencePrice_ init, rejectedOrders accounting) that a replace must
+    // interleaved with side effects (referencePrice_ init,
+    // rejectedOrders accounting) that a replace must
     // NOT trigger. Folding addOrder onto this is a mechanical follow-up.
     RejectReason checkAdmission(ParticipantId participantId, Side side,
                                 Price price, Quantity qty, OrderType type,
@@ -762,10 +783,6 @@ private:
                                                   Quantity qty);
     OB_ALWAYS_INLINE std::optional<RejectReason> admitPriceBand(OrderId orderId, ParticipantId participantId,
                                                Price price, Quantity qty, OrderType type);
-#ifndef OB_LEAN_MODE
-    OB_ALWAYS_INLINE std::optional<RejectReason> admitCircuitBreaker(OrderId orderId, Price price, Quantity qty,
-                                                    OrderType type);
-#endif
     std::optional<RejectReason> admitPostOnly(OrderId orderId, ParticipantId participantId,
                                               Side side, Price price, Quantity qty, OrderType type);
     std::optional<RejectReason> admitParkCapacity(OrderId orderId, ParticipantId participantId,
@@ -990,6 +1007,9 @@ private:
     TradingState tradingState_{TradingState::Continuous};
     size_t maxDepthPerSide_{0};  // 0 = unlimited
     double cbThreshold_{0.05};   // Circuit breaker threshold (default 5%)
+    uint64_t volatilityDwellNs_;          // set in the ctor (config or 5 min)
+    uint64_t volatilityClockStart_{0};    // caller's clock at the first due-check
+    bool     volatilityClockStarted_{false};
     double priceBandPct_{0.0};   // LULD price-band half-width (0 = disabled)
     double marketProtectionPct_{0.0};  // market-order sweep collar (0 = disabled)
 

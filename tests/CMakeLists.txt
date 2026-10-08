@@ -444,13 +444,14 @@ enable_assertions(IcebergMinQtyTest)
 add_test(NAME IcebergMinQtyTest COMMAND IcebergMinQtyTest)
 set_tests_properties(IcebergMinQtyTest PROPERTIES TIMEOUT 60 LABELS "project;property")
 
-# Roadmap 0.14: the volatility breaker rejects the out-of-band order and leaves
-# the book's trading state alone — one passive order must not stop a symbol.
-add_executable(BreakerNoAuctionTest BreakerNoAuctionTest.cpp)
-target_link_libraries(BreakerNoAuctionTest PRIVATE OrderMatcher)
-enable_assertions(BreakerNoAuctionTest)
-add_test(NAME BreakerNoAuctionTest COMMAND BreakerNoAuctionTest)
-set_tests_properties(BreakerNoAuctionTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
+# Roadmap 1.8-H3 (PRIOR-5, AUCT-8): the volatility breaker trips on the first
+# fill's price, never on a passive quote and never inside an auction; the
+# auction reopens on a timer, and replay reproduces the trip.
+add_executable(VolatilityBreakerTest VolatilityBreakerTest.cpp)
+target_link_libraries(VolatilityBreakerTest PRIVATE OrderMatcher)
+enable_assertions(VolatilityBreakerTest)
+add_test(NAME VolatilityBreakerTest COMMAND VolatilityBreakerTest)
+set_tests_properties(VolatilityBreakerTest PROPERTIES TIMEOUT 60 LABELS "project;auction")
 
 # Roadmap 1.8-H2 (AUCT-2): parked market orders fill ahead of every limit at
 # the uncross; they were queued behind limits at the clearing price.

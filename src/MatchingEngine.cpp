@@ -790,6 +790,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             break;
         }
 
+        const TradingState stateBefore = book->getTradingState();
         AddOrderResult result = book->addOrder(req.orderId, req.participantId, req.side,
                                                req.price, req.qty, req.orderType,
                                                req.stopPrice, req.displayQty, req.tif,
@@ -806,6 +807,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (journal_ && std::holds_alternative<OrderId>(result)) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
+                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
                 journal_->logAddOrder(req.orderId, req.participantId, req.symbolId, req.side,
                                       req.price, req.qty, req.orderType, req.tif,
                                       req.expiryTime, req.stopPrice, req.stopLimitPrice,
@@ -959,6 +961,14 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             }
             if (auto* book = getOrderBook(symbolId)) {
                 book->expireOrders(req.expiryTime, onExpire);
+                // H3: the volatility-auction timer runs on the owning worker.
+                if (book->volatilityAuctionDue(req.expiryTime)) {
+                    OrderRequest reopen{};
+                    reopen.type = OrderRequest::Type::TradingState;
+                    reopen.symbolId = symbolId;
+                    reopen.newQty = static_cast<Quantity>(TradingState::Continuous);
+                    (void)applySessionControl(reopen);
+                }
             }
         }
         break;
@@ -1634,6 +1644,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     // Capture everything this order emits so none of it reaches the client
     // before the journal entry behind it is durable. No-op when disabled.
     durabilityGate_.beginOrder();
+    const TradingState stateBefore = book->getTradingState();
     AddOrderResult result = book->addOrder(orderId, participantId, side, price, qty,
                                            type, stopPrice, displayQty, tif, expiryTime,
                                            stopLimitPrice, pegType, pegOffset, trailAmount,
@@ -1651,6 +1662,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         uint64_t appendOrdinal = 0;
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
+            logBreakerTrip(symbolId, stateBefore, book->getTradingState());
             journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
                                   expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
                                   pegOffset, trailAmount, minQty, hidden);
@@ -1988,6 +2000,17 @@ MarketDataSnapshot MatchingEngine::getSnapshot(SymbolId symbolId, size_t depth) 
     return {};
 }
 
+// H3: a breaker trip happens inside addOrder. It goes into the journal AHEAD
+// of the order that caused it, so replay enters the auction first and the
+// order replays as an auction arrival; replay never evaluates the breaker
+// itself, so a replaying engine with another threshold or reference — the
+// reference is not in a checkpoint — still lands in the same state. Caller
+// holds journalMutex_.
+void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
+                                    TradingState after) {
+    if (after != before) journal_->logTradingState(symbolId, after);
+}
+
 // Session control. Each transition and uncross is applied by the book's
 // owning thread and journaled there, so the record lands in the journal in
 // order with that book's orders and replay re-runs the auction exactly
@@ -2120,6 +2143,14 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
         }
     }
     holdUntilDurable(appendOrdinal);
+    // H3: reopen every volatility auction that has run its dwell — the
+    // reopening cross and a journaled TradingStateChange, like any reopen.
+    for (SymbolId symbolId : symbolIds_) {
+        auto* book = getOrderBook(symbolId);
+        if (book && book->volatilityAuctionDue(currentTime))
+            routeSessionControl(symbolId, OrderRequest::Type::TradingState,
+                                TradingState::Continuous);
+    }
 }
 
 bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy policy) {

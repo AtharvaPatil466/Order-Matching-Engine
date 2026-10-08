@@ -64,7 +64,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ### Regulatory & Risk
 In the shipped binaries, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy
-- **Volatility Circuit Breakers**: a fixed 5% band; a breach rejects the order and the symbol keeps trading
+- **Volatility Circuit Breakers**: a fixed 5% threshold on the price an order's first fill would print at; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant
 - **Kill Switch**: Instant cancellation of all orders for a participant across all symbols
 - **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first

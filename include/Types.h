@@ -101,7 +101,8 @@ constexpr ParticipantId kMaxParticipants = 1024;
 
 enum class RejectReason : uint8_t {
     None,
-    VolatilityCircuitBreaker, // The order that tripped the breaker
+    VolatilityCircuitBreaker, // A replace priced outside the breaker threshold
+                              // (a new order trips the breaker instead)
     PostOnlyWouldCross,
     FOKInsufficientLiquidity,
     RiskLimitBreached,
@@ -188,9 +189,10 @@ enum class TradingState : uint8_t {
     VolatilityAuction  // A short auction (orders accumulate, indicative is
                        // published) that reopens via a cross, instead of a
                        // hard halt. Same admission as the auction states.
-                       // Entered only via setTradingState: the breaker
-                       // rejects the out-of-band order and no longer
-                       // switches the book here (roadmap 0.14 / 1.8-H3).
+                       // Entered when an order's first fill would print
+                       // outside the breaker threshold, or via
+                       // setTradingState; reopens after the dwell
+                       // (roadmap 1.8-H3).
 };
 
 enum class MatchAlgorithm : uint8_t {

@@ -179,16 +179,17 @@ void testCircuitBreaker() {
     book.setEventListener(&listener);
 
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
-    // A buy 6% above the 5% default band trips the breaker: the triggering
-    // order is rejected and the trading state is untouched (roadmap 0.14 —
-    // this used to switch the whole book to VolatilityAuction).
+    // A bid 6% above the reference is a quote, not a print: it rests and the
+    // book stays Continuous (roadmap 1.8-H3).
     book.addOrder(2, 2, Side::Buy, 1060000, 100, OrderType::Limit);
     assert(book.getTradingState() == TradingState::Continuous);
-    assert(book.getOrder(2) == nullptr);
+    assert(book.getOrder(2) != nullptr);
 
-    // In-band orders keep trading continuously: this sell fills the resting bid.
+    // A sell would fill against it first, 6% from the reference, outside the
+    // 5% default: the breaker trips and nothing prints.
     book.addOrder(3, 3, Side::Sell, 1000000, 100, OrderType::Limit);
-    assert(book.getOrder(3) == nullptr && book.getOrder(1) == nullptr);
+    assert(book.getTradingState() == TradingState::VolatilityAuction);
+    assert(listener.trades.empty() && book.getOrder(3) != nullptr);
     std::cout << "testCircuitBreaker PASSED" << std::endl;
 }
 
@@ -298,18 +299,17 @@ void testCircuitBreakerBoundaries() {
     book.setEventListener(&listener);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
+    // A first fill 4.9% from the reference trades.
     book.addOrder(2, 2, Side::Sell, 1049000, 100, OrderType::Limit);
-    assert(listener.trades.size() == 0);
-
-    // 5.1% away: the breaker rejects this order.
-    book.addOrder(3, 3, Side::Buy, 1051000, 100, OrderType::Limit);
-    assert(book.getOrder(3) == nullptr);
-
-    // The rejection does not stop the market (roadmap 0.14): this in-band sell
-    // trades against the resting bid on arrival. It used to be asserted NOT to
-    // trade, because the trip had switched the book to VolatilityAuction.
-    book.addOrder(4, 4, Side::Sell, 1000000, 100, OrderType::Limit);
+    book.addOrder(3, 3, Side::Buy, 1049000, 100, OrderType::Limit);
     assert(listener.trades.size() == 1);
+    assert(book.getTradingState() == TradingState::Continuous);
+
+    // A first fill 5.1% away trips the breaker (roadmap 1.8-H3): no print.
+    book.addOrder(4, 4, Side::Sell, 1051000, 100, OrderType::Limit);
+    book.addOrder(5, 5, Side::Buy, 1051000, 100, OrderType::Limit);
+    assert(listener.trades.size() == 1);
+    assert(book.getTradingState() == TradingState::VolatilityAuction);
 
     std::cout << "testCircuitBreakerBoundaries PASSED" << std::endl;
 }

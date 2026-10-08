@@ -846,27 +846,40 @@ day's close and execute there (roadmap 1.8-H3, AUCT-8 / OTM-9; pinned by
 `matchAlgorithm_` and is always FIFO is a real semantic choice — a pro-rata product would
 plausibly want pro-rata allocation at the cross — and nothing states it or tests it.
 
-### Rule 7.4 — A volatility breach rejects the order; the auction is entered explicitly
+### Rule 7.4 — The breaker trips on the first fill's price and starts a timed volatility auction
 
-When an order's price deviates from `referencePrice_` by more than `cbThreshold_`, that order
-is rejected (`VolatilityCircuitBreaker`) and a `breaker_trip` event is logged. The book's
-trading state is **not** changed. It used to switch to `VolatilityAuction`. But the price
-tested is a limit price, not a print, so one passive order far from the market could stop
-continuous trading for the whole symbol, and nothing in the binary reopened it (roadmap 0.14,
-findings PRIOR-5 and AUCT-8). Tripping on a would-be execution price and reopening on a timer
-is roadmap 1.8-H3. Pinned by `tests/BreakerNoAuctionTest.cpp`.
+In `Continuous`, before an arriving order matches, the book takes the price its **first fill**
+would print at — the best opposite level it crosses, stepping over its owner's own orders
+where self-trade prevention would — and compares it with `referencePrice_`. If it deviates by
+more than `cbThreshold_`, the book enters `VolatilityAuction` before anything prints and a
+`breaker_trip` event is logged. The order becomes the auction's first arrival: a limit rests,
+a market order is parked for the reopening cross, an IOC or FOK is cancelled. Only the first
+fill is tested; a sweep that starts in band runs on. A passive order trips nothing however far
+it is from the market, and nothing trips in an auction state.
 
-> `admitCircuitBreaker` and `checkCircuitBreaker` in `src/OrderBook.cpp`
+The breaker used to test each order's **limit** price and switch the book on a breach: one
+passive order far from the market stopped continuous trading for the whole symbol, and nothing
+reopened it (PRIOR-5, AUCT-8). The 0.14 stop-gap then rejected such orders one by one. A
+**replace** is still refused on its new limit price (`VolatilityCircuitBreaker`): it is never
+auctioned, so a crossing replace cannot print out of band either (roadmap 1.8-H3; pinned by
+`tests/VolatilityBreakerTest.cpp`).
 
-`VolatilityAuction` is still a trading state. It is entered with `setTradingState`, and
-admission then works as in the other auction states. Reopening runs the standard uncross, re-anchors `referencePrice_` to the reopening print so
-the post-auction bands measure from the fresh price, and returns to `Continuous`:
+> `firstFillPrice` and `tripBreakerOnFirstFill` in `src/OrderBook.cpp`
 
-> `src/OrderBook.cpp:2869-2884` — `resumeVolatilityAuction()`, with the re-anchor at
-> `src/OrderBook.cpp:2881`
+**The auction reopens on a timer.** A book in `VolatilityAuction` — tripped or entered with
+`setTradingState` — reopens after the dwell, 5 minutes by default (`volatility_auction_dwell_ms`).
+The dwell runs on the engine's expiry clock and starts at the first expiry tick after the book
+entered the state, so it can run up to one tick (1 s) long. The engine's periodic expiry hook
+drives it on the book's owning thread: the `ExpireCheck` sweep in async mode, `expireOrders()`
+— `GatewayServer`'s tick — in sync mode. The reopen is an ordinary journaled
+`TradingStateChange` to `Continuous`, which runs the uncross and re-anchors `referencePrice_`
+to the reopening print. `resumeVolatilityAuction()` reopens at once.
 
-**There is no automatic dwell timer and no automatic reopen.** `resumeVolatilityAuction()` has
-no scheduler behind it; something outside the book must call it.
+**A trip is journaled.** The engine writes a `TradingStateChange(VolatilityAuction)` record
+ahead of the order that tripped the breaker, and replay never evaluates the breaker itself, so
+recovery reproduces the trip even with another threshold, or with the reference a checkpoint
+does not carry. The dwell clock is not journaled: after a restart into a volatility auction the
+dwell starts again.
 
 ### Rule 7.5 — What this engine calls LULD is a single fixed percentage band, not US-equities LULD
 
@@ -877,8 +890,8 @@ distance from the real thing needs stating:
 |---|---|
 | Reference price is a rolling 5-minute average | `referencePrice_` is seeded from the first limit price seen and re-anchored only on a volatility-auction reopen (`src/OrderBook.cpp:591-595`, `src/OrderBook.cpp:2881`) |
 | Band percentage is tiered by price and by time of day, and doubles near the open/close | One flat `priceBandPct_` for the whole session |
-| A quote at the band creates a *Limit State*; 15 seconds in Limit State becomes a 5-minute pause | No Limit State, no dwell timer |
-| A pause reopens via an auction on a published schedule | Reopen is an explicit external call |
+| A quote at the band creates a *Limit State*; 15 seconds in Limit State becomes a 5-minute pause | No Limit State; a would-be print outside the breaker threshold starts a volatility auction at once |
+| A pause reopens via an auction on a published schedule | The volatility auction reopens with a cross after a fixed dwell (5 minutes by default) |
 | Trades outside the band are prohibited | The band is an **admission** filter on limit-style orders only — see [defect B5](#b5--triggered-stops-and-pegs-bypass-the-price-band-and-the-circuit-breaker) |
 
 The band is checked only for `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden`.
@@ -1218,10 +1231,10 @@ The real fix is 1.6-F4.
 
 ### B5 — Triggered stops and pegs bypass the price band and the circuit breaker
 
-The admission filters check the price band and the circuit breaker only for `Limit`, `IOC`,
-`FOK`, `PostOnly`, `Iceberg` and `Hidden`.
+The price band is checked only for `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden`;
+the circuit breaker tests the first fill of an order arriving through `addOrder` (Rule 7.4).
 
-> `src/OrderBook.cpp:597-611` (band), `src/OrderBook.cpp:628-630` (breaker)
+> `admitPriceBand` (band) and `tripBreakerOnFirstFill` (breaker) in `src/OrderBook.cpp`
 
 A `Stop` is admitted without either check, because at admission it carries a trigger rather
 than a tradeable price — reasonable. But when it elects, `checkStopOrders` rewrites its type

@@ -103,8 +103,11 @@ void test_breaker_trip_emits_event() {
     book.setCircuitBreakerThreshold(0.02);
     // Establish reference at 1,000,000.
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
-    // 3% move trips the 2% breaker.
+    // A passive ask 3% away trips nothing; a buy that would lift it prints
+    // 3% away and trips the 2% breaker (roadmap 1.8-H3).
     book.addOrder(2, 2, Side::Sell, 1030000, 100, OrderType::Limit);
+    assert(!findEvent(cap, "breaker_trip") && "a passive quote tripped the breaker");
+    book.addOrder(3, 3, Side::Buy, 1030000, 100, OrderType::Limit);
 
     auto* trip = findEvent(cap, "breaker_trip");
     assert(trip && "breaker_trip not emitted on threshold breach");

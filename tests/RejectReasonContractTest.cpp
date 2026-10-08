@@ -102,12 +102,16 @@ TEST(RejectReasonContract, OutsidePriceBand) {
     EXPECT_EQ(expectReject(r), RejectReason::OutsidePriceBand);
 }
 
+// A new order never gets this reason: an out-of-band first fill moves the
+// book into a volatility auction instead (roadmap 1.8-H3). A replace to a
+// price outside the threshold is still refused with it.
 TEST(RejectReasonContract, VolatilityCircuitBreaker) {
     OrderBook book(0);
     book.setCircuitBreakerThreshold(0.02);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
-    auto r = book.addOrder(2, 2, Side::Sell, 1030000, 100, OrderType::Limit);
-    EXPECT_EQ(expectReject(r), RejectReason::VolatilityCircuitBreaker);
+    RejectReason reason = RejectReason::None;
+    EXPECT_FALSE(book.cancelReplace(1, 1030000, 100, reason));
+    EXPECT_EQ(reason, RejectReason::VolatilityCircuitBreaker);
 }
 
 TEST(RejectReasonContract, PostOnlyWouldCross) {

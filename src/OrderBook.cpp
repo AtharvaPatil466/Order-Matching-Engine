@@ -77,6 +77,14 @@ static size_t resolveTradeHistoryCapacity() {
     return std::bit_ceil(want < 2 ? size_t(2) : want);
 }
 
+// The volatility-auction dwell: `volatility_auction_dwell_ms`, else 5 minutes
+// (roadmap 1.8-H3).
+static uint64_t resolveVolatilityDwellNs() {
+    constexpr size_t kDefaultMs = 5 * 60 * 1000;
+    return static_cast<uint64_t>(configuredSize("volatility_auction_dwell_ms", kDefaultMs)) *
+           1'000'000ULL;
+}
+
 // Next-order prefetch in the matching loops (opt-in, -DENABLE_MATCH_PREFETCH=ON).
 // Pulls the node the loop reaches next into L1 while the current fill computes,
 // instead of stalling on the pointer chase. Hint only — __builtin_prefetch
@@ -97,6 +105,7 @@ OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCap
       orderPool_(resolveOrderPoolCapacity(orderPoolCapacity)),
       orderLookup_(orderPool_.capacity()),
       symbolId_(symbolId), matchAlgorithm_(algo),
+      volatilityDwellNs_(resolveVolatilityDwellNs()),
       participantRisk_(1024),
       tradeHistory_(resolveTradeHistoryCapacity()) {
     // orderLookup_ is sized FROM THE POOL ITSELF — orderPool_ is declared
@@ -404,8 +413,10 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     }
 
 #ifndef OB_LEAN_MODE
-    // Circuit breaker: the TEST only. addOrder's copy additionally logs the
-    // breaker_trip event; a replace only declines.
+    // Circuit breaker, on the replace's LIMIT price: the 0.14 rule. A new
+    // order trips on its first fill's price instead (tripBreakerOnFirstFill);
+    // a replace is refused, never auctioned, so a crossing replace cannot
+    // print out of band either.
     if (priced && !checkCircuitBreaker(price))
         return RejectReason::VolatilityCircuitBreaker;
 #endif
@@ -620,9 +631,8 @@ std::optional<RejectReason> OrderBook::admitPoolPressure(OrderId orderId,
 //
 // Then rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
 // is configured and a reference price has been established. It rejects the
-// individual order and lets subsequent in-band orders continue trading (as
-// the volatility breaker now does too, with its own threshold and reject
-// reason). Skipped on order types without a meaningful limit
+// individual order and lets subsequent in-band orders continue trading.
+// Skipped on order types without a meaningful limit
 // price (Market / Stop families / Pegged).
 // Precondition: bookLock_ held.
 std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
@@ -652,43 +662,62 @@ std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
     return std::nullopt;
 }
 
-#ifndef OB_LEAN_MODE
-// --- Circuit breaker check ---  Precondition: bookLock_ held.
-// Deliberately does NOT go through rejectOrder(): a breaker trip is a venue
-// event, not a participant's fault, and the original never counted it against
-// the participant's rejectedOrders. Keeping the notify inline preserves that.
-std::optional<RejectReason> OrderBook::admitCircuitBreaker(OrderId orderId, Price price,
-                                                           Quantity qty, OrderType type) {
-    if (type == OrderType::Limit || type == OrderType::IOC || type == OrderType::FOK
-        || type == OrderType::PostOnly || type == OrderType::Iceberg || type == OrderType::Hidden) {
-        if (!checkCircuitBreaker(price)) {
-            // Reject the order; leave the market's trading state alone.
-            // This used to move the whole book into VolatilityAuction, but
-            // the price tested here is a LIMIT price, not a print: a passive
-            // bid 50% below the market cannot execute, yet it switched every
-            // participant on the symbol to accumulate-only, and nothing in the
-            // binary ever resumed it (PRIOR-5, AUCT-8). Tripping on a would-be
-            // execution price and reopening on a timer is roadmap 1.8-H3;
-            // until then the breaker is a per-order reject.
-            // VolatilityAuction is still entered explicitly (setTradingState).
-            // Pinned by BreakerNoAuctionTest.
-            // Compliance/monitoring contract: a breach must always emit the
-            // `breaker_trip` event (symbol/price/ref/threshold_pct). Kept
-            // alongside the newer structured `risk.circuit_breaker` event so
-            // existing alerting and StructuredLogTest continue to observe it.
-            obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
-                .kv("symbol", (long long)symbolId_)
-                .kv("price", (long long)price)
-                .kv("ref", (long long)referencePrice_)
-                .kv("threshold_pct", cbThreshold_));
-            obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, price));
-            notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::VolatilityCircuitBreaker);
-            return RejectReason::VolatilityCircuitBreaker;
+// --- H3: the volatility breaker trips on a print, not a quote ---
+// The breaker used to test each order's LIMIT price: a passive bid far below
+// the market, which can never execute, switched the whole symbol into
+// VolatilityAuction and nothing reopened it (PRIOR-5, AUCT-8); the 0.14
+// stop-gap then refused such orders one by one. What a breaker guards is the
+// print, so it now tests the price the order's first fill would execute at.
+//
+// ponytail: STP is approximated — an own resting order ends the walk under the
+// cancel-incoming modes and is stepped over under the others; DecreaseAndCancel
+// may leave nothing to fill and still count the next level.
+std::optional<Price> OrderBook::firstFillPrice(const Order& in) const {
+    const FlatPriceMap& opposite = (in.side == Side::Buy) ? asks_ : bids_;
+    if (opposite.empty()) return std::nullopt;
+    const bool market = in.type == OrderType::Market;
+    auto crosses = [&](Price px) {
+        return market || (in.side == Side::Buy ? px <= in.price : px >= in.price);
+    };
+    if (!crosses(opposite.bestPrice())) return std::nullopt;
+    if (stpNoneResting(in.participantId)) return opposite.bestPrice();
+
+    const STPMode mode = getSTPMode(in.participantId);
+    const bool ownOrderStopsIncoming = mode == STPMode::DefaultCancelIncoming ||
+                                       mode == STPMode::CancelIncoming ||
+                                       mode == STPMode::CancelBoth;
+    std::optional<Price> fill;
+    opposite.forEachLevelWhile([&](Price px, const OrderList& level) -> bool {
+        if (!crosses(px)) return false;
+        for (const Order* r = level.front(); r; r = r->next) {
+            if (r->participantId != in.participantId) { fill = px; return false; }
+            if (ownOrderStopsIncoming) return false;
         }
-    }
-    return std::nullopt;
+        return true;
+    });
+    return fill;
 }
-#endif
+
+// Only in Continuous: an auction state never matches on arrival, and an order
+// arriving in one never trips (H3). Not in replay either — the trip is
+// journaled as a TradingStateChange ahead of the order that caused it, so a
+// replay with a different threshold or reference still reproduces it.
+// Logs `breaker_trip` (symbol/price/ref/threshold_pct), the compliance and
+// monitoring contract, alongside the structured `risk.circuit_breaker`.
+bool OrderBook::tripBreakerOnFirstFill(const Order& in) {
+    if (replayMode_ || tradingState_ != TradingState::Continuous || referencePrice_ == 0)
+        return false;
+    const std::optional<Price> fill = firstFillPrice(in);
+    if (!fill || checkCircuitBreaker(*fill)) return false;
+    obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
+        .kv("symbol", (long long)symbolId_)
+        .kv("price", (long long)*fill)
+        .kv("ref", (long long)referencePrice_)
+        .kv("threshold_pct", cbThreshold_));
+    obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, *fill));
+    setTradingStateLocked(TradingState::VolatilityAuction);
+    return true;
+}
 
 // --- Post-Only: reject if would cross the spread ---  Precondition: bookLock_ held.
 std::optional<RejectReason> OrderBook::admitPostOnly(OrderId orderId, ParticipantId participantId,
@@ -1065,9 +1094,6 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 #endif
 
     if (auto r = admitPriceBand(orderId, participantId, price, qty, type)) return *r;
-#ifndef OB_LEAN_MODE
-    if (auto r = admitCircuitBreaker(orderId, price, qty, type)) return *r;
-#endif
     if (auto r = admitPostOnly(orderId, participantId, side, price, qty, type)) return *r;
 
     if (auto r = admitParkCapacity(orderId, participantId, qty, type)) return *r;
@@ -1086,6 +1112,15 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     if (auto r = screenFOK(order, orderId, side, price, qty, type)) return *r;
     if (auto id = screenMinQty(order, orderId, side, price, qty, type, minQty)) return *id;
+
+#ifndef OB_LEAN_MODE
+    // H3: a trip makes this order the volatility auction's first arrival: a
+    // market order parks for the reopening cross; any other type carries on
+    // below as an auction arrival (no match; a limit rests, IOC/FOK cancel).
+    if (tripBreakerOnFirstFill(*order))
+        if (auto id = parkNonMatchingOrder(order, orderId, side, price, qty, type,
+                                           pegType, pegOffset, trailAmount)) return *id;
+#endif
 
     // --- Match (skipped during auction / pre-open) ---
     // PreOpen / AuctionOpen / AuctionClose all accumulate without
@@ -1888,6 +1923,7 @@ void OrderBook::setTradingStateLocked(TradingState s) {
                      .kv("to",   tradingStateName(s)));
     obSink().log(logTradingStateChange(symbolId_, tradingStateName(tradingState_), tradingStateName(s)));
     tradingState_ = s;
+    if (s == TradingState::VolatilityAuction) volatilityClockStarted_ = false;  // a new dwell
     if (s == TradingState::AuctionClose) {
         releaseOnCloseOrders();
     }
@@ -3220,6 +3256,18 @@ AuctionResult OrderBook::discoverUncrossPrice() const {
 AuctionResult OrderBook::computeAuctionState() const {
     std::unique_lock<std::mutex> lock(bookLock_);
     return discoverUncrossPrice();
+}
+
+bool OrderBook::volatilityAuctionDue(uint64_t now) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    if (tradingState_ != TradingState::VolatilityAuction) return false;
+    if (!volatilityClockStarted_) {
+        volatilityClockStarted_ = true;
+        volatilityClockStart_ = now;
+    }
+    // A clock that stepped back before the start delays the reopen; it never
+    // wraps into an early one.
+    return now >= volatilityClockStart_ && now - volatilityClockStart_ >= volatilityDwellNs_;
 }
 
 bool OrderBook::resumeVolatilityAuction() {

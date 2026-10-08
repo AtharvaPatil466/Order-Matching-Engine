@@ -324,11 +324,12 @@ public:
     // partial uncrosses.
     size_t uncrossBatch(const std::vector<SymbolId>& symbols);
 
-    // Reopen every book currently in a volatility auction: run its
+    // Reopen every book currently in a volatility auction now: run its
     // reopening cross and return it to continuous trading. Returns the
-    // count of books reopened. The timing policy (how long the volatility
-    // pause lasts) lives with the caller — a scheduler/timer decides when
-    // to invoke this; the engine just performs the reopening crosses.
+    // count of books reopened. The engine also reopens each one by itself
+    // once it has run its dwell (OrderBook::volatilityAuctionDue), from the
+    // expiry hook: the ExpireCheck sweep in async mode, expireOrders() —
+    // GatewayServer's tick — in sync mode.
     size_t resumeVolatilityAuctions();
 
     // End the trading session for `symbols`: move them to PostClose (which
@@ -575,6 +576,8 @@ private:
     // journal it, and run OCO on the cross's fills. Returns the journal append
     // ordinal (0 = not journaled). Runs on the book's owning thread.
     uint64_t applySessionControl(const OrderRequest& req);
+    // Journal a breaker trip that addOrder just made (H3). journalMutex_ held.
+    void logBreakerTrip(SymbolId symbolId, TradingState before, TradingState after);
     // Route one session-control request: to the owning worker in async mode
     // (the caller then waitForDrain()s), applied here in sync mode.
     void routeSessionControl(SymbolId symbolId, OrderRequest::Type type,

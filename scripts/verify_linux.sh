@@ -37,10 +37,9 @@ LANE="${1:-sanitizers}"
 # it teaches you to ignore the output. The TSan lane's extra exclusions are
 # documented in ci.yml: PropertyTest is a heavy fuzzer and TSan x property
 # fuzzing is impractically slow (it times out at 180s here, which looks like a
-# hang rather than a skip), and AdminServerEndpointsTest has accept/recv
-# teardown races that are acceptable on an admin port off the data path.
+# hang rather than a skip).
 EXCLUDE_DEFAULT='BenchmarkRegressionTest'
-EXCLUDE_TSAN='BenchmarkRegressionTest|PropertyTest|AdminServerEndpointsTest'
+EXCLUDE_TSAN='BenchmarkRegressionTest|PropertyTest'
 
 case "$LANE" in
   sanitizers)

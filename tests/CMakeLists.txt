@@ -362,7 +362,9 @@ add_executable(AdminServerEndpointsTest AdminServerEndpointsTest.cpp)
 target_link_libraries(AdminServerEndpointsTest PRIVATE OrderMatcher)
 enable_assertions(AdminServerEndpointsTest)
 add_test(NAME AdminServerEndpointsTest COMMAND AdminServerEndpointsTest)
-set_tests_properties(AdminServerEndpointsTest PROPERTIES TIMEOUT 30
+# 120, not 30: its live-flow section runs 16 producers, and under TSan on a
+# 2-CPU runner one pass took 9-20s.
+set_tests_properties(AdminServerEndpointsTest PROPERTIES TIMEOUT 120
                      LABELS "project;ops;integration")
 
 # Market data shared-memory schema compatibility / validation.

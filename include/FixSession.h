@@ -146,6 +146,7 @@ public:
         case RejectReason::QueueBackpressure:     return "backpressure";
         case RejectReason::RateLimitExceeded:     return "rate limit";
         case RejectReason::EngineStopped:         return "engine stopped";
+        case RejectReason::JournalHalted:         return "journal halted";
         case RejectReason::CapacityExhausted:     return "capacity";
         case RejectReason::OutOfPriceRange:       return "price range";
         case RejectReason::RiskLimitBreached:     return "risk";

@@ -841,6 +841,12 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             book->emitReject(req.orderId, req.qty, RejectReason::KillSwitchActive);
             break;
         }
+        // D4, the same way: an order queued before the journal halted must
+        // not match now. It could never be made durable.
+        if (journalHalted()) [[unlikely]] {
+            book->emitReject(req.orderId, req.qty, RejectReason::JournalHalted);
+            break;
+        }
 
         // Hierarchical pre-trade risk gate (no-op unless configured). Market
         // orders have no limit price, so they skip the fat-finger reference
@@ -1655,6 +1661,12 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::EngineStopped);
     }
 
+    // D4: the journal hit a real write error and writes nothing more. Whatever
+    // is accepted now could never be made durable.
+    if (journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);
+    }
+
     // ENGTEST-1: position and OTR state is indexed by participant id. Past the
     // arrays those controls were skipped, not enforced, so an id there traded
     // with no limits. Every ingress (gateway, admin, OUCH/DPDK, SBE, FIX) comes
@@ -1748,6 +1760,12 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     } else {
         holdUntilDurable(0);
     }
+    // The append above may be the commit that failed. Then the order is not
+    // on disk and a restart will not have it, so its client is told that —
+    // not "accepted" — and the gate keeps everything it produced (D4).
+    if (journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);
+    }
     return orderBookResultToSubmitResult(result, sequenceId);
 }
 
@@ -1787,6 +1805,9 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     // dereferenced freed pool memory. Same gate submitOrder already uses.
     if (shuttingDown_.load(std::memory_order_acquire)) [[unlikely]] {
         return rejectedAsync(RejectReason::EngineStopped);
+    }
+    if (journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);
     }
 
     uint64_t sequenceId = nextSequenceId();
@@ -1862,6 +1883,9 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     }
     holdUntilDurable(appendOrdinal);
     if (journal_) maybeTriggerAutoCheckpoint();
+    if (journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);   // see submitOrder
+    }
     return acceptedAsync(sequenceId);
 }
 
@@ -1945,6 +1969,9 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     if (newQty == 0) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidQuantity);
     }
+    if (journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);
+    }
 
     uint64_t sequenceId = nextSequenceId();
 
@@ -1981,6 +2008,9 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     }
     holdUntilDurable(appendOrdinal);
     if (appendOrdinal) maybeTriggerAutoCheckpoint();
+    if (appendOrdinal && journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);   // see submitOrder
+    }
     return modified ? SubmitResult::accepted(sequenceId)
                     : SubmitResult::rejected(modifyReason);
 }
@@ -1995,6 +2025,9 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
                                                  ParticipantId requester) {
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
+    }
+    if (journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);
     }
 
     uint64_t sequenceId = nextSequenceId();
@@ -2035,6 +2068,9 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
     }
     holdUntilDurable(appendOrdinal);
     if (appendOrdinal) maybeTriggerAutoCheckpoint();
+    if (appendOrdinal && journalHalted()) [[unlikely]] {
+        return rejectedAsync(RejectReason::JournalHalted);   // see submitOrder
+    }
     return replaced ? SubmitResult::accepted(sequenceId)
                     : SubmitResult::rejected(replaceReason);
 }
@@ -2603,6 +2639,14 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
 
 void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
     if (!journal_) {
+        return;
+    }
+    // D4: the book holds state the disk refused — the request whose commit
+    // failed was applied before it was journaled. A snapshot would make that
+    // durable after its client was told JournalHalted. The journal refuses
+    // the rewrite too; this says so in the log.
+    if (journal_->halted()) {
+        obSink().log(obEvent("checkpoint_refused_journal_halted", LogSeverity::Error));
         return;
     }
 

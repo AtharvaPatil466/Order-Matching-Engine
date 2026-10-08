@@ -110,6 +110,7 @@ inline int ordRejReasonCode(RejectReason r) {
     case RejectReason::CapacityExhausted:           return 0;   // Broker / Exchange option
     case RejectReason::QueueBackpressure:           return 0;
     case RejectReason::EngineStopped:               return 0;
+    case RejectReason::JournalHalted:               return 0;
     case RejectReason::UnsupportedFixVersion:       return 99;  // Other
     case RejectReason::None:                        return kOrdRejReasonOmit;
     case RejectReason::KillSwitchActive:            return 2;   // Exchange closed

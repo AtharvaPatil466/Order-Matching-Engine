@@ -623,6 +623,9 @@ private:
     // hold what it emitted until journal entry `appendOrdinal` is durable, or
     // release it now when the request journaled nothing (0).
     void holdUntilDurable(uint64_t appendOrdinal);
+    // D4: the journal hit a real write error and writes nothing more, so the
+    // engine takes no new request until a restart (Journal::halt()).
+    bool journalHalted() const { return journal_ && journal_->halted(); }
     std::atomic<bool> booksFrozen_{false};
     // P3-6: set by gracefulShutdown() to refuse NEW orders while draining.
     // Reset on start()/startAsync() so an engine can be restarted in-process.

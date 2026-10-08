@@ -103,6 +103,7 @@ inline char ouchRejectCode(RejectReason r) {
     case RejectReason::RateLimitExceeded:           return OUCH_REJECT_RATE_LIMIT;
     case RejectReason::QueueBackpressure:           return OUCH_REJECT_OTHER;
     case RejectReason::EngineStopped:               return OUCH_REJECT_DESTINATION_CLOSED;
+    case RejectReason::JournalHalted:               return OUCH_REJECT_DESTINATION_CLOSED;
     case RejectReason::CapacityExhausted:           return OUCH_REJECT_OTHER;
     case RejectReason::OutOfPriceRange:             return OUCH_REJECT_INVALID_PRICE;
     case RejectReason::OutsidePriceBand:            return OUCH_REJECT_INVALID_PRICE;

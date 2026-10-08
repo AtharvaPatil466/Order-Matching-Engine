@@ -158,7 +158,13 @@ enum class RejectReason : uint8_t {
     // MissingRequiredField, which is for a field that is not there at all:
     // telling a client "missing required field" about a field they did send
     // points them at the wrong half of their encoder.
-    InvalidFieldValue
+    InvalidFieldValue,
+
+    // The journal could not write, so the engine takes nothing more until a
+    // restart replays what the disk accepted (roadmap 1.4-D4). Distinct from
+    // EngineStopped: an order sent just before this may or may not be on
+    // disk, so a client has to reconcile its orders after the restart.
+    JournalHalted
 };
 
 // What a client is told. NotOrderOwner is deliberately indistinguishable from

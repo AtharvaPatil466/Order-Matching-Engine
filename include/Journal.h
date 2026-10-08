@@ -3,6 +3,7 @@
 #include "Types.h"
 #include "FaultInjector.h"
 #include "Metrics.h"
+#include "StructuredLog.h"
 #include <atomic>
 #include <chrono>
 #include <cerrno>
@@ -474,6 +475,7 @@ public:
     void quiesce() { drainCompletions(); }
 
     void truncate() {
+        if (halted()) return;   // the file is what a restart replays; keep it
         flush();
         close();
         open("wb+");
@@ -499,6 +501,10 @@ public:
     // Build the replacement into <path>.tmp. Touches nothing owned by this
     // journal; safe to call without the caller's append lock held.
     bool prepareRewrite(const std::function<void(Journal&)>& writer) {
+        // A halted journal's caller holds state the disk refused — the order
+        // whose commit failed is in the book. A snapshot of that book would
+        // make it durable after its client was told it was rejected.
+        if (halted()) return false;
         const std::string tmpPath = filePath_ + ".tmp";
         // A previous rewrite that crashed between close() and rename() can
         // leave a stale sibling. Clear it here — the one place that is about
@@ -556,13 +562,15 @@ public:
             // above fails that way on fd exhaustion, and this renamed a
             // zero-byte file over the live journal. So ask the file: it must be
             // exactly the header plus one record per entry appended, from a
-            // journal that was accepting them. (A real write error never gets
-            // here — writeBatch and syncFile fail-stop.)
+            // journal that was accepting them, whose writes and fsync all
+            // succeeded — a real write error halts the temp journal (D4) and
+            // its unsynced bytes must never be renamed over the live file.
             const uint64_t n = temp.entriesAppended_;
             const uint64_t expectedBytes =
                 n == 0 ? 0 : sizeof(JournalFileHeader) + n * sizeof(JournalEntry);
             struct stat st{};
             snapshotComplete = temp.pendingEntries() == 0 && !temp.recoveryFailed_ &&
+                               !temp.halted() &&
                                temp.file_ && ::fstat(fileno(temp.file_), &st) == 0 &&
                                static_cast<uint64_t>(st.st_size) == expectedBytes;
         }
@@ -577,6 +585,10 @@ public:
     // caller's append lock held: it closes and reopens the file handle.
     bool commitRewrite() {
         const std::string tmpPath = filePath_ + ".tmp";
+        if (halted()) {
+            std::remove(tmpPath.c_str());
+            return false;
+        }
 
         // The rename discards the old file, torn tail and all; keep those bytes.
         cutTornTail();
@@ -628,6 +640,11 @@ public:
     // therefore refusing to append. See checkRecoverable().
     bool recoveryFailed() const { return recoveryFailed_; }
 
+    // True once a real write or sync error has stopped this journal (roadmap
+    // 1.4-D4; see halt()). Sticky: nothing clears it, so a restart is what
+    // brings the journal back. Readable from any thread.
+    bool halted() const { return halted_.load(std::memory_order_acquire); }
+
     // Cut a torn final write found at open (JRN-2, roadmap D2): fewer bytes
     // than one record after the last replayable one. That is what a crash
     // partway through a write leaves, and it cannot hold a record, so cutting
@@ -642,24 +659,35 @@ public:
     // journals, and cutting there would cut a writer's in-flight record. The
     // write path runs this before its first byte, so no writer can skip it;
     // bootJournal runs it at boot so the log says so then.
-    // A no-op when there is nothing to cut. Failing to cut is a write failure.
+    // A no-op when there is nothing to cut. Failing to cut is a write failure,
+    // and halts the journal (see halt()).
     void cutTornTail() {
-        if (tornBytes_ == 0 || !file_ || recoveryFailed_) return;
+        if (tornBytes_ == 0 || !file_ || recoveryFailed_ || halted()) return;
         const int fd = fileno(file_);
         const std::string aside = filePath_ + ".torn";
         char torn[sizeof(JournalEntry)];
         if (::pread(fd, torn, tornBytes_, static_cast<off_t>(tornFrom_)) !=
-            static_cast<ssize_t>(tornBytes_))
-            failStop("reading the torn tail", errno);
+            static_cast<ssize_t>(tornBytes_)) {
+            halt("reading the torn tail", errno);
+            return;
+        }
         FILE* out = std::fopen(aside.c_str(), "ab");
-        if (!out) failStop("opening " + aside, errno);
+        if (!out) {
+            halt("opening " + aside, errno);
+            return;
+        }
         const bool saved = std::fwrite(torn, 1, tornBytes_, out) == tornBytes_ &&
                            std::fflush(out) == 0 && syncFd(fileno(out));
         const int saveErr = errno;
         std::fclose(out);
-        if (!saved || !syncDirOf(filePath_)) failStop("saving the torn tail to " + aside, saveErr);
-        if (::ftruncate(fd, static_cast<off_t>(tornFrom_)) != 0 || !syncFd(fd))
-            failStop("cutting the torn tail", errno);
+        if (!saved || !syncDirOf(filePath_)) {
+            halt("saving the torn tail to " + aside, saveErr);
+            return;
+        }
+        if (::ftruncate(fd, static_cast<off_t>(tornFrom_)) != 0 || !syncFd(fd)) {
+            halt("cutting the torn tail", errno);
+            return;
+        }
         std::fseek(file_, 0, SEEK_END);
         std::fprintf(stderr,
             "[Journal] Cut a torn final write: %zu byte(s) after the last whole record\n"
@@ -859,7 +887,7 @@ protected:
     // Push a not-yet-numbered, not-yet-CRC'd entry into the batch. Both the
     // sequenceNumber and the checksum are assigned at commit time (see
     // commitBatch) so that:
-    //   * On-disk sequences are contiguous even when an fwrite is short —
+    //   * On-disk sequences are contiguous even when a write is short —
     //     unwritten entries stay in batch_ and are renumbered on retry,
     //     never leaving a gap in the persistent log.
     //   * A process crash between log time and commit time loses entries
@@ -875,6 +903,11 @@ protected:
         if (recoveryFailed_) {
             return;
         }
+        // A HALTED journal still takes the entry, into memory only: it counts
+        // toward entriesAppended_, so a caller holding events behind this
+        // ordinal (DurabilityGate) keeps holding them, instead of reading the
+        // previous ordinal — already durable — and releasing them. commitBatch
+        // writes nothing once halted.
         batch_.push_back(entry);
         // Append ordinal, distinct from sequenceNumber: sequences are assigned
         // at COMMIT time so a crash leaks no phantom numbers, which makes them
@@ -893,12 +926,13 @@ protected:
     //   1. Decide how many entries to attempt this commit (`toWrite`).
     //   2. Assign sequenceNumber and CRC to that prefix only — these are the
     //      entries we are about to commit to disk.
-    //   3. fwrite. If the underlying write returns short (real OS short
-    //      write or torn-write fault), rewind sequence_ by the unwritten
-    //      count and keep the unwritten suffix in batch_ for the next
-    //      commit. The suffix's sequenceNumber and CRC are reset; they will
-    //      be re-assigned on the next attempt.
-    //   4. fflush + syncFile (or skip syncFile if fsync_fail fault armed).
+    //   3. write(2) the prefix. A torn-write fault shrinks the prefix and
+    //      keeps the unwritten suffix in batch_ for the next commit, its
+    //      sequenceNumber and CRC reset to be re-assigned then. A REAL write
+    //      error halts the journal instead (halt()): the prefix is cut from
+    //      the file, sequence_ rewound, and the whole batch kept.
+    //   4. syncFile (or skip it if the fsync_fail fault is armed). A real
+    //      sync error halts the same way.
     //
     // This guarantees on-disk sequences are contiguous: a torn write loses
     // entries entirely (they stay in memory or are dropped on crash), but
@@ -912,20 +946,23 @@ protected:
         }
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
         if (useIoUring_) {
-            commitBatchAsync();  // drains requeue_ internally, then submits
+            // Drains requeue_ internally — including a failed chain handed back
+            // by the reaper — and only then checks halted(), then submits.
+            commitBatchAsync();
             return;
         }
 #endif
-        if (batch_.empty()) {
+        // Halted: nothing more is written, and the batch stays where it is.
+        if (halted() || batch_.empty()) {
             return;
         }
         commitBatchSync();
     }
 
-    // Synchronous commit path: fwrite → fflush → fdatasync, then fire onCommit
-    // inline once the sync is durable. Used on macOS, on Linux without liburing
-    // (or when the ring failed to init), and as the io_uring SQE-exhaustion
-    // fallback. This is the original commitBatch body, behaviour-unchanged.
+    // Synchronous commit path: write(2) → fdatasync, then fire onCommit inline
+    // once the sync is durable. Used on macOS, on Linux without liburing (or
+    // when the ring failed to init), and as the io_uring SQE-exhaustion
+    // fallback. A real error at either step halts the journal (see halt()).
     void commitBatchSync() {
         if (!file_ || batch_.empty()) {
             return;
@@ -971,25 +1008,20 @@ protected:
             bytes[byteOff] ^= bit;
         }
 
-        // Write the toWrite-entry prefix to the page cache. On Linux with
-        // liburing this is an io_uring write; elsewhere it is the classic
-        // fwrite + fflush. Returns the number of WHOLE entries that landed —
-        // identical contract to the old fwrite return — so the short-write
-        // rewind and durability barrier below are mechanism-agnostic.
-        size_t actuallyWritten = writeBatch(toWrite);
-
-        // A real short write no longer reaches here — writeBatch fail-stops
-        // on it, because retrying appends after a possibly-torn record, and the
-        // restart cuts that torn tail (cutTornTail). This rewind stays for
-        // roadmap D4, whose halted state would retry in-process instead.
-        if (actuallyWritten < toWrite) {
-            sequence_ -= (toWrite - actuallyWritten);
+        // The header goes down before the first record. If it cannot, the
+        // journal has halted and nothing was written for this batch.
+        writePendingHeader();
+        if (halted()) {
+            keepUnwritten(toWrite);
+            return;
         }
-        // Only whole entries land, so this stays exact. Atomic because the
-        // io_uring reaper reaches this path off the caller's thread, the same
-        // reason persistedEntries_ is atomic.
-        bytesOnDisk_.fetch_add(actuallyWritten * sizeof(JournalEntry),
-                               std::memory_order_relaxed);
+        // Where this commit starts: the size a failure cuts the file back to.
+        const size_t before = bytesOnDisk_.load(std::memory_order_relaxed);
+        if (!writeBatch(toWrite)) {
+            halt("writing journal records", errno, before);
+            keepUnwritten(toWrite);
+            return;
+        }
 
         // Durability barrier. The replication ack (onCommit_, fired below)
         // must happen STRICTLY AFTER a successful durable sync — never before,
@@ -1005,19 +1037,27 @@ protected:
         bool durable = false;
         if (!fi.shouldFail("journal.commit.fsync_fail")) {
             durable = syncFile();
-            // A REAL sync failure is fatal — see failStop. The fault point above
-            // is a different thing: an fsync that has not happened YET, whose
-            // ack is withheld and retried by design.
-            if (!durable) failStop("fdatasync", errno);
+            // A REAL sync failure halts the journal — see halt(). The fault
+            // point above is a different thing: an fsync that has not happened
+            // YET, whose ack is withheld and retried by design.
+            if (!durable) {
+                halt("fdatasync", errno, before);
+                keepUnwritten(toWrite);
+                return;
+            }
         }
 
-        persistedEntries_.fetch_add(actuallyWritten, std::memory_order_relaxed);
+        // Only whole entries land, so this stays exact. Atomic because the
+        // io_uring reaper reaches this path off the caller's thread, the same
+        // reason persistedEntries_ is atomic.
+        bytesOnDisk_.fetch_add(toWrite * sizeof(JournalEntry), std::memory_order_relaxed);
+        persistedEntries_.fetch_add(toWrite, std::memory_order_relaxed);
         // Counter cached at function-static scope — first call locks the
         // registry to allocate; subsequent calls hit the atomic directly.
         static auto& kEntriesCommitted = MetricsRegistry::instance().counter(
             "journal_entries_committed_total",
             "Total journal entries successfully written to disk");
-        kEntriesCommitted.increment(actuallyWritten);
+        kEntriesCommitted.increment(toWrite);
 
         // Fire the commit callback ONLY after a successful durable sync (see
         // the durability barrier above), and BEFORE erasing the prefix so the
@@ -1026,33 +1066,36 @@ protected:
         // short (the replication coordinator queues bytes for an async send,
         // which is the intended use).
         //
-        // `durable` is false only when the sync was skipped or failed. In that
-        // case the bytes are not on stable storage, so they must not be acked
-        // to the backup — withholding the ack is what closes the
-        // ack-before-fsync hazard.
-        if (durable && onCommit_ && actuallyWritten > 0) {
-            onCommit_(batch_.data(), actuallyWritten);
+        // `durable` is false only when the fsync_fail fault skipped the sync.
+        // The bytes are not on stable storage, so they must not be acked to
+        // the backup — withholding the ack is what closes the ack-before-fsync
+        // hazard.
+        if (durable && onCommit_) {
+            onCommit_(batch_.data(), toWrite);
         }
-        if (durable && onDurable_ && actuallyWritten > 0) {
-            onDurable_(actuallyWritten);
+        if (durable && onDurable_) {
+            onDurable_(toWrite);
         }
 
         // Pop the persisted prefix. Anything past it stays in batch_ and
         // will be renumbered on the next commit. To keep that retry pure
         // (no stale CRCs/sequences), zero out those fields now.
-        batch_.erase(batch_.begin(), batch_.begin() + actuallyWritten);
+        batch_.erase(batch_.begin(), batch_.begin() + static_cast<std::ptrdiff_t>(toWrite));
         for (auto& e : batch_) {
             e.sequenceNumber = 0;
             e.checksum = 0;
         }
+    }
 
-        // For a fault-injected torn write we modeled as "this attempt
-        // wrote less than asked"; the unwritten suffix is now intact in
-        // batch_ for the next commit. Real torn writes (process crash
-        // mid-fwrite) lose the in-memory tail; on next process start, the
-        // file ends at whatever the OS persisted and recovery picks up
-        // from there.
-        (void)tornWrite;
+    // A commit of the first `n` entries did not happen: give back the sequence
+    // numbers it assigned and leave every entry in batch_, unnumbered, exactly
+    // as the fault-injected short write leaves its suffix.
+    void keepUnwritten(size_t n) {
+        sequence_ -= n;
+        for (auto& e : batch_) {
+            e.sequenceNumber = 0;
+            e.checksum = 0;
+        }
     }
 
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
@@ -1068,7 +1111,7 @@ protected:
     // onCommit only once the chain is durable. Called on the writer thread.
     void commitBatchAsync() {
         // The ring appends at EOF, so the header has to be on disk before the
-        // first record goes down this path as well.
+        // first record goes down this path as well. (A no-op once halted.)
         writePendingHeader();
         // ── Hazard C: single outstanding durability chain ──
         // Block until the previous chain is fully reaped. On return the reaper
@@ -1086,7 +1129,9 @@ protected:
             }
         }
 
-        if (batch_.empty()) {
+        // Halted (by the chain just reaped, or before): the batch — now
+        // including that chain's entries — stays held and nothing is written.
+        if (halted() || batch_.empty()) {
             return;
         }
 
@@ -1151,6 +1196,7 @@ protected:
                             batch_.begin() + static_cast<std::ptrdiff_t>(toWrite));
             slot.firstSeq = slot.buf.front().sequenceNumber;
             slot.count = static_cast<uint32_t>(toWrite);
+            slot.startBytes = bytesOnDisk_.load(std::memory_order_relaxed);
             slot.writeRes = INT32_MIN;
             slot.fsyncRes = INT32_MIN;
             slot.wantAck = wantAck;
@@ -1251,47 +1297,55 @@ protected:
     }
 
     // Chain complete: compute durability, update counters, fire onCommit iff
-    // durable, hand any real-short-write tail back to the writer, free the slot.
+    // durable, or — on a real error — halt and hand the chain back to the
+    // writer; then free the slot.
     void finalizeChain(uint32_t slotIdx) {
         const JournalEntry* bufPtr = nullptr;
         size_t written = 0;
         bool durable = false;
+        std::string failed;   // non-empty: what failed
+        int failedErr = 0;
+        size_t cutTo = 0;
         {
             std::lock_guard<std::mutex> lk(ringMu_);
             Inflight& slot = inflight_[slotIdx];
-            written = (slot.writeRes > 0)
-                ? static_cast<size_t>(slot.writeRes) / sizeof(JournalEntry)
-                : 0;
-            if (written > slot.count) written = slot.count;  // defensive
 
-            // Fail-stop on a REAL error, exactly as the synchronous path does —
-            // see failStop. The fault points cannot trip these: short_write
-            // shrinks slot.count before submission, and fsync_fail sets
-            // wantAck = false so no fsync is issued and fsyncRes is never set,
-            // which is why the fsync check is gated on wantAck.
+            // A REAL error halts the journal, exactly as the synchronous path
+            // does — see halt(). The fault points cannot trip these:
+            // short_write shrinks slot.count before submission, and fsync_fail
+            // sets wantAck = false so no fsync is issued and fsyncRes is never
+            // set, which is why the fsync check is gated on wantAck.
             const size_t wantBytes = slot.count * sizeof(JournalEntry);
-            if (slot.writeRes < 0)
-                failStop("io_uring write", -slot.writeRes);
-            if (static_cast<size_t>(slot.writeRes) != wantBytes)
-                failStop("io_uring write (short: " + std::to_string(slot.writeRes) +
-                         " of " + std::to_string(wantBytes) + " bytes)", 0);
-            if (slot.wantAck && slot.fsyncRes != 0)
-                failStop("io_uring fdatasync", slot.fsyncRes < 0 ? -slot.fsyncRes : 0);
-
-            durable = slot.wantAck && written == slot.count && slot.fsyncRes == 0;
-            bufPtr = slot.buf.data();
-
-            // A real short write no longer reaches here — it fail-stops above,
-            // because this path appends and a retry would land after a
-            // possibly-torn record; the restart cuts it (cutTornTail). This
-            // requeue stays for roadmap D4, which would retry in-process.
-            if (written < slot.count) {
-                requeue_.assign(
-                    slot.buf.begin() + static_cast<std::ptrdiff_t>(written),
-                    slot.buf.end());
-                for (auto& e : requeue_) { e.sequenceNumber = 0; e.checksum = 0; }
-                pendingRewind_ = slot.count - static_cast<uint32_t>(written);
+            if (slot.writeRes < 0) {
+                failed = "io_uring write";
+                failedErr = -slot.writeRes;
+            } else if (static_cast<size_t>(slot.writeRes) != wantBytes) {
+                failed = "io_uring write (short: " + std::to_string(slot.writeRes) +
+                         " of " + std::to_string(wantBytes) + " bytes)";
+            } else if (slot.wantAck && slot.fsyncRes != 0) {
+                failed = "io_uring fdatasync";
+                failedErr = slot.fsyncRes < 0 ? -slot.fsyncRes : 0;
             }
+
+            if (!failed.empty()) {
+                // None of the chain is durable, so all of it goes back to the
+                // writer, which folds it in front of batch_ before anything
+                // else (commitBatchAsync) and keeps holding it.
+                requeue_.assign(slot.buf.begin(), slot.buf.end());
+                for (auto& e : requeue_) { e.sequenceNumber = 0; e.checksum = 0; }
+                pendingRewind_ = slot.count;
+                cutTo = slot.startBytes;
+            } else {
+                written = slot.count;
+                durable = slot.wantAck;
+                bufPtr = slot.buf.data();
+            }
+        }
+
+        if (!failed.empty()) {
+            // Outside ringMu_: halt() does I/O and logs. The writer cannot
+            // touch the file meanwhile — inflightCount_ is still 1.
+            halt(failed, failedErr, cutTo);
         }
 
         // persistedEntries_, bytesOnDisk_ + metric reflect bytes that reached
@@ -1382,20 +1436,13 @@ private:
         }
     }
 
-    // Write the first `toWrite` entries of batch_ to the page cache and return
-    // the number of WHOLE entries that landed. Synchronous fwrite + fflush.
-    //
-    // This is the synchronous commit half, used by commitBatchSync() (macOS,
-    // Linux without liburing / ring-init-failed, and the io_uring
-    // SQE-exhaustion fallback). The io_uring write is issued directly by
-    // commitBatchAsync() as the first link of the durability chain — it does
-    // NOT go through here, so this stays a plain fwrite.
     // Put the header down before the first record. Called from both write
-    // paths; a no-op after the first time and on pre-header files.
+    // paths; a no-op after the first time, on pre-header files, and once halted.
     void writePendingHeader() {
+        if (halted()) return;
         cutTornTail();   // never write behind a torn record
         upgradeOldHeader();
-        if (!pendingHeader_ || !file_) return;
+        if (halted() || !pendingHeader_ || !file_) return;
         JournalFileHeader h{};
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
         h.formatVersion = JOURNAL_FORMAT_CURRENT;
@@ -1409,13 +1456,15 @@ private:
         // stamped clean"; it also stamped a checkpoint of a legacy journal
         // clean, which laundered it on the next restart.
         h.contentEpoch  = contentEpoch_;
-        std::fseek(file_, 0, SEEK_END);
-        // Flushed before any record is written, and before io_uring may touch
-        // the same fd — stdio buffering and the ring must not interleave. A
-        // header that did not land is as fatal as a record that did not:
-        // everything written after it would be framed wrongly.
-        if (std::fwrite(&h, sizeof(h), 1, file_) != 1 || std::fflush(file_) != 0)
-            failStop("writing the journal header", errno);
+        // Straight to the descriptor, like the records (see writeBatch), and
+        // so before io_uring may touch the same fd. A header that did not land
+        // halts the journal as a record would: everything written after it
+        // would be framed wrongly.
+        const size_t before = bytesOnDisk_.load(std::memory_order_relaxed);
+        if (!writeAll(fileno(file_), &h, sizeof(h))) {
+            halt("writing the journal header", errno, before);
+            return;
+        }
         pendingHeader_ = false;
         bytesOnDisk_.fetch_add(sizeof(JournalFileHeader), std::memory_order_relaxed);
     }
@@ -1434,27 +1483,55 @@ private:
             syncFd(fd);
         const int err = errno;
         if (fd >= 0) ::close(fd);
-        if (!ok) failStop("upgrading the journal header to the current format", err);
+        if (!ok) {
+            halt("upgrading the journal header to the current format", err);
+            return;
+        }
         headerIsOld_ = false;
     }
 
-    size_t writeBatch(size_t toWrite) {
-        writePendingHeader();
-        const size_t w = std::fwrite(batch_.data(), sizeof(JournalEntry), toWrite, file_);
-        // fwrite reports what reached the stdio BUFFER, not the file, so its
-        // count proves nothing on its own; the flush is where the bytes really
-        // go out, and where a full disk shows up. Ignoring its result is what let
-        // entries be reported durable that were never written (JRN-4).
-        const int flushed = std::fflush(file_);
-        const int err = errno;
-        if (flushed != 0 || std::ferror(file_) || w != toWrite)
-            failStop("writing journal records", err);
-        return w;
+    // Write the first `toWrite` entries of batch_ to the file. True when all
+    // of them got there; false, errno set, when the kernel refused any byte.
+    //
+    // This is the synchronous commit half, used by commitBatchSync() (macOS,
+    // Linux without liburing / ring-init-failed, and the io_uring
+    // SQE-exhaustion fallback). The io_uring write is issued directly by
+    // commitBatchAsync() as the first link of the durability chain.
+    //
+    // write(2), not fwrite. fwrite reports what reached the stdio BUFFER, and
+    // ignoring the flush behind it is what let entries be reported durable
+    // that were never written (JRN-4). Checking the flush was not enough
+    // either once a failure stops being fatal: the refused bytes stay in that
+    // buffer, and the fclose on the way out writes them after the cut — into
+    // the file a restart replays. With no buffer there is nothing to push.
+    bool writeBatch(size_t toWrite) {
+        return writeAll(fileno(file_), batch_.data(), toWrite * sizeof(JournalEntry));
     }
 
-    // Stop the process on a REAL I/O error from the journal's write path.
+    // Write all of [data, data+len), retrying EINTR and resuming after a
+    // partial write. False with errno set on the first refusal.
+    static bool writeAll(int fd, const void* data, size_t len) {
+        const char* p = static_cast<const char*>(data);
+        while (len > 0) {
+            const ssize_t n = ::write(fd, p, len);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            if (n == 0) {   // no progress and no error: do not spin
+                errno = EIO;
+                return false;
+            }
+            p += n;
+            len -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    // Halt this journal on a REAL I/O error from its write path (roadmap
+    // 1.4-D4; JRN-4, JRN-7).
     //
-    // Not "withhold the ack and carry on", for three reasons, each sufficient:
+    // Never "withhold the ack and carry on", for three reasons, each sufficient:
     //   * Both commit paths APPEND. A failed or short write can leave a torn
     //     record at EOF; anything appended after it is lost on replay, because
     //     recovery stops at the first record whose CRC does not check.
@@ -1466,22 +1543,53 @@ private:
     //     dirty pages and marked them clean, so a retry "succeeds" with the data
     //     gone. PostgreSQL treats fsync failure as fatal for this reason.
     //
+    // This used to abort the process (3c4322a): safe, but every session went
+    // down with it and no client was told why. Halting keeps the process up:
+    //   * what this commit put down is cut — ftruncate back to `cutTo`, then
+    //     fsync — so the file holds exactly what was reported durable, and a
+    //     restart replays neither a torn record nor an order a client was
+    //     refused (the engine answers the failed request JournalHalted);
+    //   * the entries stay in memory and are never reported durable: onCommit
+    //     and onDurable do not fire and the persisted counters do not move;
+    //   * every later commit is a no-op, so nothing lands behind the failure;
+    //   * the engine rejects every new request (MatchingEngine::submit*).
+    // Sticky. Resuming in-process would mean rolling the in-memory book back
+    // to the durable prefix, which is what a restart's replay does.
+    // ponytail: restart required; an in-process resume is a product decision
+    // nobody has made, and the cut makes it possible later.
+    //
     // The fault-injection points are deliberately NOT routed here: short_write
     // shrinks the batch before it is written, and fsync_fail models an fsync
     // that has not happened yet — both are benign, retried or withheld by
-    // design, and pinned by the chaos suites. A restart replays the file up to
-    // its last whole record. Roadmap 1.4-D4 replaces this abort with a halted
-    // state that rejects new orders and alerts.
-    [[noreturn]] void failStop(const std::string& what, int err) const {
+    // design, and pinned by the chaos suites.
+    static constexpr size_t kNoCut = SIZE_MAX;
+    void halt(const std::string& what, int err, size_t cutTo = kNoCut) {
+        bool cut = cutTo == kNoCut;
+        if (!cut && file_) {
+            const int fd = fileno(file_);
+            cut = ::ftruncate(fd, static_cast<off_t>(cutTo)) == 0 && syncFd(fd);
+        }
+        halted_.store(true, std::memory_order_release);
         std::fprintf(stderr,
-            "[Journal] FATAL: %s failed for %s%s%s.\n"
-            "          The entries in this commit may be missing or torn on disk,\n"
-            "          so they cannot be reported durable, and appending after a\n"
-            "          torn record would lose every later entry on replay.\n"
-            "          Stopping. A restart replays up to the last whole record.\n",
-            what.c_str(), filePath_.c_str(), err ? ": " : "",
-            err ? std::strerror(err) : "");
-        std::abort();
+            "[Journal] HALTED: %s failed for %s%s%s.\n"
+            "          %s\n"
+            "          This journal writes nothing more and reports nothing more durable;\n"
+            "          the engine rejects new requests (JournalHalted). Fix the disk and\n"
+            "          restart: replay restores everything that was acknowledged.\n",
+            what.c_str(), filePath_.c_str(), err ? ": " : "", err ? std::strerror(err) : "",
+            cutTo == kNoCut ? "Nothing had been written for the failed operation."
+            : cut ? "What the failed commit wrote was cut from the file again."
+                  : "CUTTING what the failed commit wrote ALSO FAILED: the file may hold\n"
+                    "          entries no client was told about. Check it before restarting.");
+        obSink().log(obEvent("journal.halted", LogSeverity::Error)
+                         .kv("path", filePath_)
+                         .kv("operation", what)
+                         .kv("errno", static_cast<long long>(err))
+                         .kv("cut", static_cast<long long>(cut ? 1 : 0)));
+        static auto& kWriteFailures = MetricsRegistry::instance().counter(
+            "journal_write_failures_total",
+            "Journal writes or syncs the disk refused; each one halts that journal");
+        kWriteFailures.increment();
     }
 
     // Returns true iff the durable barrier actually made the bytes durable.
@@ -1834,6 +1942,8 @@ private:
     // Bytes of whole entries on disk. See bytesOnDisk().
     std::atomic<size_t> bytesOnDisk_{0};
     std::atomic<size_t> persistedEntries_{0};
+    // Set by halt(), on the writer or the io_uring reaper; never cleared.
+    std::atomic<bool>   halted_{false};
     uint64_t            entriesAppended_{0};
     std::vector<JournalEntry> batch_;
     // CONTRACT: onCommit_ fires on the reaper thread — must be lock-free and
@@ -1872,6 +1982,7 @@ private:
         std::vector<JournalEntry> buf;   // copy submitted in this chain
         uint64_t firstSeq{0};            // sequenceNumber of buf.front()
         uint32_t count{0};               // entries submitted
+        size_t   startBytes{0};          // file size before this chain: a failure cuts back to it
         int32_t  writeRes{INT32_MIN};    // write CQE res (bytes, or -errno)
         int32_t  fsyncRes{INT32_MIN};    // fdatasync CQE res (0, or -errno)
         uint16_t pendingCqes{0};         // CQEs still to reap for this chain
@@ -1881,8 +1992,8 @@ private:
     std::array<Inflight, kInflightDepth> inflight_{};
     uint32_t nextSlot_{0};               // round-robin slot cursor (writer)
     uint32_t inflightCount_{0};          // chains in flight (0 or 1)
-    uint32_t pendingRewind_{0};          // real-short-write shortfall to apply
-    std::vector<JournalEntry> requeue_;  // real-short-write tail, writer re-commits
+    uint32_t pendingRewind_{0};          // a failed chain's count, to give back
+    std::vector<JournalEntry> requeue_;  // a failed chain's entries, writer re-holds
     std::mutex ringMu_;                  // guards inflight_/inflightCount_/requeue_
     std::condition_variable chainDone_;  // signalled when inflightCount_ hits 0
     std::thread reaper_;

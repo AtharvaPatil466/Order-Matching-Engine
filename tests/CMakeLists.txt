@@ -639,14 +639,24 @@ add_test(NAME OrderLifecycleTest COMMAND OrderLifecycleTest)
 set_tests_properties(OrderLifecycleTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
-# point — must never be reported durable, and must stop the process. The child
-# reports every durability callback through a pipe, so the count survives the
-# abort that the fix introduces.
+# point — must never be reported durable, and must halt the journal (D4): the
+# failed commit cut from the file, its entries kept in memory, nothing more
+# written. The child reports every durability callback through a pipe.
 add_executable(JournalWriteFailureTest JournalWriteFailureTest.cpp)
 target_link_libraries(JournalWriteFailureTest PRIVATE OrderMatcher)
 enable_assertions(JournalWriteFailureTest)
 add_test(NAME JournalWriteFailureTest COMMAND JournalWriteFailureTest)
 set_tests_properties(JournalWriteFailureTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
+# D4: what the engine does once its journal halts — the failed request is not
+# reported accepted and its events stay held, later orders and cancels are
+# rejected JournalHalted (sync and async admission), no checkpoint runs, and a
+# checkpoint whose own temp file fails leaves the live journal alone (h3).
+add_executable(JournalHaltTest JournalHaltTest.cpp)
+target_link_libraries(JournalHaltTest PRIVATE OrderMatcher)
+enable_assertions(JournalHaltTest)
+add_test(NAME JournalHaltTest COMMAND JournalHaltTest)
+set_tests_properties(JournalHaltTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
 # The order-entry port must journal what it acknowledges: GatewayServer had no
 # journal at all, so a restart lost every order it had accepted. Driven against

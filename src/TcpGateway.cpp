@@ -40,6 +40,7 @@ const char* rejectReasonToString(RejectReason reason) {
     case RejectReason::RateLimitExceeded: return "rate limit exceeded";
     case RejectReason::QueueBackpressure: return "queue backpressure";
     case RejectReason::EngineStopped: return "engine stopped";
+    case RejectReason::JournalHalted: return "journal halted; restart required";
     case RejectReason::MarketHalted: return "market halted";
     case RejectReason::OrderTypeNotAllowedInState: return "order type not allowed in current state";
     case RejectReason::OutsidePriceBand: return "outside price band";

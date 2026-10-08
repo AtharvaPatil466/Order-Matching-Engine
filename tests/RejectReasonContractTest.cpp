@@ -227,12 +227,13 @@ TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
         RejectReason::InvalidDisplayQty,
         RejectReason::NotOrderOwner,
         RejectReason::InvalidFieldValue,
+        RejectReason::JournalHalted,
     };
 
     // Pins the list against the enum's size. Appending a reason without
     // listing it here now fails the build rather than silently narrowing what
     // "every reason" means — which is exactly how the five above went missing.
-    static_assert(static_cast<size_t>(RejectReason::InvalidFieldValue) + 1 ==
+    static_assert(static_cast<size_t>(RejectReason::JournalHalted) + 1 ==
                       sizeof(kAll) / sizeof(kAll[0]),
                   "a RejectReason was added — add it to kAll and update the "
                   "last-value reference in this assert");

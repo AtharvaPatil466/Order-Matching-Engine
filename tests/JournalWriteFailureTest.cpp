@@ -1,5 +1,5 @@
 // JournalWriteFailureTest — the journal must never report an entry durable that
-// the disk did not accept.
+// the disk did not accept, and must stop writing once the disk has refused one.
 //
 // WHAT WAS WRONG (JRN-4). writeBatch did
 //
@@ -14,13 +14,18 @@
 // — and onDurable fires for entries that are not in the file. A durable client
 // ack built on that confirms orders a full disk just dropped.
 //
-// Continuing after the failure is not safe either, which is why the fix is to
-// stop. Both commit paths APPEND. A failed flush can leave a torn record at EOF,
-// and anything appended after it is lost on replay, because recovery stops at
-// the first record whose CRC does not check. And DurabilityGate releases events
-// against a single FIFO count of committed entries, so a later successful
-// commit would advance that count across the failed batch and release acks for
-// exactly the orders that were dropped.
+// Continuing to write after the failure is not safe either. Both commit paths
+// APPEND: a failed write can leave a torn record at EOF, and anything appended
+// after it is lost on replay, because recovery stops at the first record whose
+// CRC does not check. And DurabilityGate releases events against a single FIFO
+// count of committed entries, so a later successful commit would advance that
+// count across the failed batch and release acks for exactly the orders that
+// were dropped.
+//
+// That used to be answered by aborting the process (3c4322a). Roadmap 1.4-D4
+// replaces the abort with a HALTED journal: it cuts what the failed commit put
+// down, keeps the batch in memory, writes nothing more, and never reports it
+// durable; the engine rejects new orders and a restart replays the file.
 //
 // HOW THE FAILURE IS PRODUCED. For real, without mocks: a child process sets
 // RLIMIT_FSIZE so the limit lands halfway through the fourth record, and ignores
@@ -34,8 +39,9 @@
 //      the number intact on disk. Every durability callback is sent to the
 //      parent through a pipe, which RLIMIT_FSIZE does not apply to, so the count
 //      survives however the child ends.
-//   2. The outcome: the child is stopped by SIGABRT. A journal that can no
-//      longer tell what is on disk must not keep accepting work.
+//   2. The outcome: the process keeps running with the journal halted, the
+//      unwritten entries still held, and nothing after the failure on disk —
+//      not even the half record the failed write left, and not on the way out.
 
 #include "Journal.h"
 #include "TempPath.h"
@@ -44,6 +50,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -55,7 +62,9 @@ namespace {
 
 constexpr int kEntries           = 10;
 constexpr int kWholeBeforeLimit  = 3;    // the limit admits exactly this many records
-constexpr int kSetrlimitFailed   = 90;   // child exit code: the test could not arm itself
+constexpr int kSetrlimitFailed   = 90;   // child exit codes: the test could not arm itself,
+constexpr int kNotHalted         = 91;   //   the write failed and the journal carried on,
+constexpr int kBatchNotKept      = 92;   //   or it dropped the entries it could not write
 
 [[noreturn]] void runChild(const std::string& path, int reportFd) {
     std::signal(SIGXFSZ, SIG_IGN);   // EFBIG instead of death
@@ -67,17 +76,24 @@ constexpr int kSetrlimitFailed   = 90;   // child exit code: the test could not 
 
     // Immediate: one commit per entry, so the first failing commit is the
     // fourth one and the expected counts are exact.
-    Journal journal(path, Journal::SyncPolicy::Immediate, 1);
-    uint64_t reported = 0;
-    journal.setOnDurable([&](size_t n) {
-        reported += n;
-        (void)!write(reportFd, &reported, sizeof reported);
-    });
-    for (int i = 1; i <= kEntries; ++i)
-        journal.logAddOrder(static_cast<OrderId>(i), 7, 1, Side::Buy, 10000, 10,
-                            OrderType::Limit);
-    journal.flush();
-    _exit(0);
+    int code = 0;
+    {
+        Journal journal(path, Journal::SyncPolicy::Immediate, 1);
+        uint64_t reported = 0;
+        journal.setOnDurable([&](size_t n) {
+            reported += n;
+            (void)!write(reportFd, &reported, sizeof reported);
+        });
+        for (int i = 1; i <= kEntries; ++i)
+            journal.logAddOrder(static_cast<OrderId>(i), 7, 1, Side::Buy, 10000, 10,
+                                OrderType::Limit);
+        journal.flush();
+        if (!journal.halted())
+            code = kNotHalted;
+        else if (journal.pendingEntries() != static_cast<size_t>(kEntries - kWholeBeforeLimit))
+            code = kBatchNotKept;
+    }   // ~Journal flushes and closes: a halted one must write nothing on the way out
+    _exit(code);
 }
 
 std::string tempJournalPath() {
@@ -109,10 +125,12 @@ int main() {
     assert(waitpid(pid, &status, 0) == pid);
 
     const size_t onDisk = Journal(path).readAll(true, true).size();
+    const auto fileBytes = std::filesystem::file_size(path);
     std::remove(path.c_str());
 
-    std::printf("reported durable: %llu   intact on disk: %zu   child: %s %d\n",
+    std::printf("reported durable: %llu   intact on disk: %zu   file bytes: %llu   child: %s %d\n",
                 static_cast<unsigned long long>(maxReported), onDisk,
+                static_cast<unsigned long long>(fileBytes),
                 WIFSIGNALED(status) ? "signal" : "exit",
                 WIFSIGNALED(status) ? WTERMSIG(status) : WEXITSTATUS(status));
 
@@ -124,10 +142,17 @@ int main() {
     assert(maxReported <= onDisk &&
            "the journal reported entries DURABLE that are not intact on disk — a "
            "durable ack built on this confirms orders the disk dropped");
-    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT &&
-           "a journal write failure must stop the process: continuing appends after "
-           "a possibly-torn record and advances the gate's FIFO count past the "
-           "failed batch");
+    assert(WIFEXITED(status) &&
+           "a journal write failure must halt the journal, not kill the process");
+    assert(WEXITSTATUS(status) != kNotHalted &&
+           "the write failed and the journal did not halt: the next commit would "
+           "append behind a possibly-torn record");
+    assert(WEXITSTATUS(status) != kBatchNotKept &&
+           "the halted journal dropped the entries it could not write");
+    assert(WEXITSTATUS(status) == 0);
+    assert(fileBytes == sizeof(JournalFileHeader) + kWholeBeforeLimit * sizeof(JournalEntry) &&
+           "the failed commit's partial record is still in the file — it must be cut, "
+           "so the file holds exactly what was reported durable");
 
     std::puts("JournalWriteFailureTest passed");
     return 0;

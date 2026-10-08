@@ -98,6 +98,10 @@ struct MarketDataSnapshot {
     PriceLevel asks[MAX_DEPTH];
     size_t bidCount = 0;
     size_t askCount = 0;
+    // Every price level on each side, hidden-only levels included — taken
+    // under the same lock as the depth, for readers off the owning thread.
+    size_t bidLevels = 0;
+    size_t askLevels = 0;
     Price lastTradePrice;
     Quantity lastTradeQty;
     uint64_t timestamp;

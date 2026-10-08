@@ -3440,6 +3440,8 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
     snap.lastTradePrice = lastTradePrice_;
     snap.lastTradeQty = lastTradeQty_;
     snap.timestamp = nowNs();
+    snap.bidLevels = bids_.size();
+    snap.askLevels = asks_.size();
 
     size_t maxDepth = std::min(depth, MarketDataSnapshot::MAX_DEPTH);
 

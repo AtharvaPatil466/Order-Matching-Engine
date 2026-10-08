@@ -13,6 +13,7 @@
 #include "Metrics.h"
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -61,6 +62,41 @@ std::string httpGet(uint16_t port, const std::string& path) {
     }
     ::close(fd);
     return out;
+}
+
+// Scrape the endpoints that read worker-owned state while an async worker
+// is matching. Roadmap 1.7-G3 (THR-14): /audit read the book's level counts
+// with no lock, racing the worker that mutates them. Run under TSan.
+void scrapeUnderLiveFlow() {
+    constexpr SymbolId kSym = 1;
+    constexpr int kScrapes = 200;
+    MatchingEngine engine;
+    engine.addSymbol(kSym);
+    engine.startAsync(1);
+    AdminServer admin(engine, 0);
+    admin.setAuthDisabled(true);
+    assert(admin.start() && "admin server failed to bind");
+
+    std::atomic<bool> stop{false};
+    std::thread producer([&] {
+        // Levels come and go: alternating sides over a spread of prices.
+        for (OrderId id = 1; !stop.load(std::memory_order_acquire); ++id) {
+            const Side side = (id % 2) ? Side::Buy : Side::Sell;
+            const Price px = 100 + static_cast<Price>(id % 9);
+            engine.submitOrder(kSym, id, 7, side, px, 1, OrderType::Limit);
+        }
+    });
+
+    for (int i = 0; i < kScrapes; ++i) {
+        const std::string audit = httpGet(admin.port(), "/audit?symbolId=1");
+        assert(audit.find("\"bidLevels\":") != std::string::npos);
+    }
+
+    stop.store(true, std::memory_order_release);
+    producer.join();
+    admin.stop();
+    engine.stopAsync();
+    std::puts("/audit under live order flow: ok");
 }
 
 }  // namespace
@@ -124,6 +160,8 @@ int main() {
 
     admin.stop();
     engine.stop();
+
+    scrapeUnderLiveFlow();
     std::puts("AdminServerEndpointsTest passed");
     return 0;
 }

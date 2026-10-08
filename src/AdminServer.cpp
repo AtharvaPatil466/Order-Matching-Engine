@@ -557,12 +557,10 @@ std::string AdminServer::generateAuditResponse(SymbolId sym) const {
     }
     oss << "]},";
 
-    // Active order count (bid levels + ask levels)
-    const OrderBook* book = engine_.getOrderBook(sym);
-    size_t bidLevels = book ? book->getBidLevelsCount() : 0;
-    size_t askLevels = book ? book->getAskLevelsCount() : 0;
-    oss << "\"bidLevels\":" << bidLevels << ",";
-    oss << "\"askLevels\":" << askLevels;
+    // Level counts from the snapshot, taken under the book's lock: reading
+    // them live raced the worker that mutates the book (THR-14).
+    oss << "\"bidLevels\":" << snap.bidLevels << ",";
+    oss << "\"askLevels\":" << snap.askLevels;
     oss << "}";
 
     return oss.str();

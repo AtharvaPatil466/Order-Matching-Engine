@@ -798,6 +798,15 @@ add_test(NAME ShutdownCancelRaceTest COMMAND ShutdownCancelRaceTest)
 set_tests_properties(ShutdownCancelRaceTest PROPERTIES TIMEOUT 120
                      LABELS "project;lifecycle;concurrency")
 
+# Roadmap 1.7-G2 (LF-5): stopAsync() under live producers — no push into a
+# freed queue, no acked order left unapplied. Meaningful under ASan/TSan.
+add_executable(StopAsyncRaceTest StopAsyncRaceTest.cpp)
+target_link_libraries(StopAsyncRaceTest PRIVATE OrderMatcher)
+enable_assertions(StopAsyncRaceTest)
+add_test(NAME StopAsyncRaceTest COMMAND StopAsyncRaceTest)
+set_tests_properties(StopAsyncRaceTest PROPERTIES TIMEOUT 120
+                     LABELS "project;lifecycle;concurrency")
+
 # Kill-switch completeness (C5) — the safety control must be complete, not
 # best-effort: after setKillSwitch returns, zero resting orders may survive.
 # Exercises the async path with a small ring and maxPushRetries=1, the only

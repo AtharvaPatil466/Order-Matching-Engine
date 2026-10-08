@@ -97,7 +97,31 @@ MatchingEngine::~MatchingEngine() {
     }
 }
 
+bool MatchingEngine::admit(size_t threadIndex) {
+    std::atomic<uint64_t>& gate = threadStats_[threadIndex].admission;
+    if (gate.fetch_add(1, std::memory_order_acquire) & kQueueClosed) {
+        gate.fetch_sub(1, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+void MatchingEngine::leave(size_t threadIndex) {
+    threadStats_[threadIndex].admission.fetch_sub(1, std::memory_order_release);
+}
+
+// ponytail: two RMWs per order on the ThreadStats line the producer already
+// RMWs for `submitted`. If they ever show up in a profile, fold the closed bit
+// into `submitted` itself (bump before the push, undo on failure) — that needs
+// waitForDrain and the worker backstop to tolerate the undo.
 bool MatchingEngine::enqueueSafe(size_t threadIndex, const OrderRequest& req) {
+    if (!admit(threadIndex)) return false;
+    const bool queued = pushWithBackpressure(threadIndex, req);
+    leave(threadIndex);
+    return queued;
+}
+
+bool MatchingEngine::pushWithBackpressure(size_t threadIndex, const OrderRequest& req) {
     if (bpThresholdFraction_ > 0.0) {
         size_t maxDepth = static_cast<size_t>(
             bpThresholdFraction_ * requestQueues_[threadIndex]->capacity());
@@ -130,7 +154,9 @@ bool MatchingEngine::enqueueSafe(size_t threadIndex, const OrderRequest& req) {
 // C5: never-drop control-plane enqueue. See the header for why this shares the
 // order ring rather than using a side channel.
 // Bounded sibling of enqueueControl, for the one caller that must not spin
-// forever. Does the submitted_/wakeup bookkeeping ONLY on success: counting a
+// forever: stopAsync's Shutdown, pushed after the admission gates are closed,
+// so it deliberately does not pass through them.
+// Does the submitted_/wakeup bookkeeping ONLY on success: counting a
 // message that was never queued would make waitForDrain() wait for something
 // that is never going to be processed.
 bool MatchingEngine::tryEnqueueControl(size_t threadIndex, const OrderRequest& req,
@@ -148,6 +174,14 @@ bool MatchingEngine::tryEnqueueControl(size_t threadIndex, const OrderRequest& r
 }
 
 void MatchingEngine::enqueueControl(size_t threadIndex, const OrderRequest& req) {
+    // The one way a control message is not delivered: the engine is stopping,
+    // its workers drain and exit, and nothing is left for it to act on.
+    if (!admit(threadIndex)) {
+        obSink().log(obEvent("control_after_stop", LogSeverity::Warn)
+            .kv("thread", (long long)threadIndex)
+            .kv("request_type", (long long)static_cast<int>(req.type)));
+        return;
+    }
     uint64_t spins = 0;
     while (!requestQueues_[threadIndex]->push(req)) {
         ++spins;
@@ -171,6 +205,7 @@ void MatchingEngine::enqueueControl(size_t threadIndex, const OrderRequest& req)
     threadStats_[threadIndex].submitted.fetch_add(1, std::memory_order_relaxed);
     queueWakeups_[threadIndex].fetch_add(1, std::memory_order_release);
     queueWakeups_[threadIndex].notify_one();
+    leave(threadIndex);
 }
 
 size_t MatchingEngine::countResting(ParticipantId pid) {
@@ -536,6 +571,21 @@ void MatchingEngine::stopAsync() {
 
     stopExpiryTimer();
 
+    // LF-5: no producer may be inside a push when the queues are destroyed
+    // below, and none may land an order behind the Shutdown message, where it
+    // is acked and never applied. Turn new submissions away, close every
+    // queue's gate, and wait out the producers already through it. The workers
+    // are still running, so a producer spinning on a full ring gets its slot.
+    running_.store(false, std::memory_order_release);
+    for (size_t i = 0; i < numThreads_; ++i) {
+        threadStats_[i].admission.fetch_or(kQueueClosed, std::memory_order_acq_rel);
+    }
+    for (size_t i = 0; i < numThreads_; ++i) {
+        while (threadStats_[i].admission.load(std::memory_order_acquire) != kQueueClosed) {
+            std::this_thread::yield();
+        }
+    }
+
     OrderRequest shutdown{};
     shutdown.type = OrderRequest::Type::Shutdown;
 
@@ -575,7 +625,6 @@ void MatchingEngine::stopAsync() {
     requestQueues_.clear();
     queueWakeups_.reset();
 
-    running_.store(false, std::memory_order_release);
     booksFrozen_.store(false, std::memory_order_release);
     async_ = false;
 }
@@ -1657,7 +1706,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         req.hidden = hidden;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
-            return rejectedAsync(RejectReason::QueueBackpressure);
+            return rejectedAsync(enqueueRejectReason());
         }
         return acceptedAsync(sequenceId);
     }
@@ -1756,7 +1805,7 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
         req.participantId = requester;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
-            return rejectedAsync(RejectReason::QueueBackpressure);
+            return rejectedAsync(enqueueRejectReason());
         }
         return acceptedAsync(sequenceId);
     }
@@ -1912,7 +1961,7 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
         req.participantId = requester;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
-            return rejectedAsync(RejectReason::QueueBackpressure);
+            return rejectedAsync(enqueueRejectReason());
         }
         return acceptedAsync(sequenceId);
     }
@@ -1964,7 +2013,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         req.participantId = requester;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
-            return rejectedAsync(RejectReason::QueueBackpressure);
+            return rejectedAsync(enqueueRejectReason());
         }
         return acceptedAsync(sequenceId);
     }

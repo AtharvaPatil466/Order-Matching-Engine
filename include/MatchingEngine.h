@@ -635,8 +635,9 @@ private:
     // journalMutex_. Never held while taking a drain; see checkpointInternal.
     std::mutex checkpointMutex_;
 
-    // Async mode (Thread Pool)
-    bool async_{false};
+    // Async mode (Thread Pool). Atomic: producers read it on every submit
+    // while stopAsync() clears it.
+    std::atomic<bool> async_{false};
 
     // Backstop exit for workers, checked ONLY when a worker's queue is empty.
     // stopAsync() delivers shutdown in-band so it queues behind existing work
@@ -657,8 +658,12 @@ private:
         // diagnostic below reconstructs what it needs from submitted/processed
         // rather than paying a store per order for state only a hang reads.
         std::atomic<bool>     exited{false};
+        // LF-5 admission gate: producers currently inside a push to this
+        // queue, plus kQueueClosed once stopAsync() has shut it. See admit().
+        std::atomic<uint64_t> admission{0};
     };
     std::unique_ptr<ThreadStats[]> threadStats_;
+    static constexpr uint64_t kQueueClosed = uint64_t{1} << 63;
 
     // Report a slow shutdown after this long, then again on each interval.
     std::chrono::milliseconds shutdownReportInterval_{5000};
@@ -718,6 +723,20 @@ private:
 
     // Internal helper: push to specific thread's queue with backpressure
     bool enqueueSafe(size_t threadIndex, const OrderRequest& req);
+    bool pushWithBackpressure(size_t threadIndex, const OrderRequest& req);
+    // What a submit whose enqueue failed tells the client: the engine is
+    // stopping, or the queue is full.
+    RejectReason enqueueRejectReason() const {
+        return running_.load(std::memory_order_acquire) ? RejectReason::QueueBackpressure
+                                                        : RejectReason::EngineStopped;
+    }
+
+    // LF-5 admission gate in front of each queue. Every producer push goes
+    // through admit()/leave(); stopAsync() closes the gates and waits for the
+    // producers already inside before it touches the queues. admit() is false
+    // once the queue is closed; true obliges exactly one leave().
+    bool admit(size_t threadIndex);
+    void leave(size_t threadIndex);
 
     // C5: control-plane enqueue that CANNOT be dropped. enqueueSafe gives up
     // after maxPushRetries_ and returns false; the three safety-control call

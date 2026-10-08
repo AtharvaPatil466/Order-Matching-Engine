@@ -2267,7 +2267,9 @@ size_t MatchingEngine::replayJournal() {
         }
         case JournalEntry::Type::CancelReplace: {
             if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-                book->cancelReplace(entry.orderId, entry.newPrice, entry.newQty);
+                book->cancelReplace(entry.orderId, entry.newPrice,
+                                    journaledReplaceTotal(
+                                        entry, book->getOrder(entry.orderId)->cumQty));
             }
             break;
         }
@@ -2413,6 +2415,7 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
     };
 
     bool applied = false;
+    Quantity replaceTotal = entry.newQty;  // CancelReplace only; re-logged below
     switch (entry.entryType) {
     case JournalEntry::Type::AddOrder: {
         auto* book = ensureBook(entry.symbolId);
@@ -2442,7 +2445,9 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
     }
     case JournalEntry::Type::CancelReplace: {
         if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            book->cancelReplace(entry.orderId, entry.newPrice, entry.newQty);
+            replaceTotal = journaledReplaceTotal(entry,
+                                                 book->getOrder(entry.orderId)->cumQty);
+            book->cancelReplace(entry.orderId, entry.newPrice, replaceTotal);
             applied = true;
         }
         break;
@@ -2497,8 +2502,9 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
             journal_->logModifyOrder(entry.orderId, entry.symbolId, entry.newQty);
             break;
         case JournalEntry::Type::CancelReplace:
+            // The resolved total: the local journal writes total records only.
             journal_->logCancelReplace(entry.orderId, entry.symbolId,
-                                       entry.newPrice, entry.newQty);
+                                       entry.newPrice, replaceTotal);
             break;
         case JournalEntry::Type::TradingStateChange:
             journal_->logTradingState(entry.symbolId, journaledTradingState(entry),

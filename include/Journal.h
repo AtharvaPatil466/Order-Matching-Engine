@@ -108,7 +108,14 @@ inline constexpr uint32_t JOURNAL_FORMAT_V1   = 1;
 // does not know and re-run every auction order as a continuous one, so it must
 // refuse the file instead. A v1 file is marked v2 before its first new record.
 inline constexpr uint32_t JOURNAL_FORMAT_V2      = 2;
-inline constexpr uint32_t JOURNAL_FORMAT_CURRENT = JOURNAL_FORMAT_V2;
+// v3: a CancelReplace record's newQty is the order's new TOTAL, not its new
+// leaves (1.5-E1), and the record says so (REPLACE_NEWQTY_IS_TOTAL). Same
+// layout again, so this build reads v1 and v2. An older build would replay a
+// total as leaves, so it must refuse the file; an older file is marked v3
+// before its first new record, which is also why the meaning is carried per
+// record — an upgraded file holds both kinds.
+inline constexpr uint32_t JOURNAL_FORMAT_V3      = 3;
+inline constexpr uint32_t JOURNAL_FORMAT_CURRENT = JOURNAL_FORMAT_V3;
 
 // contentEpoch answers a different question from formatVersion, and conflating
 // the two would be a lie in both directions. formatVersion is the LAYOUT
@@ -191,6 +198,18 @@ struct JournalEntry {
 // unfilled (1.5-E1). Older files carry 0 here: restored as unfilled, as before.
 inline Quantity snapshotCumQty(const JournalEntry& e) {
     return static_cast<Quantity>(e.newPrice);
+}
+
+// CancelReplace records reuse quantity, unused by them, as flags. A record
+// with REPLACE_NEWQTY_IS_TOTAL (every one written since format v3) carries the
+// order's new total. One without it was written when newQty meant the new
+// LEAVES — before roadmap 0.11 any leaves, under it only the order's current
+// leaves on a partially filled order — so replay restates it as a total
+// against the fills the order has at that point in the replay.
+inline constexpr Quantity REPLACE_NEWQTY_IS_TOTAL = 1;
+
+inline Quantity journaledReplaceTotal(const JournalEntry& e, Quantity cumQty) {
+    return (e.quantity & REPLACE_NEWQTY_IS_TOTAL) ? e.newQty : cumQty + e.newQty;
 }
 
 // The state a TradingStateChange record carries, and for PreOpen its trading
@@ -345,6 +364,7 @@ public:
                           Quantity newQty) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::CancelReplace;
+        entry.quantity = REPLACE_NEWQTY_IS_TOTAL;  // newQty: the new total
         entry.timestamp = now();
         entry.orderId = id;
         entry.symbolId = symbolId;
@@ -1374,7 +1394,7 @@ private:
     // paths; a no-op after the first time and on pre-header files.
     void writePendingHeader() {
         cutTornTail();   // never write behind a torn record
-        upgradeV1Header();
+        upgradeOldHeader();
         if (!pendingHeader_ || !file_) return;
         JournalFileHeader h{};
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
@@ -1400,11 +1420,12 @@ private:
         bytesOnDisk_.fetch_add(sizeof(JournalFileHeader), std::memory_order_relaxed);
     }
 
-    // Mark a v1 file v2 before anything is appended to it, since what is
-    // appended may be a record a v1 build cannot read. In place, through its
-    // own descriptor: file_ is O_APPEND, where a positioned write lands at EOF.
-    void upgradeV1Header() {
-        if (!headerIsV1_) return;
+    // Mark an older file (v1, v2) current before anything is appended to it,
+    // since what is appended may be a record an older build would misread. In
+    // place, through its own descriptor: file_ is O_APPEND, where a positioned
+    // write lands at EOF.
+    void upgradeOldHeader() {
+        if (!headerIsOld_) return;
         const uint32_t v = JOURNAL_FORMAT_CURRENT;
         const int fd = ::open(filePath_.c_str(), O_WRONLY);
         const bool ok = fd >= 0 &&
@@ -1413,8 +1434,8 @@ private:
             syncFd(fd);
         const int err = errno;
         if (fd >= 0) ::close(fd);
-        if (!ok) failStop("upgrading the journal header to format v2", err);
-        headerIsV1_ = false;
+        if (!ok) failStop("upgrading the journal header to the current format", err);
+        headerIsOld_ = false;
     }
 
     size_t writeBatch(size_t toWrite) {
@@ -1563,8 +1584,8 @@ private:
 
         dataOffset_ = sizeof(JournalFileHeader);
         contentEpoch_ = h.contentEpoch;
-        headerIsV1_ = h.formatVersion == JOURNAL_FORMAT_V1;
-        if ((h.formatVersion != JOURNAL_FORMAT_V1 && h.formatVersion != JOURNAL_FORMAT_CURRENT) ||
+        headerIsOld_ = h.formatVersion < JOURNAL_FORMAT_CURRENT;
+        if (h.formatVersion < JOURNAL_FORMAT_V1 || h.formatVersion > JOURNAL_FORMAT_CURRENT ||
             h.recordSize != sizeof(JournalEntry)) {
             recoveryFailed_ = true;
             std::fprintf(stderr,
@@ -1803,8 +1824,8 @@ private:
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().
     bool   pendingHeader_{false};
-    // The existing header says v1; upgradeV1Header() marks it before a write.
-    bool   headerIsV1_{false};
+    // The existing header is v1 or v2; upgradeOldHeader() marks it before a write.
+    bool   headerIsOld_{false};
     // A torn final write still to cut: tornBytes_ bytes from offset tornFrom_.
     // See cutTornTail().
     size_t tornFrom_{0};

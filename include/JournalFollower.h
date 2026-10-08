@@ -443,9 +443,12 @@ private:
         case JournalEntry::Type::ModifyOrder:
             book->modifyOrder(e.orderId, e.newQty);
             break;
-        case JournalEntry::Type::CancelReplace:
-            book->cancelReplace(e.orderId, e.newPrice, e.newQty);
+        case JournalEntry::Type::CancelReplace: {
+            const Order* o = book->getOrder(e.orderId);
+            book->cancelReplace(e.orderId, e.newPrice,
+                                journaledReplaceTotal(e, o ? o->cumQty : 0));
             break;
+        }
         case JournalEntry::Type::TradingStateChange:
         case JournalEntry::Type::Uncross:
             applySessionRecord(*book, e);

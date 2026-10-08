@@ -217,8 +217,9 @@ private:
 
             case JournalEntry::Type::CancelReplace:
                 if (auto sym = symbolOf(e.orderId)) {
-                    engine_.submitCancelReplace(*sym, e.orderId,
-                                                e.newPrice, e.newQty);
+                    const Order* o = engine_.getOrderBook(*sym)->getOrder(e.orderId);
+                    engine_.submitCancelReplace(*sym, e.orderId, e.newPrice,
+                                                journaledReplaceTotal(e, o->cumQty));
                 }
                 break;
 

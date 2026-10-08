@@ -311,6 +311,14 @@ enable_assertions(ReplaceAfterCheckpointTest)
 add_test(NAME ReplaceAfterCheckpointTest COMMAND ReplaceAfterCheckpointTest)
 set_tests_properties(ReplaceAfterCheckpointTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A CancelReplace record written before 1.5-E1 meant the new leaves; it still
+# replays that way, and the journal is marked v3 before a total record lands.
+add_executable(LegacyReplaceReplayTest LegacyReplaceReplayTest.cpp)
+target_link_libraries(LegacyReplaceReplayTest PRIVATE OrderMatcher)
+enable_assertions(LegacyReplaceReplayTest)
+add_test(NAME LegacyReplaceReplayTest COMMAND LegacyReplaceReplayTest)
+set_tests_properties(LegacyReplaceReplayTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # Durable client acks cover every journaled request, not only new orders (D7).
 add_executable(DurableGateCoverageTest DurableGateCoverageTest.cpp)
 target_link_libraries(DurableGateCoverageTest PRIVATE OrderMatcher)

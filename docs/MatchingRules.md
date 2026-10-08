@@ -729,7 +729,8 @@ market orders until the close (AUCT-4, MATCH-12, TLA-3). `SessionScheduler` now 
 flip alone. Entering `Halted` does not cross. Pinned by `tests/AuctionOpenAtomicTest.cpp`.
 
 Every trading-state change and every explicit uncross is journaled (`TradingStateChange`,
-`Uncross`; journal format v2, which still reads v1 and marks a v1 file v2 before appending), and
+`Uncross`, added in journal format v2; the current format, v3, still reads v1 and v2 and marks an
+older file current before appending), and
 replay applies them in journal order, so recovery re-runs each auction exactly. Through
 `MatchingEngine` they are applied and journaled by the book's owning worker, in order with that
 book's orders; a checkpoint writes each non-`Continuous` book's state before its orders. Before
@@ -1117,7 +1118,11 @@ they would a new order of that size (rule 9.3).
 
 Every ingress passes the client's quantity through unchanged: FIX `OrderQty` (38) on a `G`,
 OUCH `Shares` on a Replace, and the native gateway's `newQty`. Journal replay passes the
-recorded `newQty` back through the same contract, and a checkpoint's Snapshot records carry
+recorded `newQty` back through the same contract. A `CancelReplace` record says which meaning
+it carries: those written since journal format v3 are flagged as totals, and an older unflagged
+one meant the new leaves, so replay restates it as `cumQty + newQty` at that point
+(`tests/LegacyReplaceReplayTest.cpp`). An older build refuses a v3 file rather than read totals
+as leaves. And a checkpoint's Snapshot records carry
 each order's `cumQty`, so a replace after a restore is applied against the fills the order
 really had (`tests/ReplaceAfterCheckpointTest.cpp`).
 Pinned by `tests/ReplaceQuantityTest.cpp`.

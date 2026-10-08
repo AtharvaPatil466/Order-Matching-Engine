@@ -975,7 +975,7 @@ void testFormatVersionMismatchIsRefused() {
     {
         JournalFileHeader h{};
         std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
-        h.formatVersion = JOURNAL_FORMAT_V1 + 1;         // written by a newer build
+        h.formatVersion = JOURNAL_FORMAT_CURRENT + 1;    // written by a newer build
         h.recordSize    = sizeof(JournalEntry);
         std::ofstream out(JOURNAL_PATH, std::ios::binary);
         out.write(reinterpret_cast<const char*>(&h), sizeof(h));

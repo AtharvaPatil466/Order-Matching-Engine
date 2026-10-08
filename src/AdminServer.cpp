@@ -434,16 +434,20 @@ std::string AdminServer::generateReadyzResponse() const {
 
 std::string AdminServer::generateMetricsResponse() const {
     LatencyTracker e2e = engine_.getAggregateE2ELatency();
+    // LF-8: one read of each, processed first, and a floor at zero. A producer
+    // counts an order as submitted only after its push, so a worker can finish
+    // the order first; subtracting a separately re-read pair wrapped to ~1.8e19.
+    const uint64_t processed = engine_.getProcessedCount();
+    const uint64_t submitted = engine_.getSubmittedCount();
+    const uint64_t pending = submitted > processed ? submitted - processed : 0;
     std::ostringstream oss;
     oss << "{";
-    oss << "\"submitted\":" << engine_.getSubmittedCount() << ",";
-    oss << "\"processed\":" << engine_.getProcessedCount() << ",";
+    oss << "\"submitted\":" << submitted << ",";
+    oss << "\"processed\":" << processed << ",";
     oss << "\"rateLimited\":" << engine_.getRateLimitedCount() << ",";
     oss << "\"backpressureRejected\":" << engine_.getBackpressureRejectCount() << ",";
     oss << "\"queueDropped\":" << engine_.getDroppedCount() << ",";
     
-    // Queue depth per thread
-    uint64_t pending = engine_.getSubmittedCount() - engine_.getProcessedCount();
     oss << "\"pendingOrders\":" << pending << ",";
     oss << "\"e2eLatency\":{";
     oss << "\"count\":" << e2e.getCount() << ",";

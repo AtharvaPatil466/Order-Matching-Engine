@@ -401,29 +401,35 @@ bool parsePort(const char* text, uint16_t& out, const char* what) {
     }
 }
 
+// Every flag this binary reads; the unknown-argument check and --help both come
+// from it (see cliArgsError in CliFlags.h).
+constexpr CliFlag kFlags[] = {
+    {"--participant-credentials", "FILE",
+     "credentials, one per line as user:secret:id[,id...] [OB_PARTICIPANT_CREDENTIALS]"},
+    {"--no-participant-auth", nullptr,
+     "accept every claimed identity (explicit opt-out) [OB_NO_PARTICIPANT_AUTH=1]"},
+    {"--journal", "PATH",
+     "journal every accepted order, replay it at start [OB_JOURNAL_PATH]"},
+    {"--replay-legacy-journal", nullptr,
+     "replay a journal from a build that seeded orders [OB_REPLAY_LEGACY_JOURNAL=1]"},
+    {"--help", nullptr, "this message (also -h)"},
+    {"-h", nullptr, "this message"},
+};
+
 void printUsage() {
     std::cout <<
         "Usage: GatewayServer [PORT] [options]\n"
         "\n"
-        "  PORT                            listen port (default 9876)\n"
-        "  --participant-credentials FILE  credential store, one per line as\n"
-        "                                  user:secret:id[,id...]\n"
-        "  --no-participant-auth           accept every claimed identity\n"
-        "                                  (explicit opt-out; see below)\n"
-        "  --journal PATH                  journal every accepted order and replay\n"
-        "                                  it on start; without one, a restart\n"
-        "                                  loses every order\n"
-        "  --replay-legacy-journal         replay a journal written by a build that\n"
-        "                                  seeded synthetic orders (see Runbook §1)\n"
-        "  --help                          this message\n"
+        "  PORT                            listen port, first argument only (default 9876)\n";
+    printCliFlags(std::cout, kFlags);
+    std::cout <<
         "\n"
-        "Environment: OB_PARTICIPANT_CREDENTIALS, OB_NO_PARTICIPANT_AUTH,\n"
-        "             OB_JOURNAL_PATH, OB_REPLAY_LEGACY_JOURNAL,\n"
-        "             OB_ENGINE_HOST + OB_ENGINE_PORT (forwarding mode).\n"
+        "A flag wins over its [ENV] variable. Any other argument is refused.\n"
+        "OB_ENGINE_HOST + OB_ENGINE_PORT (both set) switch to forwarding mode.\n"
         "\n"
-        "The gateway REFUSES TO START with no credentials unless\n"
-        "--no-participant-auth is passed, because every identity on this port\n"
-        "would otherwise be an unchecked claim.\n";
+        "Without a journal a restart loses every order. The gateway REFUSES TO\n"
+        "START with no credentials unless --no-participant-auth is passed, because\n"
+        "every identity on this port would otherwise be an unchecked claim.\n";
 }
 
 }  // namespace
@@ -441,8 +447,12 @@ int main(int argc, char* argv[]) {
     // A leading positional PORT is optional. Only consume argv[1] as one when
     // it actually looks like a number — otherwise it is a flag, and parsing it
     // as a port is what caused the aborts described above.
-    if (argc > 1 && argv[1][0] != '-') {
-        if (!parsePort(argv[1], port, "PORT")) return 1;
+    const bool hasPort = argc > 1 && argv[1][0] != '-';
+    if (hasPort && !parsePort(argv[1], port, "PORT")) return 1;
+    if (const std::string err = cliArgsError(argc, argv, kFlags, hasPort ? 2 : 1);
+        !err.empty()) {
+        std::cerr << "[Gateway] FATAL: " << err << " — refusing to start. See --help.\n";
+        return 1;
     }
 
     std::signal(SIGINT,  signalHandler);

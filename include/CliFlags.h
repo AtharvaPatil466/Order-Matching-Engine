@@ -8,6 +8,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <ostream>
+#include <span>
 #include <string>
 
 namespace OrderMatcher {
@@ -35,6 +37,47 @@ inline bool flagOrEnvBool(int argc, char** argv, const char* flag,
     }
     const char* v = std::getenv(env);
     return v && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0);
+}
+
+// One flag a binary accepts. `value` names its argument ("PATH", "N");
+// nullptr makes it a boolean that takes none.
+struct CliFlag {
+    const char* name;
+    const char* value;
+    const char* help;
+};
+
+// What is wrong with argv[first..], or "" when every argument is a known flag
+// followed by its value if it takes one.
+//
+// Both binaries used to look each flag up by name and skip everything else, so
+// a misspelt or retired flag was dropped without a word and the process started
+// without it (DOC-3: the Runbook's `--lean` and `--replay-only` did nothing). An
+// ignored flag looks exactly like one that took effect, so neither binary may
+// start on an argument it does not understand.
+inline std::string cliArgsError(int argc, char** argv, std::span<const CliFlag> known,
+                                int first = 1) {
+    for (int i = first; i < argc; ++i) {
+        const CliFlag* flag = nullptr;
+        for (const CliFlag& k : known) {
+            if (std::strcmp(argv[i], k.name) == 0) { flag = &k; break; }
+        }
+        if (!flag) return std::string("unknown argument '") + argv[i] + "'";
+        if (flag->value && ++i >= argc) return std::string(flag->name) + " needs a value";
+    }
+    return {};
+}
+
+// One line per flag, for --help, from the same table cliArgsError checks.
+inline void printCliFlags(std::ostream& out, std::span<const CliFlag> known) {
+    for (const CliFlag& k : known) {
+        std::string lhs = std::string("  ") + k.name;
+        if (k.value) lhs += std::string(" ") + k.value;
+        out << lhs;
+        if (lhs.size() < 34) out << std::string(34 - lhs.size(), ' ');
+        else out << "\n" << std::string(34, ' ');
+        out << k.help << "\n";
+    }
 }
 
 }  // namespace OrderMatcher

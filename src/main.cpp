@@ -44,6 +44,37 @@ int main(int argc, char* argv[]) {
               << "╚═══════════════════════════════════════════════════╝\n\n";
 
     // ── CLI / env parsing ─────────────────────────────────────────────
+    // Every flag this binary reads, in one table: the unknown-argument check
+    // and --help both come from it. A flag read below but missing here is
+    // refused at startup, so the two cannot drift apart silently.
+    static constexpr CliFlag kFlags[] = {
+        {"--threads", "N", "worker threads (default 4)"},
+        {"--symbols", "S", "symbols 0..S-1 (default 4)"},
+        {"--port", "P", "admin HTTP port (default 8080)"},
+        {"--admin-bind", "ADDR", "admin listen address (default 127.0.0.1) [OB_ADMIN_BIND]"},
+        {"--admin-token", "TOKEN", "admin bearer token [OB_ADMIN_TOKEN]"},
+        {"--admin-no-auth", nullptr, "run the admin port without a token [OB_ADMIN_NO_AUTH=1]"},
+        {"--config", "PATH", "config file, re-read on SIGHUP [OB_CONFIG_PATH]"},
+        {"--journal", "PATH", "journal file, replayed at boot [OB_JOURNAL_PATH]"},
+        {"--journal-max-mb", "MB", "checkpoint past this size [OB_JOURNAL_MAX_SIZE_MB]"},
+        {"--replay-legacy-journal", nullptr,
+         "replay a journal from a build that seeded orders [OB_REPLAY_LEGACY_JOURNAL=1]"},
+        {"--session-schedule", "PRE,OPEN,CLOSE_AUCTION,CLOSE",
+         "session timetable, HH:MM UTC; the close cancels DAY orders [OB_SESSION_SCHEDULE]"},
+        {"--role", "primary|backup", "replication role; refused without the next flag [OB_NODE_ROLE]"},
+        {"--allow-unsafe-replication", nullptr,
+         "run replication despite REPL-1..6 [OB_ALLOW_UNSAFE_REPLICATION=1]"},
+        {"--node-id", "N", "replication node id (default 1) [OB_NODE_ID]"},
+        {"--repl-port", "P", "primary's replication port (default 9002) [OB_REPLICATION_PORT]"},
+        {"--primary-host", "HOST", "backup only: primary's host [OB_PRIMARY_HOST]"},
+        {"--primary-port", "P", "backup only: primary's port (default 9002) [OB_PRIMARY_REPLICATION_PORT]"},
+        {"--help", nullptr, "this message"},
+    };
+    if (const std::string err = cliArgsError(argc, argv, kFlags); !err.empty()) {
+        std::cerr << "[Config] FATAL: " << err << " — refusing to start. See --help.\n";
+        return 1;
+    }
+
     size_t numThreads = 4;
     uint16_t adminPort = 8080;
     size_t numSymbols = 4;
@@ -57,26 +88,9 @@ int main(int argc, char* argv[]) {
         else if (arg == "--symbols" && i + 1 < argc)
             numSymbols = std::stoul(argv[++i]);
         else if (arg == "--help") {
-            std::cout
-                << "Usage: OrderEngine [options]\n"
-                << "  --threads N    Worker threads (default: 4)\n"
-                << "  --port P       Admin HTTP port (default: 8080)\n"
-                << "  --admin-bind A Admin listen address (default: 127.0.0.1; OB_ADMIN_BIND)\n"
-                << "  --symbols S    Number of symbols (default: 4)\n"
-                << "  --session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE\n"
-                << "                 Run the trading session on this timetable, HH:MM UTC\n"
-                << "                 (e.g. 13:00,13:30,19:55,20:00; OB_SESSION_SCHEDULE).\n"
-                << "                 The close cancels DAY orders. Off when unset.\n"
-                << "\n"
-                << "Replication (DISABLED unless acknowledged — known defects REPL-1..6):\n"
-                << "  --allow-unsafe-replication  required with a role (OB_ALLOW_UNSAFE_REPLICATION=1)\n"
-                << "  OB_NODE_ROLE              primary | backup   (unset = standalone)\n"
-                << "  OB_NODE_ID                numeric node id    (default: 1)\n"
-                << "  OB_REPLICATION_PORT       primary listen port (default: 9002)\n"
-                << "  OB_PRIMARY_HOST           backup-only: host of primary\n"
-                << "  OB_PRIMARY_REPLICATION_PORT  backup-only: port of primary\n"
-                << "  OB_JOURNAL_PATH           enables on-disk journaling\n"
-                << "  --config PATH  Config file path (reloaded on SIGHUP)\n";
+            std::cout << "Usage: OrderEngine [options]\n";
+            printCliFlags(std::cout, kFlags);
+            std::cout << "\nA flag wins over its [ENV] variable. Any other argument is refused.\n";
             return 0;
         }
     }

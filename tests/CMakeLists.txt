@@ -255,6 +255,16 @@ set_tests_properties(EngineRefusesUnreadableJournalTest PROPERTIES
     TIMEOUT 60
     LABELS "project;recovery")
 
+# An argument neither binary understands is fatal (DOC-3). Both skipped unknown
+# flags, so the Runbook's `--lean` and `--replay-only` were dropped silently and
+# the process started without them. Deadline-driven: the defect is "it started".
+add_test(NAME CliRejectsUnknownFlagsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cli_rejects_unknown_flags.sh
+                 $<TARGET_FILE:OrderEngine> $<TARGET_FILE:GatewayServer>)
+set_tests_properties(CliRejectsUnknownFlagsTest PROPERTIES
+    TIMEOUT 120
+    LABELS "project;lifecycle")
+
 # Durable client acknowledgements (C4). No GTest dependency.
 add_executable(DurableAckTest DurableAckTest.cpp)
 target_link_libraries(DurableAckTest PRIVATE OrderMatcher)

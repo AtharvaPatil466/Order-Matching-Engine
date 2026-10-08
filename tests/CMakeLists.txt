@@ -582,6 +582,14 @@ enable_assertions(ReplaceQuantityTest)
 add_test(NAME ReplaceQuantityTest COMMAND ReplaceQuantityTest)
 set_tests_properties(ReplaceQuantityTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.3-C2 (MATCH-14): validateIntegrity refuses a zero-quantity resting
+# order, an over-showing iceberg, and fills + leaves that do not make the size.
+add_executable(IntegrityOracleTest IntegrityOracleTest.cpp)
+target_link_libraries(IntegrityOracleTest PRIVATE OrderMatcher)
+enable_assertions(IntegrityOracleTest)
+add_test(NAME IntegrityOracleTest COMMAND IntegrityOracleTest)
+set_tests_properties(IntegrityOracleTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

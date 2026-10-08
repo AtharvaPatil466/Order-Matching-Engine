@@ -305,6 +305,11 @@ public:
     // own contents, or frees a node twice. Both happened, and both were found
     // only because a randomised soak happened to walk the right path.
     //
+    // It also refuses quantity states no correct book can be in: a resting
+    // order with remainingQty == 0 or visibleQty > remainingQty, and any live
+    // order whose cumQty + remainingQty != initialQty. (A crossed touch in
+    // Continuous is not checked yet; see the TODO naming 1.6-F3.)
+    //
     // Returns true if consistent; otherwise false with a description in `err`.
     // Cost is O(orders), so this is a test/debug tool, not a hot-path check.
     bool validateIntegrity(std::string* err = nullptr) const;

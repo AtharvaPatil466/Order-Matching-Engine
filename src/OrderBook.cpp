@@ -2072,6 +2072,15 @@ bool OrderBook::validateIntegrity(std::string* err) const {
                     fail("is on the wrong side of the book");
                     return;
                 }
+                if (o->remainingQty == 0) {
+                    fail("rests with remainingQty == 0");
+                    return;
+                }
+                if (o->visibleQty > o->remainingQty) {
+                    fail("shows visibleQty " + std::to_string(o->visibleQty) +
+                         " > remainingQty " + std::to_string(o->remainingQty));
+                    return;
+                }
             }
         });
     };
@@ -2079,13 +2088,26 @@ bool OrderBook::validateIntegrity(std::string* err) const {
     checkSide(bids_, Side::Buy, "bid");
     if (problem.empty()) checkSide(asks_, Side::Sell, "ask");
 
+    // TODO(1.6-F3): refuse a crossed or locked touch while Continuous. Held
+    // back because it fails today on a live defect (an elected trailing stop
+    // rests as a limit opposite an iceberg at the same price, MATCH-5), which
+    // 1.6-F3 fixes by running the stop sweeps after the remainder is final.
+
     // The other direction: anything orderLookup_ calls resting must be linked.
+    // And on every live order, parked ones included, fills and leaves make up
+    // its size: cumQty is recorded, not derived, so a path that moves one
+    // without the other — an overfill, a phantom fill — shows up here.
     if (problem.empty()) {
         orderLookup_.forEach([&](OrderId id, Order* o) {
             if (!problem.empty() || !o) return;
             if (o->inBook && seen.find(id) == seen.end()) {
                 problem = "order #" + std::to_string(id) +
                           " has inBook == true but is not linked into any price level";
+            } else if (o->cumQty + o->remainingQty != o->initialQty) {
+                problem = "order #" + std::to_string(id) + " has cumQty " +
+                          std::to_string(o->cumQty) + " + remainingQty " +
+                          std::to_string(o->remainingQty) + " != initialQty " +
+                          std::to_string(o->initialQty);
             }
         });
     }

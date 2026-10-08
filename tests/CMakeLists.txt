@@ -1096,6 +1096,15 @@ add_test(NAME LatencyTrackerIntervalTest COMMAND LatencyTrackerIntervalTest)
 set_tests_properties(LatencyTrackerIntervalTest PROPERTIES TIMEOUT 30
                      LABELS "project;unit")
 
+# Roadmap 1.7-G3 (BENCH-8): the engine's latency histograms read while the
+# workers write them. Meaningful under TSan.
+add_executable(E2ELatencyRaceTest E2ELatencyRaceTest.cpp)
+target_link_libraries(E2ELatencyRaceTest PRIVATE OrderMatcher)
+enable_assertions(E2ELatencyRaceTest)
+add_test(NAME E2ELatencyRaceTest COMMAND E2ELatencyRaceTest)
+set_tests_properties(E2ELatencyRaceTest PROPERTIES TIMEOUT 120
+                     LABELS "project;concurrency")
+
 # Sequence ids are now handed out in per-thread BLOCKS to remove a contended
 # global fetch_add. Uniqueness across threads is the property that change could
 # break, and SubmitResultTest only covers the single-threaded case.

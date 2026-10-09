@@ -1,0 +1,480 @@
+{
+  "abo_2022": {
+    "ftse100_races_per_symbol_day": 537.24,
+    "ftse100_races_per_symbol_second_8p5h_day": 0.01755686274509804,
+    "ftse100_share_of_volume_in_races": 0.22,
+    "full_sample_share_of_volume_in_races": 0.2146,
+    "latency_arbitrage_tax_bp_all_volume": 0.42,
+    "participants_per_race_at_500us": 3.3,
+    "race_definition": "2+ participants, 1+ success and 1+ fail (failed IOC or cancel), same symbol, price and side, within the information horizon (~200 us average, capped at 500 us)",
+    "race_duration_us": {
+      "mean": 79,
+      "median": 46,
+      "mode": "5-10",
+      "p90": "~200"
+    },
+    "sensitivity_2plus_within_1ms": {
+      "races_per_day": 768.02,
+      "share_of_volume": 0.4003
+    },
+    "sensitivity_2plus_within_3ms": {
+      "races_per_day": 799.91,
+      "share_of_volume": 0.4372
+    }
+  },
+  "by_window_ms": {
+    "0": {
+      "lower_bound_races_per_s": 0.0,
+      "lower_bound_share_of_volume": 0.0,
+      "n_races": 3055558,
+      "p_cluster_after_placebo_trigger": 0.05568700093009764,
+      "p_race_after_move_trigger": 0.8171159646219558,
+      "price_levels_per_race": {
+        "n": 3055558,
+        "p50": 5.0,
+        "p90": 16.0,
+        "p99": 53.0
+      },
+      "race_duration_ms": {
+        "n": 3055558,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p99": 0.0
+      },
+      "race_qty_btc": {
+        "n": 3055558,
+        "p10": 0.004000000000814907,
+        "p25": 0.009000000001833541,
+        "p50": 0.028000000000247383,
+        "p75": 0.12000000000011823,
+        "p90": 0.6590000000005602,
+        "p99": 9.189000000001675
+      },
+      "race_qty_over_top_depth": {
+        "n": 533069,
+        "p10": 0.0021296590521160206,
+        "p25": 0.007741027447037998,
+        "p50": 0.040889526542172885,
+        "p75": 0.3153846153824046,
+        "p90": 2.449253409641504,
+        "p99": 126.99999999979809
+      },
+      "race_share_exceeding_top_depth": 0.1570734745408193,
+      "races_per_hour": 4835.471053080132,
+      "races_per_s": 1.34318640363337,
+      "records_per_race": {
+        "n": 3055558,
+        "p50": 5.0,
+        "p90": 16.0,
+        "p99": 53.0
+      },
+      "share_of_records_in_races": 0.6665551871162113,
+      "share_of_volume_in_races": 0.3360570259999382,
+      "window_ms": 0
+    },
+    "1": {
+      "lower_bound_races_per_s": 0.29061069862500194,
+      "lower_bound_share_of_volume": 0.23594887757839397,
+      "n_races": 2638582,
+      "p_cluster_after_placebo_trigger": 0.06856503677411285,
+      "p_race_after_move_trigger": 0.8496380959336175,
+      "price_levels_per_race": {
+        "n": 2638582,
+        "p50": 6.0,
+        "p90": 18.0,
+        "p99": 61.0
+      },
+      "race_duration_ms": {
+        "n": 2638582,
+        "p50": 0.0,
+        "p90": 1.0,
+        "p99": 3.0
+      },
+      "race_qty_btc": {
+        "n": 2638582,
+        "p10": 0.005000000000109139,
+        "p25": 0.0110000000013315,
+        "p50": 0.03400000000056025,
+        "p75": 0.13500000000112777,
+        "p90": 0.717000000000553,
+        "p99": 9.428000000008105
+      },
+      "race_qty_over_top_depth": {
+        "n": 458588,
+        "p10": 0.002610966057717901,
+        "p25": 0.009615384614537795,
+        "p50": 0.04988587163808764,
+        "p75": 0.38324724144912753,
+        "p90": 2.866666666659512,
+        "p99": 148.70999999992716
+      },
+      "race_share_exceeding_top_depth": 0.16989541810950134,
+      "races_per_hour": 4175.599639142271,
+      "races_per_s": 1.159888788650631,
+      "records_per_race": {
+        "n": 2638582,
+        "p50": 6.0,
+        "p90": 18.0,
+        "p99": 61.0
+      },
+      "share_of_records_in_races": 0.6791307932430648,
+      "share_of_volume_in_races": 0.3532394618721402,
+      "window_ms": 1
+    },
+    "10": {
+      "lower_bound_races_per_s": 0.4904535239621027,
+      "lower_bound_share_of_volume": 0.37060481801105266,
+      "n_races": 1484242,
+      "p_cluster_after_placebo_trigger": 0.10739272658228687,
+      "p_race_after_move_trigger": 0.9351523736267168,
+      "price_levels_per_race": {
+        "n": 1484242,
+        "p50": 12.0,
+        "p90": 34.0,
+        "p99": 102.0
+      },
+      "race_duration_ms": {
+        "n": 1484242,
+        "p50": 4.0,
+        "p90": 18.0,
+        "p99": 41.0
+      },
+      "race_qty_btc": {
+        "n": 1484242,
+        "p10": 0.012999999999806278,
+        "p25": 0.03899999999987358,
+        "p50": 0.12100000000000932,
+        "p75": 0.4729999999996153,
+        "p90": 1.918000000000984,
+        "p99": 18.744769999999566
+      },
+      "race_qty_over_top_depth": {
+        "n": 260196,
+        "p10": 0.00765155974096866,
+        "p25": 0.029197080291902756,
+        "p50": 0.15744312744465172,
+        "p75": 0.9710707199562366,
+        "p90": 4.5532694585632605,
+        "p99": 255.52499999992264
+      },
+      "race_share_exceeding_top_depth": 0.24658718811972513,
+      "races_per_hour": 2348.837504235155,
+      "races_per_s": 0.652454862287543,
+      "records_per_race": {
+        "n": 1484242,
+        "p50": 13.0,
+        "p90": 34.0,
+        "p99": 104.0
+      },
+      "share_of_records_in_races": 0.7135915290086378,
+      "share_of_volume_in_races": 0.4091385118977542,
+      "window_ms": 10
+    },
+    "100": {
+      "lower_bound_races_per_s": 0.3498544029840987,
+      "lower_bound_share_of_volume": 0.46033505089443394,
+      "n_races": 907946,
+      "p_cluster_after_placebo_trigger": 0.22923822565895957,
+      "p_race_after_move_trigger": 0.9702366352082686,
+      "price_levels_per_race": {
+        "n": 907946,
+        "p50": 19.0,
+        "p90": 58.0,
+        "p99": 179.0
+      },
+      "race_duration_ms": {
+        "n": 907946,
+        "p50": 29.0,
+        "p90": 138.0,
+        "p99": 320.0
+      },
+      "race_qty_btc": {
+        "n": 907946,
+        "p10": 0.02599999999983993,
+        "p25": 0.0809999999997899,
+        "p50": 0.2709999999997308,
+        "p75": 1.0570000000033133,
+        "p90": 3.7819999999995417,
+        "p99": 33.43019999999587
+      },
+      "race_qty_over_top_depth": {
+        "n": 160136,
+        "p10": 0.01415889497368621,
+        "p25": 0.0530973451331302,
+        "p50": 0.2631578947364641,
+        "p75": 1.181818181819916,
+        "p90": 3.9284615384610326,
+        "p99": 41.97684063373335
+      },
+      "race_share_exceeding_top_depth": 0.2785944447219863,
+      "races_per_hour": 1436.839556231593,
+      "races_per_s": 0.39912209895322026,
+      "records_per_race": {
+        "n": 907946,
+        "p50": 20.0,
+        "p90": 59.0,
+        "p99": 186.0
+      },
+      "share_of_records_in_races": 0.7346616770702397,
+      "share_of_volume_in_races": 0.4740228140231561,
+      "window_ms": 100
+    },
+    "2": {
+      "lower_bound_races_per_s": 0.4493164462701019,
+      "lower_bound_share_of_volume": 0.2737248685596345,
+      "n_races": 2354102,
+      "p_cluster_after_placebo_trigger": 0.08009100573615378,
+      "p_race_after_move_trigger": 0.8753427101079311,
+      "price_levels_per_race": {
+        "n": 2354102,
+        "p50": 7.0,
+        "p90": 21.0,
+        "p99": 67.0
+      },
+      "race_duration_ms": {
+        "n": 2354102,
+        "p50": 0.0,
+        "p90": 3.0,
+        "p99": 6.0
+      },
+      "race_qty_btc": {
+        "n": 2354102,
+        "p10": 0.006000000000312866,
+        "p25": 0.015000000000000568,
+        "p50": 0.04800000000113869,
+        "p75": 0.1840000000015607,
+        "p90": 0.9070000000028813,
+        "p99": 10.802000000000135
+      },
+      "race_qty_over_top_depth": {
+        "n": 409947,
+        "p10": 0.0033534540581186024,
+        "p25": 0.012638230647694832,
+        "p50": 0.06682297772649295,
+        "p75": 0.5142857143211932,
+        "p90": 3.437499999997584,
+        "p99": 180.0000000001927
+      },
+      "race_share_exceeding_top_depth": 0.18999773141406084,
+      "races_per_hour": 3725.405335784182,
+      "races_per_s": 1.0348348154956062,
+      "records_per_race": {
+        "n": 2354102,
+        "p50": 7.0,
+        "p90": 21.0,
+        "p99": 67.0
+      },
+      "share_of_records_in_races": 0.6904454905905311,
+      "share_of_volume_in_races": 0.36766551125660124,
+      "window_ms": 2
+    },
+    "20": {
+      "lower_bound_races_per_s": 0.4373363565260289,
+      "lower_bound_share_of_volume": 0.4004761704082395,
+      "n_races": 1249455,
+      "p_cluster_after_placebo_trigger": 0.12447019389622044,
+      "p_race_after_move_trigger": 0.9486351111979506,
+      "price_levels_per_race": {
+        "n": 1249455,
+        "p50": 15.0,
+        "p90": 41.0,
+        "p99": 124.0
+      },
+      "race_duration_ms": {
+        "n": 1249455,
+        "p50": 7.0,
+        "p90": 33.0,
+        "p99": 80.0
+      },
+      "race_qty_btc": {
+        "n": 1249455,
+        "p10": 0.01599999999962165,
+        "p25": 0.04900000000179716,
+        "p50": 0.1569999999992433,
+        "p75": 0.6169999999993365,
+        "p90": 2.4020000000018626,
+        "p99": 22.94684000000771
+      },
+      "race_qty_over_top_depth": {
+        "n": 219606,
+        "p10": 0.009287537145431856,
+        "p25": 0.03517200033175036,
+        "p50": 0.18726459454924,
+        "p75": 1.0329413075684122,
+        "p90": 4.136864137624624,
+        "p99": 173.9890929384643
+      },
+      "race_share_exceeding_top_depth": 0.2553436609200113,
+      "races_per_hour": 1977.2831949602123,
+      "races_per_s": 0.5492453319333923,
+      "records_per_race": {
+        "n": 1249455,
+        "p50": 15.0,
+        "p90": 41.0,
+        "p99": 127.0
+      },
+      "share_of_records_in_races": 0.7195680065714792,
+      "share_of_volume_in_races": 0.426796533361296,
+      "window_ms": 20
+    },
+    "5": {
+      "lower_bound_races_per_s": 0.5320134852388023,
+      "lower_bound_share_of_volume": 0.3309324734920322,
+      "n_races": 1844901,
+      "p_cluster_after_placebo_trigger": 0.09494769316627484,
+      "p_race_after_move_trigger": 0.9130028990049835,
+      "price_levels_per_race": {
+        "n": 1844901,
+        "p50": 10.0,
+        "p90": 27.0,
+        "p99": 83.0
+      },
+      "race_duration_ms": {
+        "n": 1844901,
+        "p50": 2.0,
+        "p90": 8.0,
+        "p99": 19.0
+      },
+      "race_qty_btc": {
+        "n": 1844901,
+        "p10": 0.0090000000004693,
+        "p25": 0.02599999999983993,
+        "p50": 0.08399999999960528,
+        "p75": 0.3160000000000025,
+        "p90": 1.3779999999997017,
+        "p99": 14.517000000003918
+      },
+      "race_qty_over_top_depth": {
+        "n": 323822,
+        "p10": 0.005416384563175914,
+        "p25": 0.020857473928076044,
+        "p50": 0.11205591102728303,
+        "p75": 0.7837837837842616,
+        "p90": 4.366154533348868,
+        "p99": 241.23949999999599
+      },
+      "race_share_exceeding_top_depth": 0.22437635491103136,
+      "races_per_hour": 2919.586334574107,
+      "races_per_s": 0.810996204048363,
+      "records_per_race": {
+        "n": 1844901,
+        "p50": 10.0,
+        "p90": 27.0,
+        "p99": 84.0
+      },
+      "share_of_records_in_races": 0.7053112697428092,
+      "share_of_volume_in_races": 0.3907409998181438,
+      "window_ms": 5
+    },
+    "50": {
+      "lower_bound_races_per_s": 0.38743873105911786,
+      "lower_bound_share_of_volume": 0.4333491678315854,
+      "n_races": 1049116,
+      "p_cluster_after_placebo_trigger": 0.16658025675429122,
+      "p_race_after_move_trigger": 0.9610216829454795,
+      "price_levels_per_race": {
+        "n": 1049116,
+        "p50": 17.0,
+        "p90": 49.0,
+        "p99": 153.0
+      },
+      "race_duration_ms": {
+        "n": 1049116,
+        "p50": 13.0,
+        "p90": 69.0,
+        "p99": 171.0
+      },
+      "race_qty_btc": {
+        "n": 1049116,
+        "p10": 0.020000000000067075,
+        "p25": 0.06300000000010186,
+        "p50": 0.20600000000285945,
+        "p75": 0.8150000000005093,
+        "p90": 3.0550000000139335,
+        "p99": 28.24409999999954
+      },
+      "race_qty_over_top_depth": {
+        "n": 184567,
+        "p10": 0.011480989516686189,
+        "p25": 0.042832372801777374,
+        "p50": 0.22007722008108746,
+        "p75": 1.0833333333341753,
+        "p90": 3.809564553104737,
+        "p99": 66.35600000055342
+      },
+      "race_share_exceeding_top_depth": 0.2639637638364388,
+      "races_per_hour": 1660.2434152201386,
+      "races_per_s": 0.4611787264500385,
+      "records_per_race": {
+        "n": 1049116,
+        "p50": 17.0,
+        "p90": 50.0,
+        "p99": 158.0
+      },
+      "share_of_records_in_races": 0.7272568823929174,
+      "share_of_volume_in_races": 0.4517941902313516,
+      "window_ms": 50
+    }
+  },
+  "comparability": {
+    "comparable": [
+      "same instrument and side, a short window after a price change",
+      "share of volume in races: aggressive volume in races over all volume"
+    ],
+    "not_comparable": [
+      "ABO count participants including FAILED messages; the tape shows only fills, and one record can hold many takers (100 ms same-price aggregation), so a multi-sniper race at one level is a single record",
+      "a single taker sweeping several levels looks exactly like a race here, so these counts are an upper bound on races and give no participant count",
+      "finest window here is one 1 ms stamp (W=0), ~5x ABO's average horizon; W>=1 ms compares to ABO's 1-3 ms sensitivity rows, not their baseline",
+      "a 24/7 crypto perp against FTSE equities in 8.5 h sessions: compare per-second rates, not per-day counts",
+      "no latency-arbitrage tax: without failed messages there is no winner/loser split and no profit-per-race measure"
+    ]
+  },
+  "definition": {
+    "depth": "hit-side top size, last snapshot <= 200 ms before",
+    "race": ">= 2 same-side records from the trigger within W ms",
+    "trigger": "record that moved the implied mid in its own direction"
+  },
+  "paper_section_3_7_point_estimate": {
+    "note": "100 ms book trigger, 200 ms window, records regrouped per ms+side",
+    "race_proxy_median_taker_over_depth": 0.0283
+  },
+  "sample": {
+    "covered_s": 2274857.75,
+    "days": [
+      "2026-06-24",
+      "2026-06-25",
+      "2026-06-26",
+      "2026-06-27",
+      "2026-06-28",
+      "2026-06-29",
+      "2026-06-30",
+      "2026-07-01",
+      "2026-07-02",
+      "2026-07-03",
+      "2026-07-04",
+      "2026-07-05",
+      "2026-07-06",
+      "2026-07-07",
+      "2026-07-08",
+      "2026-07-09",
+      "2026-07-10",
+      "2026-07-11",
+      "2026-07-12",
+      "2026-07-13",
+      "2026-07-14",
+      "2026-07-15",
+      "2026-07-16",
+      "2026-07-17",
+      "2026-07-18",
+      "2026-07-20",
+      "2026-07-21"
+    ],
+    "hours_with_book": 556,
+    "skipped_files": [
+      "trades/2026-07-20/01.parquet",
+      "trades/2026-07-20/18.parquet",
+      "trades/2026-07-21/01.parquet",
+      "trades/2026-07-21/23.parquet"
+    ]
+  }
+}

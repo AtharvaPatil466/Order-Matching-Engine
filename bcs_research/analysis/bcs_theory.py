@@ -198,6 +198,7 @@ def laplace_equilibrium(lam_invest: float, lam_jump: float, b: float, n_firms: i
         "lp_loss_per_jump": prize * lose,
         "sniper_profit_per_jump_each": prize / n_firms,
         "rent_rate": rent_rate,
+        "sniper_take_rate": rent_rate * lose,       # what snipers actually realise, all of them
         "lp_profit_rate": lam_invest * h - rent_rate * lose,    # equation (1)
         "sniper_profit_rate_each": rent_rate / n_firms,         # equation (2)
         "stale_volume_share": stale_trades / (stale_trades + lam_invest),  # §VI.E.3
@@ -279,7 +280,7 @@ SPEC_N = (2, 3, 5, 10)
 
 if __name__ == "__main__":
     cols = ("half_spread", "lp_breakeven_half_spread", "race_prob_per_jump", "race_loss_prob",
-            "lp_loss_per_jump", "rent_rate", "lp_profit_rate", "stale_volume_share")
+            "lp_loss_per_jump", "sniper_take_rate", "lp_profit_rate", "stale_volume_share")
     print("| lam_jump/lam_invest | N | " + " | ".join(cols) + " |")
     print("|---" * (len(cols) + 2) + "|")
     for ratio in SPEC_JUMP_RATIOS:

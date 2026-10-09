@@ -122,6 +122,7 @@ def test_trade_among_firms_is_zero_sum_and_roles_are_indifferent():
     assert eq["lp_loss_per_jump"] == pytest.approx((n - 1) * eq["sniper_profit_per_jump_each"])
     assert eq["lp_profit_rate"] == pytest.approx(eq["sniper_profit_rate_each"], rel=1e-9)
     assert eq["rent_rate"] == pytest.approx(10.0 * eq["half_spread"], rel=1e-12)
+    assert eq["sniper_take_rate"] == pytest.approx((n - 1) * eq["sniper_profit_rate_each"])
 
 
 def test_free_entry_spends_the_whole_rent_on_speed():

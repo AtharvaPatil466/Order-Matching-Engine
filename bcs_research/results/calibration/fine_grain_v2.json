@@ -1,0 +1,135 @@
+{
+  "by_interval_ms": {
+    "10": {
+      "bucket_volume_btc_nonempty": {
+        "p50": 0.029999999329447746,
+        "p90": 0.5899999737739563,
+        "p99": 5.550000190734863
+      },
+      "buckets": 227486124,
+      "p_empty": 0.9485528400844352,
+      "p_empty_if_poisson": 0.849759435179505,
+      "p_two_plus": 0.011032804796480685,
+      "p_two_plus_if_poisson": 0.011898040309224367,
+      "records_per_bucket_fano": 26.864626950668733,
+      "records_per_bucket_mean": 0.16280198699064388,
+      "return_kurtosis": 72034.94085152926,
+      "share_of_mid_path_invisible_on_grid": 0.43371431975241104,
+      "share_records_in_buckets_with_a_price_move": 0.7581718826198638,
+      "share_records_in_multi_record_buckets": 0.7517576052594083,
+      "share_volume_in_buckets_with_a_price_move": 0.5941059665744248,
+      "share_volume_in_multi_record_buckets": 0.5948343555385628,
+      "sigma_bp_per_sqrt_s": 0.5426011193653051,
+      "zero_return_share": 0.985351005175688
+    },
+    "100": {
+      "bucket_volume_btc_nonempty": {
+        "p50": 0.032999999821186066,
+        "p90": 0.8169999718666077,
+        "p99": 8.081000328063965
+      },
+      "buckets": 22748894,
+      "p_empty": 0.6337465900540044,
+      "p_empty_if_poisson": 0.19643456000086254,
+      "p_two_plus": 0.09924064879813498,
+      "p_two_plus_if_poisson": 0.48388274328472425,
+      "records_per_bucket_fano": 48.353527033777155,
+      "records_per_bucket_mean": 1.627425931124388,
+      "return_kurtosis": 1760.4460931286742,
+      "share_of_mid_path_invisible_on_grid": 0.4868542282116788,
+      "share_records_in_buckets_with_a_price_move": 0.7804281997396368,
+      "share_records_in_multi_record_buckets": 0.8359872189676452,
+      "share_volume_in_buckets_with_a_price_move": 0.7145518079844105,
+      "share_volume_in_multi_record_buckets": 0.7972836003043533,
+      "sigma_bp_per_sqrt_s": 0.569130564773791,
+      "zero_return_share": 0.926952574340139
+    },
+    "1000": {
+      "bucket_volume_btc_nonempty": {
+        "p50": 0.25999999046325684,
+        "p90": 3.8380000591278076,
+        "p99": 26.283000946044922
+      },
+      "buckets": 2275164,
+      "p_empty": 0.040500816644426514,
+      "p_empty_if_poisson": 9.476702598073359e-08,
+      "p_two_plus": 0.8533437589553984,
+      "p_two_plus_if_poisson": 0.9999983726753836,
+      "records_per_bucket_fano": 100.12077539523673,
+      "records_per_bucket_mean": 16.1718443153988,
+      "return_kurtosis": 169.50346799366253,
+      "share_of_mid_path_invisible_on_grid": 0.5830501302618617,
+      "share_records_in_buckets_with_a_price_move": 0.8518052275304735,
+      "share_records_in_multi_record_buckets": 0.993478608306429,
+      "share_volume_in_buckets_with_a_price_move": 0.8498133276770058,
+      "share_volume_in_multi_record_buckets": 0.9950967304284507,
+      "sigma_bp_per_sqrt_s": 0.6694220952612772,
+      "zero_return_share": 0.6949140619710483
+    }
+  },
+  "notes": [
+    "Counts are aggTrade RECORDS, not taker orders: on USD-M futures one record merges all same-price same-side fills within 100 ms.",
+    "sigma uses the trade-implied mid sampled previous-tick on the grid; returns never cross an hourly file (each file is hole-free).",
+    "The 100 ms row is what the tick model's grid sees; the 10 ms row shows what it collapses."
+  ],
+  "record_size_btc": {
+    "mean": 0.11709786206483841,
+    "p50": 0.003000000026077032,
+    "p90": 0.1770000010728836,
+    "p99": 2.009999990463257
+  },
+  "resolution": {
+    "agg_trade_id_gaps_within_files": 0,
+    "aggregation_rule": "USD-M futures aggTrade merges fills within 100 ms at the same price and taking side, across taker orders",
+    "local_minus_exchange_ms": {
+      "p1": 211.88160000000002,
+      "p50": 797956.501,
+      "p90": 10455238.646,
+      "p99": 42876740.59199997
+    },
+    "min_gap_ms_between_consecutive_same_side_same_price_records": 101,
+    "trade_stamps_finer_than_1ms": 0
+  },
+  "sample": {
+    "days": [
+      "2026-06-24",
+      "2026-06-25",
+      "2026-06-26",
+      "2026-06-27",
+      "2026-06-28",
+      "2026-06-29",
+      "2026-06-30",
+      "2026-07-01",
+      "2026-07-02",
+      "2026-07-03",
+      "2026-07-04",
+      "2026-07-05",
+      "2026-07-06",
+      "2026-07-07",
+      "2026-07-08",
+      "2026-07-09",
+      "2026-07-10",
+      "2026-07-11",
+      "2026-07-12",
+      "2026-07-13",
+      "2026-07-14",
+      "2026-07-15",
+      "2026-07-16",
+      "2026-07-17",
+      "2026-07-18",
+      "2026-07-20",
+      "2026-07-21"
+    ],
+    "duration_s": 2274857.75,
+    "hour_files": 618,
+    "n_days": 27,
+    "n_records": 37035193,
+    "record_rate_per_s": 16.280223675524326,
+    "skipped_files": [
+      "trades/2026-07-20/01.parquet",
+      "trades/2026-07-20/18.parquet",
+      "trades/2026-07-21/01.parquet",
+      "trades/2026-07-21/23.parquet"
+    ]
+  }
+}

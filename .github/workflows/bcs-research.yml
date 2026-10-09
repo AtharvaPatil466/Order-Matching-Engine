@@ -1,0 +1,47 @@
+name: BCS research
+
+# The BCS research model drives the real engine through a pybind bridge linked
+# against libOrderMatcher.a, so an engine change can move its numbers. This
+# lane rebuilds both from scratch with the toolchain ci.yml uses on Linux (GCC,
+# the root CMake's -Wall -Wextra -Werror), re-runs one published cell and the
+# M=1 nesting check against the stored JSON (bcs_research/reproduce.sh), then
+# runs the whole BCS pytest suite against the module it just built.
+on:
+  pull_request:
+    paths:
+      - 'bcs_research/**'
+      - 'src/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/bcs-research.yml'
+  push:
+    paths:
+      - 'bcs_research/**'
+      - 'src/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/bcs-research.yml'
+  workflow_dispatch:
+
+jobs:
+  reproduce:
+    name: Ubuntu BCS reproduction + tests
+    runs-on: ubuntu-latest
+    env:
+      BCS_REPRO_DIR: ${{ github.workspace }}/build-bcs-repro
+    steps:
+      - uses: actions/checkout@v4
+
+      # The interpreter requirements.lock was frozen from (CPython 3.13).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build engine + bridge, reproduce the headline cell and nesting check
+        # Full run, not a smoke: ~200 + ~400 engine runs, a couple of minutes.
+        run: PYTHON=python bcs_research/reproduce.sh
+
+      - name: BCS pytest suite
+        # conftest.py looks for the module in bcs_research/build/, which a clean
+        # checkout does not have; PYTHONPATH points it at the one built above.
+        run: PYTHONPATH="$BCS_REPRO_DIR/bridge" "$BCS_REPRO_DIR/venv/bin/python" -m pytest bcs_research/tests -q

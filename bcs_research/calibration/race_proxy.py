@@ -23,9 +23,13 @@ same-side burst immediately after a price move:
   trigger   a record whose implied mid moved in its OWN direction (a buy that
             lifted the price, a sell that pushed it down): the visible start
             of a sweep of the stale side;
-  race      the trigger plus every same-side record within W ms after it
-            (same-ms records ordered by sequence), when that is >= 2 records;
-            overlapping clusters merge into one race;
+  race      every same-side record from the START of the trigger's
+            millisecond to W ms after it, when that is >= 2 records;
+            overlapping clusters merge into one race. Starting at the ms,
+            not at the trigger, matters: a sweep's level-1 fill leaves the
+            implied mid unchanged (it trades at the old ask), so the move
+            first shows on level 2 — yet the level-1 fill IS the stale quote
+            being taken;
   placebo   the same cluster test started from a record that did NOT move
             the mid, as a control for ordinary clustering of order flow.
 
@@ -107,6 +111,12 @@ def cluster_end(ts_ms: np.ndarray, window_ms: int) -> np.ndarray:
     return np.searchsorted(ts_ms, ts_ms + window_ms, side="right")
 
 
+def _at(positions: np.ndarray, n: int) -> np.ndarray:
+    mask = np.zeros(n, dtype=bool)
+    mask[positions] = True
+    return mask
+
+
 def merge_clusters(starts: np.ndarray, end: np.ndarray) -> np.ndarray:
     """Race id per record (0 = none) for clusters [s, end[s]) from each start.
 
@@ -123,16 +133,34 @@ def merge_clusters(starts: np.ndarray, end: np.ndarray) -> np.ndarray:
     return np.where(depth > 0, np.cumsum(new), 0)
 
 
-def depth_before(book: dict | None, t_ms: np.ndarray, buy_side: bool) -> np.ndarray:
-    """Hit-side top depth from the last snapshot strictly before t; NaN if stale or absent."""
+def book_at(book: dict | None, t_ms: np.ndarray, first_px: np.ndarray,
+            buy_side: bool) -> dict:
+    """Hit-side book each race met, from the last snapshot strictly before it.
+
+    `top` is the level-1 size (the paper's denominator); `at_first_px` the
+    displayed size at the race's first price and `level` its ladder index.
+    Both matter because the top moves inside the 100 ms cadence: races often
+    start above a stale snapshot's best ask, where the ladder holds only dust.
+    NaN / -1 where the snapshot is older than DEPTH_MAX_AGE_MS, absent, or
+    the price is off its 20-level ladder.
+    """
+    n = t_ms.size
     if book is None:
-        return np.full(t_ms.size, np.nan)
+        return {"top": np.full(n, np.nan), "at_first_px": np.full(n, np.nan),
+                "level": np.full(n, -1), "age_ms": np.full(n, np.nan)}
     j = np.searchsorted(book["ts_ms"], t_ms, side="left") - 1
-    ok = j >= 0
-    jj = np.where(ok, j, 0)
-    depth = (book["ask_sz"] if buy_side else book["bid_sz"])[jj]
-    fresh = ok & (t_ms - book["ts_ms"][jj] <= DEPTH_MAX_AGE_MS) & (depth > 0)
-    return np.where(fresh, depth, np.nan)
+    jj = np.maximum(j, 0)
+    px = (book["ask_px"] if buy_side else book["bid_px"])[jj]
+    sz = (book["ask_sz"] if buy_side else book["bid_sz"])[jj]
+    age = (t_ms - book["ts_ms"][jj]).astype(float)
+    fresh = (j >= 0) & (age <= DEPTH_MAX_AGE_MS)
+    hit = np.isclose(px, first_px[:, None], rtol=0, atol=EXCHANGE_TICK / 4)
+    on_ladder = fresh & hit.any(axis=1)
+    pos = lambda x: np.where(x > 0, x, np.nan)          # noqa: E731
+    return {"top": np.where(fresh, pos(sz[:, 0]), np.nan),
+            "at_first_px": np.where(on_ladder, pos((sz * hit).sum(axis=1)), np.nan),
+            "level": np.where(on_ladder, hit.argmax(axis=1), -1),
+            "age_ms": np.where(fresh, age, np.nan)}
 
 
 class WindowAccumulator:
@@ -140,10 +168,13 @@ class WindowAccumulator:
         self.w = window_ms
         self.n_races = 0
         self.qty: list[np.ndarray] = []
-        self.ratio: list[np.ndarray] = []
+        self.ratio_top: list[np.ndarray] = []
+        self.ratio_hit: list[np.ndarray] = []
+        self.age: list[np.ndarray] = []
         self.records: list[np.ndarray] = []
         self.duration_ms: list[np.ndarray] = []
         self.levels: list[np.ndarray] = []
+        self.level: list[np.ndarray] = []
         self.vol_in = self.vol_all = 0.0
         self.rec_in = self.rec_all = 0
         self.n_lb, self.vol_lb = 0, 0.0
@@ -158,13 +189,15 @@ class WindowAccumulator:
             if idx.size == 0:
                 continue
             ts, sz, px = tr["ts_ms"][idx], tr["size"][idx], tr["price"][idx]
+            lo = np.searchsorted(ts, ts, side="left")     # start of each record's ms
             end = cluster_end(ts, self.w)
-            big = (end - np.arange(ts.size)) >= MIN_RECORDS
+            big = (end - lo) >= MIN_RECORDS
             trig = move[idx] & big
-            rid = merge_clusters(trig, end)
+            rid = merge_clusters(_at(lo[trig], ts.size), end)
             # One taker order's fills share one stamp, so a cluster spanning
             # >= 2 stamps certainly holds >= 2 takers: the LOWER bound.
-            rid_lb = merge_clusters(trig & (ts[end - 1] > ts), end)
+            certain = trig & (ts[end - 1] > ts)
+            rid_lb = merge_clusters(_at(lo[certain], ts.size), end)
             self.n_lb += int(rid_lb.max(initial=0))
             self.vol_lb += float(sz[rid_lb > 0].sum())
             self.move_n += int(move[idx].sum())
@@ -185,7 +218,11 @@ class WindowAccumulator:
             self.records.append(b - a)
             self.duration_ms.append(ts[b - 1] - ts[a])
             self.levels.append(1 + cum_chg[b] - cum_chg[a + 1])
-            self.ratio.append(q / depth_before(book, ts[a], side))
+            bk = book_at(book, ts[a], px[a], side)
+            self.ratio_top.append(q / bk["top"])
+            self.ratio_hit.append(q / bk["at_first_px"])
+            self.level.append(bk["level"])
+            self.age.append(bk["age_ms"])
 
     def summary(self, covered_s: float) -> dict:
         def q(x, qs=(10, 25, 50, 75, 90, 99)):
@@ -193,8 +230,8 @@ class WindowAccumulator:
             return ({f"p{p}": float(np.percentile(x, p)) for p in qs} | {"n": int(x.size)}
                     if x.size else {"n": 0})
         cat = (lambda xs: np.concatenate(xs).astype(float) if xs else np.array([]))
-        ratio = cat(self.ratio)
-        fin = ratio[np.isfinite(ratio)]
+        top, age, level = cat(self.ratio_top), cat(self.age), cat(self.level)
+        has = np.isfinite(top)
         qty = cat(self.qty)
         return {
             "window_ms": self.w,
@@ -211,8 +248,14 @@ class WindowAccumulator:
             "p_race_after_move_trigger": self.move_hit / max(self.move_n, 1),
             "p_cluster_after_placebo_trigger": self.placebo_hit / max(self.placebo_n, 1),
             "race_qty_btc": q(qty),
-            "race_qty_over_top_depth": q(ratio),
-            "race_share_exceeding_top_depth": float(np.mean(fin > 1)) if fin.size else None,
+            "share_of_races_with_book": float(has.mean()) if has.size else 0.0,
+            "race_qty_over_top_depth": q(top),
+            "race_share_exceeding_top_depth": float(np.mean(top[has] > 1)) if has.any() else None,
+            "race_qty_over_top_depth_snapshot_le_20ms": q(top[age <= 20]),
+            "race_qty_over_depth_at_first_price": q(cat(self.ratio_hit)),
+            "share_starting_at_snapshot_top": float(np.mean(level[has] == 0)) if has.any() else None,
+            "share_starting_at_snapshot_top_le_20ms": (
+                float(np.mean(level[age <= 20] == 0)) if (age <= 20).any() else None),
             "records_per_race": q(cat(self.records), (50, 90, 99)),
             "price_levels_per_race": q(cat(self.levels), (50, 90, 99)),
             "race_duration_ms": q(cat(self.duration_ms), (50, 90, 99)),
@@ -225,7 +268,7 @@ def main() -> dict:
     covered_s = 0.0
     hours_with_book = 0
     for day, hour, tr in trade_hours(skipped=skipped):
-        book = load_book(day, hour)
+        book = load_book(day, hour, levels=20)
         hours_with_book += book is not None
         mid = implied_mid(tr["price"], tr["buy"])
         for a in acc.values():
@@ -237,8 +280,11 @@ def main() -> dict:
         "sample": {"days": SAMPLE_DAYS, "covered_s": covered_s,
                    "hours_with_book": hours_with_book, "skipped_files": skipped},
         "definition": {"trigger": "record that moved the implied mid in its own direction",
-                       "race": f">= {MIN_RECORDS} same-side records from the trigger within W ms",
-                       "depth": f"hit-side top size, last snapshot <= {DEPTH_MAX_AGE_MS} ms before"},
+                       "race": (f">= {MIN_RECORDS} same-side records from the start of the "
+                                "trigger's ms to W ms after it"),
+                       "depth": (f"hit-side book from the last snapshot <= {DEPTH_MAX_AGE_MS} ms "
+                                 "before the race: level-1 size, and size at the race's "
+                                 "first price on the 20-level ladder")},
         "by_window_ms": by,
         "abo_2022": ABO_2022,
         "comparability": COMPARABILITY,
@@ -249,7 +295,7 @@ def main() -> dict:
     }
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "race_proxy_v2.json").write_text(json.dumps(out, indent=2, sort_keys=True))
-    hdr = f"{'W ms':>5} {'races/s':>9} {'vol%':>6} {'lb/s':>7} {'lb vol%':>7} {'P(r|mv)':>8} {'P(c|pl)':>8} {'qty p50':>8} {'q/depth p50':>11} {'p90':>8} {'>depth':>7}"
+    hdr = f"{'W ms':>5} {'races/s':>9} {'vol%':>6} {'lb/s':>7} {'lb vol%':>7} {'P(r|mv)':>8} {'P(c|pl)':>8} {'qty p50':>8} {'q/top p50':>11} {'p90':>8} {'>depth':>7}"
     print(hdr)
     for w, s in by.items():
         r = s["race_qty_over_top_depth"]

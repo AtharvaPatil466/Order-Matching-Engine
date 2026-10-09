@@ -81,21 +81,25 @@ def load_trades(path: Path) -> dict | None:
     }
 
 
-def load_book(day: str, hour: str) -> dict | None:
-    """Top of book for one hour, time-sorted, or None if absent/unreadable."""
+def load_book(day: str, hour: str, levels: int = 1) -> dict | None:
+    """Book snapshots for one hour, time-sorted, or None if absent/unreadable.
+
+    Prices and sizes are (n_snapshots, levels) arrays; column 0 is the top.
+    """
     path = AF_DATA / "book_snapshots" / day / f"{hour}.parquet"
     if not path.exists():
         return None
-    t = _read_parquet(path, ["exchange_ts_ns", "bid_px_1", "ask_px_1",
-                             "bid_sz_1", "ask_sz_1"])
+    names = [f"{s}_{k}_{i}" for s in ("bid", "ask") for k in ("px", "sz")
+             for i in range(1, levels + 1)]
+    t = _read_parquet(path, ["exchange_ts_ns"] + names)
     if t is None or t.num_rows < 2:
         return None
     ts = t["exchange_ts_ns"].to_numpy() // 1_000_000
     o = np.argsort(ts, kind="stable")
     return {"ts_ms": ts[o]} | {
-        k: np.asarray(t[c].to_numpy(), float)[o]
-        for k, c in (("bid_px", "bid_px_1"), ("ask_px", "ask_px_1"),
-                     ("bid_sz", "bid_sz_1"), ("ask_sz", "ask_sz_1"))}
+        f"{s}_{k}": np.column_stack([np.asarray(t[f"{s}_{k}_{i}"].to_numpy(), float)[o]
+                                     for i in range(1, levels + 1)])
+        for s in ("bid", "ask") for k in ("px", "sz")}
 
 
 def trade_hours(days=SAMPLE_DAYS, skipped: list | None = None):

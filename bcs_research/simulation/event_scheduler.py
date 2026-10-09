@@ -95,6 +95,15 @@ class EventSimResult:
     agents: list
     n_events: int         # events dispatched; for throughput sizing
 
+    @property
+    def last_mid(self) -> float:
+        """Last two-sided mid in the snapshots (fixed point); 0.0 if never two-sided.
+        The mid mark accounting.decompose takes beside the true-V mark."""
+        for s in reversed(self.snapshots):
+            if s.best_bid > 0 and s.best_ask > 0:
+                return (s.best_bid + s.best_ask) / 2.0
+        return 0.0
+
 
 class EventScheduler:
     """Runs one simulation on a started harness. One run per harness: the

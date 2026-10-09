@@ -43,7 +43,9 @@ class FundamentalPath(Protocol):
 
     def value_at(self, t_ns: int) -> float:
         """True V in effect at t. For accounting and adverse-fill tests only;
-        agents trade on the updates they observe, never on this."""
+        agents trade on the updates they observe, never on this. One
+        exception: SlowInformedInvestor reads value_at(t - lag), because
+        learning V late is exactly what makes it informed."""
 
     def updates(self) -> Sequence[SignalUpdate]:
         """Every public update, ascending in t_ns."""

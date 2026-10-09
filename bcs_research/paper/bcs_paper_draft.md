@@ -60,7 +60,7 @@ Section 5 reports a differential test of the engine's clearing rule against an i
 
 ### 3.2 Agents
 
-All agents are driven by the scheduler through one interface — each tick an agent emits orders, and it receives the fills they produce — and each holds its own cash and inventory for the welfare accounting of §3.4. Constants are in Supplement S4; what matters here is each agent's role and decision rule.
+All agents are driven by the scheduler through one interface — each tick an agent emits orders, and it receives the fills they produce — and each holds its own cash and inventory for the welfare accounting of §3.4. Constants are in the operating-point configuration (§3.5, Supplement S4); what matters here is each agent's role and decision rule.
 
 **The fundamental** is the exogenous true value $V(t)$, a discrete random walk in fixed-point price space. Its latency-delayed read returns the most recent $V$ at or before $t - \ell$, and that delay is the BCS information gap separating a fast agent from a slow one; the undelayed value is used only for the maker's adverse-fill test.
 
@@ -90,7 +90,7 @@ All metrics are computed from the per-tick snapshots and fills, and apply unchan
 
 The pre-registered operating point pairs a baseline and a treatment that share every market parameter and differ **only in HFT presence**: the **baseline** is the latency-disadvantaged, adverse-selection-aware maker plus noise traders; the **treatment** adds HFTs. Both run on the continuous scheduler through the verified engine.
 
-It fixes 3,000 ticks, eight noise traders against three HFTs, a 100-tick base spread, per-step $\sigma = 20$, a three-tick maker latency against zero-latency snipers, and 20 seeds per arm with 2,000-resample bootstrap intervals. The full parameter set, including the agent-level constants of §3.2, is in Supplement S4.
+It fixes 3,000 ticks, eight noise traders against three HFTs, a 100-tick base spread, per-step $\sigma = 20$, a three-tick maker latency against zero-latency snipers, and 100 seeds per arm with 2,000-resample bootstrap intervals. Simulation time advances in ticks of 1,000 simulated microseconds; §3.6 maps one tick to 100 ms of wall clock for calibration, and every latency and interval in this paper is stated in ticks. The full parameter set, including the agent-level constants of §3.2, is the configuration `CFG` in `experiments/exp1_primary.py` (Supplement S4).
 
 Around this operating point we run three one-dimensional sweeps, each isolating one axis of the mechanism (a $3\times3$ sensitivity-by-decay grid around the operating point is in Supplement S1.1):
 
@@ -118,7 +118,9 @@ The sample is 86 complete book-and-trade hours of BTCUSDT-perp: hours with at le
 
 Nothing in a public tape flags a snipe, so we do not label them: we report the distribution unconditionally and under a *race proxy* — an order arriving within 0.2 s of a snapshot on which the top of book moved by at least one price increment — and treat the gap between the two as the informative object. We condition on a price move rather than on order size because a move is what the BCS mechanism says triggers a race. A placebo on non-move orders in the same window measures the dilution that 100 ms snapshots impose on a microsecond phenomenon: its median is 0.0057 against the proxy's 0.0283, a factor of 5.0, so we treat the proxy as a bound rather than a measurement.
 
-| sample | $n$ | p10 | p50 | p90 | p99 |
+**Table 1.** Snipe-to-depth ratio on the BTCUSDT-perp tape: taker-order size divided by the top-of-book depth it met (dimensionless), 86 hours.
+
+| sample | $n$ (taker orders) | p10 | p50 | p90 | p99 |
 |---|---|---|---|---|---|
 | unconditional | 2,269,256 | 0.00027 | **0.0072** | 0.393 | 18.0 |
 | race proxy | 390,540 | 0.00051 | **0.0283** | 4.24 | 290 |
@@ -138,6 +140,8 @@ The surface reproduces the published calibrated cells exactly where the two grid
 
 **The boundary.** Incidence is classified per cell by the sign of the maker's PnL delta against the shared no-HFT baseline, at 95% bootstrap confidence; a cell whose interval brackets zero is reported as indeterminate rather than assigned to whichever side its point estimate falls on.
 
+**Table 2.** Incidence boundary under single-maker supply (calibrated environment, $n=100$). The maker's PnL delta against the no-HFT baseline is in simulation currency (§3.4).
+
 | Snipe/quote ratio | Maker gains up to | Flips at | Maker delta at k=21 |
 |---|---|---|---|
 | 0.0049 | all k ≤ 21 | — | +2,154 (still gains) |
@@ -154,9 +158,9 @@ The critical count falls monotonically as the snipe grows, from beyond the grid 
 
 **Where the real tape sits, and what it does to the BCS incidence prediction.** The ratio is a design parameter in the sense that no feed reports it directly, but §3.7 bounds it: measured per trade against contemporaneous top-of-book depth on 86 complete book-and-trade hours of BTCUSDT-perp, it is 0.0072 at the median unconditionally and 0.0283 under the race proxy, with the placebo quantifying the dilution. The unconditional median falls between the two smallest ratios on the grid — and that is the region in which the maker gains at every HFT count we tested, while noise traders bear the entire transfer. **In the regime the tape supports, under single-maker liquidity supply, the BCS prediction that the latency tax falls on liquidity providers inverts.** §4.2 adds the maker-count axis, and the inversion does not survive a second maker. The maker widens in response to adverse fills, and that widening leaves it better off on net — by cutting what the snipers take from its stale quotes rather than by earning more from noise flow, which in fact falls (see the leg decomposition below); the loss lands on the noise traders who cross the wider spread. The race-proxy median of 0.0283 sits just above the 0.0243 row, where the flip occurs at k=7 — so under the more conservative conditioning the maker still gains against a handful of snipers and loses only once the field grows. Both readings place real BTC at or below the boundary rather than deep in the maker-pays regime that §4.3 reports, and the maker-pays regime is reached only at snipe sizes 35–140× the measured median. One qualification attaches to the measurement: the tape under-measures multi-level sweeps, because Binance aggregates fills per taker order per price level, so the true race-order ratio is somewhere above the proxy, and the boundary matters more than any single point on it.
 
-![Incidence boundary over snipe-to-quote ratio and HFT count. The shaded vertical band is the ratio measured on the BTCUSDT-perp tape (unconditional median to race-proxy median); open markers with arrows are ratios at which no flip occurs anywhere on the swept grid.](../results/figures/fig7_incidence_boundary.png)
+![Figure 1. Incidence boundary under single-maker supply (calibrated environment, $n=100$). Horizontal axis: snipe-to-quote size ratio (dimensionless, log scale); vertical axis: the first HFT count $k$ at which the maker no longer gains at 95% confidence. Open markers with arrows are censored: no flip occurs on the swept grid ($k \leq 21$), or the maker already loses at $k=1$. The shaded vertical band is the ratio measured on the BTCUSDT-perp tape, from the unconditional median (0.0072) to the race-proxy median (0.0283); its upper edge lies past the 0.0243 flip at $k=7$.](../results/figures/fig7_incidence_boundary.png)
 
-The boundary is plotted with its censoring made explicit, because only three of the seven ratios flip inside the grid: at 0.0049 and 0.0097 the maker gains at every count up to twenty-one, so the critical count is bounded below by 21 rather than measured, and at 0.3396 and 1.0000 the maker already loses to a single sniper, so it is bounded above by 1. Drawing a curve through all seven would fabricate four of them. The figure's substantive content is the position of the tape band relative to the boundary: the band lies entirely within the maker-gains region across the full range of counts we swept, and for the BCS incidence prediction to hold on this market the measured ratio would have to sit above the boundary curve rather than below it.
+The boundary is plotted with its censoring made explicit, because only three of the seven ratios flip inside the grid: at 0.0049 and 0.0097 the maker gains at every count up to twenty-one, so the critical count is bounded below by 21 rather than measured, and at 0.3396 and 1.0000 the maker already loses to a single sniper, so it is bounded above by 1. Drawing a curve through all seven would fabricate four of them. The figure's substantive content is the position of the tape band relative to the boundary: the unconditional median lies within the maker-gains region at every count we swept, while the race-proxy end of the band lies just past the 0.0243 row, where the maker gains only up to $k=6$. For the BCS incidence prediction to hold on this market the measured ratio would have to sit above the boundary curve rather than below it.
 
 Across the 63 cells the noise traders' delta varies by a factor of two while the maker's changes sign, so the maker's exposure is essentially the whole source of variation on the surface; under inelastic demand that near-constant toll is what the model allows. Incidence also does not reduce to the product of snipe ratio and HFT count. Both checks are in Supplement S2.3.
 
@@ -173,7 +177,7 @@ Across the 63 cells the noise traders' delta varies by a factor of two while the
 | 0.0097 | 7 | −6,852 | +6,041 | +2,369 | **+1,558** |
 | 0.0097 | 21 | −6,529 | +5,566 | +2,389 | **+1,425** |
 
-Seed-matched deltas against the shared no-HFT baseline, $n=100$.
+**Table 3.** The maker's PnL delta at the tape-band cells split into its legs: seed-matched deltas against the shared no-HFT baseline, $n=100$, in simulation currency.
 
 The revenue leg is **negative** in all eight cells: with snipers present the maker earns *less* from non-adverse flow than it does in the no-HFT baseline, because widening drives away more noise volume than it recovers in edge per fill. The sniping leg is **positive**, meaning the maker's losses to adverse fills *shrink* relative to baseline — the wider quote is picked off less profitably, and the baseline itself carries adverse selection from noise traders hitting stale quotes when the fundamental moves. The net gain is therefore not "more noise revenue than sniping loss." It is reduced adverse-selection cost, plus a substantial inventory-carry term, together outweighing a fall in noise revenue.
 
@@ -186,6 +190,8 @@ The claim holds for all HFT counts tested — up to twenty-one. Behavior at high
 §4.1 holds two things fixed: liquidity is supplied by a single maker, and uninformed demand is inelastic. This section relaxes each in turn. The maker-count axis reverses the inversion at the class level; elasticity does not move it. Both extensions reproduce §4.1 exactly at their inelastic, single-maker corner.
 
 **Maker competition.** We re-run the 63-cell surface at maker counts $M \in \{1,2,3,5\}$ on the calibrated environment, holding every §3.6 parameter fixed, at $n=100$ (441 cells, 44,800 engine runs). Aggregate top-of-book depth is held at the calibrated quote size and divided across the makers, so adding makers varies competition and latency spread rather than the depth a snipe meets; latencies for $M>1$ are §4.4's set, anchored on measured replenishment quantiles. A zero-latency-leader variant, placing the leading maker at zero latency, is run as an optimistic bound. The $M=1$ column reproduces §4.1 to **0.0 absolute difference** on five metrics at three probe cells re-run at $n=100$, and conservation holds across all 441 cells at a maximum absolute residual of $5.57\times10^{-10}$.
+
+**Table 4.** The incidence surface by maker count $M$ ($n=100$). Rent is total HFT rent in simulation currency.
 
 | $M$ | latencies (ticks) | ratio 0.0049 | ratio 0.0097 | flip @ 0.0243 | rent at $k=3$, ratio 1.0 |
 |---|---|---|---|---|---|
@@ -201,6 +207,8 @@ The inversion all but fails at $M=2$, the smallest competitive case, and fails c
 Agent order is ruled out as the cause. Re-running the calibrated sets with the latencies assigned to the maker slots in every order leaves every verdict unchanged: at three makers, where depth splits evenly, the per-maker results are identical to the bit across all six orders, and at two they differ by at most 276, through the one extra unit the first slot quotes. The identity orders reproduce the published per-maker run to 0.0 on all ninety per-maker means. §4.4's monotone-in-latency ordering was measured at ratio 1.0 and does not extend to the tape band, and what sets the winner there we have not identified.
 
 **Elastic demand.** The second fixed assumption is that noise traders cross at a fixed per-tick probability whatever the maker quotes. We set $\lambda_{\text{eff}} = \lambda (s_{\text{base}}/s)^{\alpha}$ with $s$ read off the book, so arrivals match §3.6's fitted intensity at base spread for every $\alpha$ and only the response to widening changes, and re-run the full surface at $\alpha \in \{0, 0.5, 1.0\}$ (189 cells, $n=20$). The $\alpha=0$ path reproduces §4.1 exactly at three $n=100$ probe cells.
+
+**Table 5.** The single-maker surface under elastic noise-trader demand ($n=20$). Rent in simulation currency; baseline trades are trades per no-HFT run.
 
 | $\alpha$ | ratio 0.0049 | ratio 0.0097 | flip @ 0.0243 | rent at $k=3$, ratio 1.0 | baseline trades |
 |---|---|---|---|---|---|
@@ -224,7 +232,7 @@ Within this conserved frame, HFT entry extracts a rent of 34.70 [26.25, 44.80] p
 
 #### Experiment 2: latency-advantage scaling
 
-Experiment 2 sweeps the market maker's staleness, holding the HFTs at zero latency. Rent rises with staleness at approximately 10.46 per tick, and a linear specification and a segmented one with a free breakpoint are indistinguishable ($\Delta\mathrm{BIC} = -0.17$). We read this as no detectable knee, not as positive support for linearity. Rent first becomes distinguishable from zero at about two ticks of staleness, the detectability floor of a grid that resolves latency only at tick granularity (§6.2). The welfare decomposition closes at every point on the sweep. The figure and per-cell values are in Supplement S2.5.
+Experiment 2 sweeps the market maker's staleness, holding the HFTs at zero latency. Rent rises with staleness at approximately 10.46 units of simulation currency per tick ($n=100$), and a linear specification and a segmented one with a free breakpoint are indistinguishable ($\Delta\mathrm{BIC} = -0.17$). We read this as no detectable knee, not as positive support for linearity. Rent first becomes distinguishable from zero at about two ticks of staleness, the detectability floor of a grid that resolves latency only at tick granularity (§6.2). The welfare decomposition closes at every point on the sweep. The figure and per-cell values are in Supplement S2.5.
 
 #### Experiment 3: HFT competition
 
@@ -254,6 +262,8 @@ The pre-registered operating point was chosen for mechanism clarity, not realism
 
 What calibration adds is magnitude. Normalised by traded notional, HFT rent moves from 0.125 bp at the operating point to 4.42 bp calibrated. The calibrated figure is an upper bound rather than an estimate, because a single latency-disadvantaged maker facing the perp's order flow has no competitor to replenish a cleared quote and so absorbs the entire race. Replacing it with $N$ makers whose latencies span the measured top-of-book replenishment quantiles, holding aggregate depth fixed, collapses the rent by a factor of fifty:
 
+**Table 6.** Calibrated HFT rent with $N$ competing makers (rent in basis points of traded notional; liquidity gaps per run).
+
 | $N$ makers | latencies (ticks) | HFT rent (bp) | liquidity gaps |
 |---|---|---|---|
 | 1 | 3 | 4.421 | 52.73 |
@@ -275,7 +285,7 @@ Model checking certifies the matching design at bounded scope (§3.1). It says n
 
 **The divergence moved published results, through that code path only.** Experiment 4's 50,000-tick grid has seven batch arms and one continuous arm, and the continuous arm never calls `uncross`. We re-ran the grid with batch clearing moved from the Python rule to the engine, holding seeds, fundamental paths, run length and every parameter fixed.
 
-**Table.** Experiment 4 at 50,000 ticks ($n=100$), before and after batch clearing moved to the engine. Point estimates in simulation currency (§3.4); \* marks a 95% bootstrap interval that excludes zero.
+**Table 7.** Experiment 4 at 50,000 ticks ($n=100$), before and after batch clearing moved to the engine. Point estimates in simulation currency (§3.4); \* marks a 95% bootstrap interval that excludes zero.
 
 | arm | HFT rent, Python rule | HFT rent, engine | maker Δ, Python rule | maker Δ, engine |
 |---|---|---|---|---|
@@ -314,7 +324,7 @@ Several limitations bound the strength of these conclusions.
 
 **First, the elasticity of uninformed demand.** Noise traders cross at a fixed per-tick probability in every arm except the elasticity surface (§3.2), so the volume a maker earns its widened spread on cannot fall when it widens. §4.2 relaxes this to unit elasticity at a single maker and the maker-gains region largely remains, as the leg decomposition predicts, but elasticity above unit is untested and the within-class split has not been tested against elastic demand at all.
 
-**Second, liquidity supply is narrow in both count and rule.** §4.2 maps maker counts to five, but §4.1's headline arm holds one maker, and every maker in this paper follows a single imposed adverse-selection quoting rule. A maker that defended itself differently — fading quotes, skewing on inventory — might not profit from small snipes at all, and none of ours chooses its spread to maximise profit, so "the maker gains" is a property of that rule under sniping rather than a statement about profit-maximising liquidity provision. The rule's aggressiveness is one hand-tuned parameter, and re-running §4.1's main readings across a $7.5\times$ span of it leaves the inversion's *existence* intact at the tape band while moving its *location* across the whole grid and changing total rent by a factor of five; no critical HFT count should therefore be read as a property of the market rather than of this maker. Scope is also narrow: one asset on one venue, spread and depth *levels* far from the perp's (§3.6), latency resolved only at tick granularity, and IOC-in-batch semantics in the auction arm that are a modelling choice rather than an institutional given.
+**Second, liquidity supply is narrow in both count and rule.** §4.2 maps maker counts to five, but §4.1's headline arm holds one maker, and every maker in this paper follows a single imposed adverse-selection quoting rule. A maker that defended itself differently — fading quotes, skewing on inventory — might not profit from small snipes at all, and none of ours chooses its spread to maximise profit, so "the maker gains" is a property of that rule under sniping rather than a statement about profit-maximising liquidity provision. The rule's aggressiveness is one hand-tuned parameter, and re-running §4.1's main readings across a $7.5\times$ span of it ($n=20$, `exp6b_sensitivity_adverse.json`) leaves the inversion's *existence* intact at the tape band while moving its *location* across the whole grid and changing total rent by a factor of five; no critical HFT count should therefore be read as a property of the market rather than of this maker. Scope is also narrow: one asset on one venue, spread and depth *levels* far from the perp's (§3.6), latency resolved only at tick granularity, and IOC-in-batch semantics in the auction arm that are a modelling choice rather than an institutional given.
 
 **Third, the ratio measured on the tape and the ratio swept in the simulation are not the same object.** The tape's 0.0072 is a snipe against *aggregate* top-of-book depth, whereas the simulation measures it against *one* maker's quote, so the per-maker ratio lies between the tape ratio and the tape ratio times the number of makers at the touch — a count no public feed reports. §4.2 shows why this matters: splitting aggregate depth across $M$ makers multiplies each maker's own ratio by $M$, and the maker-gains region at the tape band is all but gone at $M=2$. What remains unobservable is $M$ itself. The surface reports every cell of a grid fixed before the runs, so we apply no cell-level multiple-testing correction (Supplement S2.6).
 

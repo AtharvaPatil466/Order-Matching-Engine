@@ -25,12 +25,15 @@ START=$SECONDS
 
 echo "==> [1/5] engine library -> $OUT/engine"
 # ENABLE_ASSERTIONS=ON is what the bridge is compiled to match (-UNDEBUG on
-# both sides). ENABLE_IO_URING=OFF because MatchingEngine.h includes Journal.h,
-# whose layout depends on OB_HAVE_LIBURING — a PUBLIC define the bridge never
-# sees, since it links the .a by path. On a Linux box with liburing-dev that is
-# the same ODR trap as NDEBUG. Step 4 checks both. POSITION_INDEPENDENT_CODE
-# because the .a is linked into a shared object (the Python module): macOS is
-# PIC by default, Linux is not and ld refuses with "recompile with -fPIC".
+# both sides). ENABLE_IO_URING=OFF because the bridge links the .a by path and
+# so never sees OrderMatcher's PUBLIC usage requirements: on a Linux box with
+# liburing-dev the module builds, then fails at import with "undefined symbol:
+# io_uring_queue_init", and OB_HAVE_LIBURING changes Journal.h (included by
+# MatchingEngine.h) on one side of the boundary only. Step 4 checks NDEBUG and
+# these feature macros.
+# POSITION_INDEPENDENT_CODE because the .a is linked into a shared object (the
+# Python module): macOS is PIC by default, Linux is not, and ld refuses the
+# archive with "recompile with -fPIC".
 cmake -S "$ROOT" -B "$OUT/engine" \
     -DCMAKE_BUILD_TYPE=Release \
     -DENABLE_ASSERTIONS=ON \

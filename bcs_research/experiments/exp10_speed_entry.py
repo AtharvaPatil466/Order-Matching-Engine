@@ -59,7 +59,6 @@ Run: bcs_research/.venv/bin/python bcs_research/experiments/exp10_speed_entry.py
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 import time
@@ -68,7 +67,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-for _d in ("build", "simulation", "agents", "metrics"):
+for _d in ("build", "simulation", "agents", "metrics", "analysis"):
     _p = str(_ROOT / _d)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -77,6 +76,7 @@ import numpy as np  # noqa: E402
 from scipy import optimize, stats  # noqa: E402
 
 import bcs_engine as be  # noqa: E402
+import bcs_theory  # noqa: E402
 from accounting import TAKER_HEAVY, ZERO, build_ledger, decompose  # noqa: E402
 from bootstrap import bootstrap_ci  # noqa: E402
 from event_maker import EventMaker  # noqa: E402
@@ -278,51 +278,58 @@ def tier_fixed_point(fast_profit, slow_profit, cost, start) -> dict:
 
 
 # --- BCS predictions -----------------------------------------------------------
-# Copied, not imported: the THEORY lane's analysis/bcs_theory.py (on bcs/tier1)
-# from Budish, Cramton & Shim (2015, QJE 130(4)). For Laplace(0, b) jumps the
-# per-jump prize is b * exp(-h/b) (laplace_equilibrium; memoryless, so a
-# successful snipe earns exactly b on average), free entry stops at floor(R/c)
-# racing firms (free_entry_n: eq. 7 with integer N, §VI.D), and h* solves
-# eq. (3), lam_invest * h = lam_jump * prize(h) (laplace_half_spread).
+# From the THEORY lane's analysis/bcs_theory.py (Budish, Cramton & Shim 2015,
+# QJE 130(4)): sniping_prize is E[(J - h)^+] (b * exp(-h/b) for Laplace jumps:
+# memoryless, so a successful snipe earns b on average), free_entry_n is eq. (7)
+# with integer N (§VI.D), and eq. (3) sets the spread.
 
 def theory(cfg, half_spread_bp, fee_name, maker_tier, cost=None) -> dict:
     """BCS's numbers for this market, in money per second.
 
     Mappings, derived here rather than in BCS: a snipe takes the maker's whole
     quote, so the prize rate R is lam_jump * maker_qty * prize per unit; a
-    sniper pays its taker fee f per unit, so it fires only on J > h + f and the
-    prize net of fees is b * exp(-(h + f)/b). A fast maker races too (N + 1
-    firms, BCS); the paper's slow maker never wins, so only the N snipers race.
+    sniper pays its taker fee f per unit, so it fires only on J > h + f and
+    the prize net of fees is prize(h + f). A fast maker races too (N + 1
+    firms, BCS); the paper's slow maker never wins, so only the N snipers
+    race. free_entry_n refuses c > R/2 (BCS footnote 26: N* >= 2); such
+    cells get no prediction rather than an extrapolated one.
     """
     b = _fixed(cfg, cfg["path"]["jump_scale_bp"])
     h = _fixed(cfg, half_spread_bp)
     f = FEES[fee_name].taker_bps * 1e-4 * cfg["path"]["v0"]
-    rent = cfg["path"]["jump_intensity_per_s"] * cfg["maker_qty"] * b * math.exp(-(h + f) / b) / P
+    prize = bcs_theory.sniping_prize(h + f, bcs_theory.laplace_jump(b))
+    rent = cfg["path"]["jump_intensity_per_s"] * cfg["maker_qty"] * prize / P
     out = {"prize_rate": rent}
-    if cost is not None:
-        maker_races = int(maker_tier == "fast")
-        n = max(0, math.floor(rent / cost) - maker_races)
-        # Sniper speed / sniper rent: N c / (R N/(N+1)) = (N+1) c / R with a racing maker.
-        out |= {"n_star": n, "dissipated_share": (n + maker_races) * cost / rent if n else None}
-    return out
+    if cost is None:
+        return out
+    try:
+        firms = int(bcs_theory.free_entry_n(rent, cost, integer=True))
+    except ValueError:
+        return out | {"n_star": None, "dissipated_share": None, "outside_bcs": True}
+    maker_races = int(maker_tier == "fast")
+    n = firms - maker_races
+    # Sniper speed / sniper rent: N c / (R N/(N+1)) = (N+1) c / R with a racing maker.
+    return out | {"n_star": n, "dissipated_share": firms * cost / rent}
 
 
 def theory_half_spread_bp(cfg) -> float:
     """h* for this market's investors, zero fees: eq. (3) with elastic participation.
 
-    The maker's spread revenue from reservation traders, lam_n * 2 Phi(-h/eps)
-    * q_n * h, equals the prize lam_j * q_m * b * exp(-h/b). With inelastic
-    one-unit investors this is bcs_theory's h* = b W(lam_j / lam_i); here
-    participation falls with h, so it is solved numerically for the smallest
-    root, the competitive spread.
+    Derived here: the maker's spread revenue from reservation traders,
+    lam_n * 2 Phi(-h/eps) * q_n * h, equals the prize rate lam_j * q_m *
+    prize(h). With inelastic investors it is bcs_theory.laplace_half_spread
+    (b W(lam_j / lam_i), lam_i = lam_n q_n / q_m in quote units); here
+    participation falls with h, so it is solved for the smallest root, the
+    competitive spread.
     """
     b = _fixed(cfg, cfg["path"]["jump_scale_bp"])
     eps = _fixed(cfg, cfg["noise_eps_bp"])
     pth = cfg["path"]
+    jump = bcs_theory.laplace_jump(b)
 
     def gap(h):
         revenue = cfg["noise_rate_per_s"] * 2 * stats.norm.sf(h / eps) * cfg["noise_qty"] * h
-        return revenue - pth["jump_intensity_per_s"] * cfg["maker_qty"] * b * math.exp(-h / b)
+        return revenue - pth["jump_intensity_per_s"] * cfg["maker_qty"] * bcs_theory.sniping_prize(h, jump)
 
     h = optimize.brentq(gap, 0.0, eps)
     return h / (1e-4 * pth["v0"])
@@ -390,7 +397,7 @@ def _cost_row(cfg, cells, h, f, cost, basis):
     fe = free_entry(table, cost)
     th = theory(cfg, h, f, cfg["maker_tier"], cost)
     return fe | {"cost_basis": basis, "theory": th,
-                 "n_star_gap": fe["n_star"] - th["n_star"],
+                 "n_star_gap": None if th["n_star"] is None else fe["n_star"] - th["n_star"],
                  "welfare": welfare_at(cells[(h, f, fe["n_star"])], fe["n_star"], cost,
                                        cfg["maker_tier"] == "fast")}
 
@@ -462,7 +469,7 @@ def run_two_tier(cfg, seeds, duration_s, half_spread_bp=2.0, fee_name="zero", wo
                           "from_all_slow": tier_fixed_point(fast, slow, c, 0),
                           "from_all_fast": tier_fixed_point(fast, slow, c, TWO_TIER_POOL),
                           "theory_single_tier_n_star": theory(cfg, half_spread_bp, fee_name,
-                                                              "slow", c)["n_star"]}
+                                                              "slow", c).get("n_star")}
                          for c in COSTS],
         "max_identity_residual": max(_max_residual(rows[k]) for k in states),
     }
@@ -501,8 +508,8 @@ def main(n_seeds=40, duration_s=600.0, out_path=PILOT_OUT):
             "accounting.decompose end-of-run V mark of the same quantity, noisier.",
             "Identities checked per run: sum of edge P&L = 0, sum of gross P&L at end V = 0, "
             "sum of net P&L + exchange revenue = 0. Speed is outside them: all-in welfare = -speed.",
-            "Theory: formulas copied from analysis/bcs_theory.py (bcs/tier1); fee and quote-size "
-            "mappings derived here (see theory()).",
+            "Theory: analysis/bcs_theory.py; the fee, quote-size and elastic-investor mappings are "
+            "derived here (see theory(), theory_half_spread_bp()). c > R/2 cells have no prediction.",
             "PLACEHOLDER path parameters (config.path) until the DATA lane's calibration.",
             "Book data has no latency: a sniper slower than the maker's cancel sends no IOC "
             "rather than a missing one; fills/P&L unaffected; IOC counts are not a cost basis.",

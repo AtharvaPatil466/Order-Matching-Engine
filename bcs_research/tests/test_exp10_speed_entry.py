@@ -117,13 +117,14 @@ def test_same_seed_reproduces_exactly_in_and_out_of_the_pool():
 
 def test_theory_half_spread_nests_bcs_lambert_w_for_inelastic_investors():
     # Huge reservation shocks: every arrival crosses (2 Phi(-h/eps) -> 1), so
-    # eq. (3) is lam_n q_n h = lam_j q_m b exp(-h/b): h* = b W(lam_j q_m / (lam_n q_n)).
-    from scipy import special
+    # eq. (3) holds with lam_i = lam_n q_n / q_m investors per quote unit.
+    import bcs_theory
     cfg = x.CONFIG | {"noise_eps_bp": 1e9}
     p = cfg["path"]
-    b_bp = p["jump_scale_bp"]
-    ratio = p["jump_intensity_per_s"] * cfg["maker_qty"] / (cfg["noise_rate_per_s"] * cfg["noise_qty"])
-    assert x.theory_half_spread_bp(cfg) == pytest.approx(b_bp * special.lambertw(ratio).real, rel=1e-6)
+    b = x._fixed(cfg, p["jump_scale_bp"])
+    h = bcs_theory.laplace_half_spread(cfg["noise_rate_per_s"] * cfg["noise_qty"] / cfg["maker_qty"],
+                                       p["jump_intensity_per_s"], b)
+    assert x.theory_half_spread_bp(cfg) == pytest.approx(h / (1e-4 * p["v0"]), rel=1e-6)
 
 
 def test_theory_free_entry_counts_the_racing_maker():
@@ -135,3 +136,5 @@ def test_theory_free_entry_counts_the_racing_maker():
     assert (fast["n_star"], slow["n_star"]) == (4, 5)
     assert fast["dissipated_share"] == pytest.approx(5 / 5.5)
     assert slow["dissipated_share"] == pytest.approx(5 / 5.5)
+    # Outside BCS's domain (c > R/2, footnote 26) there is no prediction.
+    assert x.theory(x.CONFIG, 2.0, "zero", "fast", cost=rent * 0.6)["n_star"] is None

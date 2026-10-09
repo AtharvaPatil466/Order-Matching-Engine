@@ -28,8 +28,6 @@ At the class level the answer depends on structure (Figure 1). With a single mak
 
 ### 1.3 Contributions
 
-This paper makes three contributions.
-
 **First**, it treats the incidence of the latency tax as an empirical question distinct from its existence and maps it over market structure: under single-maker supply the BCS prediction inverts at the snipe-to-depth ratio measured on the tape, and competitive supply restores it (§§4.1–4.2). Neither BCS nor the message-level measurement of Aquilina, Budish, and O'Neill (2022) treats incidence as a function of market structure.
 
 **Second**, it shows that incidence within the liquidity-providing class is redistributive, so the class-level question is not well posed without a weighting, and that who pays is set by how the makers' latencies are spaced rather than by speed rank (§4.2). [TODO: held-out prediction test]
@@ -48,7 +46,7 @@ This paper makes three contributions.
 
 ## 3. Model and Experimental Design
 
-This section describes the simulation apparatus. The design rests on a deliberate separation of concerns: a single model-checked C++ matching engine adjudicates every trade — continuous matching and batch-auction uncrossing alike — while a Python layer above it supplies the agents, the latency model, and the batch-auction cadence. The verified engine is the part we trust to be correct; the Python layer is the part we vary. The boundary between them is the pybind11 bridge, and it is drawn where the engine's formal guarantees end.
+A single model-checked C++ matching engine adjudicates every trade, while a Python layer above it supplies the agents, the latency model and the batch-auction cadence; the pybind11 bridge between them is drawn where the engine's formal guarantees end.
 
 ### 3.1 The matching engine, and what its verification covers
 
@@ -98,8 +96,6 @@ Around this operating point we run three one-dimensional sweeps, each isolating 
 2. **HFT count sweep (Exp 3).** Number of HFTs over $\{0, 1, 2, 3, 5, 8, 13, 21\}$, separating per-HFT rent (competed away) from total rent (transfer).
 3. **Auction-frequency sweep (Exp 4).** Batch interval over $\{1, 5, 10, 25, 50, 100, 500\}$ plus continuous, run through a batch scheduler that parks the book in an auction state and clears through the engine's own uncross (Supplement S3), measuring how much maker welfare loss the frequent batch auction recovers and at what interval.
 
-Each sweep varies one parameter and holds the rest at the operating point, so that any change in the outcome metrics is attributable to that single axis.
-
 ### 3.6 Calibration to BTC order flow
 
 To discipline the operating point against real microstructure, we calibrate the simulation's *environment* parameters to Binance BTCUSDT-perpetual order flow recorded by a companion collector (20-level book snapshots at about 10 per second and the aggregated-trade stream, both with nanosecond timestamps). The collector drops a few hours on most days, so each moment is estimated gap-safe rather than by discarding gapped days (Supplement S2.1). The sample is 27 days (2026-06-24 to 2026-07-21, less 2026-07-19; 37.0M trades, 4.16M snapshots, 2.27M seconds of coverage), yielding: trade arrival 16.28/s; trade sizes p50/p90/p99 of 0.003/0.177/2.01 BTC; median spread of one exchange tick (≈0.016 bp); median top-of-book depth 6.18 BTC; and 1-second realized volatility of 0.650 bp/√s.
@@ -130,7 +126,7 @@ The distribution is extremely right-skewed, which is why the surface sweeps as f
 
 ## 4. Results
 
-We report the incidence surface first (§4.1) and its extension to competing makers and elastic demand (§4.2), then the four supporting experiments on which the incidence claim rests (§4.3) and their re-run at calibrated parameters, which supplies magnitudes (§4.4). Throughout, the zero-sum conservation residual closes to floating-point noise on every run, which shows the harness's accounting has no leak — and no more than that (§3.4).
+We report the incidence surface first (§4.1) and its extension to competing makers and elastic demand (§4.2), then the four supporting experiments on which the incidence claim rests (§4.3) and their re-run at calibrated parameters, which supplies magnitudes (§4.4). The zero-sum residual closes to floating-point noise on every run (§3.4).
 
 ### 4.1 The incidence surface: who bears the latency tax
 
@@ -305,8 +301,6 @@ HFT rent crosses zero in three batch cells, from significantly positive to indis
 The episode shows that a re-implementation checked against source code can still differ from the code it copies the first time both run on the same input. It does not show that the engine is correct; it shows that running against the engine caught an error that reading its source did not.
 
 ## 6. Discussion
-
-The incidence results (§§4.1–4.2) rest on supporting experiments that establish a zero-sum transfer, smooth scaling in the maker's staleness, and a clearing rule that drives the outcome (§4.3). Below we draw out what the findings do and do not license, state their limitations plainly, and set out the work needed to harden them.
 
 ### 6.1 Implications for market design
 

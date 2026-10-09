@@ -123,6 +123,25 @@ def race_loss_probability(n_firms: int) -> float:
     return (n_firms - 1) / n_firms
 
 
+def race_win_probability(lag: float, eps: float, n_snipers: int) -> float:
+    """P(an LP lagging the snipers by `lag` cancels before all n_snipers snipe).
+
+    Each message gets an independent U[0, eps] jitter on top of its fixed
+    latency (BCS footnote 21's "small random latency"). The LP wins iff
+    lag + U_LP < min_i U_i, which integrates to ((eps - lag)/eps)^(k+1)/(k+1)
+    for 0 <= lag <= eps and 0 beyond. At lag 0 it is BCS's 1/N with
+    N = k + 1. Derived here, not in BCS; eps = 0 means exact ties, broken
+    uniformly, so the LP wins 1/N at lag 0 and never otherwise.
+    """
+    if lag < 0 or eps < 0 or n_snipers < 0:
+        raise ValueError("need lag >= 0, eps >= 0, n_snipers >= 0")
+    if eps == 0:
+        return 1.0 / (n_snipers + 1) if lag == 0 else 0.0
+    if lag >= eps:
+        return 0.0
+    return ((eps - lag) / eps) ** (n_snipers + 1) / (n_snipers + 1)
+
+
 def depth_half_spreads(lam_invest: float, lam_jump: float, jump, qty_probs) -> list[float]:
     """Half-spread of the k-th unit of depth, BCS equation (4) / Proposition 2.
 

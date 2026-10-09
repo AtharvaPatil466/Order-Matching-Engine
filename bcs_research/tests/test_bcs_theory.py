@@ -13,6 +13,7 @@ import sys
 _R = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_R / "analysis"))
 
+import numpy as np
 import pytest
 from scipy import stats
 
@@ -79,6 +80,23 @@ def test_equilibrium_spread_does_not_depend_on_n():
 @pytest.mark.parametrize("n", [2, 3, 5, 10])
 def test_race_loss_probability_is_n_minus_one_over_n(n):
     assert bt.race_loss_probability(n) == pytest.approx((n - 1) / n)
+
+
+def test_race_win_probability_reduces_to_one_over_n_with_no_lag():
+    assert bt.race_win_probability(0.0, 1000.0, n_snipers=4) == pytest.approx(1 / 5)
+    assert bt.race_win_probability(0.0, 0.0, n_snipers=4) == pytest.approx(1 / 5)
+    assert bt.race_win_probability(1.0, 0.0, n_snipers=4) == 0.0
+    assert bt.race_win_probability(1000.0, 1000.0, n_snipers=1) == 0.0
+
+
+def test_race_win_probability_matches_monte_carlo_jitter_race():
+    rng = np.random.default_rng(0)
+    lag, eps, k, draws = 300.0, 1000.0, 3, 400_000
+    lp = lag + rng.uniform(0, eps, draws)
+    snipers = rng.uniform(0, eps, (draws, k)).min(axis=1)
+    empirical = float(np.mean(lp < snipers))
+    se = math.sqrt(empirical * (1 - empirical) / draws)
+    assert abs(empirical - bt.race_win_probability(lag, eps, k)) < 4 * se
 
 
 def test_spread_increases_in_jump_intensity_and_scale_and_falls_in_investor_rate():

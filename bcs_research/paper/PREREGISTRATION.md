@@ -44,6 +44,10 @@ public.
   Inconclusive results are never counted as hits. If more than a third of the
   primaries are inconclusive, the program is underpowered and the writeup says
   so before reporting anything else.
+- **Magnitude bands.** "Within ±x of the prediction" means: HIT if the 95%
+  interval lies inside the band, MISS if it is disjoint from it, otherwise
+  INCONCLUSIVE. Not "the interval contains the prediction": across a dozen
+  cells that rule fails a correct model about half the time by chance.
 - **Tape band.** Where a prediction counts "maker-gains cells at the tape
   band", it means the paper's 18 cells: snipe/quote ratios {0.0049, 0.0097} ×
   HFT counts {1, 2, 3, 5, 6, 7, 8, 13, 21} (`exp6_incidence_surface.K_GRID`),
@@ -104,7 +108,7 @@ The full protocol, parameters and tolerances are in
   fees), the event model recovers BCS's equilibrium.
 - **Predictions (magnitudes from BCS eq. 3 and Prop 1).**
   - **primary** — race-loss share = (N − 1)/N for N ∈ {2, 3, 5, 10}, each
-    within ±0.02 absolute with its Wilson interval containing (N − 1)/N;
+    within ±0.02 absolute (40 seeds × 600 s per cell, the spec's sizing);
   - empirical indifference half-spread ĥ (LP profit = mean sniper profit)
     within ±3% of h* = b·W(λ_j/λ_i) in all 12 cells, and independent of N
     (slope of ĥ on (N − 1)/N: 95% interval inside ±3% of h*);
@@ -115,8 +119,8 @@ The full protocol, parameters and tolerances are in
     match (ε/τ)(N − 1)/(2(N + 1)) (derived refinement of BCS footnote 34)
     within the Poisson interval.
 - **Test.** As in the spec, §5.
-- **Miss.** Any primary cell outside tolerance with its interval excluding
-  the prediction; or ĥ trending in N (slope interval excluding ±3% of h*).
+- **Miss.** Any primary cell whose interval is disjoint from its band; or
+  ĥ trending in N (slope interval disjoint from ±3% of h*).
   We expect every continuous-market cell to be a HIT; a miss here would mean
   the scheduler, not BCS, is wrong, and every later experiment waits on it.
 
@@ -129,8 +133,8 @@ The full protocol, parameters and tolerances are in
   - **primary (H2a)** — the share of snipe-able jumps on which the maker's
     cancel arrives first equals `race_win_probability(lag, ε, k)` =
     ((ε − lag)/ε)^(k+1)/(k+1) for lag ≤ ε, 0 beyond (*derived*), for
-    k ∈ {1, 3, 8, 21} and lag/ε ∈ {0, 0.25, 0.5, 1.5}: within ±0.02 absolute,
-    Wilson interval containing the prediction. At lag 0 that is 1/(k + 1):
+    k ∈ {1, 3, 8, 21} and lag/ε ∈ {0, 0.25, 0.5, 1.5}: within ±0.02 absolute.
+    At lag 0 that is 1/(k + 1):
     0.50, 0.25, 0.11, 0.045.
   - **H2b** — with snipe size = quote size, total sniper rent at lag 0 grows
     as k/(k + 1): rent(k)/rent(21) = (k/(k + 1))/(21/22), so 0.52 at k = 1 and
@@ -151,7 +155,7 @@ The full protocol, parameters and tolerances are in
   PnL; gap counts (§3.3 definition, unchanged); maker PnL delta.
 - **Test.** Wilson intervals (H2a); bootstrap ratio intervals (H2b, H2c);
   the §4.1 cell rule (H2d).
-- **Miss.** H2a: any cell outside ±0.02 with interval excluding the formula.
+- **Miss.** H2a: any cell whose interval is disjoint from ±0.02 of the formula.
   H2b: rent ratio at k = 1, lag 0 above 0.65 (i.e. still near flat).
   H2c: gaps(21)/gaps(3) ≥ 3. H2d: ≥ 6 of 18 maker-gains cells at
   ≤ 1 ms, or fewer than 6 at 300 ms.

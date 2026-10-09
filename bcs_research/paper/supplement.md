@@ -58,7 +58,7 @@ Each maker's PnL delta is bootstrapped separately at the eighteen tape-band cell
 | 1, 4, 7 | 6 | 18 | 14 |
 | 2, 3, 4 | 6 | 3 | 3 |
 
-With a zero-latency leader the ordering is monotone in latency. With latencies spaced as measured replenishment spaces them, it is not. At two makers the faster usually gains, but the order reverses at thirteen or more snipers. At three makers without a zero-latency leader the fastest never wins consistently: the middle maker gains in all eighteen cells under {1, 3, 5} and {1, 4, 7}, while under the closely spaced {2, 3, 4} the slowest gains most often, in 10 of 18, and the middle maker pays in 14. Neither speed rank nor a particular tick value predicts the winner — three ticks wins under {1, 3, 5} and mostly pays under {2, 3, 4}. Across the eight rows, 136 of the 144 cells have at least one maker gaining and one paying and 4 have every maker paying; the slowest maker pays in 112. (The results file's own `is_redistribution` flag, which also requires the aggregate not to be maker-gains, marks 126.)
+With a zero-latency leader the ordering is monotone in latency. With latencies spaced as measured replenishment spaces them, it is not. At two makers the faster usually gains, but the order reverses at thirteen or more snipers. At three makers without a zero-latency leader the fastest never wins consistently: the middle maker gains in all eighteen cells under {1, 3, 5} and {1, 4, 7}, while under the closely spaced {2, 3, 4} the slowest gains most often, in 10 of 18, and the middle maker pays in 14. Neither speed rank nor a particular tick value predicts the winner — three ticks wins under {1, 3, 5} and mostly pays under {2, 3, 4}.
 
 ### S1.4 The Hawkes endogeneity diagnostic: a placebo-validated null
 

@@ -67,6 +67,88 @@ bcs_research/.venv/bin/python bcs_research/build_bridge.py
 bcs_research/.venv/bin/python -m pytest bcs_research/tests -q
 ```
 
+On Linux, step 1 needs `-DCMAKE_POSITION_INDEPENDENT_CODE=ON -DENABLE_IO_URING=OFF`.
+Without the first, ld refuses to link the archive into the Python module. Without
+the second, on a box with liburing-dev, the module builds and then fails at import
+(`undefined symbol: io_uring_queue_init`). `reproduce.sh` below sets both.
+
+## Reproduce a headline result (one command)
+
+```bash
+bcs_research/reproduce.sh     # from a clean checkout: cmake, a C++20 compiler, python3 >= 3.12
+```
+
+**The result.** This is the single-maker inversion cell of paper §4.1. The setup
+is one market maker, k = 3 HFTs, and a snipe-to-quote ratio of 0.0097: a 20-unit
+snipe against the calibrated 2,061-unit quote, inside the band measured on the
+BTCUSDT-perp tape. Adding the HFTs changes the maker's PnL by **+1,542.24
+[1,278.39, 1,843.60]** (n = 100, 95% bootstrap CI). The maker gains and the noise
+traders pay (−2,758.54), so the BCS incidence prediction inverts.
+
+**Why this one.** (a) The paper rests on it. The abstract states it ("a single
+maker inverts the prediction and profits"), and it is the M = 1 point that
+§4.2's maker-count sign change is measured from. (b) It is not one of the results
+the review demotes: Experiment 1's rent test, the Hawkes null, the NT-delta
+18/82 split, and the "136 of 144 cells" count. (c) It is cheap. One cell is 200
+engine runs, so it runs at the full published n = 100 with no reduced-seed
+stand-in.
+
+**What the script does.** Everything goes into `build-bcs-repro/`
+(gitignored). The script never reads or writes `build/` or `bcs_research/build/`.
+
+1. Builds `libOrderMatcher.a` with the root CMake: Release,
+   `ENABLE_ASSERTIONS=ON`, `ENABLE_IO_URING=OFF`, `-fPIC`.
+2. Creates a venv and installs `requirements.lock`.
+3. Builds the pybind bridge against that library.
+4. Fails if any engine or bridge translation unit would compile with `NDEBUG` in
+   effect, or with an `OB_*` feature macro the bridge cannot see. Either one is
+   the ODR trap described in `bindings/CMakeLists.txt`: the module links and
+   then crashes or returns garbage.
+5. Re-runs the cell with `exp6_incidence_surface.run_cell`, then checks it
+   against `results/experiments/exp6_incidence_surface.json`. Every stored
+   statistic must match: mean, CI bounds, std and n for all 16 metrics. The
+   verdict must be `maker_gains`. It then runs `exp7_3d_surface.verify_nesting()`,
+   which checks that the 3-D surface's M = 1 column reproduces three exp6 cells.
+
+**Tolerance.** Every compared float must satisfy |reproduced − stored| ≤ 1e-6. The
+values are O(10²–10⁵) and published to the unit, so the tolerance only absorbs
+last-bit libm differences between platforms. The script reports bit-exactness
+separately. Both checks were bit-exact on every platform below.
+
+| Where (from clean, incl. engine build + venv) | Toolchain | Wall time |
+| --- | --- | --- |
+| Apple-silicon laptop, macOS | Apple clang, CPython 3.13.0 | 79 s |
+| `ubuntu:24.04` container, arm64 (OrbStack) | GCC 13.3, CPython 3.13.16 | 84 s |
+| `ubuntu:24.04` container, amd64 under Rosetta | GCC 13.3, CPython 3.13.16 | 151 s |
+
+Overrides: `PYTHON` (base interpreter for the venv), `BCS_REPRO_DIR`, `JOBS`.
+
+**Seed policy.** Every experiment driver takes `n_seeds` and runs seeds
+`1..n_seeds`. Nothing draws from an unseeded generator. Each source of randomness
+in a run has its own numpy `default_rng` stream, derived from the run seed `s`:
+
+- fundamental value: `s`
+- noise trader `i`: `1000·s + i`
+- HFT `j`: `2000·s + j`
+
+The treatment and baseline arms share `s`, so they see the same fundamental path
+and noise flow, and every delta is seed-matched. Bootstrap CIs resample with
+`seed=0` (`boot_seed`). Agent constructors default to `seed=0`, never `None`.
+Python dependencies are pinned in full in `requirements.lock`; `requirements.txt`
+keeps only the direct ones.
+
+**CI.** `.github/workflows/bcs-research.yml` runs on PRs and pushes that touch
+`bcs_research/**`, `src/**`, `include/**` or `CMakeLists.txt`, and on demand. On
+`ubuntu-latest` with GCC and CPython 3.13, it runs `reproduce.sh` in full (no
+smoke mode is needed at this cost). It then runs `pytest bcs_research/tests`
+against the module that build produced.
+
+The numerical nesting check is `verify_nesting()`, called from `reproduce.sh`.
+The nesting tests under `tests/` (`test_exp7_3d_surface.py`, `test_exp6_incidence.py`)
+pin only the configuration the nest relies on: M = 1 resolves to the single
+3-tick maker, and the grid contains the published cells. They run no
+simulations.
+
 ## Results (summary)
 
 Full writeup with figures, tables, and 95% bootstrap CIs in

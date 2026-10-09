@@ -24,7 +24,7 @@ clearing rule, kept as a cross-check. It agrees with the engine on executable
 volume but can pick a different clearing price when several prices tie on max
 volume (tie-break cascade divergence — pinned in
 tests/test_batch_auction.py::test_python_matcher_divergence_pinned and
-reported in the paper, §4.4).
+reported in the paper, §5).
 
 Produces the same SimResult shape as LatencyScheduler, so all existing metrics
 (welfare decomposition, liquidity gaps, Kyle's lambda) apply unchanged.

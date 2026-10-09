@@ -133,7 +133,7 @@ def test_engine_uncross_clears_batch_at_single_price():
 def test_python_matcher_divergence_pinned():
     # Same book, two matchers: the retired Python rule clears the volume-80
     # tie at 100, the verified engine at 101. Both move all 80 units. Pinned
-    # so the documented divergence (paper §4.4) cannot regress silently.
+    # so the documented divergence (paper §5) cannot regress silently.
     py_price, py_vol, _ = discover_uncross_price(_TIE_BUYS, _TIE_SELLS)
     assert (py_price, py_vol) == (100, 80)
 

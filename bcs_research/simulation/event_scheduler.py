@@ -25,7 +25,8 @@ Semantics, exactly as written in contracts.py:
   - One callback's Orders/Cancels travel as one message burst: they arrive
     together and apply in the order returned, as a session's messages keep
     their order on a real venue. A maker's requote can therefore never
-    overtake, and trade against, its own stale quote.
+    overtake, and trade against, its own stale quote. Successive bursts from
+    one agent also arrive in send order (FIFO), however wide its jitter.
     ponytail: a burst is applied atomically; another participant's message at
     the identical nanosecond cannot interleave inside it.
 
@@ -132,7 +133,8 @@ class EventScheduler:
         self._heap = []
         self._seq = 0
         self._trades = []
-        self._races = {i: [] for i, u in enumerate(self._updates) if u.is_jump}
+        self._last_arrival = {}
+        self._races ={i: [] for i, u in enumerate(self._updates) if u.is_jump}
         snapshots = []
 
         for a in agents:
@@ -220,9 +222,18 @@ class EventScheduler:
             else:
                 raise TypeError(f"unknown action {a!r}")
         if burst:
-            jitter = self._jitter.get(agent.participant_id, 0)
-            delay = agent.order_latency_ns + (self._rng.randint(0, jitter) if jitter else 0)
-            self._push(t + delay, _ARRIVE, agent, burst, cause)
+            pid = agent.participant_id
+            jitter = self._jitter.get(pid, 0)
+            arrive = t + agent.order_latency_ns + (self._rng.randint(0, jitter) if jitter else 0)
+            # A session is FIFO: when jitter is wider than the gap between two
+            # of one agent's bursts, the later one must not overtake (or tie,
+            # and be shuffled ahead of) the earlier, or its cancels would land
+            # before the orders they target and leave those orders orphaned.
+            last = self._last_arrival.get(pid, -1)
+            if arrive <= last:
+                arrive = last + 1
+            self._last_arrival[pid] = arrive
+            self._push(arrive, _ARRIVE, agent, burst, cause)
 
     def _arrive(self, t, agent, burst, cause):
         log = self._races.get(cause)

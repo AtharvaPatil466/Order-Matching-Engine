@@ -357,11 +357,10 @@ def test_live_order_bookkeeping_matches_the_engine_through_partials_and_too_late
     # Arrange: a two-level maker that requotes after fills, sniped on jumps by
     # two jittered snipers of 4 and 7 lots (so a 10-lot is partly taken, or
     # emptied before the cancel lands), and a slow taker that takes 3 from the
-    # fresh quotes after every calm update. No maker jitter: the scheduler
-    # draws jitter per burst, so with jitter wider than the gap between two of
-    # the maker's bursts the later one can overtake the earlier, its cancels
-    # land before the orders they target, and those orders rest orphaned
-    # (EventMaker too). A real session is FIFO; the scheduler should be.
+    # fresh quotes after every calm update. The maker is jittered wider than
+    # the gap between its own bursts, which only stays consistent because the
+    # scheduler keeps each session FIFO (an overtaking cancel would orphan
+    # the order it targets).
     ids = itertools.count(NOISE * 1_000_000_000 + 1)
 
     def calm_taker(t, u, view):
@@ -382,7 +381,7 @@ def test_live_order_bookkeeping_matches_the_engine_through_partials_and_too_late
 
     # Act
     res, h = run_on_engine(agents, mixed_path(150, seed=3), seed=3,
-                           race_jitter_ns={SNIPER_A: 6_000, SNIPER_B: 6_000})
+                           race_jitter_ns={MAKER: 6_000, SNIPER_A: 6_000, SNIPER_B: 6_000})
 
     # Assert: the run exercised every path...
     maker_outcomes = Counter(a.outcome for r in res.races for a in r.arrivals

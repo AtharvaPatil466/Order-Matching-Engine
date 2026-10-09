@@ -217,3 +217,26 @@ def test_path_updates_out_of_order_are_rejected():
     updates = [SignalUpdate(5_000, V0), SignalUpdate(1_000, V0)]
     with pytest.raises(ValueError, match="ascend"):
         run([Scripted(1)], ListPath(updates, 10_000))
+
+
+def test_one_agents_bursts_arrive_in_send_order_even_when_jitter_exceeds_their_gap():
+    # Arrange: an order on one update and its cancel on the next, 1 us apart,
+    # with 6 us of jitter per burst. A real session is FIFO, so the cancel must
+    # never overtake (or tie and be shuffled ahead of) the order it targets.
+    updates = [SignalUpdate(1_000, V0, is_jump=True), SignalUpdate(2_000, V0, is_jump=True)]
+
+    def react(t, u, view):
+        return [Order(11, SELL, V0, 5, LIMIT)] if u.t_ns == 1_000 else [Cancel(11)]
+
+    for seed in range(50):
+        agent = Scripted(1, signal=react)
+
+        # Act
+        res = run([agent], ListPath(updates, 1_000_000), seed=seed,
+                  race_jitter_ns={1: 6_000})
+
+        # Assert
+        order, cancel = (r.arrivals[0] for r in res.races)
+        assert cancel.arrival_ns > order.arrival_ns, seed
+        assert cancel.outcome == "cancelled", seed
+        assert res.snapshots[-1].best_ask == 0, seed

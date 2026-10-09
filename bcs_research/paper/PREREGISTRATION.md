@@ -47,7 +47,8 @@ public.
 - **Magnitude bands.** "Within ±x of the prediction" means: HIT if the 95%
   interval lies inside the band, MISS if it is disjoint from it, otherwise
   INCONCLUSIVE. Not "the interval contains the prediction": across a dozen
-  cells that rule fails a correct model about half the time by chance.
+  cells that rule fails a correct model about half the time by chance. In a
+  miss line, "outside ±x" means the interval is disjoint from the band.
 - **Tape band.** Where a prediction counts "maker-gains cells at the tape
   band", it means the paper's 18 cells: snipe/quote ratios {0.0049, 0.0097} ×
   HFT counts {1, 2, 3, 5, 6, 7, 8, 13, 21} (`exp6_incidence_surface.K_GRID`),
@@ -136,8 +137,9 @@ The full protocol, parameters and tolerances are in
     k ∈ {1, 3, 8, 21} and lag/ε ∈ {0, 0.25, 0.5, 1.5}: within ±0.02 absolute.
     At lag 0 that is 1/(k + 1):
     0.50, 0.25, 0.11, 0.045.
-  - **H2b** — with snipe size = quote size, total sniper rent at lag 0 grows
-    as k/(k + 1): rent(k)/rent(21) = (k/(k + 1))/(21/22), so 0.52 at k = 1 and
+  - **H2b** — for a fixed-spread maker that cancels on every signal (the
+    replication spec's LP), with snipe size = quote size, total sniper rent at
+    lag 0 grows as k/(k + 1): rent(k)/rent(21) = (k/(k + 1))/(21/22), so 0.52 at k = 1 and
     0.79 at k = 3, each within ±10%. At lag > ε it is flat: every
     rent(k)/rent(21) in [0.9, 1.1] (TOST). The tick model's flat rent (paper
     Exp 3) is the slow-maker special case.
@@ -188,7 +190,7 @@ The full protocol, parameters and tolerances are in
     less.
 - **Test.** Bootstrap ratio interval (H3a); per-snipe bootstrap and OLS
   slope with seed-clustered bootstrap (H3b); cell counts (H3c).
-- **Miss.** H3a outside ±10% with interval excluding the formula; H3b
+- **Miss.** H3a outside ±10%; H3b
   Laplace per-snipe profit varying with h (slope interval excluding 0) or
   random-walk slope ≥ 0; H3c count under jumps ≥ count under the random walk.
 
@@ -380,7 +382,7 @@ iteration for M ≥ 2; a fixed cost of quoting with exit.
     closely spaced cells, generalising the paper's {2, 3, 4} reversal.
 - **Test.** One-sided binomial against chance 1/M; the hit-rate bands above.
 - **Miss.** Event model below 60%, or below 50% on the closely spaced sets;
-  tick model closely spaced hit rate ≥ 70%.
+  tick model overall hit rate below 50%, or closely spaced hit rate ≥ 70%.
 
 ### P11. Global parameter sensitivity
 
@@ -391,15 +393,17 @@ iteration for M ≥ 2; a fixed cost of quoting with exit.
   [0, 2], c_speed [0, rent/3], fees F [0, 0.3b]. Outcomes: total sniper rent,
   maker PnL delta, noise-trader toll, gap rate. Index intervals by bootstrap.
 - **Predictions.**
-  - **primary (H11a)** — BCS Prop 5(iii)–(v): first-order index of sniper
-    latency level (lag fixed) < 0.05 and of c_speed < 0.05 for total sniper
-    rent, while λ_j and b together carry ≥ 0.5 of its variance.
+  - **primary (H11a)** — BCS Prop 5(iv)–(v): the first-order index of sniper
+    latency level (lag fixed) is < 0.05 for total sniper rent, while λ_j and b
+    together carry ≥ 0.5 of its variance. (c_speed enters only the waste
+    outcome; its zero index on gross rent is mechanical and is not counted as
+    a hit.)
   - **H11b** — for maker PnL delta, adverse sensitivity and snipe/quote ratio
     rank in the top three total-order indices, and interactions are strong:
     Σ total-order − Σ first-order ≥ 0.2 (the paper's "surface does not
     reduce to one dimension").
   - **H11c** — the noise-trader toll is nearly invariant to k: total-order
     index of k < 0.1 (the paper's factor-of-two toll across 63 cells).
-- **Miss.** H11a either index ≥ 0.1, or λ_j and b below 0.35 together;
+- **Miss.** H11a latency-level index ≥ 0.1, or λ_j and b below 0.35 together;
   H11b either named parameter outside the top three, or interactions < 0.1;
   H11c index of k ≥ 0.2.

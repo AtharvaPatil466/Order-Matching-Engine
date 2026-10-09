@@ -269,7 +269,7 @@ What calibration adds is magnitude. Normalised by traded notional, HFT rent move
 
 $n=100$ seeds; the $N=1$ row reproduces the published single-maker figure, so the sweep nests it rather than re-specifying it, and the zero-sum residual stays at machine zero throughout. The ≈0.4 bp latency-arbitrage tax that Aquilina, Budish, and O'Neill (2022) measure from regulator-held exchange messages falls inside the range these arms span — envelope consistency between a simulated and a directly measured quantity, not agreement on a number.
 
-The mechanism is visible in the per-maker decomposition. At $N=5$ maker PnL is monotone in latency, the fastest earning $+2{,}014$ and the slowest losing $-2{,}393$, because a fast competitor replenishes the touch before the slow maker's stale quote can be sniped. The slow maker still absorbs adverse selection; what changes is that it is no longer the only supplier. The single-maker absorption bias is therefore measured and removed rather than asserted as a caveat.
+The mechanism is visible in the per-maker decomposition. At $N=5$ maker PnL is monotone in latency, the fastest earning $+2{,}014$ and the slowest losing $-2{,}393$, because a fast competitor replenishes the touch before the slow maker's stale quote can be sniped. The slow maker still absorbs adverse selection; what changes is that it is no longer the only supplier.
 
 At calibrated parameters the per-tick auction is still the worst batch cell (Supplement S1.2). A second calibrated snipe size, 50 units, is the starting point of §4.1.
 
@@ -304,8 +304,6 @@ The episode shows that a re-implementation checked against source code can still
 
 ### 6.1 Implications for market design
 
-Three findings bear on market design.
-
 First, the class-level answer to "who bears the latency tax" is structure-dependent, so a regulator cannot read it off the existence of the tax. Whether summed maker PnL is positive or negative turns on how many makers supply the book and on the snipe-to-depth ratio prevailing there — quantities that differ across venues and that no public feed reports — so an incidence claim transported from one market to another is an assumption rather than a measurement.
 
 Second, at the tape-measured ratio latency competition sorts liquidity providers rather than taxing them uniformly: one maker typically gains while another pays, and which one depends on how their latencies are spaced. A remedy justified as protecting "liquidity providers" protects some of them at the expense of others.
@@ -313,8 +311,6 @@ Second, at the tape-measured ratio latency competition sorts liquidity providers
 Third, the per-tick auction backfires: it raises maker loss to 41.3 against the continuous 28.5, and a maker slower than the interval does not by itself explain it (§4.3). Batching is a remedy only above a minimum cadence, and what fixes that cadence is not yet measured. Because the maker's recovery above that floor is monotone while the rent reduction is not statistically resolved, the remedy is better described by whom it protects than by what it takes from snipers.
 
 ### 6.2 Limitations
-
-Several limitations bound the strength of these conclusions.
 
 **First, the elasticity of uninformed demand.** Noise traders cross at a fixed per-tick probability in every arm except the elasticity surface (§3.2), so the volume a maker earns its widened spread on cannot fall when it widens. §4.2 relaxes this to unit elasticity at a single maker and the maker-gains region largely remains, as the leg decomposition predicts, but elasticity above unit is untested and the within-class split has not been tested against elastic demand at all.
 
@@ -330,7 +326,7 @@ None of the four changes the structural point: the identity of the class bearing
 
 On the structural axes, what stays open is a held-out test of whether the latency configuration predicts which maker wins (§4.2), elasticity above unit and its interaction with the maker-count surface, and the elasticity surface at $n=100$; both surfaces resolve their boundaries only to the width of the grid.
 
-First, the single-venue, single-asset scope should be relaxed. A multi-venue extension would let us study latency arbitrage across correlated instruments and order routing, the setting in which the mechanical-arbitrage evidence motivating BCS is most salient, where snipers can compete across books rather than within one.
+First, the single-venue, single-asset scope should be relaxed. A multi-venue extension would let us study latency arbitrage across correlated instruments and order routing, where snipers can compete across books rather than within one.
 
 Second, the strategy spaces of both the market maker and the HFTs are deliberately narrow and should be enriched — for example, inventory-aware or quote-fade defences for the maker and more elaborate timing or order-type strategies for the snipers — to test how far the welfare decomposition and the batch-auction recovery are robust to more sophisticated play on both sides.
 

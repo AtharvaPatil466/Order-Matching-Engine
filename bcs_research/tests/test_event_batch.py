@@ -333,3 +333,38 @@ def test_rejects_bad_configuration():
                {"interval_ns": TAU, "price_rule": "walras"}):
         with pytest.raises(ValueError):
             EventBatchScheduler(_harness(), 1, **kw)
+
+
+# --- exp11's pieces -----------------------------------------------------------
+
+class _Book:
+    def __init__(self, bid, ask):
+        self._bid, self._ask = bid, ask
+
+    def best_bid(self):
+        return self._bid
+
+    def best_ask(self):
+        return self._ask
+
+
+def test_exp11_competitive_sniper_bids_its_value_less_one_tick():
+    sys.path.insert(0, str(_R / "experiments"))
+    import exp11_batch_semantics as E
+    s = E.CompetitiveSniper(2, 1)
+    [buy] = s.on_signal(0, SignalUpdate(0, 1010.4, True), _Book(990, 1000))
+    [sell] = s.on_signal(0, SignalUpdate(0, 979.6, True), _Book(990, 1000))
+    assert (buy.side, buy.price, sell.side, sell.price) == (BUY, 1010, SELL, 980)
+    assert s.on_signal(0, SignalUpdate(0, 995.0, True), _Book(990, 1000)) == []
+
+
+@pytest.mark.parametrize("arm", ["continuous", (1_000_000, "random", "pressure")])
+def test_exp11_short_run_closes_the_books_under_both_fee_schedules(arm):
+    sys.path.insert(0, str(_R / "experiments"))
+    import exp11_batch_semantics as E
+    row = E.run_once({**E.CFG, "duration_s": 2}, 1, arm, "competitive")
+    assert row["n_trades"] > 0
+    for fees in ("zero", "taker_heavy"):
+        total = (row[f"maker_edge_{fees}"] + row[f"sniper_edge_{fees}"] - row[f"noise_cost_{fees}"]
+                 + row[f"exchange_{fees}"])
+        assert abs(total) < 1e-9 and abs(row[f"residual_{fees}"]) < 1e-9

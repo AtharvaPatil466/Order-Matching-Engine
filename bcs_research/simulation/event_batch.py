@@ -47,13 +47,15 @@ Semantics implemented here, on top of EventScheduler's clock and latencies:
                  lowest). This is BCS's Bertrand outcome for a stale quote
                  facing several bidders (Prop 6(iii)); see PREREGISTRATION P9.
     The engine cannot do "pressure" itself, so the scheduler reprices: the
-    engine still decides WHO trades and HOW MUCH; the price is moved within
-    the set of prices the engine's own first two steps rank equal, using the
-    retired discover_uncross_price (reference=None) on the pre-uncross book.
-    A reprice happens only when both prices leave the same cumulative buy
-    and sell quantities eligible, i.e. the engine's fills are exactly the
-    fills at the new price; otherwise the engine price stands and the batch
-    is counted in `reprice_refused`.
+    engine still decides WHO trades and HOW MUCH; only the price moves, to
+    the retired discover_uncross_price (reference=None) on the pre-uncross
+    book. A reprice happens only when that rule clears the same volume and
+    its price lies between every filled seller's limit and every filled
+    buyer's limit, which makes the engine's fills exactly the fills at the
+    new price (priority order does not depend on the price); otherwise the
+    engine price stands and the batch is counted in `reprice_refused`.
+    ponytail: when the tie is an interval where supply equals demand, BCS
+    take its midpoint; this rule takes the cascade's end of it.
   - No aggressor in an auction (the engine stamps every uncross trade
     aggressor=Buy). For fee purposes the order that arrived later is the
     taker; an order resting from an earlier batch is always the maker.
@@ -137,6 +139,7 @@ class EventBatchScheduler(EventScheduler):
     def run(self, agents, path):
         self._h.set_trading_state(self._sym, be.TradingState.AuctionOpen)
         self._window = {}           # order id -> (agent, Order, race slot, arrival rank)
+        self._limit = {}            # order id -> limit price, every order submitted
         self._rank = 0
         self._armed = False
         self._dirty = False         # a cancel changed the book since the last publish
@@ -228,6 +231,7 @@ class EventBatchScheduler(EventScheduler):
         rejected = {}
         for agent, m, _, _ in entries:
             otype = _LIMIT if m.order_type == _IOC else m.order_type
+            self._limit[m.order_id] = m.price
             tif = m.tif if m.tif is not None else _GTC
             ok, reason, _ = self._h.submit_order(self._sym, m.order_id, agent.participant_id,
                                                  m.side, m.price, m.quantity, otype, tif)
@@ -236,12 +240,12 @@ class EventBatchScheduler(EventScheduler):
         return rejected
 
     def _pressure_target(self):
-        """(price, cumulative-curve key) of the reference-free cascade, pre-uncross."""
+        """(price, volume) of the reference-free cascade on the pre-uncross book."""
         snap = self._h.snapshot(self._sym, _BOOK_DEPTH)
-        buys = [(lv.price, lv.total_quantity) for lv in snap.bids]
-        sells = [(lv.price, lv.total_quantity) for lv in snap.asks]
-        price, _, _ = discover_uncross_price(buys, sells, reference=None)
-        return None if price is None else (price, buys, sells)
+        price, vol, _ = discover_uncross_price([(lv.price, lv.total_quantity) for lv in snap.bids],
+                                               [(lv.price, lv.total_quantity) for lv in snap.asks],
+                                               reference=None)
+        return None if price is None else (price, vol)
 
     def _clearing_price(self, trades, target):
         """The price every trade of this batch is recorded at."""
@@ -250,8 +254,10 @@ class EventBatchScheduler(EventScheduler):
         engine_price = trades[0].price
         if target is None or target[0] == engine_price:
             return engine_price
-        price, buys, sells = target
-        if _eligible(buys, sells, price) != _eligible(buys, sells, engine_price):
+        price, vol = target
+        lo = max(self._limit[t.sell_order_id] for t in trades)
+        hi = min(self._limit[t.buy_order_id] for t in trades)
+        if vol != sum(t.quantity for t in trades) or not lo <= price <= hi:
             self.reprice_refused += 1
             return engine_price
         self.repriced += 1
@@ -273,11 +279,6 @@ class EventBatchScheduler(EventScheduler):
             for oid in (tr.buy_order_id, tr.sell_order_id):
                 filled[oid] = filled.get(oid, 0) + tr.quantity
         return filled
-
-
-def _eligible(buys, sells, p):
-    """Cumulative buy and sell quantity that can trade at p."""
-    return (sum(q for bp, q in buys if bp >= p), sum(q for sp, q in sells if sp <= p))
 
 
 def _outcome(m, filled):

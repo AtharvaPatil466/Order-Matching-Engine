@@ -436,12 +436,29 @@ def run_tasks(tasks, workers, jsonl_path=None, log=print) -> dict:
     return rows
 
 
+def curve_points(c: dict, runs_by_h) -> list[dict]:
+    """π_LP(h) and D(h) at every grid point against spec §3's curves, band 5% of
+    lam_i·h*. `runs_by_h` holds one list of per-seed rows per grid point."""
+    lose, tol = race_loss_probability(c["n_firms"]), CURVE_BAND * SPEC_LAM_INVEST * c["h_star"]
+    by_h = {rs[0]["half_spread"]: rs for rs in runs_by_h}
+    points = []
+    for h, rs in sorted(by_h.items()):
+        prize = c["lam_jump"] * SPEC_B * math.exp(-h / SPEC_B)
+        points.append({
+            "h": h,
+            "pi_lp": judged(bootstrap_ci([r["lp_rate"] for r in rs], n_bootstrap=N_BOOTSTRAP,
+                                         seed=BOOT_SEED), SPEC_LAM_INVEST * h - prize * lose, tol),
+            "D": judged(bootstrap_ci([indifference(r) for r in rs], n_bootstrap=N_BOOTSTRAP,
+                                     seed=BOOT_SEED), SPEC_LAM_INVEST * h - prize, tol),
+        })
+    return points
+
+
 def summarize_cell(c: dict, seeds, duration_s, rows) -> dict:
     """Every spec §5 row for one cell, with theory, interval and verdict."""
     lam_jump, n = c["lam_jump"], c["n_firms"]
     eq = laplace_equilibrium(SPEC_LAM_INVEST, lam_jump, SPEC_B, n)
     h_star, lose = c["h_star"], race_loss_probability(n)
-    curve_tol = CURVE_BAND * SPEC_LAM_INVEST * h_star
 
     def run(h, s, jitter=0):
         return rows[(lam_jump, n, h, s, duration_s, jitter)]
@@ -462,17 +479,7 @@ def summarize_cell(c: dict, seeds, duration_s, rows) -> dict:
     snipe_profit = boot([r["sniper_edge"] / r["sniper_fills"] for r in at_star if r["sniper_fills"]])
     stale = wilson(sum(r["n_sniper_trades"] for r in at_star), sum(r["n_trades"] for r in at_star))
 
-    curves = []
-    for h in sorted(set(c["grid_star"] + c["grid_zero"])):
-        prize = lam_jump * SPEC_B * math.exp(-h / SPEC_B)
-        rs = [run(h, s) for s in seeds]
-        curves.append({
-            "h": h,
-            "pi_lp": judged(boot([r["lp_rate"] for r in rs]),
-                            SPEC_LAM_INVEST * h - prize * lose, curve_tol),
-            "D": judged(boot([indifference(r) for r in rs]), SPEC_LAM_INVEST * h - prize, curve_tol),
-        })
-
+    curves = curve_points(c, [[run(h, s) for s in seeds] for h in c["grid_star"] + c["grid_zero"]])
     all_runs = [r for (lj, nf, *_), r in rows.items() if lj == lam_jump and nf == n]
     take_theory = lam_jump * SPEC_B * math.exp(-c["grid_star"][3] / SPEC_B) * lose
     out = {

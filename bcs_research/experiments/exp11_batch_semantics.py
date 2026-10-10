@@ -205,8 +205,8 @@ def measure(res, cls):
     return row
 
 
-def arms():
-    return [CONTINUOUS] + [(tau, r, p) for tau in INTERVALS_NS for r in RATIONINGS for p in PRICE_RULES]
+def arms(intervals=INTERVALS_NS, rationings=RATIONINGS):
+    return [CONTINUOUS] + [(tau, r, p) for tau in intervals for r in rationings for p in PRICE_RULES]
 
 
 def arm_label(arm):
@@ -215,9 +215,11 @@ def arm_label(arm):
 
 PAIRED = ("maker_edge_zero", "sniper_edge_zero", "noise_cost_zero", "maker_edge_taker_heavy",
           "maker_pnl_zero", "maker_sniper_vol_per_jump")
+ROWS_KEPT = ("maker_edge_zero", "sniper_edge_zero", "noise_cost_zero", "maker_sniper_vol_per_jump",
+             "race_sniper_fill_share")   # per-seed rows stored for re-analysis; CIs cover every metric
 
 
-def summarize(cfg, rows_by_cell, seeds, boot_seed=0):
+def summarize(cfg, rows_by_cell, seeds, intervals=INTERVALS_NS, rationings=RATIONINGS, boot_seed=0):
     keys = sorted(next(iter(rows_by_cell.values()))[0])
     cells = []
     for (kind, label), rows in rows_by_cell.items():
@@ -226,24 +228,25 @@ def summarize(cfg, rows_by_cell, seeds, boot_seed=0):
                   for k in PAIRED}
         cells.append({"sniper_kind": kind, "arm": label,
                       "ci": bootstrap_ci_table(rows, keys, seed=boot_seed),
-                      "delta_vs_continuous": paired, "rows": rows})
+                      "delta_vs_continuous": paired,
+                      "rows": [{k: r[k] for k in ROWS_KEPT} for r in rows]})
     lag = 2 * (cfg["maker_latency_ns"] - cfg["sniper_latency_ns"])
     theory = {"maker_lag_ns": lag, "half_spread": half_spread(cfg),
-              "slow_lp_exposure_by_tau": {str(t): fba_slow_lp_exposure(lag, t) for t in INTERVALS_NS}}
-    return {"status": STATUS, "config": cfg, "seeds": list(seeds), "intervals_ns": INTERVALS_NS,
-            "rationings": RATIONINGS, "price_rules": PRICE_RULES, "sniper_kinds": SNIPER_KINDS,
+              "slow_lp_exposure_by_tau": {str(t): fba_slow_lp_exposure(lag, t) for t in intervals}}
+    return {"status": STATUS, "config": cfg, "seeds": list(seeds), "intervals_ns": list(intervals),
+            "rationings": list(rationings), "price_rules": PRICE_RULES, "sniper_kinds": SNIPER_KINDS,
             "theory": theory, "cells": cells}
 
 
-def run_grid(cfg, n_seeds, log=print):
+def run_grid(cfg, n_seeds, intervals=INTERVALS_NS, rationings=RATIONINGS, log=print):
     seeds = range(1, n_seeds + 1)
     rows_by_cell = {}
     t0 = time.time()
     for kind in SNIPER_KINDS:
-        for arm in arms():
+        for arm in arms(intervals, rationings):
             rows_by_cell[(kind, arm_label(arm))] = [run_once(cfg, s, arm, kind) for s in seeds]
             log(f"[{time.time() - t0:7.1f}s] {kind:11s} {arm_label(arm)}")
-    return summarize(cfg, rows_by_cell, seeds)
+    return summarize(cfg, rows_by_cell, seeds, intervals, rationings)
 
 
 def print_summary(report):
@@ -382,13 +385,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=None)
     ap.add_argument("--tick-probe", action="store_true")
+    ap.add_argument("--intervals-ns", type=int, nargs="+", default=INTERVALS_NS)
+    ap.add_argument("--rationings", nargs="+", default=list(RATIONINGS))
+    ap.add_argument("--out-name", default="exp11_batch_semantics.json")
     args = ap.parse_args(argv)
     if args.tick_probe:
         report = tick_interval1_probe(args.seeds or 100)
         out = _ROOT / "results" / "experiments" / "exp11_interval1_probe.json"
     else:
-        report = run_grid(CFG, args.seeds or 20)
-        out = _ROOT / "results" / "pilot" / "exp11_batch_semantics.json"
+        report = run_grid(CFG, args.seeds or 20, args.intervals_ns, args.rationings)
+        out = _ROOT / "results" / "pilot" / args.out_name
         print_summary(report)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, sort_keys=True))

@@ -59,3 +59,27 @@ def test_rule_miss_on_overall_or_on_the_closely_spaced_sets():
     mixed = _configs(40, 0) + _configs(0, 12, close=True)
     assert x.classify(mixed)["closely_spaced_hit_rate"]["upper"] < 0.5
     assert x.classify(mixed)["verdict"] == "MISS"
+
+
+def test_generator_starts_with_p10s_list_and_avoids_the_papers_sets():
+    cs = x.generate_configs(30)
+    assert len(cs) == 39 and [tuple(int(t) for t in c["ticks"]) for c in cs[:9]] == list(x.P10_LISTED)
+    assert [c["closely_spaced"] for c in cs[:9]] == [True, True, True] + [False] * 6
+    for c in cs:
+        assert len(set(c["ticks"])) == len(c["ticks"]) and frozenset(c["ticks"]) not in x.PAPER_CONFIGS
+        assert sorted(c["slots"]) == list(range(len(c["ticks"])))
+        assert c["k"] in x.K_GRID and c["ratio"] in x.TAPE_BAND
+        if c["family"] == "close":
+            assert c["closely_spaced"]
+    assert {len(c["ticks"]) for c in cs[9:]} == set(x.MAKER_COUNTS)
+    assert x.generate_configs(30) == cs                     # fixed generator seed
+
+
+def test_a_matched_pair_maps_latencies_to_slots_and_scores():
+    c = {**x.generate_configs(0)[4], "index": 4}           # {1, 7} ticks
+    cfg = {**x.market_cfg(), "duration_s": 2}
+    row = x.run_config_seed(c, 4001, cfg)
+    assert row["latency_ns"] == [int(c["ticks"][r] * x.TICK_NS) for r in c["slots"]]
+    assert len(row["delta"]) == 2 and row["edge_off"] != row["edge_on"]
+    s = x.score_config(c, [row, row])
+    assert s["hit"] == x.is_hit(row["latency_ns"], row["delta"]) and s["n_seeds"] == 2

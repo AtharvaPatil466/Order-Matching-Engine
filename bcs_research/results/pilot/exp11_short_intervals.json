@@ -1,0 +1,4446 @@
+{
+  "cells": [
+    {
+      "arm": "continuous",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.11428228288333,
+          "mean": 45.640591770666674,
+          "n": 30,
+          "std": 1.4814560453762633,
+          "upper": 46.12454143459166
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -14.351766685516829,
+          "mean": -13.825618377259657,
+          "n": 30,
+          "std": 1.4212340472724359,
+          "upper": -13.31463260367028
+        },
+        "maker_edge_zero": {
+          "lower": -1.2841913917673649,
+          "mean": -0.7854492999263252,
+          "n": 30,
+          "std": 1.3702358155695997,
+          "upper": -0.29625178531276775
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -14.594203956479017,
+          "mean": -4.434618420719498,
+          "n": 30,
+          "std": 29.10291548343513,
+          "upper": 6.526259345359307
+        },
+        "maker_pnl_zero": {
+          "lower": -1.5064832635837069,
+          "mean": 8.605550656613836,
+          "n": 30,
+          "std": 29.008706103357255,
+          "upper": 19.52341200844116
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7849667195222496,
+          "mean": 0.7985989545246603,
+          "n": 30,
+          "std": 0.03542186932037541,
+          "upper": 0.8105910682188413
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.9991666666667,
+          "mean": 653.0333333333333,
+          "n": 30,
+          "std": 21.9855760796836,
+          "upper": 660.2333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.12645423677823,
+          "mean": 37.669060397257816,
+          "n": 30,
+          "std": 1.5158258584234099,
+          "upper": 38.16863029448147
+        },
+        "noise_cost_zero": {
+          "lower": 10.762318245291484,
+          "mean": 10.928780605591156,
+          "n": 30,
+          "std": 0.4561138326458761,
+          "upper": 11.082145175447456
+        },
+        "one_sided_share": {
+          "lower": 0.04683263888888888,
+          "mean": 0.047646111111111104,
+          "n": 30,
+          "std": 0.002280723095754102,
+          "upper": 0.048406125
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7849667195222496,
+          "mean": 0.7985989545246603,
+          "n": 30,
+          "std": 0.03542186932037541,
+          "upper": 0.8105910682188413
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.180501622381295e-12,
+          "mean": 1.9634664264837435e-13,
+          "n": 30,
+          "std": 3.899830913717131e-12,
+          "upper": 1.5775055336083199e-12
+        },
+        "residual_zero": {
+          "lower": -1.2003672130352546e-12,
+          "mean": 1.9468870959826744e-13,
+          "n": 30,
+          "std": 3.9070067868035435e-12,
+          "upper": 1.5841313446192842e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 5.442814795005268,
+          "mean": 5.854087003850811,
+          "n": 30,
+          "std": 1.1691080931125777,
+          "upper": 6.283236797562332
+        },
+        "sniper_edge_zero": {
+          "lower": 11.242969606913157,
+          "mean": 11.714229905517476,
+          "n": 30,
+          "std": 1.309367892211774,
+          "upper": 12.18517934078292
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -0.42458012431600106,
+          "mean": 2.139214071355261,
+          "n": 30,
+          "std": 7.50055426521829,
+          "upper": 4.922622472860743
+        },
+        "sniper_pnl_zero": {
+          "lower": 5.413309904622409,
+          "mean": 7.9993569730219285,
+          "n": 30,
+          "std": 7.463108711118406,
+          "upper": 10.786581578146011
+        },
+        "vol_maker_noise": {
+          "lower": 527.5316666666666,
+          "mean": 535.6666666666666,
+          "n": 30,
+          "std": 22.380547108792687,
+          "upper": 543.2008333333333
+        },
+        "vol_maker_sniper": {
+          "lower": 114.66583333333334,
+          "mean": 117.36666666666666,
+          "n": 30,
+          "std": 7.503258551382118,
+          "upper": 120.00083333333333
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_pnl_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "sniper_edge_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": -0.004739047858957193,
+          "maker_sniper_vol_per_jump": 0.8461538461538461,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8461538461538461,
+          "sniper_edge_zero": 10.694313156958222
+        },
+        {
+          "maker_edge_zero": 1.0409629826614284,
+          "maker_sniper_vol_per_jump": 0.7532467532467533,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7532467532467533,
+          "sniper_edge_zero": 9.175526966056418
+        },
+        {
+          "maker_edge_zero": -1.8666148883401092,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 12.779982275426077
+        },
+        {
+          "maker_edge_zero": 0.391098220922473,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 9.991754031348814
+        },
+        {
+          "maker_edge_zero": 0.0987394494831795,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 11.446450418318651
+        },
+        {
+          "maker_edge_zero": -1.0952569673319317,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 11.036595455681825,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 12.131852423013736
+        },
+        {
+          "maker_edge_zero": 0.29536993627704455,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 10.998825606343118
+        },
+        {
+          "maker_edge_zero": -4.110620261451257,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 15.085457061546565
+        },
+        {
+          "maker_edge_zero": -2.331584900848601,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 13.38820539291337
+        },
+        {
+          "maker_edge_zero": -0.6290089431721594,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 11.82851444528935
+        },
+        {
+          "maker_edge_zero": -1.8045041845748329,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 12.706478005949512
+        },
+        {
+          "maker_edge_zero": -1.1395795448059547,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 11.727162622642838
+        },
+        {
+          "maker_edge_zero": -1.1850335628752202,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 12.710958675476157
+        },
+        {
+          "maker_edge_zero": 0.5536722961882948,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.03612134361473,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 10.482449047426426
+        },
+        {
+          "maker_edge_zero": -0.47834063793773346,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 11.637663430964539
+        },
+        {
+          "maker_edge_zero": 1.7675070186078075,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 9.7576888954567
+        },
+        {
+          "maker_edge_zero": 0.7924121472755651,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 10.794663335014276
+        },
+        {
+          "maker_edge_zero": -1.7756164844593747,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.913532734615814,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 12.689149219075174
+        },
+        {
+          "maker_edge_zero": -0.022602384015369577,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 10.712306354300807
+        },
+        {
+          "maker_edge_zero": -1.465724442108325,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 11.645050322306146
+        },
+        {
+          "maker_edge_zero": -0.10785299339824203,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 11.94097941022246
+        },
+        {
+          "maker_edge_zero": -3.012476697831931,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.465031309930191,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 13.477508007762133
+        },
+        {
+          "maker_edge_zero": -1.2034328916964836,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 11.954530580957034
+        },
+        {
+          "maker_edge_zero": 0.1361937477090709,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 10.982326388215386
+        },
+        {
+          "maker_edge_zero": 0.24704220541678473,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.301753633693489,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 10.054711428276693
+        },
+        {
+          "maker_edge_zero": -1.4708609070243905,
+          "maker_sniper_vol_per_jump": 0.7816901408450704,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7816901408450704,
+          "sniper_edge_zero": 12.528211632553742
+        },
+        {
+          "maker_edge_zero": -3.8755857948760126,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 14.075798400087326
+        },
+        {
+          "maker_edge_zero": -0.8762827652256453,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 11.075555440114568
+        },
+        {
+          "maker_edge_zero": 0.7543656406730005,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 10.60914463995743
+        },
+        {
+          "maker_edge_zero": -1.1851243431718705,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.158555208378813,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 12.34367955155066
+        }
+      ],
+      "sniper_kind": "stale"
+    },
+    {
+      "arm": "tau=10000ns/time/engine",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.10373012110002,
+          "mean": 45.63127457,
+          "n": 30,
+          "std": 1.4907351416917536,
+          "upper": 46.120480617691655
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -14.3538957241957,
+          "mean": -13.823850965603505,
+          "n": 30,
+          "std": 1.429099486620077,
+          "upper": -13.311545519628725
+        },
+        "maker_edge_zero": {
+          "lower": -1.2849991423559606,
+          "mean": -0.7843426316035059,
+          "n": 30,
+          "std": 1.374674041420085,
+          "upper": -0.2951492881052874
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -14.663472304334917,
+          "mean": -4.557374483398261,
+          "n": 30,
+          "std": 29.067212574730622,
+          "upper": 6.4351448127011395
+        },
+        "maker_pnl_zero": {
+          "lower": -1.6130027819063382,
+          "mean": 8.48213385060174,
+          "n": 30,
+          "std": 28.97447389534233,
+          "upper": 19.44846305740099
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.8,
+          "mean": 652.9,
+          "n": 30,
+          "std": 22.104826019069527,
+          "upper": 660.1333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.118473055684206,
+          "mean": 37.66103463772762,
+          "n": 30,
+          "std": 1.5196063850471757,
+          "upper": 38.16772906811635
+        },
+        "noise_cost_zero": {
+          "lower": 10.761461572314817,
+          "mean": 10.926743254394287,
+          "n": 30,
+          "std": 0.4569510419627529,
+          "upper": 11.080667740623081
+        },
+        "one_sided_share": {
+          "lower": 0.04682759722222222,
+          "mean": 0.04764166666666666,
+          "n": 30,
+          "std": 0.0022810440673158945,
+          "upper": 0.04839559722222221
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.1329663133589437e-12,
+          "mean": 2.0439946032032215e-13,
+          "n": 30,
+          "std": 3.842639677045441e-12,
+          "upper": 1.5591972157835696e-12
+        },
+        "residual_zero": {
+          "lower": -1.1313261438772303e-12,
+          "mean": 2.0274152727021526e-13,
+          "n": 30,
+          "std": 3.85139320824794e-12,
+          "upper": 1.553246420371579e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 5.43995559559913,
+          "mean": 5.85361103333112,
+          "n": 30,
+          "std": 1.173509082700476,
+          "upper": 6.285209473993539
+        },
+        "sniper_edge_zero": {
+          "lower": 11.24171146702303,
+          "mean": 11.711085885997784,
+          "n": 30,
+          "std": 1.3155585890606676,
+          "upper": 12.18517934078292
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -0.43211089651774354,
+          "mean": 2.1161467008326986,
+          "n": 30,
+          "std": 7.508856263338762,
+          "upper": 4.9155596265008406
+        },
+        "sniper_pnl_zero": {
+          "lower": 5.396372837222633,
+          "mean": 7.973621553499366,
+          "n": 30,
+          "std": 7.472368670035977,
+          "upper": 10.781056737806736
+        },
+        "vol_maker_noise": {
+          "lower": 527.3991666666667,
+          "mean": 535.5666666666667,
+          "n": 30,
+          "std": 22.421244885648573,
+          "upper": 543.1333333333333
+        },
+        "vol_maker_sniper": {
+          "lower": 114.6,
+          "mean": 117.33333333333333,
+          "n": 30,
+          "std": 7.5114727066150095,
+          "upper": 120.0
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": -0.00604882162516116,
+          "mean": 0.001767411656152736,
+          "n": 30,
+          "std": 0.023541346743137626,
+          "upper": 0.011402607907401042
+        },
+        "maker_edge_zero": {
+          "lower": -0.004075422276833179,
+          "mean": 0.0011066683228193605,
+          "n": 30,
+          "std": 0.018352903912341543,
+          "upper": 0.008752155236177294
+        },
+        "maker_pnl_zero": {
+          "lower": -0.379134386195471,
+          "mean": -0.12341680601209694,
+          "n": 30,
+          "std": 0.6349906101363781,
+          "upper": 0.04937486416026123
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0006493506493506551,
+          "mean": -0.00021645021645021837,
+          "n": 30,
+          "std": 0.001165620088124362,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": -0.004753786272276272,
+          "mean": -0.002037351196871621,
+          "n": 30,
+          "std": 0.006112056502278538,
+          "upper": 0.0
+        },
+        "sniper_edge_zero": {
+          "lower": -0.009432058559072943,
+          "mean": -0.003144019519690981,
+          "n": 30,
+          "std": 0.016931063270383802,
+          "upper": 0.0
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": -0.004739047858957193,
+          "maker_sniper_vol_per_jump": 0.8461538461538461,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8461538461538461,
+          "sniper_edge_zero": 10.694313156958222
+        },
+        {
+          "maker_edge_zero": 1.1352835682521574,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 9.081206380465689
+        },
+        {
+          "maker_edge_zero": -1.8666148883401092,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 12.779982275426077
+        },
+        {
+          "maker_edge_zero": 0.391098220922473,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 9.991754031348814
+        },
+        {
+          "maker_edge_zero": 0.0987394494831795,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 11.446450418318651
+        },
+        {
+          "maker_edge_zero": -1.1156078871952222,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 11.016244535818535,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 12.131852423013736
+        },
+        {
+          "maker_edge_zero": 0.29536993627704455,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 10.998825606343118
+        },
+        {
+          "maker_edge_zero": -4.110620261451257,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 15.085457061546565
+        },
+        {
+          "maker_edge_zero": -2.331584900848601,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 13.38820539291337
+        },
+        {
+          "maker_edge_zero": -0.6290089431721594,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 11.82851444528935
+        },
+        {
+          "maker_edge_zero": -1.8045041845748329,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 12.706478005949512
+        },
+        {
+          "maker_edge_zero": -1.1395795448059547,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 11.727162622642838
+        },
+        {
+          "maker_edge_zero": -1.1850335628752202,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 12.710958675476157
+        },
+        {
+          "maker_edge_zero": 0.5536722961882948,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.03612134361473,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 10.482449047426426
+        },
+        {
+          "maker_edge_zero": -0.47834063793773346,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 11.637663430964539
+        },
+        {
+          "maker_edge_zero": 1.7675070186078075,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 9.7576888954567
+        },
+        {
+          "maker_edge_zero": 0.7924121472755651,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 10.794663335014276
+        },
+        {
+          "maker_edge_zero": -1.7959890008153643,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.893160218259823,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 12.689149219075174
+        },
+        {
+          "maker_edge_zero": -0.022602384015369577,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 10.712306354300807
+        },
+        {
+          "maker_edge_zero": -1.465724442108325,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 11.645050322306146
+        },
+        {
+          "maker_edge_zero": -0.10785299339824203,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 11.94097941022246
+        },
+        {
+          "maker_edge_zero": -3.012476697831931,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.465031309930191,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 13.477508007762133
+        },
+        {
+          "maker_edge_zero": -1.2034328916964836,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 11.954530580957034
+        },
+        {
+          "maker_edge_zero": 0.1361937477090709,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 10.982326388215386
+        },
+        {
+          "maker_edge_zero": 0.22664510572991667,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 10.054711428276693
+        },
+        {
+          "maker_edge_zero": -1.4708609070243905,
+          "maker_sniper_vol_per_jump": 0.7816901408450704,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7816901408450704,
+          "sniper_edge_zero": 12.528211632553742
+        },
+        {
+          "maker_edge_zero": -3.8755857948760126,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 14.075798400087326
+        },
+        {
+          "maker_edge_zero": -0.8762827652256453,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 11.075555440114568
+        },
+        {
+          "maker_edge_zero": 0.7543656406730005,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 10.60914463995743
+        },
+        {
+          "maker_edge_zero": -1.1851243431718705,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.158555208378813,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 12.34367955155066
+        }
+      ],
+      "sniper_kind": "stale"
+    },
+    {
+      "arm": "tau=10000ns/time/pressure",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.10373012110002,
+          "mean": 45.63127457,
+          "n": 30,
+          "std": 1.4907351416917536,
+          "upper": 46.120480617691655
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -14.3538957241957,
+          "mean": -13.823850965603505,
+          "n": 30,
+          "std": 1.429099486620077,
+          "upper": -13.311545519628725
+        },
+        "maker_edge_zero": {
+          "lower": -1.2849991423559606,
+          "mean": -0.7843426316035059,
+          "n": 30,
+          "std": 1.374674041420085,
+          "upper": -0.2951492881052874
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -14.663472304334917,
+          "mean": -4.557374483398261,
+          "n": 30,
+          "std": 29.067212574730622,
+          "upper": 6.4351448127011395
+        },
+        "maker_pnl_zero": {
+          "lower": -1.6130027819063382,
+          "mean": 8.48213385060174,
+          "n": 30,
+          "std": 28.97447389534233,
+          "upper": 19.44846305740099
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.8,
+          "mean": 652.9,
+          "n": 30,
+          "std": 22.104826019069527,
+          "upper": 660.1333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.118473055684206,
+          "mean": 37.66103463772762,
+          "n": 30,
+          "std": 1.5196063850471757,
+          "upper": 38.16772906811635
+        },
+        "noise_cost_zero": {
+          "lower": 10.761461572314817,
+          "mean": 10.926743254394287,
+          "n": 30,
+          "std": 0.4569510419627529,
+          "upper": 11.080667740623081
+        },
+        "one_sided_share": {
+          "lower": 0.04682759722222222,
+          "mean": 0.04764166666666666,
+          "n": 30,
+          "std": 0.0022810440673158945,
+          "upper": 0.04839559722222221
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.1329663133589437e-12,
+          "mean": 2.0439946032032215e-13,
+          "n": 30,
+          "std": 3.842639677045441e-12,
+          "upper": 1.5591972157835696e-12
+        },
+        "residual_zero": {
+          "lower": -1.1313261438772303e-12,
+          "mean": 2.0274152727021526e-13,
+          "n": 30,
+          "std": 3.85139320824794e-12,
+          "upper": 1.553246420371579e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 5.43995559559913,
+          "mean": 5.85361103333112,
+          "n": 30,
+          "std": 1.173509082700476,
+          "upper": 6.285209473993539
+        },
+        "sniper_edge_zero": {
+          "lower": 11.24171146702303,
+          "mean": 11.711085885997784,
+          "n": 30,
+          "std": 1.3155585890606676,
+          "upper": 12.18517934078292
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -0.43211089651774354,
+          "mean": 2.1161467008326986,
+          "n": 30,
+          "std": 7.508856263338762,
+          "upper": 4.9155596265008406
+        },
+        "sniper_pnl_zero": {
+          "lower": 5.396372837222633,
+          "mean": 7.973621553499366,
+          "n": 30,
+          "std": 7.472368670035977,
+          "upper": 10.781056737806736
+        },
+        "vol_maker_noise": {
+          "lower": 527.3991666666667,
+          "mean": 535.5666666666667,
+          "n": 30,
+          "std": 22.421244885648573,
+          "upper": 543.1333333333333
+        },
+        "vol_maker_sniper": {
+          "lower": 114.6,
+          "mean": 117.33333333333333,
+          "n": 30,
+          "std": 7.5114727066150095,
+          "upper": 120.0
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": -0.00604882162516116,
+          "mean": 0.001767411656152736,
+          "n": 30,
+          "std": 0.023541346743137626,
+          "upper": 0.011402607907401042
+        },
+        "maker_edge_zero": {
+          "lower": -0.004075422276833179,
+          "mean": 0.0011066683228193605,
+          "n": 30,
+          "std": 0.018352903912341543,
+          "upper": 0.008752155236177294
+        },
+        "maker_pnl_zero": {
+          "lower": -0.379134386195471,
+          "mean": -0.12341680601209694,
+          "n": 30,
+          "std": 0.6349906101363781,
+          "upper": 0.04937486416026123
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0006493506493506551,
+          "mean": -0.00021645021645021837,
+          "n": 30,
+          "std": 0.001165620088124362,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": -0.004753786272276272,
+          "mean": -0.002037351196871621,
+          "n": 30,
+          "std": 0.006112056502278538,
+          "upper": 0.0
+        },
+        "sniper_edge_zero": {
+          "lower": -0.009432058559072943,
+          "mean": -0.003144019519690981,
+          "n": 30,
+          "std": 0.016931063270383802,
+          "upper": 0.0
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": -0.004739047858957193,
+          "maker_sniper_vol_per_jump": 0.8461538461538461,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8461538461538461,
+          "sniper_edge_zero": 10.694313156958222
+        },
+        {
+          "maker_edge_zero": 1.1352835682521574,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 9.081206380465689
+        },
+        {
+          "maker_edge_zero": -1.8666148883401092,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 12.779982275426077
+        },
+        {
+          "maker_edge_zero": 0.391098220922473,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 9.991754031348814
+        },
+        {
+          "maker_edge_zero": 0.0987394494831795,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 11.446450418318651
+        },
+        {
+          "maker_edge_zero": -1.1156078871952222,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 11.016244535818535,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 12.131852423013736
+        },
+        {
+          "maker_edge_zero": 0.29536993627704455,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 10.998825606343118
+        },
+        {
+          "maker_edge_zero": -4.110620261451257,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 15.085457061546565
+        },
+        {
+          "maker_edge_zero": -2.331584900848601,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 13.38820539291337
+        },
+        {
+          "maker_edge_zero": -0.6290089431721594,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 11.82851444528935
+        },
+        {
+          "maker_edge_zero": -1.8045041845748329,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 12.706478005949512
+        },
+        {
+          "maker_edge_zero": -1.1395795448059547,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 11.727162622642838
+        },
+        {
+          "maker_edge_zero": -1.1850335628752202,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 12.710958675476157
+        },
+        {
+          "maker_edge_zero": 0.5536722961882948,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.03612134361473,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 10.482449047426426
+        },
+        {
+          "maker_edge_zero": -0.47834063793773346,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 11.637663430964539
+        },
+        {
+          "maker_edge_zero": 1.7675070186078075,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 9.7576888954567
+        },
+        {
+          "maker_edge_zero": 0.7924121472755651,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 10.794663335014276
+        },
+        {
+          "maker_edge_zero": -1.7959890008153643,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.893160218259823,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 12.689149219075174
+        },
+        {
+          "maker_edge_zero": -0.022602384015369577,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 10.712306354300807
+        },
+        {
+          "maker_edge_zero": -1.465724442108325,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 11.645050322306146
+        },
+        {
+          "maker_edge_zero": -0.10785299339824203,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 11.94097941022246
+        },
+        {
+          "maker_edge_zero": -3.012476697831931,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.465031309930191,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 13.477508007762133
+        },
+        {
+          "maker_edge_zero": -1.2034328916964836,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 11.954530580957034
+        },
+        {
+          "maker_edge_zero": 0.1361937477090709,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 10.982326388215386
+        },
+        {
+          "maker_edge_zero": 0.22664510572991667,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 10.054711428276693
+        },
+        {
+          "maker_edge_zero": -1.4708609070243905,
+          "maker_sniper_vol_per_jump": 0.7816901408450704,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7816901408450704,
+          "sniper_edge_zero": 12.528211632553742
+        },
+        {
+          "maker_edge_zero": -3.8755857948760126,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 14.075798400087326
+        },
+        {
+          "maker_edge_zero": -0.8762827652256453,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 11.075555440114568
+        },
+        {
+          "maker_edge_zero": 0.7543656406730005,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 10.60914463995743
+        },
+        {
+          "maker_edge_zero": -1.1851243431718705,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.158555208378813,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 12.34367955155066
+        }
+      ],
+      "sniper_kind": "stale"
+    },
+    {
+      "arm": "tau=50000ns/time/engine",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.092106546025015,
+          "mean": 45.61962876100001,
+          "n": 30,
+          "std": 1.4895688134960026,
+          "upper": 46.11513763657499
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -14.340673808871056,
+          "mean": -13.812076253719813,
+          "n": 30,
+          "std": 1.4310216513816374,
+          "upper": -13.298861926202454
+        },
+        "maker_edge_zero": {
+          "lower": -1.2797025833758289,
+          "mean": -0.7765607850531457,
+          "n": 30,
+          "std": 1.377221465860864,
+          "upper": -0.28526648886744155
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -14.711666925499673,
+          "mean": -4.560461618743364,
+          "n": 30,
+          "std": 29.013884181743357,
+          "upper": 6.371301162990924
+        },
+        "maker_pnl_zero": {
+          "lower": -1.621012465210605,
+          "mean": 8.475053849923302,
+          "n": 30,
+          "std": 28.921393139232944,
+          "upper": 19.450975732663945
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7842639790468947,
+          "mean": 0.7979146622910722,
+          "n": 30,
+          "std": 0.03555742621432189,
+          "upper": 0.8098616627984762
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.6991666666667,
+          "mean": 652.7333333333333,
+          "n": 30,
+          "std": 22.08911245136139,
+          "upper": 659.9333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.105523940964474,
+          "mean": 37.65096190081652,
+          "n": 30,
+          "std": 1.5207447527580276,
+          "upper": 38.15774229298339
+        },
+        "noise_cost_zero": {
+          "lower": 10.756251816385904,
+          "mean": 10.921002382816527,
+          "n": 30,
+          "std": 0.45973008629869444,
+          "upper": 11.07594292661996
+        },
+        "one_sided_share": {
+          "lower": 0.04681827777777778,
+          "mean": 0.047627777777777776,
+          "n": 30,
+          "std": 0.002278642112430824,
+          "upper": 0.048381222222222214
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7842639790468947,
+          "mean": 0.7979146622910722,
+          "n": 30,
+          "std": 0.03555742621432189,
+          "upper": 0.8098616627984762
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.2630252399503652e-12,
+          "mean": 7.129112115459672e-14,
+          "n": 30,
+          "std": 3.8434597916553375e-12,
+          "upper": 1.4499275854025948e-12
+        },
+        "residual_zero": {
+          "lower": -1.285644183705396e-12,
+          "mean": 6.963318810448982e-14,
+          "n": 30,
+          "std": 3.853539683964093e-12,
+          "upper": 1.451615124400025e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 5.427894012636249,
+          "mean": 5.843409393536334,
+          "n": 30,
+          "std": 1.1668031429786263,
+          "upper": 6.272328916896595
+        },
+        "sniper_edge_zero": {
+          "lower": 11.227193421920804,
+          "mean": 11.697563167869667,
+          "n": 30,
+          "std": 1.3120903126922963,
+          "upper": 12.165795218289714
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -0.3878304466486252,
+          "mean": 2.1401635785877295,
+          "n": 30,
+          "std": 7.497053994813236,
+          "upper": 4.926689311903017
+        },
+        "sniper_pnl_zero": {
+          "lower": 5.4299252659222885,
+          "mean": 7.994317352921061,
+          "n": 30,
+          "std": 7.459544881963602,
+          "upper": 10.789409569896273
+        },
+        "vol_maker_noise": {
+          "lower": 527.3658333333334,
+          "mean": 535.4333333333333,
+          "n": 30,
+          "std": 22.394468563067583,
+          "upper": 543.0
+        },
+        "vol_maker_sniper": {
+          "lower": 114.56583333333333,
+          "mean": 117.26666666666667,
+          "n": 30,
+          "std": 7.527431316340404,
+          "upper": 119.93333333333334
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.03333333333333333,
+          "n": 30,
+          "std": 0.1795054935711501,
+          "upper": 0.1
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": -0.006929076833209647,
+          "mean": 0.013542123539846311,
+          "n": 30,
+          "std": 0.07088598921454851,
+          "upper": 0.043447530732374694
+        },
+        "maker_edge_zero": {
+          "lower": -0.009979021238269542,
+          "mean": 0.008888514873179413,
+          "n": 30,
+          "std": 0.0667046024716789,
+          "upper": 0.03682880783803851
+        },
+        "maker_pnl_zero": {
+          "lower": -0.5306001679409997,
+          "mean": -0.1304968066905346,
+          "n": 30,
+          "std": 0.9782054858782461,
+          "upper": 0.13824815156015827
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0015833931326889113,
+          "mean": -0.0006842922335880094,
+          "n": 30,
+          "std": 0.002054372833841774,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": -0.015562940346057631,
+          "mean": -0.00777822277463122,
+          "n": 30,
+          "std": 0.019126148338297684,
+          "upper": -0.0020376714395080003
+        },
+        "sniper_edge_zero": {
+          "lower": -0.043712173904049814,
+          "mean": -0.01666673764781059,
+          "n": 30,
+          "std": 0.06184188907160062,
+          "upper": 0.0
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": 0.07184632564535098,
+          "maker_sniper_vol_per_jump": 0.8391608391608392,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8391608391608392,
+          "sniper_edge_zero": 10.617727783453914
+        },
+        {
+          "maker_edge_zero": 1.1352835682521574,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 9.081206380465689
+        },
+        {
+          "maker_edge_zero": -1.8666148883401092,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 12.779982275426077
+        },
+        {
+          "maker_edge_zero": 0.391098220922473,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 9.991754031348814
+        },
+        {
+          "maker_edge_zero": 0.0987394494831795,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 11.446450418318651
+        },
+        {
+          "maker_edge_zero": -1.1360042540479884,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 10.995848168965768,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 12.131852423013736
+        },
+        {
+          "maker_edge_zero": 0.29536993627704455,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 10.998825606343118
+        },
+        {
+          "maker_edge_zero": -4.110620261451257,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 15.085457061546565
+        },
+        {
+          "maker_edge_zero": -2.331584900848601,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 13.38820539291337
+        },
+        {
+          "maker_edge_zero": -0.6290089431721594,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 11.82851444528935
+        },
+        {
+          "maker_edge_zero": -1.8045041845748329,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 12.706478005949512
+        },
+        {
+          "maker_edge_zero": -1.1395795448059547,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 11.727162622642838
+        },
+        {
+          "maker_edge_zero": -1.1850335628752202,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 12.710958675476157
+        },
+        {
+          "maker_edge_zero": 0.5332687776610846,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.015717825087517,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 10.482449047426426
+        },
+        {
+          "maker_edge_zero": -0.47834063793773346,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 11.637663430964539
+        },
+        {
+          "maker_edge_zero": 1.7675070186078075,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 9.7576888954567
+        },
+        {
+          "maker_edge_zero": 0.7924121472755651,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 10.794663335014276
+        },
+        {
+          "maker_edge_zero": -1.8163642319520368,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.872784987123149,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 12.689149219075174
+        },
+        {
+          "maker_edge_zero": -0.022602384015369577,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 10.712306354300807
+        },
+        {
+          "maker_edge_zero": -1.465724442108325,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 11.645050322306146
+        },
+        {
+          "maker_edge_zero": -0.10785299339824203,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 11.94097941022246
+        },
+        {
+          "maker_edge_zero": -3.1031453329554908,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.374362674806632,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 13.477508007762133
+        },
+        {
+          "maker_edge_zero": -1.2034328916964836,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 11.954530580957034
+        },
+        {
+          "maker_edge_zero": 0.1361937477090709,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 10.982326388215386
+        },
+        {
+          "maker_edge_zero": 0.22664510572991667,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 10.054711428276693
+        },
+        {
+          "maker_edge_zero": -1.1417647366851107,
+          "maker_sniper_vol_per_jump": 0.7746478873239436,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7746478873239436,
+          "sniper_edge_zero": 12.199115462214461
+        },
+        {
+          "maker_edge_zero": -3.8755857948760126,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 14.075798400087326
+        },
+        {
+          "maker_edge_zero": -0.8762827652256453,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 11.075555440114568
+        },
+        {
+          "maker_edge_zero": 0.7543656406730005,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 10.60914463995743
+        },
+        {
+          "maker_edge_zero": -1.205506738864448,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.138172812686237,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 12.34367955155066
+        }
+      ],
+      "sniper_kind": "stale"
+    },
+    {
+      "arm": "tau=50000ns/time/pressure",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.092106546025015,
+          "mean": 45.61962876100001,
+          "n": 30,
+          "std": 1.4895688134960026,
+          "upper": 46.11513763657499
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -14.340673808871056,
+          "mean": -13.812076253719813,
+          "n": 30,
+          "std": 1.4310216513816374,
+          "upper": -13.298861926202454
+        },
+        "maker_edge_zero": {
+          "lower": -1.2797025833758289,
+          "mean": -0.7765607850531457,
+          "n": 30,
+          "std": 1.377221465860864,
+          "upper": -0.28526648886744155
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -14.711666925499673,
+          "mean": -4.560461618743364,
+          "n": 30,
+          "std": 29.013884181743357,
+          "upper": 6.371301162990924
+        },
+        "maker_pnl_zero": {
+          "lower": -1.621012465210605,
+          "mean": 8.475053849923302,
+          "n": 30,
+          "std": 28.921393139232944,
+          "upper": 19.450975732663945
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7842639790468947,
+          "mean": 0.7979146622910722,
+          "n": 30,
+          "std": 0.03555742621432189,
+          "upper": 0.8098616627984762
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.6991666666667,
+          "mean": 652.7333333333333,
+          "n": 30,
+          "std": 22.08911245136139,
+          "upper": 659.9333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.105523940964474,
+          "mean": 37.65096190081652,
+          "n": 30,
+          "std": 1.5207447527580276,
+          "upper": 38.15774229298339
+        },
+        "noise_cost_zero": {
+          "lower": 10.756251816385904,
+          "mean": 10.921002382816527,
+          "n": 30,
+          "std": 0.45973008629869444,
+          "upper": 11.07594292661996
+        },
+        "one_sided_share": {
+          "lower": 0.04681827777777778,
+          "mean": 0.047627777777777776,
+          "n": 30,
+          "std": 0.002278642112430824,
+          "upper": 0.048381222222222214
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7842639790468947,
+          "mean": 0.7979146622910722,
+          "n": 30,
+          "std": 0.03555742621432189,
+          "upper": 0.8098616627984762
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.2630252399503652e-12,
+          "mean": 7.129112115459672e-14,
+          "n": 30,
+          "std": 3.8434597916553375e-12,
+          "upper": 1.4499275854025948e-12
+        },
+        "residual_zero": {
+          "lower": -1.285644183705396e-12,
+          "mean": 6.963318810448982e-14,
+          "n": 30,
+          "std": 3.853539683964093e-12,
+          "upper": 1.451615124400025e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 5.427894012636249,
+          "mean": 5.843409393536334,
+          "n": 30,
+          "std": 1.1668031429786263,
+          "upper": 6.272328916896595
+        },
+        "sniper_edge_zero": {
+          "lower": 11.227193421920804,
+          "mean": 11.697563167869667,
+          "n": 30,
+          "std": 1.3120903126922963,
+          "upper": 12.165795218289714
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -0.3878304466486252,
+          "mean": 2.1401635785877295,
+          "n": 30,
+          "std": 7.497053994813236,
+          "upper": 4.926689311903017
+        },
+        "sniper_pnl_zero": {
+          "lower": 5.4299252659222885,
+          "mean": 7.994317352921061,
+          "n": 30,
+          "std": 7.459544881963602,
+          "upper": 10.789409569896273
+        },
+        "vol_maker_noise": {
+          "lower": 527.3658333333334,
+          "mean": 535.4333333333333,
+          "n": 30,
+          "std": 22.394468563067583,
+          "upper": 543.0
+        },
+        "vol_maker_sniper": {
+          "lower": 114.56583333333333,
+          "mean": 117.26666666666667,
+          "n": 30,
+          "std": 7.527431316340404,
+          "upper": 119.93333333333334
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.03333333333333333,
+          "n": 30,
+          "std": 0.1795054935711501,
+          "upper": 0.1
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": -0.006929076833209647,
+          "mean": 0.013542123539846311,
+          "n": 30,
+          "std": 0.07088598921454851,
+          "upper": 0.043447530732374694
+        },
+        "maker_edge_zero": {
+          "lower": -0.009979021238269542,
+          "mean": 0.008888514873179413,
+          "n": 30,
+          "std": 0.0667046024716789,
+          "upper": 0.03682880783803851
+        },
+        "maker_pnl_zero": {
+          "lower": -0.5306001679409997,
+          "mean": -0.1304968066905346,
+          "n": 30,
+          "std": 0.9782054858782461,
+          "upper": 0.13824815156015827
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0015833931326889113,
+          "mean": -0.0006842922335880094,
+          "n": 30,
+          "std": 0.002054372833841774,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": -0.015562940346057631,
+          "mean": -0.00777822277463122,
+          "n": 30,
+          "std": 0.019126148338297684,
+          "upper": -0.0020376714395080003
+        },
+        "sniper_edge_zero": {
+          "lower": -0.043712173904049814,
+          "mean": -0.01666673764781059,
+          "n": 30,
+          "std": 0.06184188907160062,
+          "upper": 0.0
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": 0.07184632564535098,
+          "maker_sniper_vol_per_jump": 0.8391608391608392,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8391608391608392,
+          "sniper_edge_zero": 10.617727783453914
+        },
+        {
+          "maker_edge_zero": 1.1352835682521574,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 9.081206380465689
+        },
+        {
+          "maker_edge_zero": -1.8666148883401092,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 12.779982275426077
+        },
+        {
+          "maker_edge_zero": 0.391098220922473,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 9.991754031348814
+        },
+        {
+          "maker_edge_zero": 0.0987394494831795,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 11.446450418318651
+        },
+        {
+          "maker_edge_zero": -1.1360042540479884,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 10.995848168965768,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 12.131852423013736
+        },
+        {
+          "maker_edge_zero": 0.29536993627704455,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 10.998825606343118
+        },
+        {
+          "maker_edge_zero": -4.110620261451257,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 15.085457061546565
+        },
+        {
+          "maker_edge_zero": -2.331584900848601,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 13.38820539291337
+        },
+        {
+          "maker_edge_zero": -0.6290089431721594,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 11.82851444528935
+        },
+        {
+          "maker_edge_zero": -1.8045041845748329,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 12.706478005949512
+        },
+        {
+          "maker_edge_zero": -1.1395795448059547,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 11.727162622642838
+        },
+        {
+          "maker_edge_zero": -1.1850335628752202,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 12.710958675476157
+        },
+        {
+          "maker_edge_zero": 0.5332687776610846,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.015717825087517,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 10.482449047426426
+        },
+        {
+          "maker_edge_zero": -0.47834063793773346,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 11.637663430964539
+        },
+        {
+          "maker_edge_zero": 1.7675070186078075,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 9.7576888954567
+        },
+        {
+          "maker_edge_zero": 0.7924121472755651,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 10.794663335014276
+        },
+        {
+          "maker_edge_zero": -1.8163642319520368,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.872784987123149,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 12.689149219075174
+        },
+        {
+          "maker_edge_zero": -0.022602384015369577,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 10.712306354300807
+        },
+        {
+          "maker_edge_zero": -1.465724442108325,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 11.645050322306146
+        },
+        {
+          "maker_edge_zero": -0.10785299339824203,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 11.94097941022246
+        },
+        {
+          "maker_edge_zero": -3.1031453329554908,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.374362674806632,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 13.477508007762133
+        },
+        {
+          "maker_edge_zero": -1.2034328916964836,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 11.954530580957034
+        },
+        {
+          "maker_edge_zero": 0.1361937477090709,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 10.982326388215386
+        },
+        {
+          "maker_edge_zero": 0.22664510572991667,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 10.054711428276693
+        },
+        {
+          "maker_edge_zero": -1.1417647366851107,
+          "maker_sniper_vol_per_jump": 0.7746478873239436,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7746478873239436,
+          "sniper_edge_zero": 12.199115462214461
+        },
+        {
+          "maker_edge_zero": -3.8755857948760126,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 14.075798400087326
+        },
+        {
+          "maker_edge_zero": -0.8762827652256453,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 11.075555440114568
+        },
+        {
+          "maker_edge_zero": 0.7543656406730005,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 10.60914463995743
+        },
+        {
+          "maker_edge_zero": -1.205506738864448,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.138172812686237,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 12.34367955155066
+        }
+      ],
+      "sniper_kind": "stale"
+    },
+    {
+      "arm": "continuous",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.11428228288333,
+          "mean": 45.640591770666674,
+          "n": 30,
+          "std": 1.4814560453762633,
+          "upper": 46.12454143459166
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -14.351766685516829,
+          "mean": -13.825618377259657,
+          "n": 30,
+          "std": 1.4212340472724359,
+          "upper": -13.31463260367028
+        },
+        "maker_edge_zero": {
+          "lower": -1.2841913917673649,
+          "mean": -0.7854492999263252,
+          "n": 30,
+          "std": 1.3702358155695997,
+          "upper": -0.29625178531276775
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -14.594203956479017,
+          "mean": -4.434618420719498,
+          "n": 30,
+          "std": 29.10291548343513,
+          "upper": 6.526259345359307
+        },
+        "maker_pnl_zero": {
+          "lower": -1.5064832635837069,
+          "mean": 8.605550656613836,
+          "n": 30,
+          "std": 29.008706103357255,
+          "upper": 19.52341200844116
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7849667195222496,
+          "mean": 0.7985989545246603,
+          "n": 30,
+          "std": 0.03542186932037541,
+          "upper": 0.8105910682188413
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.9991666666667,
+          "mean": 653.0333333333333,
+          "n": 30,
+          "std": 21.9855760796836,
+          "upper": 660.2333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.12645423677823,
+          "mean": 37.669060397257816,
+          "n": 30,
+          "std": 1.5158258584234099,
+          "upper": 38.16863029448147
+        },
+        "noise_cost_zero": {
+          "lower": 10.762318245291484,
+          "mean": 10.928780605591156,
+          "n": 30,
+          "std": 0.4561138326458761,
+          "upper": 11.082145175447456
+        },
+        "one_sided_share": {
+          "lower": 0.04683263888888888,
+          "mean": 0.047646111111111104,
+          "n": 30,
+          "std": 0.002280723095754102,
+          "upper": 0.048406125
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7849667195222496,
+          "mean": 0.7985989545246603,
+          "n": 30,
+          "std": 0.03542186932037541,
+          "upper": 0.8105910682188413
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.180501622381295e-12,
+          "mean": 1.9634664264837435e-13,
+          "n": 30,
+          "std": 3.899830913717131e-12,
+          "upper": 1.5775055336083199e-12
+        },
+        "residual_zero": {
+          "lower": -1.2003672130352546e-12,
+          "mean": 1.9468870959826744e-13,
+          "n": 30,
+          "std": 3.9070067868035435e-12,
+          "upper": 1.5841313446192842e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 5.442814795005268,
+          "mean": 5.854087003850811,
+          "n": 30,
+          "std": 1.1691080931125777,
+          "upper": 6.283236797562332
+        },
+        "sniper_edge_zero": {
+          "lower": 11.242969606913157,
+          "mean": 11.714229905517476,
+          "n": 30,
+          "std": 1.309367892211774,
+          "upper": 12.18517934078292
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -0.42458012431600106,
+          "mean": 2.139214071355261,
+          "n": 30,
+          "std": 7.50055426521829,
+          "upper": 4.922622472860743
+        },
+        "sniper_pnl_zero": {
+          "lower": 5.413309904622409,
+          "mean": 7.9993569730219285,
+          "n": 30,
+          "std": 7.463108711118406,
+          "upper": 10.786581578146011
+        },
+        "vol_maker_noise": {
+          "lower": 527.5316666666666,
+          "mean": 535.6666666666666,
+          "n": 30,
+          "std": 22.380547108792687,
+          "upper": 543.2008333333333
+        },
+        "vol_maker_sniper": {
+          "lower": 114.66583333333334,
+          "mean": 117.36666666666666,
+          "n": 30,
+          "std": 7.503258551382118,
+          "upper": 120.00083333333333
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_pnl_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "sniper_edge_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": -0.004739047858957193,
+          "maker_sniper_vol_per_jump": 0.8461538461538461,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8461538461538461,
+          "sniper_edge_zero": 10.694313156958222
+        },
+        {
+          "maker_edge_zero": 1.0409629826614284,
+          "maker_sniper_vol_per_jump": 0.7532467532467533,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7532467532467533,
+          "sniper_edge_zero": 9.175526966056418
+        },
+        {
+          "maker_edge_zero": -1.8666148883401092,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 12.779982275426077
+        },
+        {
+          "maker_edge_zero": 0.391098220922473,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 9.991754031348814
+        },
+        {
+          "maker_edge_zero": 0.0987394494831795,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 11.446450418318651
+        },
+        {
+          "maker_edge_zero": -1.0952569673319317,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 11.036595455681825,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 12.131852423013736
+        },
+        {
+          "maker_edge_zero": 0.29536993627704455,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 10.998825606343118
+        },
+        {
+          "maker_edge_zero": -4.110620261451257,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 15.085457061546565
+        },
+        {
+          "maker_edge_zero": -2.331584900848601,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 13.38820539291337
+        },
+        {
+          "maker_edge_zero": -0.6290089431721594,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 11.82851444528935
+        },
+        {
+          "maker_edge_zero": -1.8045041845748329,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 12.706478005949512
+        },
+        {
+          "maker_edge_zero": -1.1395795448059547,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 11.727162622642838
+        },
+        {
+          "maker_edge_zero": -1.1850335628752202,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 12.710958675476157
+        },
+        {
+          "maker_edge_zero": 0.5536722961882948,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.03612134361473,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 10.482449047426426
+        },
+        {
+          "maker_edge_zero": -0.47834063793773346,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 11.637663430964539
+        },
+        {
+          "maker_edge_zero": 1.7675070186078075,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 9.7576888954567
+        },
+        {
+          "maker_edge_zero": 0.7924121472755651,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 10.794663335014276
+        },
+        {
+          "maker_edge_zero": -1.7756164844593747,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.913532734615814,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 12.689149219075174
+        },
+        {
+          "maker_edge_zero": -0.022602384015369577,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 10.712306354300807
+        },
+        {
+          "maker_edge_zero": -1.465724442108325,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 11.645050322306146
+        },
+        {
+          "maker_edge_zero": -0.10785299339824203,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 11.94097941022246
+        },
+        {
+          "maker_edge_zero": -3.012476697831931,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.465031309930191,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 13.477508007762133
+        },
+        {
+          "maker_edge_zero": -1.2034328916964836,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 11.954530580957034
+        },
+        {
+          "maker_edge_zero": 0.1361937477090709,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 10.982326388215386
+        },
+        {
+          "maker_edge_zero": 0.24704220541678473,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.301753633693489,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 10.054711428276693
+        },
+        {
+          "maker_edge_zero": -1.4708609070243905,
+          "maker_sniper_vol_per_jump": 0.7816901408450704,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7816901408450704,
+          "sniper_edge_zero": 12.528211632553742
+        },
+        {
+          "maker_edge_zero": -3.8755857948760126,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 14.075798400087326
+        },
+        {
+          "maker_edge_zero": -0.8762827652256453,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 11.075555440114568
+        },
+        {
+          "maker_edge_zero": 0.7543656406730005,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 10.60914463995743
+        },
+        {
+          "maker_edge_zero": -1.1851243431718705,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.158555208378813,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 12.34367955155066
+        }
+      ],
+      "sniper_kind": "competitive"
+    },
+    {
+      "arm": "tau=10000ns/time/engine",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.10339904583335,
+          "mean": 45.63115572633333,
+          "n": 30,
+          "std": 1.4909165911521645,
+          "upper": 46.121703056975
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -8.988945568903668,
+          "mean": -8.640747010270172,
+          "n": 30,
+          "std": 0.9668728019251176,
+          "upper": -8.301405313216371
+        },
+        "maker_edge_zero": {
+          "lower": 4.056405678146044,
+          "mean": 4.398727368396494,
+          "n": 30,
+          "std": 0.9492515837081931,
+          "upper": 4.728899544038976
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -9.483684154268978,
+          "mean": 0.6257294719351232,
+          "n": 30,
+          "std": 28.995754179986406,
+          "upper": 11.520403946461892
+        },
+        "maker_pnl_zero": {
+          "lower": 3.5963492033485718,
+          "mean": 13.66520385060179,
+          "n": 30,
+          "std": 28.905088079046433,
+          "upper": 24.543874372549
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.8,
+          "mean": 652.9,
+          "n": 30,
+          "std": 22.104826019069527,
+          "upper": 660.1333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.118473055684206,
+          "mean": 37.66103463772762,
+          "n": 30,
+          "std": 1.5196063850471757,
+          "upper": 38.16772906811635
+        },
+        "noise_cost_zero": {
+          "lower": 10.761461572314817,
+          "mean": 10.926743254394287,
+          "n": 30,
+          "std": 0.4569510419627529,
+          "upper": 11.080667740623081
+        },
+        "one_sided_share": {
+          "lower": 0.04682759722222222,
+          "mean": 0.04764166666666666,
+          "n": 30,
+          "std": 0.0022810440673158945,
+          "upper": 0.04839559722222221
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -9.95529584694547e-13,
+          "mean": 2.0321522242738866e-13,
+          "n": 30,
+          "std": 3.3389862060238506e-12,
+          "upper": 1.3285550437558409e-12
+        },
+        "residual_zero": {
+          "lower": -1.0015336708117196e-12,
+          "mean": 2.0511000305608226e-13,
+          "n": 30,
+          "std": 3.3448775617911417e-12,
+          "upper": 1.3344111001363976e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 0.40900727137135295,
+          "mean": 0.6706259216644521,
+          "n": 30,
+          "std": 0.750072992646725,
+          "upper": 0.935561625462519
+        },
+        "sniper_edge_zero": {
+          "lower": 6.221569014920447,
+          "mean": 6.528015885997786,
+          "n": 30,
+          "std": 0.857102906700084,
+          "upper": 6.845181769740074
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -5.670539030560495,
+          "mean": -3.0668384108340168,
+          "n": 30,
+          "std": 7.628754404776442,
+          "upper": -0.22180850172197916
+        },
+        "sniper_pnl_zero": {
+          "lower": 0.16367414006459746,
+          "mean": 2.7905515534993173,
+          "n": 30,
+          "std": 7.581073818868287,
+          "upper": 5.622645879274869
+        },
+        "vol_maker_noise": {
+          "lower": 527.3991666666667,
+          "mean": 535.5666666666667,
+          "n": 30,
+          "std": 22.421244885648573,
+          "upper": 543.1333333333333
+        },
+        "vol_maker_sniper": {
+          "lower": 114.6,
+          "mean": 117.33333333333333,
+          "n": 30,
+          "std": 7.5114727066150095,
+          "upper": 120.0
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": 4.935640098821233,
+          "mean": 5.184871366989484,
+          "n": 30,
+          "std": 0.7083624891770798,
+          "upper": 5.441439048383795
+        },
+        "maker_edge_zero": {
+          "lower": 4.932632441703448,
+          "mean": 5.184176668322819,
+          "n": 30,
+          "std": 0.7085445955078485,
+          "upper": 5.441675878618732
+        },
+        "maker_pnl_zero": {
+          "lower": 4.680900841928132,
+          "mean": 5.059653193987954,
+          "n": 30,
+          "std": 0.9859802617892464,
+          "upper": 5.391137980441986
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0006493506493506551,
+          "mean": -0.00021645021645021837,
+          "n": 30,
+          "std": 0.001165620088124362,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": -0.004753786272276272,
+          "mean": -0.002037351196871621,
+          "n": 30,
+          "std": 0.006112056502278538,
+          "upper": 0.0
+        },
+        "sniper_edge_zero": {
+          "lower": -5.443970666666666,
+          "mean": -5.186214019519692,
+          "n": 30,
+          "std": 0.7080214480573146,
+          "upper": -4.935307700975986
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": 4.8849609521410455,
+          "maker_sniper_vol_per_jump": 0.8461538461538461,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8461538461538461,
+          "sniper_edge_zero": 5.804613156958217
+        },
+        {
+          "maker_edge_zero": 5.373983568252159,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 4.842506380465688
+        },
+        {
+          "maker_edge_zero": 4.168185111659893,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 6.745182275426073
+        },
+        {
+          "maker_edge_zero": 5.0221982209224745,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 5.360654031348811
+        },
+        {
+          "maker_edge_zero": 5.400139449483182,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 6.145050418318657
+        },
+        {
+          "maker_edge_zero": 4.44669211280477,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 11.016244535818535,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 6.569552423013733
+        },
+        {
+          "maker_edge_zero": 5.88136993627704,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 5.412825606343116
+        },
+        {
+          "maker_edge_zero": 2.0912797385487325,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 8.883557061546567
+        },
+        {
+          "maker_edge_zero": 4.135615099151398,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 6.921005392913368
+        },
+        {
+          "maker_edge_zero": 4.0465910568278485,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 7.152914445289353
+        },
+        {
+          "maker_edge_zero": 3.302295815425161,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 7.599678005949509
+        },
+        {
+          "maker_edge_zero": 3.5202204551940417,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 7.067362622642842
+        },
+        {
+          "maker_edge_zero": 4.204966437124786,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 7.32095867547615
+        },
+        {
+          "maker_edge_zero": 4.920472296188291,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.03612134361473,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 6.115649047426424
+        },
+        {
+          "maker_edge_zero": 4.339259362062264,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 6.820063430964537
+        },
+        {
+          "maker_edge_zero": 6.188007018607809,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 5.3371888954567
+        },
+        {
+          "maker_edge_zero": 5.004612147275578,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 6.582463335014272
+        },
+        {
+          "maker_edge_zero": 3.073310999184647,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.893160218259823,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 7.819849219075172
+        },
+        {
+          "maker_edge_zero": 4.262997615984631,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 6.426706354300805
+        },
+        {
+          "maker_edge_zero": 3.241575557891673,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 6.937750322306142
+        },
+        {
+          "maker_edge_zero": 5.171147006601761,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 6.661979410222464
+        },
+        {
+          "maker_edge_zero": 2.873823302168063,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.465031309930191,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 7.591208007762137
+        },
+        {
+          "maker_edge_zero": 4.120967108303515,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 6.6301305809570374
+        },
+        {
+          "maker_edge_zero": 5.5822937477090715,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 5.536226388215379
+        },
+        {
+          "maker_edge_zero": 4.836645105729912,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 5.444711428276695
+        },
+        {
+          "maker_edge_zero": 4.315839092975611,
+          "maker_sniper_vol_per_jump": 0.7816901408450704,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7816901408450704,
+          "sniper_edge_zero": 6.741511632553743
+        },
+        {
+          "maker_edge_zero": 3.1591142051239864,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 7.041098400087331
+        },
+        {
+          "maker_edge_zero": 3.97061723477436,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 6.228655440114565
+        },
+        {
+          "maker_edge_zero": 5.402265640672984,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 5.961244639957428
+        },
+        {
+          "maker_edge_zero": 5.020375656828135,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.158555208378813,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 6.138179551550661
+        }
+      ],
+      "sniper_kind": "competitive"
+    },
+    {
+      "arm": "tau=10000ns/time/pressure",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.10373914182501,
+          "mean": 45.63123837066666,
+          "n": 30,
+          "std": 1.4907771597645345,
+          "upper": 46.120154013208335
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -2.5315277939230327,
+          "mean": -2.4117346602701684,
+          "n": 30,
+          "std": 0.3281039860017792,
+          "upper": -2.299267826368062
+        },
+        "maker_edge_zero": {
+          "lower": 10.440482061310508,
+          "mean": 10.627764035063166,
+          "n": 30,
+          "std": 0.538686494922751,
+          "upper": 10.809615316177855
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -3.1810944719691703,
+          "mean": 6.854741821935081,
+          "n": 30,
+          "std": 28.934047294582452,
+          "upper": 17.757515766926343
+        },
+        "maker_pnl_zero": {
+          "lower": 9.955540947413901,
+          "mean": 19.89424051726842,
+          "n": 30,
+          "std": 28.84656824092363,
+          "upper": 30.746659824772063
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.8,
+          "mean": 652.9,
+          "n": 30,
+          "std": 22.104826019069527,
+          "upper": 660.1333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.118473055684206,
+          "mean": 37.66103463772762,
+          "n": 30,
+          "std": 1.5196063850471757,
+          "upper": 38.16772906811635
+        },
+        "noise_cost_zero": {
+          "lower": 10.761461572314817,
+          "mean": 10.926743254394287,
+          "n": 30,
+          "std": 0.4569510419627529,
+          "upper": 11.080667740623081
+        },
+        "one_sided_share": {
+          "lower": 0.04682759722222222,
+          "mean": 0.04764166666666666,
+          "n": 30,
+          "std": 0.0022810440673158945,
+          "upper": 0.04839559722222221
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7846584126862143,
+          "mean": 0.79838250430821,
+          "n": 30,
+          "std": 0.03571694953248087,
+          "upper": 0.810573854954526
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 60.1325,
+          "mean": 62.2,
+          "n": 30,
+          "std": 5.70029239016152,
+          "upper": 64.2
+        },
+        "residual_taker_heavy": {
+          "lower": -8.56233602538244e-13,
+          "mean": 1.8924121529077335e-13,
+          "n": 30,
+          "std": 2.9515084753149354e-12,
+          "upper": 1.2364035721172207e-12
+        },
+        "residual_zero": {
+          "lower": -8.569500664634688e-13,
+          "mean": 1.9137284349805365e-13,
+          "n": 30,
+          "std": 2.953916207553472e-12,
+          "upper": 1.2415905340882694e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": -5.712925215619728,
+          "mean": -5.558469072668881,
+          "n": 30,
+          "std": 0.45452838660795797,
+          "upper": -5.392354840541977
+        },
+        "sniper_edge_zero": {
+          "lower": 0.21393898853028337,
+          "mean": 0.2989792193311196,
+          "n": 30,
+          "std": 0.2546711345457387,
+          "upper": 0.39448021332922567
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -11.876863561356817,
+          "mean": -9.295933405167322,
+          "n": 30,
+          "std": 7.555299555664776,
+          "upper": -6.449426665599946
+        },
+        "sniper_pnl_zero": {
+          "lower": -6.021234792436942,
+          "mean": -3.438485113167322,
+          "n": 30,
+          "std": 7.48598811732129,
+          "upper": -0.6000360929987303
+        },
+        "vol_maker_noise": {
+          "lower": 527.3991666666667,
+          "mean": 535.5666666666667,
+          "n": 30,
+          "std": 22.421244885648573,
+          "upper": 543.1333333333333
+        },
+        "vol_maker_sniper": {
+          "lower": 114.6,
+          "mean": 117.33333333333333,
+          "n": 30,
+          "std": 7.5114727066150095,
+          "upper": 120.0
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": 10.949947069397826,
+          "mean": 11.41388371698949,
+          "n": 30,
+          "std": 1.3214993706934886,
+          "upper": 11.898738785619885
+        },
+        "maker_edge_zero": {
+          "lower": 10.950270711371836,
+          "mean": 11.413213334989491,
+          "n": 30,
+          "std": 1.3238035500735497,
+          "upper": 11.89740849830322
+        },
+        "maker_pnl_zero": {
+          "lower": 10.773333565692653,
+          "mean": 11.28868986065458,
+          "n": 30,
+          "std": 1.4230180583221748,
+          "upper": 11.820227511472206
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0006493506493506551,
+          "mean": -0.00021645021645021837,
+          "n": 30,
+          "std": 0.001165620088124362,
+          "upper": 0.0
+        },
+        "noise_cost_zero": {
+          "lower": -0.004753786272276272,
+          "mean": -0.002037351196871621,
+          "n": 30,
+          "std": 0.006112056502278538,
+          "upper": 0.0
+        },
+        "sniper_edge_zero": {
+          "lower": -11.898800683821326,
+          "mean": -11.41525068618636,
+          "n": 30,
+          "std": 1.3236664420505493,
+          "upper": -10.950338624737748
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": 10.423460952141063,
+          "maker_sniper_vol_per_jump": 0.8461538461538461,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8461538461538461,
+          "sniper_edge_zero": 0.2661131569582158
+        },
+        {
+          "maker_edge_zero": 9.714483568252168,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 0.502006380465685
+        },
+        {
+          "maker_edge_zero": 10.854185111659895,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 0.05918227542607349
+        },
+        {
+          "maker_edge_zero": 10.155798220922462,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 0.2270540313488105
+        },
+        {
+          "maker_edge_zero": 11.183839449483203,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 0.36135041831865683
+        },
+        {
+          "maker_edge_zero": 11.0103921128048,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 11.016244535818535,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 0.005852423013735099
+        },
+        {
+          "maker_edge_zero": 11.10066993627702,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 0.1935256063431151
+        },
+        {
+          "maker_edge_zero": 10.49897973854874,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 0.4758570615465637
+        },
+        {
+          "maker_edge_zero": 10.609215099151378,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 0.4474053929133689
+        },
+        {
+          "maker_edge_zero": 10.810791056827846,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 0.38871444528935234
+        },
+        {
+          "maker_edge_zero": 10.710395815425176,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 0.19157800594951266
+        },
+        {
+          "maker_edge_zero": 9.481820455194043,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 1.1057626226428425
+        },
+        {
+          "maker_edge_zero": 11.357966437124816,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 0.16795867547615198
+        },
+        {
+          "maker_edge_zero": 10.8907722961883,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.03612134361473,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 0.1453490474264254
+        },
+        {
+          "maker_edge_zero": 10.894959362062268,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 0.26436343096453924
+        },
+        {
+          "maker_edge_zero": 11.415307018607812,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 0.10988889545670245
+        },
+        {
+          "maker_edge_zero": 11.523712147275543,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 0.06336333501427435
+        },
+        {
+          "maker_edge_zero": 10.12391099918465,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.893160218259823,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 0.7692492190751712
+        },
+        {
+          "maker_edge_zero": 10.456197615984673,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 0.23350635430080594
+        },
+        {
+          "maker_edge_zero": 10.01897555789167,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 0.1603503223061444
+        },
+        {
+          "maker_edge_zero": 11.41604700660174,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 0.4170794102224639
+        },
+        {
+          "maker_edge_zero": 10.22262330216806,
+          "maker_sniper_vol_per_jump": 0.8051948051948052,
+          "noise_cost_zero": 10.465031309930191,
+          "race_sniper_fill_share": 0.8051948051948052,
+          "sniper_edge_zero": 0.2424080077621387
+        },
+        {
+          "maker_edge_zero": 10.598767108303539,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 0.15233058095703603
+        },
+        {
+          "maker_edge_zero": 10.234993747709064,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 0.8835263882153783
+        },
+        {
+          "maker_edge_zero": 10.18924510572993,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 0.09211142827669391
+        },
+        {
+          "maker_edge_zero": 10.997739092975621,
+          "maker_sniper_vol_per_jump": 0.7816901408450704,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7816901408450704,
+          "sniper_edge_zero": 0.05961163255374414
+        },
+        {
+          "maker_edge_zero": 10.169614205123976,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 0.030598400087328628
+        },
+        {
+          "maker_edge_zero": 9.714817234774353,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 0.4844554401145666
+        },
+        {
+          "maker_edge_zero": 11.275565640673003,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 0.08794463995742842
+        },
+        {
+          "maker_edge_zero": 10.777675656828142,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.158555208378813,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 0.38087955155066444
+        }
+      ],
+      "sniper_kind": "competitive"
+    },
+    {
+      "arm": "tau=50000ns/time/engine",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.09179597603334,
+          "mean": 45.61951325166667,
+          "n": 30,
+          "std": 1.4897543862332234,
+          "upper": 46.11471858285833
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -8.985165876060826,
+          "mean": -8.638836584386478,
+          "n": 30,
+          "std": 0.9676542031716757,
+          "upper": -8.298013970300927
+        },
+        "maker_edge_zero": {
+          "lower": 4.052367162573396,
+          "mean": 4.396645881613521,
+          "n": 30,
+          "std": 0.9501364597954122,
+          "upper": 4.728841262554515
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -9.492544918318801,
+          "mean": 0.6127780505900642,
+          "n": 30,
+          "std": 28.92757212862748,
+          "upper": 11.512794268567307
+        },
+        "maker_pnl_zero": {
+          "lower": 3.6076726179831446,
+          "mean": 13.648260516590064,
+          "n": 30,
+          "std": 28.837091429079635,
+          "upper": 24.52998226020833
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7844804292633448,
+          "mean": 0.7981311125075224,
+          "n": 30,
+          "std": 0.03562079176817084,
+          "upper": 0.8101013200618709
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.6991666666667,
+          "mean": 652.7333333333333,
+          "n": 30,
+          "std": 22.08911245136139,
+          "upper": 659.9333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.10760052622752,
+          "mean": 37.65162796691039,
+          "n": 30,
+          "std": 1.5201480793752093,
+          "upper": 38.15777559628808
+        },
+        "noise_cost_zero": {
+          "lower": 10.759440772743154,
+          "mean": 10.923345832243728,
+          "n": 30,
+          "std": 0.4571093612345747,
+          "upper": 11.077822772591091
+        },
+        "one_sided_share": {
+          "lower": 0.04681827777777778,
+          "mean": 0.047627777777777776,
+          "n": 30,
+          "std": 0.002278642112430824,
+          "upper": 0.048381222222222214
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7844804292633448,
+          "mean": 0.7981311125075224,
+          "n": 30,
+          "std": 0.03562079176817084,
+          "upper": 0.8101013200618709
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "residual_taker_heavy": {
+          "lower": -1.0869823559763365e-12,
+          "mean": 9.947598300641403e-14,
+          "n": 30,
+          "std": 3.332952922597918e-12,
+          "upper": 1.2544572787949915e-12
+        },
+        "residual_zero": {
+          "lower": -1.0801315397657162e-12,
+          "mean": 1.0137076363510763e-13,
+          "n": 30,
+          "std": 3.3381914458366396e-12,
+          "upper": 1.257032996212121e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": 0.41053159408151774,
+          "mean": 0.6709512996302001,
+          "n": 30,
+          "std": 0.7481178961878994,
+          "upper": 0.9373785306504773
+        },
+        "sniper_edge_zero": {
+          "lower": 6.2215432013440495,
+          "mean": 6.5266999506302,
+          "n": 30,
+          "std": 0.856532840811947,
+          "upper": 6.845149359314635
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -5.62360221731119,
+          "mean": -3.0626628191192493,
+          "n": 30,
+          "std": 7.635833747389804,
+          "upper": -0.2177198124987606
+        },
+        "sniper_pnl_zero": {
+          "lower": 0.21332920418792412,
+          "mean": 2.7930858318807505,
+          "n": 30,
+          "std": 7.583795695269221,
+          "upper": 5.597748076982477
+        },
+        "vol_maker_noise": {
+          "lower": 527.3308333333334,
+          "mean": 535.4,
+          "n": 30,
+          "std": 22.428553230201896,
+          "upper": 543.0
+        },
+        "vol_maker_sniper": {
+          "lower": 114.56666666666666,
+          "mean": 117.3,
+          "n": 30,
+          "std": 7.559320957158343,
+          "upper": 119.96666666666667
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.03333333333333333,
+          "n": 30,
+          "std": 0.1795054935711501,
+          "upper": 0.1
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": 4.93559011406828,
+          "mean": 5.1867817928731785,
+          "n": 30,
+          "std": 0.7104087984004072,
+          "upper": 5.442750712612653
+        },
+        "maker_edge_zero": {
+          "lower": 4.929738445684515,
+          "mean": 5.182095181539847,
+          "n": 30,
+          "std": 0.7101091939279897,
+          "upper": 5.438320716802356
+        },
+        "maker_pnl_zero": {
+          "lower": 4.5481647534039675,
+          "mean": 5.042709859976228,
+          "n": 30,
+          "std": 1.2366585420419,
+          "upper": 5.438260523414519
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0013868760347633586,
+          "mean": -0.0004678420171377947,
+          "n": 30,
+          "std": 0.0024239117835467383,
+          "upper": 0.00021645021645021466
+        },
+        "noise_cost_zero": {
+          "lower": -0.010190715152098144,
+          "mean": -0.00543477334743064,
+          "n": 30,
+          "std": 0.011686379802876871,
+          "upper": -0.0013595304739929166
+        },
+        "sniper_edge_zero": {
+          "lower": -5.444417926997478,
+          "mean": -5.187529954887277,
+          "n": 30,
+          "std": 0.710424032386564,
+          "upper": -4.935323391153724
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": 4.885046325645354,
+          "maker_sniper_vol_per_jump": 0.8391608391608392,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8391608391608392,
+          "sniper_edge_zero": 5.804527783453908
+        },
+        {
+          "maker_edge_zero": 5.373983568252159,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 4.842506380465688
+        },
+        {
+          "maker_edge_zero": 4.168185111659893,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 6.745182275426073
+        },
+        {
+          "maker_edge_zero": 5.0221982209224745,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 5.360654031348811
+        },
+        {
+          "maker_edge_zero": 5.400139449483182,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 6.145050418318657
+        },
+        {
+          "maker_edge_zero": 4.426295745952003,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 10.995848168965768,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 6.569552423013733
+        },
+        {
+          "maker_edge_zero": 5.88136993627704,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 5.412825606343116
+        },
+        {
+          "maker_edge_zero": 2.0912797385487325,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 8.883557061546567
+        },
+        {
+          "maker_edge_zero": 4.174915099151396,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 6.881705392913367
+        },
+        {
+          "maker_edge_zero": 4.0465910568278485,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 7.152914445289353
+        },
+        {
+          "maker_edge_zero": 3.302295815425161,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 7.599678005949509
+        },
+        {
+          "maker_edge_zero": 3.5202204551940417,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 7.067362622642842
+        },
+        {
+          "maker_edge_zero": 4.204966437124786,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 7.32095867547615
+        },
+        {
+          "maker_edge_zero": 4.90006877766108,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.015717825087517,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 6.115649047426424
+        },
+        {
+          "maker_edge_zero": 4.339259362062264,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 6.820063430964537
+        },
+        {
+          "maker_edge_zero": 6.188007018607809,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 5.3371888954567
+        },
+        {
+          "maker_edge_zero": 5.004612147275578,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 6.582463335014272
+        },
+        {
+          "maker_edge_zero": 3.052935768047974,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.872784987123149,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 7.819849219075172
+        },
+        {
+          "maker_edge_zero": 4.262997615984631,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 6.426706354300805
+        },
+        {
+          "maker_edge_zero": 3.241575557891673,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 6.937750322306142
+        },
+        {
+          "maker_edge_zero": 5.171147006601761,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 6.661979410222464
+        },
+        {
+          "maker_edge_zero": 2.8534546670445025,
+          "maker_sniper_vol_per_jump": 0.8116883116883117,
+          "noise_cost_zero": 10.444666157622649,
+          "race_sniper_fill_share": 0.8116883116883117,
+          "sniper_edge_zero": 7.591211490578155
+        },
+        {
+          "maker_edge_zero": 4.120967108303515,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 6.6301305809570374
+        },
+        {
+          "maker_edge_zero": 5.5822937477090715,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 5.536226388215379
+        },
+        {
+          "maker_edge_zero": 4.836645105729912,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 5.444711428276695
+        },
+        {
+          "maker_edge_zero": 4.31593526331489,
+          "maker_sniper_vol_per_jump": 0.7746478873239436,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7746478873239436,
+          "sniper_edge_zero": 6.741415462214463
+        },
+        {
+          "maker_edge_zero": 3.1591142051239864,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 7.041098400087331
+        },
+        {
+          "maker_edge_zero": 3.97061723477436,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 6.228655440114565
+        },
+        {
+          "maker_edge_zero": 5.402265640672984,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 5.961244639957428
+        },
+        {
+          "maker_edge_zero": 4.9999932611355575,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.138172812686237,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 6.138179551550661
+        }
+      ],
+      "sniper_kind": "competitive"
+    },
+    {
+      "arm": "tau=50000ns/time/pressure",
+      "ci": {
+        "exchange_taker_heavy": {
+          "lower": 45.09194882815001,
+          "mean": 45.61942090766666,
+          "n": 30,
+          "std": 1.4896255494554806,
+          "upper": 46.11491149702499
+        },
+        "exchange_zero": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "maker_edge_taker_heavy": {
+          "lower": -2.2487813758752337,
+          "mean": -2.1597909043864743,
+          "n": 30,
+          "std": 0.24223946373877964,
+          "upper": -2.0784812883395754
+        },
+        "maker_edge_zero": {
+          "lower": 10.706920211441723,
+          "mean": 10.875665881613523,
+          "n": 30,
+          "std": 0.4766747050307609,
+          "upper": 11.034259387898192
+        },
+        "maker_pnl_taker_heavy": {
+          "lower": -2.946286343124845,
+          "mean": 7.091823730590297,
+          "n": 30,
+          "std": 28.901941895212087,
+          "upper": 17.962551252490258
+        },
+        "maker_pnl_zero": {
+          "lower": 10.150467372521776,
+          "mean": 20.127280516590297,
+          "n": 30,
+          "std": 28.814512244543984,
+          "upper": 30.961911124856915
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": 0.7844804292633448,
+          "mean": 0.7981311125075224,
+          "n": 30,
+          "std": 0.03562079176817084,
+          "upper": 0.8101013200618709
+        },
+        "n_jumps": {
+          "lower": 144.16583333333332,
+          "mean": 147.03333333333333,
+          "n": 30,
+          "std": 8.113705825467314,
+          "upper": 149.93333333333334
+        },
+        "n_trades": {
+          "lower": 644.6991666666667,
+          "mean": 652.7333333333333,
+          "n": 30,
+          "std": 22.08911245136139,
+          "upper": 659.9333333333333
+        },
+        "noise_cost_taker_heavy": {
+          "lower": 37.10760052622752,
+          "mean": 37.65162796691039,
+          "n": 30,
+          "std": 1.5201480793752093,
+          "upper": 38.15777559628808
+        },
+        "noise_cost_zero": {
+          "lower": 10.759440772743154,
+          "mean": 10.923345832243728,
+          "n": 30,
+          "std": 0.4571093612345747,
+          "upper": 11.077822772591091
+        },
+        "one_sided_share": {
+          "lower": 0.04681827777777778,
+          "mean": 0.047627777777777776,
+          "n": 30,
+          "std": 0.002278642112430824,
+          "upper": 0.048381222222222214
+        },
+        "race_sniper_fill_share": {
+          "lower": 0.7844804292633448,
+          "mean": 0.7981311125075224,
+          "n": 30,
+          "std": 0.03562079176817084,
+          "upper": 0.8101013200618709
+        },
+        "reprice_refused": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        },
+        "repriced": {
+          "lower": 60.233333333333334,
+          "mean": 62.233333333333334,
+          "n": 30,
+          "std": 5.505653659850228,
+          "upper": 64.1675
+        },
+        "residual_taker_heavy": {
+          "lower": -5.714007045298784e-13,
+          "mean": 3.197442310920451e-13,
+          "n": 30,
+          "std": 2.5932811174004105e-12,
+          "upper": 1.2373805683788906e-12
+        },
+        "residual_zero": {
+          "lower": -5.7698438619506e-13,
+          "mean": 3.202179262492185e-13,
+          "n": 30,
+          "std": 2.5989026537555063e-12,
+          "upper": 1.2422063377925943e-12
+        },
+        "sniper_edge_taker_heavy": {
+          "lower": -5.940854419359035,
+          "mean": -5.808002036369801,
+          "n": 30,
+          "std": 0.3722204241710973,
+          "upper": -5.6704267784059255
+        },
+        "sniper_edge_zero": {
+          "lower": 0.02077265045575159,
+          "mean": 0.04767995063020071,
+          "n": 30,
+          "std": 0.08471710916817356,
+          "upper": 0.0810776456702458
+        },
+        "sniper_pnl_taker_heavy": {
+          "lower": -12.100615515078024,
+          "mean": -9.541616155119264,
+          "n": 30,
+          "std": 7.567365589965576,
+          "upper": -6.682369266373824
+        },
+        "sniper_pnl_zero": {
+          "lower": -6.247833804936557,
+          "mean": -3.685934168119263,
+          "n": 30,
+          "std": 7.494281279352043,
+          "upper": -0.8682374654833501
+        },
+        "vol_maker_noise": {
+          "lower": 527.3308333333334,
+          "mean": 535.4,
+          "n": 30,
+          "std": 22.428553230201896,
+          "upper": 543.0
+        },
+        "vol_maker_sniper": {
+          "lower": 114.56666666666666,
+          "mean": 117.3,
+          "n": 30,
+          "std": 7.559320957158343,
+          "upper": 119.96666666666667
+        },
+        "vol_noise_noise": {
+          "lower": 0.0,
+          "mean": 0.03333333333333333,
+          "n": 30,
+          "std": 0.1795054935711501,
+          "upper": 0.1
+        },
+        "vol_noise_sniper": {
+          "lower": 0.0,
+          "mean": 0.0,
+          "n": 30,
+          "std": 0.0,
+          "upper": 0.0
+        }
+      },
+      "delta_vs_continuous": {
+        "maker_edge_taker_heavy": {
+          "lower": 11.199539087713266,
+          "mean": 11.665827472873184,
+          "n": 30,
+          "std": 1.3004409932560719,
+          "upper": 12.143263551096064
+        },
+        "maker_edge_zero": {
+          "lower": 11.193688012681687,
+          "mean": 11.661115181539852,
+          "n": 30,
+          "std": 1.303077976981828,
+          "upper": 12.139278775223422
+        },
+        "maker_pnl_zero": {
+          "lower": 10.965988076296,
+          "mean": 11.521729859976464,
+          "n": 30,
+          "std": 1.5003838951319584,
+          "upper": 12.065047177082329
+        },
+        "maker_sniper_vol_per_jump": {
+          "lower": -0.0013868760347633586,
+          "mean": -0.0004678420171377947,
+          "n": 30,
+          "std": 0.0024239117835467383,
+          "upper": 0.00021645021645021466
+        },
+        "noise_cost_zero": {
+          "lower": -0.010190715152098144,
+          "mean": -0.00543477334743064,
+          "n": 30,
+          "std": 0.011686379802876871,
+          "upper": -0.0013595304739929166
+        },
+        "sniper_edge_zero": {
+          "lower": -12.143914841480472,
+          "mean": -11.666549954887277,
+          "n": 30,
+          "std": 1.3042979393505525,
+          "upper": -11.198066813678272
+        }
+      },
+      "rows": [
+        {
+          "maker_edge_zero": 10.650646325645369,
+          "maker_sniper_vol_per_jump": 0.8391608391608392,
+          "noise_cost_zero": 10.689574109099276,
+          "race_sniper_fill_share": 0.8391608391608392,
+          "sniper_edge_zero": 0.038927783453906906
+        },
+        {
+          "maker_edge_zero": 10.085383568252174,
+          "maker_sniper_vol_per_jump": 0.7467532467532467,
+          "noise_cost_zero": 10.216489948717854,
+          "race_sniper_fill_share": 0.7467532467532467,
+          "sniper_edge_zero": 0.13110638046568493
+        },
+        {
+          "maker_edge_zero": 10.907785111659893,
+          "maker_sniper_vol_per_jump": 0.7733333333333333,
+          "noise_cost_zero": 10.913367387085966,
+          "race_sniper_fill_share": 0.7733333333333333,
+          "sniper_edge_zero": 0.005582275426073465
+        },
+        {
+          "maker_edge_zero": 10.376898220922458,
+          "maker_sniper_vol_per_jump": 0.7947019867549668,
+          "noise_cost_zero": 10.382852252271265,
+          "race_sniper_fill_share": 0.7947019867549668,
+          "sniper_edge_zero": 0.0059540313488105285
+        },
+        {
+          "maker_edge_zero": 11.424539449483198,
+          "maker_sniper_vol_per_jump": 0.835820895522388,
+          "noise_cost_zero": 11.545189867801852,
+          "race_sniper_fill_share": 0.835820895522388,
+          "sniper_edge_zero": 0.12065041831865678
+        },
+        {
+          "maker_edge_zero": 10.989995745952033,
+          "maker_sniper_vol_per_jump": 0.7647058823529411,
+          "noise_cost_zero": 10.995848168965768,
+          "race_sniper_fill_share": 0.7647058823529411,
+          "sniper_edge_zero": 0.005852423013735099
+        },
+        {
+          "maker_edge_zero": 11.258669936277025,
+          "maker_sniper_vol_per_jump": 0.8201438848920863,
+          "noise_cost_zero": 11.29419554262014,
+          "race_sniper_fill_share": 0.8201438848920863,
+          "sniper_edge_zero": 0.03552560634311522
+        },
+        {
+          "maker_edge_zero": 10.959679738548742,
+          "maker_sniper_vol_per_jump": 0.8627450980392157,
+          "noise_cost_zero": 10.97483680009531,
+          "race_sniper_fill_share": 0.8627450980392157,
+          "sniper_edge_zero": 0.015157061546563634
+        },
+        {
+          "maker_edge_zero": 10.76861509915138,
+          "maker_sniper_vol_per_jump": 0.8827586206896552,
+          "noise_cost_zero": 11.056620492064745,
+          "race_sniper_fill_share": 0.8827586206896552,
+          "sniper_edge_zero": 0.2880053929133689
+        },
+        {
+          "maker_edge_zero": 11.19419105682785,
+          "maker_sniper_vol_per_jump": 0.7843137254901961,
+          "noise_cost_zero": 11.199505502117201,
+          "race_sniper_fill_share": 0.7843137254901961,
+          "sniper_edge_zero": 0.005314445289352443
+        },
+        {
+          "maker_edge_zero": 10.895495815425175,
+          "maker_sniper_vol_per_jump": 0.8066666666666666,
+          "noise_cost_zero": 10.901973821374687,
+          "race_sniper_fill_share": 0.8066666666666666,
+          "sniper_edge_zero": 0.006478005949512593
+        },
+        {
+          "maker_edge_zero": 10.581420455194051,
+          "maker_sniper_vol_per_jump": 0.7870967741935484,
+          "noise_cost_zero": 10.587583077836896,
+          "race_sniper_fill_share": 0.7870967741935484,
+          "sniper_edge_zero": 0.006162622642843054
+        },
+        {
+          "maker_edge_zero": 11.51956643712482,
+          "maker_sniper_vol_per_jump": 0.7987012987012987,
+          "noise_cost_zero": 11.525925112600968,
+          "race_sniper_fill_share": 0.7987012987012987,
+          "sniper_edge_zero": 0.006358675476151989
+        },
+        {
+          "maker_edge_zero": 11.005768777661089,
+          "maker_sniper_vol_per_jump": 0.8226950354609929,
+          "noise_cost_zero": 11.015717825087517,
+          "race_sniper_fill_share": 0.8226950354609929,
+          "sniper_edge_zero": 0.009949047426425387
+        },
+        {
+          "maker_edge_zero": 11.153359362062268,
+          "maker_sniper_vol_per_jump": 0.8344827586206897,
+          "noise_cost_zero": 11.15932279302681,
+          "race_sniper_fill_share": 0.8344827586206897,
+          "sniper_edge_zero": 0.0059634309645392935
+        },
+        {
+          "maker_edge_zero": 11.520207018607815,
+          "maker_sniper_vol_per_jump": 0.7751937984496124,
+          "noise_cost_zero": 11.525195914064518,
+          "race_sniper_fill_share": 0.7751937984496124,
+          "sniper_edge_zero": 0.004988895456702448
+        },
+        {
+          "maker_edge_zero": 11.581412147275541,
+          "maker_sniper_vol_per_jump": 0.7597402597402597,
+          "noise_cost_zero": 11.587075482289821,
+          "race_sniper_fill_share": 0.7597402597402597,
+          "sniper_edge_zero": 0.005663335014274345
+        },
+        {
+          "maker_edge_zero": 10.867335768047981,
+          "maker_sniper_vol_per_jump": 0.7913669064748201,
+          "noise_cost_zero": 10.872784987123149,
+          "race_sniper_fill_share": 0.7913669064748201,
+          "sniper_edge_zero": 0.0054492190751712745
+        },
+        {
+          "maker_edge_zero": 10.664797615984671,
+          "maker_sniper_vol_per_jump": 0.8111888111888111,
+          "noise_cost_zero": 10.689703970285473,
+          "race_sniper_fill_share": 0.8111888111888111,
+          "sniper_edge_zero": 0.02490635430080584
+        },
+        {
+          "maker_edge_zero": 10.172975557891673,
+          "maker_sniper_vol_per_jump": 0.8206896551724138,
+          "noise_cost_zero": 10.179325880197819,
+          "race_sniper_fill_share": 0.8206896551724138,
+          "sniper_edge_zero": 0.006350322306144517
+        },
+        {
+          "maker_edge_zero": 11.827447006601739,
+          "maker_sniper_vol_per_jump": 0.7902097902097902,
+          "noise_cost_zero": 11.833126416824204,
+          "race_sniper_fill_share": 0.7902097902097902,
+          "sniper_edge_zero": 0.005679410222463777
+        },
+        {
+          "maker_edge_zero": 10.293854667044496,
+          "maker_sniper_vol_per_jump": 0.8116883116883117,
+          "noise_cost_zero": 10.444666157622649,
+          "race_sniper_fill_share": 0.8116883116883117,
+          "sniper_edge_zero": 0.1508114905781578
+        },
+        {
+          "maker_edge_zero": 10.385767108303538,
+          "maker_sniper_vol_per_jump": 0.8300653594771242,
+          "noise_cost_zero": 10.751097689260584,
+          "race_sniper_fill_share": 0.8300653594771242,
+          "sniper_edge_zero": 0.3653305809570358
+        },
+        {
+          "maker_edge_zero": 11.06859374770906,
+          "maker_sniper_vol_per_jump": 0.7846153846153846,
+          "noise_cost_zero": 11.11852013592444,
+          "race_sniper_fill_share": 0.7846153846153846,
+          "sniper_edge_zero": 0.04992638821537838
+        },
+        {
+          "maker_edge_zero": 10.250045105729928,
+          "maker_sniper_vol_per_jump": 0.75,
+          "noise_cost_zero": 10.28135653400662,
+          "race_sniper_fill_share": 0.75,
+          "sniper_edge_zero": 0.031311428276693906
+        },
+        {
+          "maker_edge_zero": 11.051635263314902,
+          "maker_sniper_vol_per_jump": 0.7746478873239436,
+          "noise_cost_zero": 11.057350725529364,
+          "race_sniper_fill_share": 0.7746478873239436,
+          "sniper_edge_zero": 0.0057154622144647855
+        },
+        {
+          "maker_edge_zero": 10.194214205123977,
+          "maker_sniper_vol_per_jump": 0.8057553956834532,
+          "noise_cost_zero": 10.200212605211306,
+          "race_sniper_fill_share": 0.8057553956834532,
+          "sniper_edge_zero": 0.005998400087328626
+        },
+        {
+          "maker_edge_zero": 10.129817234774348,
+          "maker_sniper_vol_per_jump": 0.7935483870967742,
+          "noise_cost_zero": 10.199272674888915,
+          "race_sniper_fill_share": 0.7935483870967742,
+          "sniper_edge_zero": 0.06945544011456663
+        },
+        {
+          "maker_edge_zero": 11.358465640673003,
+          "maker_sniper_vol_per_jump": 0.7019867549668874,
+          "noise_cost_zero": 11.363510280630425,
+          "race_sniper_fill_share": 0.7019867549668874,
+          "sniper_edge_zero": 0.005044639957428446
+        },
+        {
+          "maker_edge_zero": 11.131393261135571,
+          "maker_sniper_vol_per_jump": 0.7891566265060241,
+          "noise_cost_zero": 11.138172812686237,
+          "race_sniper_fill_share": 0.7891566265060241,
+          "sniper_edge_zero": 0.006779551550664477
+        }
+      ],
+      "sniper_kind": "competitive"
+    }
+  ],
+  "config": {
+    "duration_s": 60,
+    "jitter_ns": 2000,
+    "jump_b": 1000.0,
+    "lam_invest": 10.0,
+    "lam_jump": 2.5,
+    "maker_latency_ns": 50000,
+    "n_noise": 16,
+    "n_snipers": 3,
+    "noise_eps_mult": 2.0,
+    "qty": 1,
+    "snapshot_every_ns": 1000000,
+    "sniper_latency_ns": 5000,
+    "update_interval_ms": 10,
+    "v0": 1000000
+  },
+  "intervals_ns": [
+    10000,
+    50000
+  ],
+  "price_rules": [
+    "engine",
+    "pressure"
+  ],
+  "rationings": [
+    "time"
+  ],
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30
+  ],
+  "sniper_kinds": [
+    "stale",
+    "competitive"
+  ],
+  "status": "pilot \u2014 pre-sign-off, placeholder parameters; not a test of P9",
+  "theory": {
+    "half_spread": 204,
+    "maker_lag_ns": 90000,
+    "slow_lp_exposure_by_tau": {
+      "10000": 1.0,
+      "50000": 1.0
+    }
+  }
+}

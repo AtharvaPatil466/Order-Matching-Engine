@@ -191,10 +191,23 @@ Stale-price snipers, time rationing, engine price rule:
 | 100 ms | 5.75 [5.66, 5.84] | +6.65 [6.35, 6.96] | 0.10 | 5.85 | 0.012 | 0.0009 | 0.40 |
 | 1 s | 4.15 [3.99, 4.32] | +5.05 [4.69, 5.42] | 0.77 | 4.93 | 0.022 | 0.0001 | 0.62 |
 
-Intervals below the maker's 100 µs reaction time (10 µs and 50 µs, time
-rationing, 30 seeds) were still running when this was written. They are
-written to `results/pilot/exp11_short_intervals.json` and are not reported
-here.
+**Intervals below the maker's reaction time**
+(`results/pilot/exp11_short_intervals.json`; 10 µs and 50 µs, time
+rationing, 30 seeds). Here δ/τ ≥ 1, so every jump leaves the maker exposed.
+With stale-price snipers, batching neither helps nor hurts:
+- sniper fills against the maker per jump: 0.798 in both batch arms,
+  against 0.799 continuous;
+- Δ maker edge vs continuous: +0.00 [−0.00, 0.01] at 10 µs and +0.01
+  [−0.01, 0.04] at 50 µs, the same under both price rules;
+- Δ marked-to-V P&L: −0.12 [−0.38, 0.05] and −0.13 [−0.53, 0.14], both
+  intervals covering zero.
+
+With price-competitive snipers the maker is *better* off even here:
++5.18 [4.93, 5.44] under the engine rule and +11.4 to +11.7 under pressure.
+The snipers still fill on 80% of jumps, but the two or more of them landing
+in one batch now compete on price, so the stale quote sells near V′. Below
+the maker's latency, batching stops helping a maker facing stale-price
+snipers. It never makes the maker worse off.
 
 Pilot findings:
 
@@ -204,8 +217,9 @@ Pilot findings:
    against 0.071. Sniper rent falls from 11.9 to 1.1 at 1 ms and 0.1 at
    10 ms.
 2. **No short-interval backfire.** The maker is better off than under
-   continuous trading at every interval, including 100 µs, which equals its
-   own reaction time.
+   continuous trading at every interval from 100 µs up (100 µs equals its own
+   reaction time). At 10 and 50 µs it is no worse off, and it is better off
+   when the snipers compete on price.
 3. **At long intervals the tick model's mechanism comes back, but small.** At
    100 ms and 1 s the snipers' residual profit comes from investors, not the
    maker: 7 and 40 units of sniper–investor volume per run, against 2–3

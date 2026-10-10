@@ -29,6 +29,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace py = pybind11;
@@ -36,10 +37,21 @@ using namespace OrderMatcher;
 
 namespace {
 
-// Buffers every trade on one book. drain() returns and clears the buffer.
+// Buffers every trade on one book, and every order the book rejected AFTER
+// admission. drain() / drainRejects() return and clear their buffers.
+//
+// The second buffer exists because submitOrder's result only covers admission:
+// an order can be accepted there and then refused when it reaches the book —
+// e.g. RejectReason::OutOfPriceRange, when its price lies outside the fixed
+// band OrderBook centres on the first price it sees. The engine reports that
+// through onOrderUpdate; ignoring it made such orders look like resting quotes.
 class TradeCollector : public EventListener {
 public:
     void onTrade(const Trade& t) override { trades_.push_back(t); }
+
+    void onOrderUpdate(const OrderUpdate& u) override {
+        if (u.status == OrderStatus::Rejected) rejects_.emplace_back(u.orderId, u.rejectReason);
+    }
 
     std::vector<Trade> drain() {
         std::vector<Trade> out;
@@ -47,10 +59,17 @@ public:
         return out;
     }
 
+    std::vector<std::pair<OrderId, RejectReason>> drainRejects() {
+        std::vector<std::pair<OrderId, RejectReason>> out;
+        out.swap(rejects_);
+        return out;
+    }
+
     std::size_t pending() const { return trades_.size(); }
 
 private:
     std::vector<Trade> trades_;
+    std::vector<std::pair<OrderId, RejectReason>> rejects_;
 };
 
 // Owns a synchronous MatchingEngine plus one TradeCollector per symbol.
@@ -143,6 +162,14 @@ public:
     std::vector<Trade> drainTrades(SymbolId sym) {
         auto it = collectors_.find(sym);
         return (it == collectors_.end()) ? std::vector<Trade>{} : it->second->drain();
+    }
+
+    // (order_id, reason) for every order rejected after admission since the
+    // last call; see TradeCollector.
+    std::vector<std::pair<OrderId, RejectReason>> drainRejects(SymbolId sym) {
+        auto it = collectors_.find(sym);
+        return (it == collectors_.end()) ? std::vector<std::pair<OrderId, RejectReason>>{}
+                                         : it->second->drainRejects();
     }
 
     MarketDataSnapshot snapshot(SymbolId sym, std::size_t depth) {
@@ -238,17 +265,38 @@ PYBIND11_MODULE(bcs_engine, m) {
         .value("GTD", TimeInForce::GTD)
         .value("DAY", TimeInForce::DAY);
 
+    // Every enumerator, in declaration order: an unbound value reaches Python
+    // as "???", which hid VolatilityCircuitBreaker rejects once already.
     py::enum_<RejectReason>(m, "RejectReason")
         .value("None_", RejectReason::None)
+        .value("VolatilityCircuitBreaker", RejectReason::VolatilityCircuitBreaker)
         .value("PostOnlyWouldCross", RejectReason::PostOnlyWouldCross)
         .value("FOKInsufficientLiquidity", RejectReason::FOKInsufficientLiquidity)
+        .value("RiskLimitBreached", RejectReason::RiskLimitBreached)
         .value("InvalidPrice", RejectReason::InvalidPrice)
         .value("InvalidQuantity", RejectReason::InvalidQuantity)
         .value("SymbolNotFound", RejectReason::SymbolNotFound)
         .value("OrderNotFound", RejectReason::OrderNotFound)
+        .value("OutOfPriceRange", RejectReason::OutOfPriceRange)
+        .value("CapacityExhausted", RejectReason::CapacityExhausted)
+        .value("RateLimitExceeded", RejectReason::RateLimitExceeded)
+        .value("QueueBackpressure", RejectReason::QueueBackpressure)
+        .value("EngineStopped", RejectReason::EngineStopped)
         .value("MarketHalted", RejectReason::MarketHalted)
+        .value("OrderTypeNotAllowedInState", RejectReason::OrderTypeNotAllowedInState)
+        .value("OutsidePriceBand", RejectReason::OutsidePriceBand)
+        .value("MarketClosed", RejectReason::MarketClosed)
         .value("DuplicateOrderId", RejectReason::DuplicateOrderId)
-        .value("EngineStopped", RejectReason::EngineStopped);
+        .value("UnsupportedFixVersion", RejectReason::UnsupportedFixVersion)
+        .value("MissingRequiredField", RejectReason::MissingRequiredField)
+        .value("KillSwitchActive", RejectReason::KillSwitchActive)
+        .value("PositionLimitExceeded", RejectReason::PositionLimitExceeded)
+        .value("FatFingerReject", RejectReason::FatFingerReject)
+        .value("OrderToTradeRatioExceeded", RejectReason::OrderToTradeRatioExceeded)
+        .value("PoolCapacityExceeded", RejectReason::PoolCapacityExceeded)
+        .value("InvalidDisplayQty", RejectReason::InvalidDisplayQty)
+        .value("NotOrderOwner", RejectReason::NotOrderOwner)
+        .value("InvalidFieldValue", RejectReason::InvalidFieldValue);
 
     py::class_<Trade>(m, "Trade")
         .def_readonly("trade_id", &Trade::tradeId)
@@ -306,6 +354,7 @@ PYBIND11_MODULE(bcs_engine, m) {
         .def("best_ask", &EngineHarness::bestAsk, py::arg("symbol"))
         .def("mid", &EngineHarness::mid, py::arg("symbol"))
         .def("drain_trades", &EngineHarness::drainTrades, py::arg("symbol"))
+        .def("drain_rejects", &EngineHarness::drainRejects, py::arg("symbol"))
         .def("snapshot", &EngineHarness::snapshot,
              py::arg("symbol"), py::arg("depth") = 10)
         .def("vwap", &EngineHarness::vwap, py::arg("symbol"))

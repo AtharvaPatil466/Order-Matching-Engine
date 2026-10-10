@@ -240,3 +240,19 @@ def test_one_agents_bursts_arrive_in_send_order_even_when_jitter_exceeds_their_g
         assert cancel.arrival_ns > order.arrival_ns, seed
         assert cancel.outcome == "cancelled", seed
         assert res.snapshots[-1].best_ask == 0, seed
+
+
+def test_an_order_the_book_refuses_after_admission_fails_the_run_loudly():
+    # Arrange: the book centres a fixed price band on the first price it sees
+    # (OrderBook::ensurePriceRange). An order far outside it is accepted at
+    # admission, then refused with OutOfPriceRange when it reaches the book.
+    # Logged as "rested", it would silently drop the agent from the book.
+    updates = [SignalUpdate(1_000, V0), SignalUpdate(2_000, V0)]
+
+    def react(t, u, view):
+        price = V0 if u.t_ns == 1_000 else V0 + 10_000_000
+        return [Order(11 + u.t_ns, SELL, price, 5, LIMIT)]
+
+    # Act / Assert
+    with pytest.raises(RuntimeError, match="OutOfPriceRange"):
+        run([Scripted(1, signal=react)], ListPath(updates, 1_000_000))

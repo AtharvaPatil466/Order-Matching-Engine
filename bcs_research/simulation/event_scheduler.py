@@ -54,6 +54,7 @@ _NO_CAUSE = -1
 _BUY = be.Side.Buy
 _GTC = be.TimeInForce.GTC
 _NOT_FOUND = be.RejectReason.OrderNotFound
+_OUT_OF_RANGE = be.RejectReason.OutOfPriceRange
 _RESTS_WHEN_UNFILLED = frozenset({be.OrderType.Limit, be.OrderType.PostOnly})
 
 
@@ -248,6 +249,7 @@ class EventScheduler:
                 ok, reason, _ = self._h.submit_order(self._sym, m.order_id, pid, m.side, m.price,
                                                      m.quantity, m.order_type, tif)
                 filled = self._record_trades(t)
+                ok, reason = self._refused_at_book(ok, reason, pid, m)
                 kind = m.order_type.name.lower()
                 if not ok:
                     outcome = reason.name
@@ -259,6 +261,24 @@ class EventScheduler:
                     outcome = "rested" if m.order_type in _RESTS_WHEN_UNFILLED else "missed"
             if log is not None:
                 log.append(RaceArrival(t, pid, kind, m.order_id, outcome))
+
+    def _refused_at_book(self, ok, reason, pid, order):
+        """Fold in a refusal the book made AFTER admission (submit said ok).
+
+        OutOfPriceRange means the price lies outside the fixed band the book
+        centred on its first price; the order silently leaves the agent off the
+        book, so the run no longer models what it claims to and must not finish.
+        """
+        late = self._h.drain_rejects(self._sym)
+        if not late:
+            return ok, reason
+        reason = late[-1][1]
+        if reason == _OUT_OF_RANGE:
+            raise RuntimeError(
+                f"participant {pid}'s order {order.order_id} at price {order.price} was refused "
+                "with OutOfPriceRange: it lies outside the fixed price band the engine centred "
+                "on the first price it saw. Keep the path within that band.")
+        return False, reason
 
     def _record_trades(self, t):
         """Record the trades the order just arriving produced; return its filled qty."""

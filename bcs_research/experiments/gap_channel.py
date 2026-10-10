@@ -49,9 +49,9 @@ at fixed phases of the 10 ms update grid, so their counts depend on where
 the samples fall, the same trap as the tick model's.
 
 Run (from bcs_research/):
-    .venv/bin/python experiments/gap_channel.py tick  [--seeds 100]
+    .venv/bin/python experiments/gap_channel.py tick  [--seeds 100] [--calibrated]
     .venv/bin/python experiments/gap_channel.py event [--seeds 100]
-Writes results/pilot/gap_channel_{tick,event}.json.
+Writes results/pilot/gap_channel_{tick,tick_calibrated,event}.json.
 """
 from __future__ import annotations
 
@@ -204,7 +204,9 @@ def tick_run(seed, k, arm="published", cfg=None):
                         min_quote_qty=cfg["min_quote_qty"],
                         thin_liquidity=cfg.get("thin_liquidity", True))
     noise = [NoiseTrader(NT0 + i, lambda_per_tick=cfg["lambda_per_tick"], qty=cfg["noise_qty"],
-                         seed=seed * 1000 + i, base_half_spread=cfg["base_half_spread"])
+                         seed=seed * 1000 + i, size_sigma_ln=cfg.get("size_sigma_ln"),
+                         base_half_spread=cfg["base_half_spread"],
+                         spread_elasticity=cfg.get("spread_elasticity", 0.0))
              for i in range(cfg["n_noise"])]
     hft_cls = ShiftedJitterHFT if arm == "shifted" else HFTAgent
     hfts = [hft_cls(HFT0 + j, latency_us=cfg["hft_latency_us"],
@@ -406,16 +408,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("model", choices=("tick", "event"))
     ap.add_argument("--seeds", type=int, default=None)
+    ap.add_argument("--calibrated", action="store_true",
+                    help="tick model at the BTCUSDT-calibrated point (run_calibrated.py)")
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = _ROOT / "results" / "pilot"
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.model == "tick":
+        from run_calibrated import calibrated_cfg
         seeds = list(range(1, (args.seeds or 100) + 1))     # exp3's seeds
-        rows = _pool_map(tick_run, [(s, k, arm) for arm in TICK_ARMS for k in TICK_K for s in seeds])
+        cfg = {**TICK_CFG, **(calibrated_cfg() if args.calibrated else {})}
+        rows = _pool_map(tick_run, [(s, k, arm, cfg) for arm in TICK_ARMS for k in TICK_K
+                                    for s in seeds])
         s = summarize_tick(rows, seeds)
-        report = {"status": "tick model at the published exp3 operating point; seeds match exp3",
-                  "config": TICK_CFG, "seeds": seeds, "summary": s, "verdicts": verdicts_tick(s),
+        point = "BTCUSDT-calibrated" if args.calibrated else "published"
+        report = {"status": f"tick model at the {point} exp3 operating point; seeds match exp3",
+                  "config": cfg, "seeds": seeds, "summary": s, "verdicts": verdicts_tick(s),
                   "rows": rows}
     else:
         seeds = list(range(1, (args.seeds or 100) + 1))
@@ -423,7 +431,8 @@ def main(argv=None):
         report = {"status": EVENT_STATUS, "config": {lag: event_cfg(lag) for lag in EVENT_LAGS},
                   "seeds": seeds, "summary": summarize_event(rows, seeds), "rows": rows}
     report["elapsed_s"] = time.time() - t0
-    out = out_dir / f"gap_channel_{args.model}.json"
+    suffix = "_calibrated" if args.model == "tick" and args.calibrated else ""
+    out = out_dir / f"gap_channel_{args.model}{suffix}.json"
     out.write_text(json.dumps(report, indent=2, sort_keys=True, default=float))
     print(json.dumps({k: v for k, v in report.items() if k in ("verdicts", "elapsed_s")}, indent=1))
     print(f"wrote {out.relative_to(_ROOT)}")

@@ -32,9 +32,10 @@ def test_episodes_empty_when_never_quoted_or_always_two_sided():
 
 
 def test_traced_tick_run_reproduces_exp1_primary():
-    for k in (0, 3):
-        row = g.tick_run(2, k)
-        ref = _run(2, {**CFG, "n_hft": k}, with_hft=k > 0)
+    from run_calibrated import calibrated_cfg
+    for k, over in ((0, {}), (3, {}), (2, calibrated_cfg())):
+        row = g.tick_run(2, k, cfg=over)
+        ref = _run(2, {**CFG, **over, "n_hft": k}, with_hft=k > 0)
         assert row["gaps"] == ref["liquidity_gaps"]
         assert row["hft_rent"] == ref["hft_rent"] and row["mm_pnl"] == ref["mm_pnl"]
         assert row["hft_fills"] == ref["hft_fills"]

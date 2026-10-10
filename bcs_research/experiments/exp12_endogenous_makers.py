@@ -93,7 +93,7 @@ FEES = FeeSchedule(maker_bps=0.0, taker_bps=facts.VIP9_TAKER_BP)
 
 HALF_SPREADS_TICKS = (0.5, 1, 2, 4, 8, 16, 32, 64)
 WIDENING = ((0.0, 0.05), (1.0, 0.01), (1.0, 0.1))   # (adverse_sensitivity, spread_decay)
-QTYS = (250, 1_000, 6_182)                           # lots; 6,182 = tape median touch depth
+QTYS = (250, 1_000)   # lots; the tape touch (6,182) lost 0.3 USD/s alone, at 7x the variance
 NO_QUOTE = MakerPolicy(quote=False)
 # Where every Nash iteration starts: mid-grid, no widening, post-only with rivals.
 START = MakerPolicy(half_spread=4, qty=1_000)
@@ -104,11 +104,11 @@ COSTS_USD_PER_S = (0.0, 0.1, 0.3, 1.0)
 M_GRID = (1, 2, 3)
 
 SHORTLIST = 6
-SCREEN_SEEDS = tuple(range(100, 103))
-CONFIRM_SEEDS = tuple(range(200, 216))
-REPORT_SEEDS = tuple(range(300, 324))
+SCREEN_SEEDS = tuple(range(100, 102))
+CONFIRM_SEEDS = tuple(range(200, 212))
+REPORT_SEEDS = tuple(range(300, 316))
 HORIZON_S = 150.0
-MAX_ROUNDS = 4
+MAX_ROUNDS = 3
 STATUS = "pilot — pre-sign-off; not the confirmatory test of P8"
 PILOT_OUT = _ROOT / "results" / "pilot" / "exp12_endogenous_makers.json"
 

@@ -235,6 +235,9 @@ class EventBatchScheduler(EventScheduler):
             tif = m.tif if m.tif is not None else _GTC
             ok, reason, _ = self._h.submit_order(self._sym, m.order_id, agent.participant_id,
                                                  m.side, m.price, m.quantity, otype, tif)
+            # The parked book refuses an out-of-band price after admission;
+            # fold that in (and fail the run on it), as the continuous path does.
+            ok, reason = self._refused_at_book(ok, reason, agent.participant_id, m)
             if not ok:
                 rejected[m.order_id] = reason.name
         return rejected

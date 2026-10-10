@@ -368,3 +368,15 @@ def test_exp11_short_run_closes_the_books_under_both_fee_schedules(arm):
         total = (row[f"maker_edge_{fees}"] + row[f"sniper_edge_{fees}"] - row[f"noise_cost_{fees}"]
                  + row[f"exchange_{fees}"])
         assert abs(total) < 1e-9 and abs(row[f"residual_{fees}"]) < 1e-9
+
+
+def test_an_out_of_band_order_flushed_at_the_boundary_fails_the_run_loudly():
+    # Arrange: batch 0 centres the book's fixed price band on V0; batch 1 then
+    # flushes an ask far outside it, which the book refuses after admission.
+    far = V0 + 10_000_000
+    agent = _Script(1, {0: [Order(11, SELL, V0, 5, LIMIT)],
+                        TAU + 10: [Order(12, SELL, far, 5, LIMIT)]})
+
+    # Act / Assert
+    with pytest.raises(RuntimeError, match="OutOfPriceRange"):
+        _batch([agent])

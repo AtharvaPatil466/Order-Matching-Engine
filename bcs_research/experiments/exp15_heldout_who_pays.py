@@ -219,7 +219,8 @@ def run_market(config, seed, with_snipers, cfg=None):
 
     cfg = cfg or market_cfg()
     m = len(config["ticks"])
-    lat = [int(round(config["ticks"][r] * TICK_NS)) for r in config["slots"]]   # slot -> latency
+    tick_ns = config.get("tick_ns", TICK_NS)
+    lat = [int(round(config["ticks"][r] * tick_ns)) for r in config["slots"]]   # slot -> latency
     qtys = split_qty(int(round(1 / config["ratio"])), m)
     h = x11.half_spread(cfg)
     makers = [StrategicMaker(1 + i, MakerPolicy(half_spread=h, qty=qtys[i], post_only=True),
@@ -293,12 +294,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--configs", type=int, default=40, help="generated configs beyond P10's nine")
     ap.add_argument("--seeds", type=int, default=30, help="seeds per configuration")
+    ap.add_argument("--tick-ns", type=int, default=TICK_NS,
+                    help="event-clock length of one tick; P10 fixes 100 ms. Any other "
+                         "value is an exploratory rescaling, outside P10's verdict")
     ap.add_argument("--out-name", default="exp15_heldout_who_pays.json")
     args = ap.parse_args(argv)
     t0 = time.time()
     configs = generate_configs(args.configs)
     for c in configs:
         c["seeds"] = [c["index"] * SEED_BLOCK + s for s in range(1, args.seeds + 1)]
+        c["tick_ns"] = args.tick_ns
     tasks = [(c, s) for c in configs for s in c["seeds"]]
     out_dir = _ROOT / "results" / "pilot"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -317,7 +322,9 @@ def main(argv=None):
     scored = [score_config(c, by_cfg[c["index"]]) for c in configs]
     families = sorted({c["family"] for c in scored})
     report = {
-        "status": STATUS, "config": market_cfg(), "tick_ns": TICK_NS,
+        "status": STATUS if args.tick_ns == TICK_NS else
+        STATUS + f"; EXPLORATORY rescaling, 1 tick = {args.tick_ns} ns, outside P10's verdict",
+        "config": market_cfg(), "tick_ns": args.tick_ns,
         "generator_seed": GENERATOR_SEED, "n_seeds_per_config": args.seeds,
         "p10": classify(scored),
         "by_family": {f: classify([c for c in scored if c["family"] == f]) for f in families},

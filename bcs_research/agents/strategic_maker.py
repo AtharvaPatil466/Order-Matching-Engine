@@ -237,6 +237,10 @@ class StrategicMaker:
         if self._live.pop(order_id, None) is None:
             return []
         self.rejects += 1
+        # ponytail: no post-only "slide" (repricing a refused quote behind the
+        # opposite touch). With requote_after_fill a cross that persists is
+        # re-refused every md + order latency until the rival requotes; slide
+        # against view.best_bid/ask if a strategy needs that side filled.
         return self._requote(t_ns) if self.policy.requote_after_fill else []
 
     def _is_adverse(self, fill):

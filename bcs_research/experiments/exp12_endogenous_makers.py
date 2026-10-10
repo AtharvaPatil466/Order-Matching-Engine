@@ -103,12 +103,12 @@ ASYM_LATENCY_US = (50, 150, 450)   # maker k is 3^k times slower
 COSTS_USD_PER_S = (0.0, 0.1, 0.3, 1.0)
 M_GRID = (1, 2, 3)
 
-SHORTLIST = 5
-SCREEN_SEEDS = tuple(range(100, 104))
+SHORTLIST = 6
+SCREEN_SEEDS = tuple(range(100, 103))
 CONFIRM_SEEDS = tuple(range(200, 216))
 REPORT_SEEDS = tuple(range(300, 324))
-HORIZON_S = 300.0
-MAX_ROUNDS = 6
+HORIZON_S = 150.0
+MAX_ROUNDS = 4
 STATUS = "pilot — pre-sign-off; not the confirmatory test of P8"
 PILOT_OUT = _ROOT / "results" / "pilot" / "exp12_endogenous_makers.json"
 

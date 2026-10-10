@@ -27,8 +27,9 @@ and the gap spike (about 137) is a sampling artefact. Recommended rewrite of
 3. **This is a redistribution, not a welfare loss.** HFT rent is unchanged
    (35.2 against 34.7). Under continuous trading the noise traders pay the
    HFTs 6.2; at interval 1 the HFTs' presence *improves* the noise traders'
-   P&L by 6.1, because their sells now clear near the ask. The maker bears
-   more than all of the rent.
+   P&L by 6.1, because their orders now trade with snipers at the uniform
+   price, often the stale touch itself. The maker bears more than all of the
+   rent.
 4. **The gaps measure when the snapshot is taken, not fragility.** The tick
    batch processes a tick's IOCs after that tick's requote, so the
    end-of-tick snapshot lands after the snipe has emptied a side and before
@@ -169,7 +170,72 @@ replaces matching on arrival with:
 *Pilot — pre-sign-off, placeholder parameters; not a test of P9.* Results:
 `results/pilot/exp11_batch_semantics.json`.
 
-PILOT_RESULTS_PLACEHOLDER
+Setup (`experiments/exp11_batch_semantics.py`, `CFG`): one `EventMaker`
+quoting h = 204, which is BCS's h* for λ_invest = 10/s, λ_jump = 2.5/s and
+Laplace b = 1000; three snipers 90 µs faster than the maker (5 + 5 µs
+against 50 + 50 µs, each message ±2 µs jitter); 16 reservation-value
+investors at 10/s in total; unit orders; 60 s runs; 100 matched seeds. The
+welfare figures are each class's edge against V at its fills (zero fees
+unless stated). V is a martingale, so this edge has the same mean as P&L
+without the noise of the terminal mark. Brackets are 95% bootstrap
+intervals.
+
+Stale-price snipers, time rationing, engine price rule:
+
+| arm | maker edge | Δ maker vs continuous | sniper edge | investor cost | sniper fills vs maker per jump | BCS exposure δ/τ | one-sided snapshots |
+|---|---|---|---|---|---|---|---|
+| continuous | −0.90 [−1.18, −0.61] | — | 11.91 | 11.02 | 0.794 | 1 | 0.05 |
+| 100 µs | 0.25 [−0.03, 0.51] | +1.14 [1.05, 1.23] | 10.76 | 11.01 | 0.717 | 0.9 | 0.05 |
+| 1 ms | 9.82 [9.71, 9.94] | +10.72 [10.44, 11.00] | 1.07 | 10.90 | 0.071 | 0.09 | 0.05 |
+| 10 ms | 9.87 [9.78, 9.96] | +10.77 [10.49, 11.06] | 0.11 | 9.98 | 0.009 | 0.009 | 0.08 |
+| 100 ms | 5.75 [5.66, 5.84] | +6.65 [6.35, 6.96] | 0.10 | 5.85 | 0.012 | 0.0009 | 0.40 |
+| 1 s | 4.15 [3.99, 4.32] | +5.05 [4.69, 5.42] | 0.77 | 4.93 | 0.022 | 0.0001 | 0.62 |
+
+Intervals below the maker's 100 µs reaction time (10 µs and 50 µs, time
+rationing, 30 seeds) were still running when this was written. They are
+written to `results/pilot/exp11_short_intervals.json` and are not reported
+here.
+
+Pilot findings:
+
+1. **Batching removes the maker's sniping exposure at BCS's rate.** Sniper
+   fills against the maker per jump track δ/τ times the continuous rate:
+   0.79 × 0.9 = 0.71 against 0.717 measured, and 0.79 × 0.09 = 0.071
+   against 0.071. Sniper rent falls from 11.9 to 1.1 at 1 ms and 0.1 at
+   10 ms.
+2. **No short-interval backfire.** The maker is better off than under
+   continuous trading at every interval, including 100 µs, which equals its
+   own reaction time.
+3. **At long intervals the tick model's mechanism comes back, but small.** At
+   100 ms and 1 s the snipers' residual profit comes from investors, not the
+   maker: 7 and 40 units of sniper–investor volume per run, against 2–3
+   against the maker. Their stale-priced IOCs cross opposite investor orders
+   at the uniform price, which happens once batches are long enough to hold
+   both. The maker's edge also falls back (5.75, 4.15). Part of that drop is
+   a pilot artefact: with unit quotes and a sealed book, a side an investor
+   emptied stays invisible until the next boundary, and reservation traders
+   do not submit against an empty side (40% and 62% of snapshots are
+   one-sided). Do not read welfare off those two cells.
+4. **The price rule matters only for price-competitive snipers.** With stale
+   snipers, pressure minus engine is exactly 0 at 100 µs, as P9 H9b expects.
+   With snipers bidding V′ − 1 at 100 µs, the engine's rule leaves them 5.94
+   [5.77, 6.11] of the rent and the pressure (Bertrand) rule leaves 0.04
+   [0.02, 0.05]; paired, the maker gains +5.91 [5.74, 6.07]. When a stale
+   quote does sit in the batch, BCS's "no rent" outcome needs both a
+   reference-free price rule and snipers who compete on price. The engine's
+   reference-first rule, anchored to the opening price, hands back about
+   half of it.
+5. **Rationing decides who fills, not what the maker loses.** Random minus
+   time changes the maker's edge by at most 0.04 in any cell.
+6. **Fees (taker-heavy, 2/5 bp).** Exchange revenue is 46.2 continuous, 38.3
+   at 1 ms and about 20 at 100 ms–1 s, falling with sniper and investor
+   volume. The maker nets −14.1 continuous against −1.3 at 1 ms. In batches
+   the later arrival pays the taker fee (§3), which is a modelling choice.
+
+Pilot limits: placeholder parameters; a minimal maker (fixed spread, no
+requote on fill), so this is not the endogenous-maker test the review asks
+for. `make_agents(maker_factory=...)` is where one drops in. Agents ignore
+fees. There is one sniper threshold.
 
 ## 5. Requests for the C++ bridge (not done here)
 

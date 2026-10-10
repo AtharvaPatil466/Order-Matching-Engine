@@ -17,6 +17,10 @@ Semantics, exactly as written in contracts.py:
     t + order_latency_ns + jitter, jitter ~ U{0..race_jitter_ns[pid]} drawn
     from the scheduler's seeded RNG (0 when the agent has no entry).
   - A Wakeup fires at its at_ns, with no latency.
+  - Every Order or Cancel the engine refuses, at admission or by the book
+    after it (a cancel of an order already gone counts, as "OrderNotFound"),
+    reaches its sender's on_reject at arrival time + md_latency_ns. Agents
+    without on_reject get no event, so their runs are unchanged.
   - Events due at the same nanosecond run in a seeded random permutation,
     never registration order. Events created AT an instant with zero delay
     form a fresh batch at that same instant (a delta cycle), run after
@@ -49,7 +53,7 @@ import bcs_engine as be
 from contracts import Cancel, Fill, Order, SignalUpdate, TradeRecord, Wakeup
 from scheduler import MarketView
 
-_START, _SIGNAL, _WAKEUP, _FILL, _ARRIVE = range(5)
+_START, _SIGNAL, _WAKEUP, _FILL, _ARRIVE, _REJECT = range(6)
 _NO_CAUSE = -1
 _BUY = be.Side.Buy
 _GTC = be.TimeInForce.GTC
@@ -129,6 +133,8 @@ class EventScheduler:
         self._rng = random.Random(self._seed)
         self._view = MarketView(self._h, self._sym)
         self._by_id = {a.participant_id: a for a in agents}
+        self._hears_rejects = {a.participant_id for a in agents
+                               if callable(getattr(a, "on_reject", None))}
         self._updates = list(path.updates())
         self._duration = int(path.duration_ns)
         self._heap = []
@@ -196,6 +202,8 @@ class EventScheduler:
             actions = agent.on_fill(t, data, self._view)
         elif kind == _WAKEUP:
             actions = agent.on_wakeup(t, data, self._view)
+        elif kind == _REJECT:
+            actions = agent.on_reject(t, data[0], data[1], self._view)
         else:
             actions = agent.on_start(t, self._view)
         if actions:
@@ -244,6 +252,8 @@ class EventScheduler:
                 ok, reason, _ = self._h.submit_cancel(self._sym, m.order_id)
                 kind = "cancel"
                 outcome = "cancelled" if ok else ("too_late" if reason == _NOT_FOUND else reason.name)
+                if not ok:
+                    self._reject(t, agent, m.order_id, reason.name)
             else:
                 tif = m.tif if m.tif is not None else _GTC
                 ok, reason, _ = self._h.submit_order(self._sym, m.order_id, pid, m.side, m.price,
@@ -253,6 +263,7 @@ class EventScheduler:
                 kind = m.order_type.name.lower()
                 if not ok:
                     outcome = reason.name
+                    self._reject(t, agent, m.order_id, reason.name)
                 elif filled >= m.quantity:
                     outcome = "filled"
                 elif filled:
@@ -261,6 +272,12 @@ class EventScheduler:
                     outcome = "rested" if m.order_type in _RESTS_WHEN_UNFILLED else "missed"
             if log is not None:
                 log.append(RaceArrival(t, pid, kind, m.order_id, outcome))
+
+    def _reject(self, t, agent, order_id, reason_name):
+        """Tell the sender, md_latency_ns after the engine refused its message."""
+        if agent.participant_id in self._hears_rejects:
+            self._push(t + agent.md_latency_ns, _REJECT, agent, (order_id, reason_name),
+                       _NO_CAUSE)
 
     def _refused_at_book(self, ok, reason, pid, order):
         """Fold in a refusal the book made AFTER admission (submit said ok).

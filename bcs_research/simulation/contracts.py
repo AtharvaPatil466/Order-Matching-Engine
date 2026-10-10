@@ -18,6 +18,12 @@ Latency semantics the scheduler implements:
     a seeded random permutation, never by registration order.
   - A Wakeup is a self-scheduled callback (requotes, Poisson arrivals); it
     involves no latency.
+  - An agent learns that the engine REFUSED one of its messages (an order
+    rejected at admission or by the book after it, or a cancel of an order
+    already gone: reason "OrderNotFound") `md_latency_ns` after the refusal,
+    through the OPTIONAL on_reject callback. Agents without it are skipped.
+    Why: a post-only quote rejected for crossing never rests, and an agent
+    that cannot learn this keeps it in the book it believes it has.
   - BookView reads the engine's CURRENT book. ponytail: book-data latency is
     not modelled; the race is driven by the signal latency. Add it if a
     strategy turns out to depend on seeing a stale book.
@@ -111,3 +117,7 @@ class EventAgent(Protocol):
     def on_signal(self, t_ns: int, update: SignalUpdate, view: BookView) -> Sequence[Action]: ...
     def on_wakeup(self, t_ns: int, tag: str, view: BookView) -> Sequence[Action]: ...
     def on_fill(self, t_ns: int, fill: Fill, view: BookView) -> Sequence[Action]: ...
+    # Optional, called only on agents that define it:
+    # def on_reject(self, t_ns: int, order_id: int, reason_name: str,
+    #               view: BookView) -> Sequence[Action]: ...
+    # reason_name is the engine's RejectReason name, e.g. "PostOnlyWouldCross".

@@ -56,6 +56,8 @@ Semantics implemented here, on top of EventScheduler's clock and latencies:
     engine price stands and the batch is counted in `reprice_refused`.
     ponytail: when the tie is an interval where supply equals demand, BCS
     take its midpoint; this rule takes the cascade's end of it.
+  - A refused order is reported to its sender's on_reject from the boundary
+    (when the engine first sees it), a refused cancel from its arrival.
   - No aggressor in an auction (the engine stamps every uncross trade
     aggressor=Buy). For fee purposes the order that arrived later is the
     taker; an order resting from an earlier batch is always the maker.
@@ -81,7 +83,7 @@ from contracts import Cancel, Fill, TradeRecord
 from event_scheduler import (_NO_CAUSE, _NOT_FOUND, _RESTS_WHEN_UNFILLED, BookSnapshot,
                              EventScheduler, RaceArrival)
 
-_UNCROSS = 5          # heap event kind, after the parent's five
+_UNCROSS = 6          # heap event kind, after the parent's six
 _HALF_NS = 0.5
 _GTC = be.TimeInForce.GTC
 _LIMIT = be.OrderType.Limit
@@ -171,7 +173,7 @@ class EventBatchScheduler(EventScheduler):
         pid = agent.participant_id
         for m in burst:
             if isinstance(m, Cancel):
-                outcome = self._cancel(m.order_id)
+                outcome = self._cancel(t, agent, m.order_id)
                 if log is not None:
                     log.append(RaceArrival(t, pid, "cancel", m.order_id, outcome))
                 continue
@@ -186,13 +188,15 @@ class EventBatchScheduler(EventScheduler):
             self._window[m.order_id] = (agent, m, slot, self._rank)
             self._rank += 1
 
-    def _cancel(self, oid):
+    def _cancel(self, t, agent, oid):
         held = self._window.pop(oid, None)
         if held is not None:
             _settle(held[2], "cancelled")   # never reached the auction
             return "cancelled"
         ok, reason, _ = self._h.submit_cancel(self._sym, oid)
         self._dirty = self._dirty or ok
+        if not ok:
+            self._reject(t, agent, oid, reason.name)
         return "cancelled" if ok else ("too_late" if reason == _NOT_FOUND else reason.name)
 
     # --- the boundary -------------------------------------------------------
@@ -213,6 +217,9 @@ class EventBatchScheduler(EventScheduler):
         if self._rationing == "random":
             self._ration_rng.shuffle(entries)
         rejected = self._submit(entries)
+        for agent, m, _, _ in entries:
+            if m.order_id in rejected:      # the engine first saw it at the boundary
+                self._reject(b, agent, m.order_id, rejected[m.order_id])
         target = self._pressure_target() if self._price_rule == "pressure" else None
         self._h.uncross(self._sym)
         trades = self._h.drain_trades(self._sym)

@@ -37,6 +37,12 @@ Dimensions (MakerPolicy fields):
                        size the maker sends no cancel, so a jump snipes it.
   requote_after_fill   when a fill empties a live order, requote at once rather
                        than leaving that side empty until the next update.
+  post_only            send quotes as post-only, which the engine refuses when
+                       they would cross. Two equally fast plain-limit makers
+                       cross each other's stale quotes after every move; real
+                       makers use post-only so a quote never takes. A refused
+                       quote is learned through on_reject, dropped, and treated
+                       like a side a fill emptied (requote_after_fill decides).
 
 Avellaneda-Stoikov, and why this version. Avellaneda & Stoikov (2008, "High-
 frequency trading in a limit order book", Quant. Finance 8(3)) give, for CARA
@@ -63,13 +69,16 @@ the exceptions contracts.py sanctions; quotes use observed updates only. A
 policy that needs it (widening or fading on) must be given the path.
 
 Live orders. `_live` is what the maker BELIEVES rests: an order leaves it when
-the maker sends its cancel, or when a fill it observes empties it. There are
-no cancel acks, and none are needed: a cancelled order is gone once the cancel
-lands, and a cancel that arrives too late (the order already traded) changes
-nothing the maker would track, because the fill still arrives and still moves
+the maker sends its cancel, or when a fill it observes empties it. Plain limits
+need no cancel acks: a cancelled order is gone once the cancel lands, and a
+cancel that arrives too late (the order already traded) changes nothing the
+maker would track, because the fill still arrives and still moves
 `inventory`. Inventory therefore counts every fill, including fills on orders
 it has already cancelled; the requote/limit logic only ever reads observed
-quantities.
+quantities. A post-only quote can also be refused outright, so a post-only
+maker (only) defines on_reject and drops it; a plain-limit maker leaves the
+callback undefined, so it gets no reject events and the default policy's runs
+stay identical to EventMaker's.
 """
 from __future__ import annotations
 
@@ -81,7 +90,8 @@ import bcs_engine as be
 from contracts import Cancel, Order, Wakeup
 
 NS_PER_S = 1_000_000_000
-_BUY, _SELL, _LIMIT = be.Side.Buy, be.Side.Sell, be.OrderType.Limit
+_BUY, _SELL = be.Side.Buy, be.Side.Sell
+_LIMIT, _POST_ONLY = be.OrderType.Limit, be.OrderType.PostOnly
 _UNFADE = "unfade"
 
 
@@ -109,6 +119,7 @@ class MakerPolicy:
     fade_widen: Optional[float] = None       # None pulls quotes while fading
     requote_threshold: float = 0.0
     requote_after_fill: bool = False
+    post_only: bool = False
 
     def __post_init__(self):
         checks = {
@@ -165,6 +176,9 @@ class StrategicMaker:
         self.inventory = 0
         self.spread_mult = 1.0     # adverse widening state, 1 = base
         self.adverse_fills = 0
+        self.rejects = 0           # post-only quotes the engine refused
+        if policy.post_only:       # see "Live orders" above
+            self.on_reject = self._on_reject
         g, tau_s = policy.as_gamma, policy.as_horizon_ns / NS_PER_S
         self._as_shift = g * policy.as_sigma2_per_s * tau_s   # r = s - q * this
         self._base_half = (policy.half_spread if g == 0
@@ -218,6 +232,13 @@ class StrategicMaker:
             return self._requote(t_ns)
         return []
 
+    def _on_reject(self, t_ns, order_id, reason_name, view):
+        # A too-late cancel names an order already dropped here: nothing to do.
+        if self._live.pop(order_id, None) is None:
+            return []
+        self.rejects += 1
+        return self._requote(t_ns) if self.policy.requote_after_fill else []
+
     def _is_adverse(self, fill):
         v = self._path.value_at(fill.t_ns)
         edge = fill.price - v if fill.is_buyer else v - fill.price
@@ -232,10 +253,11 @@ class StrategicMaker:
         burst, so the cancels reach the engine ahead of the new quotes."""
         actions = [Cancel(oid) for oid in self._live]
         self._live = {}
+        otype = _POST_ONLY if self.policy.post_only else _LIMIT
         for quote in self._quotes(fading=t_ns < self._fade_until):
             self._oid += 1
             self._live[self._oid] = quote
-            actions.append(Order(self._oid, quote.side, quote.price, quote.qty, _LIMIT))
+            actions.append(Order(self._oid, quote.side, quote.price, quote.qty, otype))
         self._anchor = self._value
         return actions
 

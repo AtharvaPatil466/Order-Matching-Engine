@@ -256,3 +256,26 @@ def test_an_order_the_book_refuses_after_admission_fails_the_run_loudly():
     # Act / Assert
     with pytest.raises(RuntimeError, match="OutOfPriceRange"):
         run([Scripted(1, signal=react)], ListPath(updates, 1_000_000))
+
+
+def test_an_agents_jitter_draws_do_not_depend_on_who_else_is_in_the_run():
+    # Arrange: agent 1 posts a limit on every jump with 50 us of jitter. The
+    # second arm adds a jittered agent 2 that also reacts to every jump. With
+    # one shared jitter stream agent 2's draws would shift agent 1's, breaking
+    # common random numbers between arms (STATS lane: M >= 2 arms drifted).
+    updates = [SignalUpdate(1_000 * (i + 1), V0, is_jump=True) for i in range(40)]
+
+    def poster(pid):
+        return lambda t, u, view: [Order(pid * 1_000 + u.t_ns, SELL, V0 + pid, 1, LIMIT)]
+
+    def arrivals_of_1(agents, jitter):
+        res = run(agents, ListPath(updates, 1_000_000), seed=5, race_jitter_ns=jitter)
+        return [a.arrival_ns for r in res.races for a in r.arrivals if a.participant_id == 1]
+
+    # Act
+    alone = arrivals_of_1([Scripted(1, signal=poster(1))], {1: 50_000})
+    crowded = arrivals_of_1([Scripted(1, signal=poster(1)), Scripted(2, signal=poster(2))],
+                            {1: 50_000, 2: 50_000})
+
+    # Assert
+    assert alone == crowded

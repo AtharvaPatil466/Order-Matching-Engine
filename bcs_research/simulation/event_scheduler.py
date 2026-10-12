@@ -15,7 +15,7 @@ Semantics, exactly as written in contracts.py:
     md_latency_ns (on_fill). Fill.t_ns is the execution time.
   - Orders/Cancels returned from a callback at t arrive at the engine at
     t + order_latency_ns + jitter, jitter ~ U{0..race_jitter_ns[pid]} drawn
-    from the scheduler's seeded RNG (0 when the agent has no entry).
+    from that agent's own seeded stream (0 when the agent has no entry).
   - A Wakeup fires at its at_ns, with no latency.
   - Every Order or Cancel the engine refuses, at admission or by the book
     after it (a cancel of an order already gone counts, as "OrderNotFound"),
@@ -130,7 +130,11 @@ class EventScheduler:
 
     def run(self, agents: Sequence, path) -> EventSimResult:
         self._check_agents(agents)
-        self._rng = random.Random(self._seed)
+        self._rng = random.Random(self._seed)   # same-nanosecond tie shuffles only
+        # One jitter stream per agent, so adding or removing an agent (the
+        # treatment in a matched pair of runs) never shifts anyone else's draws.
+        self._jitter_rng = {pid: random.Random(f"jitter:{self._seed}:{pid}")
+                            for pid in self._jitter}
         self._view = MarketView(self._h, self._sym)
         self._by_id = {a.participant_id: a for a in agents}
         self._hears_rejects = {a.participant_id for a in agents
@@ -233,7 +237,8 @@ class EventScheduler:
         if burst:
             pid = agent.participant_id
             jitter = self._jitter.get(pid, 0)
-            arrive = t + agent.order_latency_ns + (self._rng.randint(0, jitter) if jitter else 0)
+            arrive = t + agent.order_latency_ns + (
+                self._jitter_rng[pid].randint(0, jitter) if jitter else 0)
             # A session is FIFO: when jitter is wider than the gap between two
             # of one agent's bursts, the later one must not overtake (or tie,
             # and be shuffled ahead of) the earlier, or its cancels would land

@@ -177,3 +177,55 @@ def test_sampler_charges_F_only_when_quoting_and_never_runs_no_quote():
 def test_policy_from_inverts_describe_for_every_policy_in_the_space():
     space = E.search_space(1)
     assert [E.policy_from(E.describe(p)) for p in space] == list(space)
+
+
+# --- confirmatory mode ------------------------------------------------------------
+
+def _rows(nets, spread=None):
+    return [{"maker_net": list(n), "half_spread_ticks": spread} for n in nets]
+
+
+def test_slowest_lowest_reads_paired_intervals():
+    import exp12_endogenous_makers as x12
+    off = _rows([[0.0, 0.0]] * 30)
+    worse = _rows([[-0.1 + 0.01 * (i % 3), -1.0 + 0.01 * (i % 5)] for i in range(30)])
+    better = _rows([[-1.0 + 0.01 * (i % 3), -0.1 + 0.01 * (i % 5)] for i in range(30)])
+    assert x12._slowest_lowest(worse, off, [50, 150]) == "lowest"
+    assert x12._slowest_lowest(better, off, [50, 150]) == "not_lowest"
+
+
+def test_h8a_steps_band_and_upper_edge():
+    import exp12_endogenous_makers as x12
+    from strategic_maker import MakerPolicy
+
+    def cell(m, spread):        # the M = 1 maker on the grid's upper edge, 20 report seeds
+        rows = [{"maker_net": [0.0], "half_spread_ticks": spread * (1 + 0.01 * ((i % 3) - 1))}
+                for i in range(20)]
+        return ({"profile": (MakerPolicy(half_spread=64, qty=250),) * m}, rows)
+    be = x12.h8a({1: cell(1, 30.0), 5: cell(5, 1.0)}, 3)["breakeven_ticks"]
+    sym = {1: cell(1, 30.0), 2: cell(2, 4.0), 3: cell(3, 2.0), 5: cell(5, be)}
+    r = x12.h8a(sym, 3)
+    assert [s["verdict"] for s in r["steps"]] == ["HIT", "HIT", "HIT"]
+    assert r["top_M_verdict"] == "HIT" and r["M1_on_upper_edge"] and r["verdict"] == "HIT"
+    sym[5] = cell(5, 3.0)                          # above M = 3 and outside +-20%
+    assert x12.h8a(sym, 3)["verdict"] == "MISS"
+
+
+def test_op_evaluator_checkpoints_and_never_reruns(tmp_path, monkeypatch):
+    import exp12_endogenous_makers as x12
+    import operating_point as op
+    calls = []
+
+    def fake(market, profile, lat, seed, horizon_s):
+        calls.append((market, seed))
+        return {"maker_net": [float(seed)]}
+    monkeypatch.setattr(x12, "simulate_op", fake)
+    log = op.CellLog(tmp_path / "ck.jsonl")
+    ev = x12.OpEvaluator((3, 1.0), 10.0, log)
+    prof = (x12.START,)
+    assert ev.rows([(prof, (50_000,))], (1, 2))[0][1]["maker_net"] == [2.0]
+    ev2 = x12.OpEvaluator((3, 1.0), 10.0, op.CellLog(tmp_path / "ck.jsonl"))
+    ev2.rows([(prof, (50_000,))], (1, 2))
+    assert len(calls) == 2                                   # resumed from the checkpoint
+    x12.OpEvaluator((8, 1.0), 10.0, log).rows([(prof, (50_000,))], (1,))
+    assert len(calls) == 3                                   # another market is another run

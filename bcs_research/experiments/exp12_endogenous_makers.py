@@ -431,5 +431,321 @@ def main(out_path=PILOT_OUT, workers=None, resume=False) -> dict:
     return {"cells": cells}
 
 
+# --- confirmatory mode: P8 at the operating point ---------------------------------
+#
+# The pilot's strategy space, solver and checks, moved onto §5's operating
+# point (operating_point.build_market: 100 us snipers with 80 us jitter, the
+# investors, VIP 9 fees; no informed investor, §5 lists none). P8 states M and
+# little else, so the base cell is k = 3 (the operating point's) with one snipe
+# clearing the quote (ratio 1: BCS's N = k + 1 breakeven H8a compares with
+# assumes it), makers at 50 us each way (lag 0) or the pilot's 50/150/450 us.
+# Solver: every run lasts §5's 30 minutes. One screen seed (30 simulated
+# minutes per candidate, six times the pilot's screen) and six confirm seeds
+# per finalist; the equilibrium is reported on 100 fresh seeds (§2's n).
+# MAX_ROUNDS 8; a cycle or the round cap is reported as non-convergence.
+# WIDENING's decays (0.01, 0.05, 0.1) are per OBSERVED UPDATE, i.e. per 10 ms,
+# by StrategicMaker's definition: they are strategy-grid points the makers
+# choose among, not the tick model's per-tick rate, so no tick conversion
+# applies (the paper's 0.1 per 100-ms tick would be 0.0105 per update, inside
+# the grid's span).
+# Every run is checkpointed, and the solver is deterministic given its runs,
+# so a restart replays the finished solves from the checkpoint without
+# simulating.
+#   H8a  M in {1, 2, 3, 5}, F = 0: the realised quoted half-spread on the report
+#        seeds, paired across M; each step M-1 -> M HIT if the paired interval's
+#        upper bound is <= 0, MISS if its lower bound is > 0. M = 5 inside +-20%
+#        of half_spread(lambda_i, lambda_j (N-1)/N, J), N = k + 1. M = 1's best
+#        response on the half-spread grid's upper edge (not in P8's miss line:
+#        off the edge is INCONCLUSIVE).
+#   H8b  three potential makers; F in {0, 0.1, 0.3, 1.0} USD/s at k = 3 and k in
+#        {1, 3, 8} at F = 0.1 (P8 states no grids: §5 defaults to the pilot's
+#        costs; the k grid is P2's {1, 3, 8} minus 21). Active makers must not
+#        rise in F or in k; each active maker's gross P&L interval must meet
+#        [F, F + increment], the increment being the fall in mean active-maker
+#        P&L when one more maker quotes (the first active maker's policy).
+#   H8c  the asymmetric equilibria (M = 2: 50/150 us; M = 3: 50/150/450 us) held
+#        fixed and evaluated in every tape-band cell, both bands (§4): per cell
+#        the slowest maker is "lowest" if every paired interval of its delta
+#        minus a rival's lies below 0, "not lowest" if any lies above 0. HIT if
+#        >= 90% of cells are lowest, MISS if > 10% are not lowest.
+#   H8d  ratio-1 cells with k in {3, 5, 6, 7, 8, 13, 21}: the M = 2 asymmetric game
+#        (the 150 us maker lags every sniper by 200 us > eps) solved per k; the
+#        slow maker counts if it chooses no-quote or takes < 5% of maker fills.
+#        HIT if >= 2/3 of cells count, MISS if < 1/2.
+
+CONFIRM_SCREEN, CONFIRM_CONFIRM = (100,), tuple(range(200, 206))
+CONFIRM_REPORT = tuple(range(300, 400))
+CONFIRM_MAX_ROUNDS = 8
+CONFIRM_K, CONFIRM_RATIO = 3, 1.0
+M_CONFIRM = (1, 2, 3, 5)
+H8B_COSTS, H8B_KS, H8B_K_COST = (0.1, 0.3, 1.0), (1, 8), 0.1
+H8D_KS = (3, 5, 6, 7, 8, 13, 21)
+SYM_US, ASYM_US = 50, (50, 150, 450)
+
+
+def simulate_op(market: tuple, profile: tuple, latencies_ns: tuple, seed: int,
+                horizon_s: float) -> dict:
+    """One operating-point run; market = (k, snipe ratio)."""
+    import operating_point as op
+    k, ratio = market
+    mk = op.build_market(seed, maker_latencies_ns=latencies_ns, k=k, snipe_ratio=ratio,
+                         policies=list(profile), horizon_s=horizon_s)
+    res = op.simulate(seed, market=mk)
+    return summarize(res, mk.makers, horizon_s)
+
+
+class OpEvaluator:
+    """Evaluator's interface on the operating point, every run checkpointed."""
+
+    def __init__(self, market: tuple, horizon_s: float, log, pool=None):
+        self.market, self.horizon_s, self.log, self.pool = market, horizon_s, log, pool
+        self.cache = log.done
+
+    def key(self, profile, lat, seed) -> str:
+        return json.dumps([list(self.market), [describe(p) for p in profile], list(lat), seed,
+                           self.horizon_s])
+
+    def rows(self, jobs: list, seeds) -> list:
+        from concurrent.futures import as_completed
+        want = {self.key(p, lat, s): (p, lat, s) for p, lat in jobs for s in seeds}
+        todo = {k: v for k, v in want.items() if k not in self.log}
+        if self.pool is None:
+            for k, (p, lat, s) in todo.items():
+                self.log.put(k, simulate_op(self.market, p, lat, s, self.horizon_s))
+        else:
+            futs = {self.pool.submit(simulate_op, self.market, p, lat, s, self.horizon_s): k
+                    for k, (p, lat, s) in todo.items()}
+            for f in as_completed(futs):
+                self.log.put(futs[f], f.result())
+        return [[self.log.get(self.key(p, lat, s)) for s in seeds] for p, lat in jobs]
+
+
+def solve_op(ev, latencies_ns, cost, initial) -> dict:
+    space = search_space(len(latencies_ns) - 1)
+
+    def br(i, profile):
+        return best_response(maker_sampler(ev, i, profile, latencies_ns, cost), space,
+                             profile[i], CONFIRM_SCREEN, CONFIRM_CONFIRM)
+    return nash_iteration(br, initial, CONFIRM_MAX_ROUNDS)
+
+
+def _lat(us) -> tuple:
+    return tuple(int(u * 1_000) for u in us)
+
+
+def _step(diff: dict) -> str:
+    return "HIT" if diff["upper"] <= 0 else ("MISS" if diff["lower"] > 0 else "INCONCLUSIVE")
+
+
+def h8a(sym: dict, k: int) -> dict:
+    """sym: {M: (nash dict, report rows)}; rows carry half_spread_ticks per report seed."""
+    import operating_point as op
+    from bcs_theory import half_spread, laplace_jump
+    spreads = {m: [r["half_spread_ticks"] for r in rows] for m, (_, rows) in sym.items()}
+    steps = []
+    ms = sorted(spreads)
+    for a, b in zip(ms, ms[1:]):
+        pairs = [(y - x) for x, y in zip(spreads[a], spreads[b]) if x is not None and y is not None]
+        d = bootstrap_ci(pairs) if pairs else None
+        steps.append({"from_M": a, "to_M": b, "diff": d, "verdict": _step(d) if d else "INCONCLUSIVE"})
+    lam_i, lam_j, b = op.INVESTOR_RATE_PER_S, op.PATH["jump_intensity_per_s"], op.PATH["jump_scale_bp"]
+    n = k + 1
+    breakeven = half_spread(lam_i, lam_j * (n - 1) / n, laplace_jump(b)) / op.TICK_BP
+    top = max(ms)
+    vals = [v for v in spreads[top] if v is not None]
+    m5 = bootstrap_ci(vals) if vals else None
+    m5v = op.band_verdict(m5["lower"], m5["upper"], 0.8 * breakeven, 1.2 * breakeven) if m5 else "MISS"
+    m1 = sym[min(ms)][0]["profile"][0]
+    edge = m1.quote and m1.half_spread == max(HALF_SPREADS_TICKS)
+    parts = [s["verdict"] for s in steps] + [m5v]
+    verdict = ("MISS" if "MISS" in parts else
+               "HIT" if all(v == "HIT" for v in parts) and edge else "INCONCLUSIVE")
+    return {"verdict": verdict, "steps": steps, "top_M": top, "top_M_half_spread_ticks": m5,
+            "breakeven_ticks": breakeven, "band": [0.8 * breakeven, 1.2 * breakeven],
+            "top_M_verdict": m5v, "M1_policy": describe(m1), "M1_on_upper_edge": bool(edge),
+            "half_spread_grid_max": max(HALF_SPREADS_TICKS)}
+
+
+def _active(profile) -> list:
+    return [i for i, p in enumerate(profile) if p.quote]
+
+
+def h8b_cell(ev, profile, lat, cost) -> dict:
+    """Active count and the free-entry band for one solved cell."""
+    act = _active(profile)
+    rows = ev.rows([(profile, lat)], CONFIRM_REPORT)[0]
+    if not act:
+        return {"active": 0, "makers": [], "verdict": "HIT"}
+    entrant = list(profile)
+    idle = [i for i, p in enumerate(profile) if not p.quote]
+    elat = list(lat)
+    if idle:
+        entrant[idle[0]] = profile[act[0]]
+    else:
+        entrant.append(profile[act[0]])
+        elat.append(lat[act[0]])
+    erows = ev.rows([(tuple(entrant), tuple(elat))], CONFIRM_REPORT)[0]
+    eact = _active(entrant)
+    gross = float(np.mean([np.mean([r["maker_net"][i] for i in act]) for r in rows]))
+    gross_e = float(np.mean([np.mean([r["maker_net"][i] for i in eact]) for r in erows]))
+    inc = max(0.0, gross - gross_e)
+    makers = []
+    for i in act:
+        ci = bootstrap_ci([r["maker_net"][i] for r in rows])
+        meets = ci["upper"] >= cost and ci["lower"] <= cost + inc
+        makers.append({"maker": i, "gross_pnl": ci, "meets_band": meets})
+    return {"active": len(act), "increment": inc, "band": [cost, cost + inc], "makers": makers,
+            "verdict": "HIT" if all(m["meets_band"] for m in makers) else "MISS"}
+
+
+def _slowest_lowest(rows_on, rows_off, lat) -> str:
+    slow = int(np.argmax(lat))
+    d = [[a - b for a, b in zip(ron["maker_net"], roff["maker_net"])]
+         for ron, roff in zip(rows_on, rows_off)]
+    d = np.array(d)
+    cis = [bootstrap_ci(d[:, slow] - d[:, j]) for j in range(len(lat)) if j != slow]
+    if any(c["lower"] > 0 for c in cis):
+        return "not_lowest"
+    return "lowest" if all(c["upper"] < 0 for c in cis) else "undetermined"
+
+
+def confirmatory(argv) -> dict:
+    import argparse
+    from concurrent.futures import ProcessPoolExecutor
+    import operating_point as op
+    global CONFIRM_REPORT, CONFIRM_CONFIRM
+    ap = argparse.ArgumentParser(description="exp12 confirmatory (P8)")
+    ap.add_argument("--confirmatory", action="store_true")
+    ap.add_argument("--horizon-s", type=float, default=op.HORIZON_S)
+    ap.add_argument("--report-seeds", type=int, default=len(CONFIRM_REPORT), help="smoke only")
+    ap.add_argument("--confirm-seeds", type=int, default=len(CONFIRM_CONFIRM), help="smoke only")
+    ap.add_argument("--m-grid", type=int, nargs="+", default=list(M_CONFIRM), help="smoke only")
+    ap.add_argument("--h8d-ks", type=int, nargs="+", default=list(H8D_KS), help="smoke only")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out-dir", type=Path, default=None)
+    a = ap.parse_args(argv)
+    CONFIRM_REPORT = tuple(range(300, 300 + a.report_seeds))
+    CONFIRM_CONFIRM = tuple(range(200, 200 + a.confirm_seeds))
+    out, ck = op.confirmatory_paths("exp12_endogenous_makers", a.out_dir)
+    log = op.CellLog(ck)
+    t0 = time.time()
+    base = (CONFIRM_K, CONFIRM_RATIO)
+    cells, notes = {}, []
+
+    def note(label, nash):
+        cells[label] = {"status": nash["status"], "profile": [describe(p) for p in nash["profile"]],
+                        "log": _jsonable(nash["log"])}
+        if nash["status"] != "equilibrium":
+            notes.append(f"{label}: {nash['status']} (non-convergence)")
+        print(f"[exp12] {label}: {nash['status']} ({time.time() - t0:.0f} s)", flush=True)
+
+    pool = ProcessPoolExecutor(max_workers=a.workers) if a.workers > 1 else None
+    try:
+        evs = {}
+
+        def ev(market):
+            if market not in evs:
+                evs[market] = OpEvaluator(market, a.horizon_s, log, pool)
+            return evs[market]
+
+        sym = {}
+        for m in a.m_grid:
+            start = dataclasses.replace(START, post_only=m > 1)
+            nash = solve_op(ev(base), _lat((SYM_US,) * m), 0.0, (start,) * m)
+            note(f"sym_M{m}_F0", nash)
+            sym[m] = (nash, ev(base).rows([(nash["profile"], _lat((SYM_US,) * m))], CONFIRM_REPORT)[0])
+        res = {"H8a": h8a(sym, CONFIRM_K)}
+
+        m3 = sym[3][0]["profile"] if 3 in sym else (dataclasses.replace(START, post_only=True),) * 3
+        lat3 = _lat((SYM_US,) * 3)
+        h8b_cells = {(0.0, CONFIRM_K): h8b_cell(ev(base), m3, lat3, 0.0)}
+        for c in H8B_COSTS:
+            nash = solve_op(ev(base), lat3, c, m3)
+            note(f"sym_M3_F{c}_k{CONFIRM_K}", nash)
+            h8b_cells[(c, CONFIRM_K)] = h8b_cell(ev(base), nash["profile"], lat3, c)
+            if c == H8B_K_COST:
+                start_k = nash["profile"]
+        for kk in H8B_KS:
+            nash = solve_op(ev((kk, CONFIRM_RATIO)), lat3, H8B_K_COST, start_k)
+            note(f"sym_M3_F{H8B_K_COST}_k{kk}", nash)
+            h8b_cells[(H8B_K_COST, kk)] = h8b_cell(ev((kk, CONFIRM_RATIO)), nash["profile"], lat3,
+                                                   H8B_K_COST)
+        by_f = [h8b_cells[(c, CONFIRM_K)]["active"] for c in (0.0,) + H8B_COSTS]
+        by_k = [h8b_cells[(H8B_K_COST, kk)]["active"] for kk in sorted(H8B_KS + (CONFIRM_K,))]
+        mono = all(x >= y for x, y in zip(by_f, by_f[1:])) and all(x >= y for x, y in zip(by_k, by_k[1:]))
+        res["H8b"] = {"active_by_cost": dict(zip(map(str, (0.0,) + H8B_COSTS), by_f)),
+                      "active_by_k": dict(zip(map(str, sorted(H8B_KS + (CONFIRM_K,))), by_k)),
+                      "cells": {f"F{c}_k{kk}": v for (c, kk), v in h8b_cells.items()},
+                      "verdict": op.all_hit(["HIT" if mono else "MISS"]
+                                            + [v["verdict"] for (c, _), v in h8b_cells.items() if c > 0])}
+
+        asym = {}
+        for m in (2, 3):
+            lat = _lat(ASYM_US[:m])
+            init = sym[m][0]["profile"] if m in sym else (dataclasses.replace(START, post_only=True),) * m
+            nash = solve_op(ev(base), lat, 0.0, init)
+            note(f"asym_M{m}_F0_k{CONFIRM_K}", nash)
+            asym[m] = (nash["profile"], lat)
+        h8c = {}
+        for band, ratios in op.BANDS.items():
+            labels = []
+            for m, (profile, lat) in asym.items():
+                off = ev((0, 1.0)).rows([(profile, lat)], CONFIRM_REPORT)[0]
+                for r in ratios:
+                    for kk in op.K_GRID:
+                        on = ev((kk, r)).rows([(profile, lat)], CONFIRM_REPORT)[0]
+                        labels.append({"M": m, "ratio": r, "k": kk,
+                                       "slowest": _slowest_lowest(on, off, lat)})
+            n = len(labels)
+            low = sum(c["slowest"] == "lowest" for c in labels)
+            nlow = sum(c["slowest"] == "not_lowest" for c in labels)
+            v = "HIT" if low >= 0.9 * n else ("MISS" if nlow > 0.1 * n else "INCONCLUSIVE")
+            h8c[band] = {"verdict": v, "lowest": low, "not_lowest": nlow, "cells": labels}
+        res["H8c"] = h8c | {"verdict": h8c["paper"]["verdict"], "read_on": "paper band (§4)"}
+
+        h8d = []
+        for kk in a.h8d_ks:
+            lat = _lat(ASYM_US[:2])
+            if kk == CONFIRM_K:
+                profile = asym[2][0]
+            else:
+                nash = solve_op(ev((kk, CONFIRM_RATIO)), lat, 0.0, asym[2][0])
+                note(f"asym_M2_F0_k{kk}", nash)
+                profile = nash["profile"]
+            rows = ev((kk, CONFIRM_RATIO)).rows([(profile, lat)], CONFIRM_REPORT)[0]
+            share = float(np.mean([r["maker_fills"][1] / max(1, sum(r["maker_fills"])) for r in rows]))
+            counts = (not profile[1].quote) or share < 0.05
+            h8d.append({"k": kk, "slow_policy": describe(profile[1]), "slow_fill_share": share,
+                        "counts": bool(counts)})
+        yes = sum(c["counts"] for c in h8d)
+        res["H8d"] = {"cells": h8d, "counting": yes, "n": len(h8d),
+                      "verdict": "HIT" if yes >= 2 / 3 * len(h8d) else
+                      ("MISS" if yes < len(h8d) / 2 else "INCONCLUSIVE")}
+    finally:
+        if pool:
+            pool.shutdown()
+    status = (op.CONFIRMATORY_STATUS if a.horizon_s >= op.HORIZON_S and a.report_seeds >= op.N_SEEDS
+              and tuple(a.m_grid) == M_CONFIRM and tuple(a.h8d_ks) == H8D_KS
+              and a.confirm_seeds >= 6 else "smoke — NOT confirmatory: reduced sizes or grids")
+    report = {"experiment": "exp12_endogenous_makers (P8), confirmatory", "status": status,
+              "market": {"k": CONFIRM_K, "snipe_ratio": CONFIRM_RATIO, "sym_us": SYM_US,
+                         "asym_us": ASYM_US}, "fees": vars(FEES), "horizon_s": a.horizon_s,
+              "seeds": {"screen": CONFIRM_SCREEN, "confirm": CONFIRM_CONFIRM,
+                        "report": CONFIRM_REPORT}, "max_rounds": CONFIRM_MAX_ROUNDS,
+              "space": {"half_spreads_ticks": HALF_SPREADS_TICKS, "widening": WIDENING,
+                        "qtys": QTYS, "post_only": "with rivals only", "no_quote": True},
+              "p8": res, "non_convergence": notes, "cells": cells,
+              "holm": "95% verdicts; Holm across the 11 primaries is applied at write-up",
+              "elapsed_s": round(time.time() - t0, 1), "units": "USD per second"}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(_jsonable(report), indent=1, default=str) + "\n")
+    print(f"[exp12] H8a {res['H8a']['verdict']}, H8b {res['H8b']['verdict']}, H8c "
+          f"{res['H8c']['verdict']}, H8d {res['H8d']['verdict']} -> {out}", flush=True)
+    return report
+
+
 if __name__ == "__main__":
-    main(resume="--resume" in sys.argv[1:])
+    if "--confirmatory" in sys.argv[1:]:
+        confirmatory(sys.argv[1:])
+    else:
+        main(resume="--resume" in sys.argv[1:])

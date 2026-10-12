@@ -1,19 +1,19 @@
 
 [tape] ratio nodes [0.0031, 0.0222, 0.1575, 2.0036]
-  sniper_rent  p10..p90         0         0   0.00284    0.2337     0.616
-  maker_delta  p10..p90   -0.7027   -0.2166 -3.334e-06 1.111e-06    0.1268
-  noise_delta  p10..p90 -1.112e-05 -1.111e-06 -5.558e-07 3.332e-06    0.7224
-  tax          p10..p90   -0.8492 -7.111e-10 5.333e-09   0.05104    0.7026
-  maker_share  p10..p90     -1838     -1470         1         1      1471
-  P(makers bear majority) 0.700 [0.100, 0.700]  P(no tax) 0.290  maker share of mean tax 4.392
-  spread drivers: {"sniper_rent": {"ratio": 0.18405677509783136, "n_makers": 3.3715743031063013e-09, "fee_tier": 0.3981660304445418, "interaction": 0.4177771910860525}, "maker_delta": {"ratio": 0.19505261961492226, "n_makers": 0.01246624899023999, "fee_tier": 0.40237501747991045, "interaction": 0.39010611391492733}, "tax": {"ratio": 0.13309080838239104, "n_makers": 0.3261744798079646, "fee_tier": 0.27455245752699525, "interaction": 0.2661822542826491}}
+  sniper_rent  p10..p90         0         0   0.01865    0.2805    0.8155
+  maker_delta  p10..p90   -0.9052   -0.3619  -0.02405         0 0.0005104
+  noise_delta  p10..p90 -0.0001603 -4.794e-06         0 8.741e-06    0.2709
+  tax          p10..p90   -0.2714 2.368e-16   0.01081    0.3151    0.8619
+  maker_share  p10..p90    0.9979    0.9998         1         1     1.001
+  P(makers bear majority) 0.700 [0.300, 0.700]  P(no snipe) 0.300  maker share of mean tax 1.182
+  spread drivers: {"sniper_rent": {"ratio": 0.3223066930875964, "n_makers": 5.9040530486066124e-09, "fee_tier": 0.3307024811208867, "interaction": 0.34699081988746383}, "maker_delta": {"ratio": 0.3565423756597501, "n_makers": 0.002355717708039663, "fee_tier": 0.3211063884472097, "interaction": 0.3199955181850005}, "tax": {"ratio": 0.32765388722730027, "n_makers": 0.08319175580707476, "fee_tier": 0.2950860776656977, "interaction": 0.2940682792999273}}
 
 [fresh_snapshot] ratio nodes [0.0069, 0.0644, 0.5175, 6.882]
-  sniper_rent  p10..p90         0         0  0.006427    0.5644    0.6161
-  maker_delta  p10..p90   -0.7461   -0.5716 -3.334e-06 1.111e-06    0.1222
-  noise_delta  p10..p90 -1.112e-05 -1.111e-06 -5.558e-07 3.332e-06    0.7224
-  tax          p10..p90   -0.8446 -7.111e-10 5.333e-09    0.1483    0.7461
-  maker_share  p10..p90     -1838     -1470         1         1      1471
-  P(makers bear majority) 0.700 [0.100, 0.700]  P(no tax) 0.290  maker share of mean tax 2.070
-  spread drivers: {"sniper_rent": {"ratio": 0.1493832543752781, "n_makers": 8.46875460832095e-09, "fee_tier": 0.5115424546361591, "interaction": 0.3390742825198082}, "maker_delta": {"ratio": 0.16082356479659426, "n_makers": 0.007950062068314105, "fee_tier": 0.5106378532698507, "interaction": 0.32058851986524095}, "tax": {"ratio": 0.12399827968726748, "n_makers": 0.23511030055574764, "fee_tier": 0.3937110409282471, "interaction": 0.24718037882873778}}
-wrote /Users/atharva/Quant Projects/Order Book/.worktrees/bcs-stats/bcs_research/results/pilot/exp14_incidence_priors.json in 2826.9s
+  sniper_rent  p10..p90         0         0   0.05419    0.4496     1.003
+  maker_delta  p10..p90    -1.104    -0.493  -0.06988 -2.368e-16 0.0001602
+  noise_delta  p10..p90 -0.0001603 -4.794e-06         0 8.741e-06    0.2709
+  tax          p10..p90   -0.2422 2.613e-09   0.04191    0.3879     1.046
+  maker_share  p10..p90    0.9993    0.9999         1         1     1.274
+  P(makers bear majority) 0.700 [0.300, 0.700]  P(no snipe) 0.300  maker share of mean tax 1.120
+  spread drivers: {"sniper_rent": {"ratio": 0.2702139673453061, "n_makers": 1.5318823992403537e-08, "fee_tier": 0.43887747588395265, "interaction": 0.29090854145191725}, "maker_delta": {"ratio": 0.302629203485358, "n_makers": 0.0015454916384225056, "fee_tier": 0.4244227829520672, "interaction": 0.27140252192415226}, "tax": {"ratio": 0.28606814476542747, "n_makers": 0.05618765643986997, "fee_tier": 0.40119383681600906, "interaction": 0.2565503619786935}}
+wrote /Users/atharva/Quant Projects/Order Book/.worktrees/bcs-stats/bcs_research/results/pilot/exp14_incidence_priors.json in 512.8s

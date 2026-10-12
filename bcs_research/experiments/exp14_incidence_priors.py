@@ -60,6 +60,14 @@ classes lose to the snipers' presence (= snipers' net + extra exchange fees).
 Maker share = -maker_delta / tax, over cells where a snipe happened and tax > 0
 (see summarise_cells for why cells without a snipe carry no incidence).
 
+ponytail: arms share path and noise seeds but not the scheduler's random stream:
+the snipers' idle observations reshuffle same-instant events, so with M >= 2
+post-only makers the books can drift apart even before any snipe, and one
+large retail IOC then meets different depth (8-seed pilot: +0.27 USD/s of noise
+fees in the M = 3, smallest-ratio cells, identical at VIP 0 where nobody
+snipes). Per-agent jitter streams in EventScheduler (a shared file) would keep
+the arms identical up to the first snipe; until then, more seeds.
+
 Status: PILOT, pre-sign-off; output to results/pilot/.
 
 Run (background): bcs_research/.venv/bin/python bcs_research/experiments/exp14_incidence_priors.py [seeds] [horizon_s] [ratio_nodes] [workers]

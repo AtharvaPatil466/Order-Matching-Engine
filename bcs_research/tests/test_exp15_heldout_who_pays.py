@@ -83,3 +83,70 @@ def test_a_matched_pair_maps_latencies_to_slots_and_scores():
     assert len(row["delta"]) == 2 and row["edge_off"] != row["edge_on"]
     s = x.score_config(c, [row, row])
     assert s["hit"] == x.is_hit(row["latency_ns"], row["delta"]) and s["n_seeds"] == 2
+
+
+# --- P10b: the ex-ante queue-front predictor -----------------------------------
+
+MS = 1_000_000
+D = 10 * MS            # the operating point's update cadence
+
+
+def test_queue_front_share_is_the_gap_before_each_makers_phase():
+    # Phases 3 and 7 ms: a snipe landing in (7, 13] ms finds maker 0 at the front
+    # (its burst is due next), one in (3, 7] finds maker 1.
+    assert x.queue_front_shares([203 * MS, 207 * MS], D) == pytest.approx([0.6, 0.4])
+    assert x.queue_front_payer([203 * MS, 207 * MS], D) == 0
+    # Three makers at phases 0, 1, 5 ms: arcs 5, 1, 4 ms. Latency rank is irrelevant.
+    assert x.queue_front_shares([300 * MS, 101 * MS, 205 * MS], D) == pytest.approx([0.5, 0.1, 0.4])
+    assert x.queue_front_payer([300 * MS, 101 * MS, 205 * MS], D) == 0
+
+
+def test_equal_phases_split_their_gap_and_a_top_tie_names_no_one():
+    # P10's integer-tick sets: 2 x ticks x 100 ms is a multiple of 10 ms, one phase.
+    assert x.queue_front_shares([200 * MS, 400 * MS, 600 * MS], D) == pytest.approx([1 / 3] * 3)
+    assert x.queue_front_payer([200 * MS, 400 * MS], D) is None
+    # Two tied at phase 0 share the 5 ms arc before them; the maker at 5 ms leads alone.
+    assert x.queue_front_shares([200 * MS, 400 * MS, 205 * MS], D) == pytest.approx([0.25, 0.25, 0.5])
+    assert x.queue_front_payer([200 * MS, 400 * MS, 205 * MS], D) == 2
+
+
+def test_a_maker_that_cancels_before_the_snipe_is_off_the_stale_touch():
+    assert x.queue_front_shares([50_000, 205 * MS], D, sniper_latency_ns=100_000,
+                                jitter_ns=20_000) == pytest.approx([0.0, 1.0])
+    with pytest.raises(ValueError):           # its cancel races the snipe: undefined here
+        x.queue_front_shares([100_000, 205 * MS], D, sniper_latency_ns=100_000, jitter_ns=80_000)
+
+
+def _first_snipe_shares(one_way_ns, seed=1):
+    """Who the scheduler puts at the front: each jump's first filled snipe's maker."""
+    import bcs_engine as be
+    from event_scheduler import EventScheduler
+    from event_sniper import EventSniper
+    from fundamental_paths import JumpDiffusionPath
+    from strategic_maker import MakerPolicy, StrategicMaker
+    path = JumpDiffusionPath(1_000_000, 0.0, D, 60 * 1_000 * MS, seed=seed,
+                             jump_intensity_per_s=5.0, jump_scale=1000.0)
+    makers = [StrategicMaker(1 + i, MakerPolicy(half_spread=50, qty=10, post_only=True),
+                             md_latency_ns=lat, order_latency_ns=lat)
+              for i, lat in enumerate(one_way_ns)]
+    agents = makers + [EventSniper(50, qty=1, md_latency_ns=5_000, order_latency_ns=5_000)]
+    h = be.EngineHarness()
+    h.add_symbol(1)
+    h.start(disable_circuit_breaker=True)
+    res = EventScheduler(h, 1, seed=seed).run(agents, path)
+    h.stop()
+    counts = [0] * len(makers)
+    for r in res.races:
+        first = next((a for a in r.arrivals if a.participant_id == 50
+                      and a.outcome in ("filled", "partial")), None)
+        if first is not None:
+            tr = next(t for t in res.trades if t.t_ns == first.arrival_ns)
+            counts[(tr.seller_id if tr.buyer_id == 50 else tr.buyer_id) - 1] += 1
+    return [c / sum(counts) for c in counts]
+
+
+def test_queue_front_shares_match_the_scheduler():
+    """The derivation checked against the engine: ~280 jumps, binomial sd ~0.03."""
+    for one_way in ((1_500_000, 3_500_000), (1_000_000, 500_000, 2_500_000)):
+        predicted = x.queue_front_shares([2 * v for v in one_way], D, sniper_latency_ns=10_000)
+        assert _first_snipe_shares(one_way) == pytest.approx(predicted, abs=0.08)

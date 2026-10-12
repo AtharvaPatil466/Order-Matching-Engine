@@ -62,6 +62,76 @@ def is_hit(latencies, deltas) -> bool:
     return int(np.argmin(deltas)) == predicted_payer(latencies)
 
 
+# --- the P10b predictor (§4 amendment, 2026-10-12): queue front, ex ante ------
+#
+# Committed on its own, before any confirmatory exp15 run, so the git order
+# shows it could not have been fitted to confirmatory data. Its inputs are the
+# latency configuration and the update cadence only.
+#
+# Derivation, from the scheduler's semantics (event_scheduler.py) and the
+# maker's (strategic_maker.py, requote_threshold 0):
+#  1. A maker with total latency L (observe + order) cancels and requotes on
+#     every update it observes, in one burst landing L after the update. The
+#     path publishes an update every D = 10 ms on the grid 0, D, 2D, ..., so the
+#     maker's bursts land at kD + L: a fixed phase phi = L mod D on the cycle.
+#  2. Each burst cancels the maker's resting quote and posts a new one, so at a
+#     price the maker shares with its rivals it goes to the BACK of the queue
+#     every D. Under price-time priority the front of the queue at the stale
+#     touch is the maker whose latest burst landed EARLIEST, i.e. the one whose
+#     next burst is due soonest after that instant.
+#  3. Jumps arrive at Poisson times, uniform on the cycle, and the first snipe
+#     lands a fixed sniper latency (plus jitter) later, so its phase on the
+#     cycle is uniform too. A snipe landing at phase x finds at the front the
+#     maker whose phase is the first one after x (cyclically). So maker i holds
+#     the front for the arc of x from the previous maker's phase up to phi_i:
+#     its share of first snipes is that preceding gap over D.
+#  4. Makers with the same phase are exchangeable (the scheduler's jitter and
+#     same-instant shuffle order them at random each cycle): they split their
+#     group's gap equally.
+#  5. A maker whose cancel always lands before the first snipe (total latency
+#     plus jitter below the snipers') has left the stale touch: share 0.
+# The predicted payer is the maker with the largest share; a tie at the top
+# names no one (None). The latency rank does not enter at all.
+# ponytail: phases within the jitter width of each other swap order now and
+# then; the nominal arcs are their expected shares, which is all "most often"
+# needs. Jumps landing within a slow maker's latency of an earlier jump add
+# off-grid bursts (probability ~ lambda_j * D per snipe); ignored.
+
+def queue_front_shares(total_latencies_ns, update_interval_ns, sniper_latency_ns=0,
+                       jitter_ns=0) -> list[float]:
+    """Each maker's share of jumps on which it holds time priority at the stale
+    touch when the first snipe lands. total_latencies_ns: observe + order, per maker."""
+    lat = [int(x) for x in total_latencies_ns]
+    d = int(update_interval_ns)
+    if d <= 0 or not lat or min(lat) < 0:
+        raise ValueError("need a positive update interval and non-negative latencies")
+    stale = []
+    for i, x in enumerate(lat):
+        if x + jitter_ns < sniper_latency_ns:      # always cancels before the snipe
+            continue
+        if x <= sniper_latency_ns + jitter_ns:
+            raise ValueError(f"maker {i}'s cancel races the first snipe ({x} ns against "
+                             f"{sniper_latency_ns} +/- {jitter_ns} ns); outside this predictor")
+        stale.append(i)
+    shares = [0.0] * len(lat)
+    phases = sorted({lat[i] % d for i in stale})
+    for k, ph in enumerate(phases):
+        gap = (ph - phases[k - 1]) % d or (d if len(phases) == 1 else 0)
+        group = [i for i in stale if lat[i] % d == ph]
+        for i in group:
+            shares[i] = gap / d / len(group)
+    return shares
+
+
+def queue_front_payer(total_latencies_ns, update_interval_ns, sniper_latency_ns=0,
+                      jitter_ns=0):
+    """P10b's predicted payer: the maker most often at the queue front; None on a tie."""
+    s = queue_front_shares(total_latencies_ns, update_interval_ns, sniper_latency_ns, jitter_ns)
+    top = max(s)
+    leaders = [i for i, v in enumerate(s) if abs(v - top) < 1e-12]
+    return leaders[0] if len(leaders) == 1 and top > 0 else None
+
+
 def spearman(latencies, deltas) -> float:
     """Spearman rank correlation of latency with PnL delta (average ranks on ties)."""
     a, b = stats.rankdata(latencies), stats.rankdata(deltas)

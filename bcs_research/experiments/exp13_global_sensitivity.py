@@ -420,7 +420,8 @@ def main(n=PILOT_N, horizon_s=PILOT_HORIZON_S, out_path=PILOT_OUT, workers=None)
 # The pilot's design (factors, ranges, outcomes, estimators) moved onto §5's
 # operating point: the sniper latency level is x[0.1, 10] of the snipers' 100 us,
 # lag/eps runs over [0, 2] of eps = 80 us, the depth is the 6,180-lot quote and
-# every racer draws the 80 us jitter. Everything else is P11's range or the
+# every racer draws the 80 us jitter. The maker's decay is the paper's 0.1 per
+# tick at 1 tick = 100 ms (CONFIRM_DECAY_PER_S below), not the pilot's 1 ms. Everything else is P11's range or the
 # pilot's documented choice (see `deviations_from_p11` in the report).
 #
 # Sample size: N_base = 2,048, not P11's written 512. P11's verdicts are
@@ -445,15 +446,24 @@ def main(n=PILOT_N, horizon_s=PILOT_HORIZON_S, out_path=PILOT_OUT, workers=None)
 
 CONFIRM_N = 2048
 PREREG_N = 512
+# The paper maker's decay, 0.1 per tick-model tick, on the pre-registration's
+# clock: one tick = 100 ms (P10; H2d's "300 ms (the tick model's 3 ticks)"), as
+# CONFIRM-B maps it. The pilot used 1 tick = 1 ms (the tick code's dt_us), a
+# rate 100x faster; the confirmatory base is -ln(0.9) / 100 ms = 1.054/s, i.e.
+# 1 - 0.9^0.1 = 0.0105 per 10-ms update, with P11's x[0.25, 4] around it.
+PAPER_TICK_S = 0.1
+CONFIRM_DECAY_PER_S = -math.log(1 - 0.1) / PAPER_TICK_S
 
 
 def confirm_params():
     import operating_point as op
     base = op.SNIPER_LATENCY_NS
-    return tuple(sa.Param("sniper_lat_ns", base / 10, base * 10, "loguniform")
-                 if q.name == "sniper_lat_ns" else
-                 sa.Param("noise_rate", op.INVESTOR_ARRIVAL_PER_S / 4, op.INVESTOR_ARRIVAL_PER_S * 4,
-                          "loguniform") if q.name == "noise_rate" else q for q in PARAMS)
+    swap = {"sniper_lat_ns": sa.Param("sniper_lat_ns", base / 10, base * 10, "loguniform"),
+            "noise_rate": sa.Param("noise_rate", op.INVESTOR_ARRIVAL_PER_S / 4,
+                                   op.INVESTOR_ARRIVAL_PER_S * 4, "loguniform"),
+            "decay_per_s": sa.Param("decay_per_s", CONFIRM_DECAY_PER_S / 4, CONFIRM_DECAY_PER_S * 4,
+                                    "loguniform")}
+    return tuple(swap.get(q.name, q) for q in PARAMS)
 
 
 def confirm_points(n: int):
@@ -560,6 +570,7 @@ def confirmatory(argv) -> dict:
             "F carried entirely by the taker (P11 gives the total only)",
             "gap_rate is the event-clock analogue (IOC empties a side), not the §3.3 grid count",
             "N_base 2048 instead of 512",
+            "decay base: 0.1 per tick at 1 tick = 100 ms (pilot: 1 ms), as CONFIRM-B maps it",
         ],
         "holm": "95% verdicts; Holm across the 11 primaries is applied at write-up",
         "sobol": analyse(rows, a.n),

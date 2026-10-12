@@ -284,13 +284,15 @@ def main(n_seeds=PILOT_SEEDS, horizon_s=PILOT_HORIZON_S, n_nodes=PILOT_NODES,
 # No prediction in PREREGISTRATION §6 covers exp14, so there is no verdict to
 # compute: this mode re-runs the pilot's stratified priors at §5's operating
 # point (snipers 100 us, eps = 80 us, the 6,180-lot quote, the maker as fast as
-# the snipers: lag 0, so it wins 1/(k + 1) of races) with §2's n = 100 seeds per
+# the snipers: lag 0, so it wins 1/(k + 1) of races; the paper maker's decay at
+# 1 tick = 100 ms, exp13.CONFIRM_DECAY_PER_S) with §2's n = 100 seeds per
 # cell and 30-minute runs, and reports it descriptively. Every run is
 # checkpointed.
 
 def confirm_base():
     import operating_point as op
     return x13.BASE_POINT | {"sniper_lat_ns": op.SNIPER_LATENCY_NS, "lag_over_eps": 0.0,
+                             "decay_per_s": x13.CONFIRM_DECAY_PER_S,     # 0.1 per 100-ms tick
                              "noise_rate": op.INVESTOR_ARRIVAL_PER_S, "n_snipers": 3,
                              "jitter_ns": op.JITTER_NS, "depth_lots": op.QUOTE_LOTS}
 

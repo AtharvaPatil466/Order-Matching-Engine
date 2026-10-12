@@ -166,3 +166,12 @@ def test_p11_verdicts_on_a_function_with_known_indices():
     assert v["H11b"]["verdict"] == "HIT"          # a pure interaction of the two named factors
     assert v["H11c"]["verdict"] == "HIT"          # zero toll
     assert x13.p11_verdicts(rows, n, 256)["n_base"] == 256
+
+
+def test_confirmatory_decay_is_the_papers_per_tick_rate_at_100_ms_ticks():
+    import math
+    import exp13_global_sensitivity as x13
+    per_update = 1 - math.exp(-x13.CONFIRM_DECAY_PER_S * 0.010)
+    assert per_update == pytest.approx(1 - 0.9 ** 0.1)          # CONFIRM-B's mapping
+    dec = next(q for q in x13.confirm_params() if q.name == "decay_per_s")
+    assert (dec.lo, dec.hi) == pytest.approx((x13.CONFIRM_DECAY_PER_S / 4, x13.CONFIRM_DECAY_PER_S * 4))

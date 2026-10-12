@@ -98,3 +98,20 @@ def test_cell_log_resumes_and_ignores_a_torn_line(tmp_path):
         fh.write('{"key": "b", "val')            # killed mid-write
     again = op.CellLog(p)
     assert "a" in again and again.get("a") == {"x": 1} and "b" not in again
+
+
+def _square(x):
+    return x * x
+
+
+def test_run_cached_skips_logged_keys_and_logs_new_ones(tmp_path):
+    log = op.CellLog(tmp_path / "ck.jsonl")
+    log.put("a", -1)                                  # resumed: must not be recomputed
+    out = op.run_cached(_square, {"a": (2,), "b": (3,)}, log, workers=1)
+    assert out == {"a": -1, "b": 9}
+    assert op.CellLog(tmp_path / "ck.jsonl").get("b") == 9
+
+
+def test_smoke_status_is_confirmatory_only_at_full_size():
+    assert op.smoke_status(100, 1800) == op.CONFIRMATORY_STATUS
+    assert op.smoke_status(2, 60).startswith("smoke — NOT confirmatory")

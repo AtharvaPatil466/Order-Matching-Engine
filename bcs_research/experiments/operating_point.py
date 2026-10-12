@@ -271,3 +271,37 @@ def confirmatory_paths(name: str, out_dir: Path | None = None) -> tuple[Path, Pa
     """(summary JSON, checkpoint JSONL) for a confirmatory driver `name`."""
     d = Path(out_dir) if out_dir else RESULTS_DIR
     return d / f"{name}.json", d / "checkpoints" / f"{name}.jsonl"
+
+
+def run_cached(fn, tasks: dict, log: CellLog, workers: int = 1, progress=print) -> dict:
+    """{key: fn(*args)} for every task, skipping keys `log` already holds.
+
+    tasks: {key (str): args tuple}. fn must be a module-level function (the
+    pool pickles it). Each result is logged the moment it lands, so a killed
+    batch loses at most the runs in flight. workers == 1 runs inline.
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    todo = {k: a for k, a in tasks.items() if k not in log}
+    done = 0
+    if todo and workers == 1:
+        for k, a in todo.items():
+            log.put(k, fn(*a))
+            done += 1
+    elif todo:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(fn, *a): k for k, a in todo.items()}
+            for f in as_completed(futs):
+                log.put(futs[f], f.result())
+                done += 1
+                if done % 200 == 0:
+                    progress(f"  {done}/{len(todo)} runs ({len(tasks) - len(todo)} resumed)")
+    return {k: log.get(k) for k in tasks}
+
+
+def smoke_status(n_seeds: int, horizon_s: float, n_required: int = N_SEEDS,
+                 horizon_required: float = HORIZON_S) -> str:
+    """CONFIRMATORY_STATUS only at the pre-registered sizes; anything smaller is a smoke run."""
+    if n_seeds >= n_required and horizon_s >= horizon_required:
+        return CONFIRMATORY_STATUS
+    return (f"smoke — NOT confirmatory: {n_seeds} seeds x {horizon_s:g} s against the "
+            f"pre-registered {n_required} x {horizon_required:g} s")

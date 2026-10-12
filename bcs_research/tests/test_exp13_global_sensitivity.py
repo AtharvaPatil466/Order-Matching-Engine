@@ -136,3 +136,33 @@ def test_analyse_reads_rows_in_design_order():
     assert t["n_snipers"]["ST"] == pytest.approx(1.0, abs=0.15)
     assert max(abs(r["ST"]) for k, r in t.items() if k != "n_snipers") < 1e-12
     assert np.isfinite([r["S1"] for r in t.values()]).all()
+
+
+# --- confirmatory mode ------------------------------------------------------------
+
+def test_the_first_512_rows_of_the_2048_design_are_the_512_design():
+    import exp13_global_sensitivity as x13
+    big, small = x13.confirm_points(2048), x13.confirm_points(512)
+    d2 = len(x13.PARAMS) + 2
+    for b in range(d2):
+        assert big[b * 2048: b * 2048 + 512] == small[b * 512: (b + 1) * 512]
+    assert small[0]["jitter_ns"] == 80_000 and small[0]["depth_lots"] == 6_180
+
+
+def test_p11_verdicts_on_a_function_with_known_indices():
+    import math
+    import exp13_global_sensitivity as x13
+    n = 512
+    pts = x13.confirm_points(n)
+    mid = {k: sum(math.log(p[k]) for p in pts) / len(pts) for k in ("adverse_sensitivity", "snipe_ratio")}
+
+    def c(p, k):
+        return math.log(p[k]) - mid[k]
+    rows = [{"sniper_rent": math.log(p["jump_rate"]) + math.log(p["jump_scale_bp"]) + 10,
+             "maker_delta": c(p, "adverse_sensitivity") * c(p, "snipe_ratio"),
+             "noise_delta": 0.0} for p in pts]
+    v = x13.p11_verdicts(rows, n, n)
+    assert v["H11a"]["verdict"] == "HIT"          # no latency, all lambda_j and b
+    assert v["H11b"]["verdict"] == "HIT"          # a pure interaction of the two named factors
+    assert v["H11c"]["verdict"] == "HIT"          # zero toll
+    assert x13.p11_verdicts(rows, n, 256)["n_base"] == 256

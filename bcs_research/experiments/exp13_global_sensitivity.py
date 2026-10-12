@@ -103,6 +103,7 @@ import numpy as np  # noqa: E402
 import bcs_engine as be  # noqa: E402
 import facts_event_model as facts  # noqa: E402
 import sensitivity as sa  # noqa: E402
+from bootstrap import bootstrap_ci  # noqa: E402
 from bcs_theory import laplace_half_spread  # noqa: E402
 from event_noise import ReservationNoiseTrader  # noqa: E402
 from event_scheduler import EventScheduler  # noqa: E402
@@ -199,11 +200,13 @@ def build(p: dict, horizon_s: float, with_snipers: bool):
     path = JumpDiffusionPath.from_calibration(
         TAPE["path"] | {"jump_intensity_per_s": p["jump_rate"], "jump_scale_bp": p["jump_scale_bp"]},
         int(horizon_s * NS_PER_S), seed=seed)
+    jitter_ns = p.get("jitter_ns", JITTER_NS)          # confirmatory: the operating point's eps
+    depth = p.get("depth_lots", DEPTH_LOTS)
     lat = int(round(p["sniper_lat_ns"]))
-    lag = int(round(p["lag_over_eps"] * JITTER_NS))
+    lag = int(round(p["lag_over_eps"] * jitter_ns))
     s_md, s_ord = lat // 2, lat - lat // 2
     m = p["n_makers"]
-    policy = MakerPolicy(half_spread=p["half_spread_ticks"], qty=max(1, round(DEPTH_LOTS / m)),
+    policy = MakerPolicy(half_spread=p["half_spread_ticks"], qty=max(1, round(depth / m)),
                          adverse_sensitivity=p["adverse_sensitivity"],
                          spread_decay=1 - math.exp(-p["decay_per_s"] * UPDATE_S),
                          post_only=True, requote_after_fill=True)
@@ -211,14 +214,14 @@ def build(p: dict, horizon_s: float, with_snipers: bool):
                              order_latency_ns=s_ord + lag - lag // 2) for i in range(m)]
     if with_snipers:
         fee_ticks = _ticks(fee_table(p)["sniper"][1])     # threshold = own taker fee
-        qty = max(1, round(p["snipe_ratio"] * DEPTH_LOTS))
+        qty = max(1, round(p["snipe_ratio"] * depth))
         agents += [EventSniper(SNIPER0 + j, qty=qty, threshold=fee_ticks, md_latency_ns=s_md,
                                order_latency_ns=s_ord) for j in range(p["n_snipers"])]
     n = TAPE["noise"]
     agents.append(ReservationNoiseTrader(
         NOISE, arrival_rate_per_s=p["noise_rate"], eps_scale=_ticks(p["noise_eps_bp"]), v0=V0,
         qty=n["median_lots"], size_sigma_ln=n["size_sigma_ln"], seed=[seed, 1]))
-    jitter = {a.participant_id: JITTER_NS for a in agents if a.participant_id < NOISE}
+    jitter = {a.participant_id: jitter_ns for a in agents if a.participant_id < NOISE}
     return agents, path, jitter
 
 
@@ -412,7 +415,169 @@ def main(n=PILOT_N, horizon_s=PILOT_HORIZON_S, out_path=PILOT_OUT, workers=None)
     return report
 
 
+# --- confirmatory mode: P11 at the operating point ------------------------------
+#
+# The pilot's design (factors, ranges, outcomes, estimators) moved onto §5's
+# operating point: the sniper latency level is x[0.1, 10] of the snipers' 100 us,
+# lag/eps runs over [0, 2] of eps = 80 us, the depth is the 6,180-lot quote and
+# every racer draws the 80 us jitter. Everything else is P11's range or the
+# pilot's documented choice (see `deviations_from_p11` in the report).
+#
+# Sample size: N_base = 2,048, not P11's written 512. P11's verdicts are
+# interval tests on indices against thresholds 0.05-0.5 apart (H11a: latency
+# S1 < 0.05 with its interval; H11b: sum(ST - S1) >= 0.2; H11c: +-10% of rent);
+# the pilot's index intervals were about +-0.1 at n = 64, so at 512 they are
+# about +-0.035 and H11a's "< 0.05" stays INCONCLUSIVE for any true index above
+# ~0.015. 2,048 halves that. Changing a written sample size after sign-off needs
+# a §4 row, so the report also carries the verdicts at N = 512: a scrambled
+# Sobol' sequence is extensible, so the first 512 rows of the 2,048-row design
+# ARE the 512-row design (tested), and that verdict costs nothing.
+#   H11a  sniper_rent: S1(sniper_lat_ns) interval below 0.05, and S1(jump_rate)
+#         + S1(jump_scale_bp) at least 0.5 (joint bootstrap of the sum); MISS
+#         if the latency S1 is >= 0.1 or the sum < 0.35.
+#   H11b  maker_delta: adverse_sensitivity and snipe_ratio in the top three
+#         total-order indices (point estimates; the seed factor is run noise,
+#         not one of P11's parameters, so it is ranked out), and
+#         sum(ST - S1) >= 0.2 over P11's parameters; MISS if either is outside
+#         the top three or the sum < 0.1.
+#   H11c  (recast, §4) toll = -noise_delta over the A and B rows (independent
+#         prior draws): its 95% interval inside +-10% of mean sniper rent.
+
+CONFIRM_N = 2048
+PREREG_N = 512
+
+
+def confirm_params():
+    import operating_point as op
+    base = op.SNIPER_LATENCY_NS
+    return tuple(sa.Param("sniper_lat_ns", base / 10, base * 10, "loguniform")
+                 if q.name == "sniper_lat_ns" else
+                 sa.Param("noise_rate", op.INVESTOR_ARRIVAL_PER_S / 4, op.INVESTOR_ARRIVAL_PER_S * 4,
+                          "loguniform") if q.name == "noise_rate" else q for q in PARAMS)
+
+
+def confirm_points(n: int):
+    import operating_point as op
+    params = confirm_params()
+    A, B = sa.saltelli_design(len(params), n, DESIGN_SEED)
+    mats = [A, B] + [sa.ab_matrix(A, B, i) for i in range(len(params))]
+    extra = {"jitter_ns": op.JITTER_NS, "depth_lots": op.QUOTE_LOTS}
+    return [pt | extra for U in mats for pt in sa.values(params, U)]
+
+
+def _blocks(rows, key, n_full, n):
+    """(d + 2, n) outcome matrix from rows ordered as confirm_points(n_full), first n rows."""
+    return np.array([r[key] for r in rows]).reshape(len(PARAMS) + 2, n_full)[:, :n]
+
+
+def _joint_ci(y, fn, n_boot=2000, seed=0):
+    """Point value and 95% bootstrap interval of fn(S1, ST), resampling design rows."""
+    s1, st = sa._indices(y[0], y[1], y[2:])
+    n = y.shape[1]
+    idx = np.random.default_rng(seed).integers(0, n, size=(n_boot, n))
+    vals = []
+    for c in np.array_split(idx, -(-n_boot // 200)):
+        b1, bt = sa._indices(y[0][c], y[1][c], y[2:][:, c])
+        vals.append(fn(b1, bt))
+    vals = np.concatenate(vals)
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    return {"mean": float(fn(s1[:, None], st[:, None])[0]), "lower": float(lo), "upper": float(hi)}
+
+
+def p11_verdicts(rows, n_full, n) -> dict:
+    import operating_point as op
+    ix = {name: i for i, name in enumerate(NAMES)}
+    params = [i for name, i in ix.items() if name != "seed"]
+    rent = _blocks(rows, "sniper_rent", n_full, n)
+    lat = _joint_ci(rent, lambda s1, st: s1[ix["sniper_lat_ns"]])
+    jb = _joint_ci(rent, lambda s1, st: s1[ix["jump_rate"]] + s1[ix["jump_scale_bp"]])
+    if lat["lower"] >= 0.1 or jb["upper"] < 0.35:
+        h11a = "MISS"
+    else:
+        h11a = "HIT" if lat["upper"] < 0.05 and jb["lower"] >= 0.5 else "INCONCLUSIVE"
+    md = _blocks(rows, "maker_delta", n_full, n)
+    s1, st = sa._indices(md[0], md[1], md[2:])
+    top3 = [NAMES[i] for i in sorted(params, key=lambda i: -st[i])[:3]]
+    inter = _joint_ci(md, lambda b1, bt: (bt[params] - b1[params]).sum(0))
+    named_in = {"adverse_sensitivity", "snipe_ratio"} <= set(top3)
+    if not named_in or inter["upper"] < 0.1:
+        h11b = "MISS"
+    else:
+        h11b = "HIT" if inter["lower"] >= 0.2 else "INCONCLUSIVE"
+    ab_rows = rows[:2 * n_full]
+    use = [r for blk in (ab_rows[:n_full][:n], ab_rows[n_full:][:n]) for r in blk]
+    toll = bootstrap_ci([-r["noise_delta"] for r in use], seed=0)
+    mean_rent = float(np.mean([r["sniper_rent"] for r in use]))
+    h11c = op.band_verdict(toll["lower"], toll["upper"], -0.1 * mean_rent, 0.1 * mean_rent)
+    return {"n_base": n,
+            "H11a": {"verdict": h11a, "S1_sniper_latency": lat, "S1_jump_rate_plus_b": jb},
+            "H11b": {"verdict": h11b, "top3_total_order": top3,
+                     "total_order": {NAMES[i]: float(st[i]) for i in params},
+                     "interactions_sum_ST_minus_S1": inter},
+            "H11c": {"verdict": h11c, "toll_usd_per_s": toll, "mean_sniper_rent": mean_rent,
+                     "band": [-0.1 * mean_rent, 0.1 * mean_rent], "rows": "A and B"}}
+
+
+def _confirm_task(p, horizon_s):
+    return outcomes(p, horizon_s)
+
+
+def confirmatory(argv) -> dict:
+    import argparse
+    import operating_point as op
+    ap = argparse.ArgumentParser(description="exp13 confirmatory (P11)")
+    ap.add_argument("--confirmatory", action="store_true")
+    ap.add_argument("--n", type=int, default=CONFIRM_N, help="smoke only: a smaller power of 2")
+    ap.add_argument("--horizon-s", type=float, default=op.HORIZON_S)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out-dir", type=Path, default=None)
+    a = ap.parse_args(argv)
+    out, ck = op.confirmatory_paths("exp13_global_sensitivity", a.out_dir)
+    log = op.CellLog(ck)
+    t0 = time.time()
+    points = confirm_points(a.n)
+    # The N = 512 design's rows run first, so a batch stopped early still has P11's
+    # written sample size complete.
+    order = sorted(range(len(points)), key=lambda i: (i % a.n >= PREREG_N, i))
+    got = op.run_cached(_confirm_task, {str(i): (points[i], a.horizon_s) for i in order},
+                        log, a.workers)
+    rows = [got[str(i)] for i in range(len(points))]
+    full = p11_verdicts(rows, a.n, a.n)
+    prereg = p11_verdicts(rows, a.n, min(PREREG_N, a.n))
+    status = op.CONFIRMATORY_STATUS if a.n >= CONFIRM_N and a.horizon_s >= op.HORIZON_S else \
+        f"smoke — NOT confirmatory: N = {a.n} x {a.horizon_s:g} s against {CONFIRM_N} x {op.HORIZON_S} s"
+    report = {
+        "experiment": "exp13_global_sensitivity (P11), confirmatory", "status": status,
+        "n_base": a.n, "d": len(PARAMS), "runs": 2 * len(points), "horizon_s": a.horizon_s,
+        "design_seed": DESIGN_SEED, "jitter_ns": op.JITTER_NS, "depth_lots": op.QUOTE_LOTS,
+        "params": [vars(q) for q in confirm_params()],
+        "p11": full, "p11_at_prereg_n512": prereg,
+        "verdicts_read_on": f"N = {a.n} (lead's instruction); P11 writes N_base = 512, whose "
+                            "verdicts are p11_at_prereg_n512 — the change needs a §4 row",
+        "deviations_from_p11": [
+            "factors added beyond P11's list: noise_eps_bp, half_spread_ticks; c_speed omitted "
+            "(mechanically zero on these outcomes); a seed factor measures run noise",
+            "F carried entirely by the taker (P11 gives the total only)",
+            "gap_rate is the event-clock analogue (IOC empties a side), not the §3.3 grid count",
+            "N_base 2048 instead of 512",
+        ],
+        "holm": "95% verdicts; Holm across the 11 primaries is applied at write-up",
+        "sobol": analyse(rows, a.n),
+        "max_identity_residual": max(abs(r["identity_residual"]) for r in rows),
+        "elapsed_s": round(time.time() - t0, 1),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=1) + "\n")
+    print(f"[exp13] N={a.n}: H11a {full['H11a']['verdict']}, H11b {full['H11b']['verdict']}, "
+          f"H11c {full['H11c']['verdict']} (N=512: {prereg['H11a']['verdict']}, "
+          f"{prereg['H11b']['verdict']}, {prereg['H11c']['verdict']}) -> {out}", flush=True)
+    return report
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
+    if "--confirmatory" in a:
+        confirmatory(a)
+        sys.exit(0)
     main(int(a[0]) if a else PILOT_N, float(a[1]) if len(a) > 1 else PILOT_HORIZON_S,
          workers=int(a[2]) if len(a) > 2 else None)

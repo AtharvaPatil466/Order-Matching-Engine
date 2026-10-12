@@ -359,6 +359,214 @@ def _run_task(args):
     return run_config_seed(*args)
 
 
+# --- confirmatory mode: P10, P10b and P10's tick-model secondary ----------------
+#
+# Market: operating_point.build_market. Each configuration's makers quote the
+# default (BCS) policy post-only with the 6,180-lot quote split across them,
+# at its latencies (1 tick = 100 ms, observe = order, as the pilot); its k and
+# its snipe ratio come from the generator, which draws the ratio from the paper
+# band. §4's first amendment: the same configuration is also run with the
+# ratio moved to the corrected tape band at the same index (0.0049 -> 0.052,
+# 0.0097 -> 0.18), reported beside; verdicts are read on the paper band. The
+# no-sniper arm does not depend on the ratio, so both bands share it.
+#
+# Configurations: P10's nine listed sets plus CONFIRM_GENERATED drawn by the
+# committed generator under a FRESH seed. The pilot's 59 configurations are the
+# data that suggested P10b (§4), so re-using them would let the suggesting
+# data confirm the rule; the generator function is unchanged. Each
+# configuration runs n = 100 seeds; the configuration is the unit.
+#
+# P10b: queue_front_payer on the configuration's total latencies, the 10 ms
+# cadence, the snipers' 100 us and eps = 80 us, committed in fdf9391 before
+# this mode existed. Right when it names the maker with the most negative
+# mean delta. A tie names no one and counts as not right (the verdict counts
+# every held-out configuration); the rate over configurations it names is
+# reported beside.
+#
+# Tick model (P10's secondary, "the paper's own"): exp1_primary._run at
+# exp1_primary.CFG + run_calibrated.calibrated_cfg(), the configuration's
+# latencies at 1 tick = 1 ms of that clock (exp7d's TICK_US), its k, and the
+# snipe size round(ratio x quote_qty) on each band; per-maker delta = with
+# minus without HFTs, seeds 1..n paired. Verdict: overall hit rate inside
+# [0.60, 0.95] and closely spaced < 0.50 (Wilson, §2's band rule); MISS if
+# overall < 0.50 or closely spaced >= 0.70.
+
+# Does the committed P10 code match P10's text? The predictor (largest latency),
+# the hit (most negative mean delta), the Spearman sign and the one-sided test
+# against 1/M do. Three differences, logged for §4 rather than changed:
+#  - P10 says "held-out cells", its nine sets x the tape-band cells; this file
+#    draws ONE (k, ratio) cell per configuration and makes the configuration
+#    the unit (as P10b's own text does);
+#  - P10 names three closely spaced sets; `closely_spaced` also flags generated
+#    sets whose every gap is <= 1 tick (and keeps {1, 3}, a 2-tick gap). With the
+#    literal three the closely-spaced miss can never fire (Wilson upper of 0/3
+#    is 0.56); both are reported, the verdict uses the committed flag;
+#  - the tick-model secondary was missing; added below.
+CONFIRM_GENERATED = 50                      # the pilot's count, beside P10's nine
+CONFIRM_GENERATOR_SEED = GENERATOR_SEED + 1
+CONFIRM_SEED_OFFSET = 500                   # config i: seeds i*1000 + 501 .. 600
+CORRECTED_BAND = {0.0049: 0.052, 0.0097: 0.18}
+TICK_US = 1000
+
+
+def confirm_configs(n_generated=CONFIRM_GENERATED):
+    return generate_configs(n_generated, seed=CONFIRM_GENERATOR_SEED)
+
+
+def run_market_op(config, seed, ratio, horizon_s):
+    """One operating-point run; ratio None is the no-sniper arm. Per-slot edge, USD."""
+    import operating_point as op
+    m = len(config["ticks"])
+    lat = [int(round(config["ticks"][r] * TICK_NS)) for r in config["slots"]]
+    qtys = op.split_qty(op.QUOTE_LOTS, m)
+    mk = op.build_market(seed, maker_latencies_ns=lat, k=config["k"] if ratio else 0,
+                         snipe_ratio=ratio or 1.0, horizon_s=horizon_s,
+                         policies=[op.default_policy(q, post_only=True) for q in qtys])
+    res = op.simulate(seed, market=mk)
+    edge = op.edge_by_participant(res.trades, res.path)
+    ids = [a.participant_id for a in mk.makers]
+    snipers = {a.participant_id for a in mk.snipers}
+    sniped = {i: 0 for i in ids}
+    for tr in res.trades:
+        for me, other in ((tr.buyer_id, tr.seller_id), (tr.seller_id, tr.buyer_id)):
+            if me in sniped and other in snipers:
+                sniped[me] += tr.quantity
+    return {"latency_ns": lat, "edge": [edge.get(i, 0.0) for i in ids],
+            "sniped_qty": [sniped[i] for i in ids]}
+
+
+def run_tick(config, seed, qty):
+    """One tick-model run (exp7b's construction); qty None is the no-HFT arm."""
+    import exp1_primary as x1
+    from run_calibrated import calibrated_cfg
+    lat = [config["ticks"][r] * TICK_US for r in config["slots"]]
+    cfg = {**x1.CFG, **calibrated_cfg(), "mm_latencies_us": lat,
+           "n_hft": config["k"] if qty else 0, "hft_qty": qty or 1}
+    r = x1._run(seed, cfg, with_hft=bool(qty), per_maker=True)
+    return {"latency_us": r["maker_latencies"], "maker_pnls": r["maker_pnls"]}
+
+
+def p10b_payer(config):
+    """P10b's ex-ante payer (slot index) at the operating point, or None."""
+    import operating_point as op
+    total = [2 * int(round(config["ticks"][r] * TICK_NS)) for r in config["slots"]]
+    return queue_front_payer(total, op.UPDATE_INTERVAL_NS, op.SNIPER_LATENCY_NS, op.JITTER_NS)
+
+
+def classify_p10b(scored) -> dict:
+    named = [c for c in scored if c["p10b_payer"] is not None]
+    hits = [c["p10b_payer"] == int(np.argmin(c["deltas"])) if c["p10b_payer"] is not None
+            else False for c in scored]
+    w = wilson(sum(hits), len(hits))
+    verdict = ("MISS" if w["upper"] < MISS_OVERALL else
+               "HIT" if w["lower"] >= HIT_BAND else "INCONCLUSIVE")
+    close = [h for h, c in zip(hits, scored) if c["closely_spaced"]]
+    wn = wilson(sum(hits), len(named)) if named else None
+    # Read literally (a tie is not right) P10b cannot HIT when ties are common:
+    # P10's nine integer-tick sets all share one phase at the 10 ms cadence. The
+    # reading over the configurations it names is reported beside, for §4.
+    return {"verdict": verdict, "hit_rate": w, "closely_spaced_hit_rate": wilson(sum(close), len(close)),
+            "n_no_prediction": len(scored) - len(named),
+            "hit_rate_where_named": wn,
+            "verdict_where_named": None if wn is None else
+            ("MISS" if wn["upper"] < MISS_OVERALL else
+             "HIT" if wn["lower"] >= HIT_BAND else "INCONCLUSIVE"),
+            "latency_rank_agrees_with_p10b": sum(c["p10b_payer"] == predicted_payer(c["latencies"])
+                                                 for c in named)}
+
+
+def classify_tick(scored) -> dict:
+    import operating_point as op
+    hits = [is_hit(c["latencies"], c["deltas"]) for c in scored]
+    close = [h for h, c in zip(hits, scored) if c["closely_spaced"]]
+    o, cl = wilson(sum(hits), len(hits)), wilson(sum(close), len(close))
+    if o["upper"] < 0.50 or (close and cl["lower"] >= 0.70):
+        verdict = "MISS"
+    else:
+        verdict = op.all_hit([op.band_verdict(o["lower"], o["upper"], 0.60, 0.95),
+                              "HIT" if close and cl["upper"] < 0.50 else "INCONCLUSIVE"])
+    return {"verdict": verdict, "hit_rate": o, "closely_spaced_hit_rate": cl, "n_configs": len(hits)}
+
+
+def _score_tick(config, base, treat):
+    deltas = np.array([[t - b for t, b in zip(tr["maker_pnls"], br["maker_pnls"])]
+                       for tr, br in zip(treat, base)])
+    lat = base[0]["latency_us"]
+    mean = deltas.mean(0).tolist()
+    return {"index": config["index"], "latencies": lat, "deltas": mean,
+            "closely_spaced": config["closely_spaced"], "hit": is_hit(lat, mean)}
+
+
+def confirmatory(args) -> dict:
+    import operating_point as op
+    from run_calibrated import calibrated_cfg
+    out, ck = op.confirmatory_paths("exp15_heldout_who_pays", args.out_dir)
+    log = op.CellLog(ck)
+    n, horizon = args.seeds_confirm or op.N_SEEDS, args.horizon_s or op.HORIZON_S
+    configs = confirm_configs(args.configs if args.configs is not None else CONFIRM_GENERATED)
+    seeds = {c["index"]: [c["index"] * SEED_BLOCK + CONFIRM_SEED_OFFSET + s for s in range(1, n + 1)]
+             for c in configs}
+    ratios = {c["index"]: {"paper": c["ratio"], "tape": CORRECTED_BAND[c["ratio"]]} for c in configs}
+    quote = calibrated_cfg()["quote_qty"]
+    t0 = time.time()
+    tasks = {}
+    for c in configs:
+        i = c["index"]
+        for s in seeds[i]:
+            tasks[f"ev/off/{i}/{s}"] = ("ev", c, s, None, horizon)
+            for band, r in ratios[i].items():
+                tasks[f"ev/{band}/{i}/{s}"] = ("ev", c, s, r, horizon)
+        for s in range(1, n + 1):
+            tasks[f"tick/off/{i}/{s}"] = ("tick", c, s, None, None)
+            for band, r in ratios[i].items():
+                tasks[f"tick/{band}/{i}/{s}"] = ("tick", c, s, max(1, round(r * quote)), None)
+    got = op.run_cached(_confirm_task, tasks, log, args.workers)
+    report = {"experiment": "exp15_heldout_who_pays (P10, P10b, P10 tick secondary), confirmatory",
+              "status": op.smoke_status(n, horizon), "n_seeds_per_config": n, "horizon_s": horizon,
+              "generator_seed": CONFIRM_GENERATOR_SEED, "n_configs": len(configs),
+              "corrected_band": CORRECTED_BAND, "tick_ns_event_clock": TICK_NS,
+              "tick_model_tick_us": TICK_US, "bands": {}}
+    for band in ("paper", "tape"):
+        scored, ticks = [], []
+        for c in configs:
+            i = c["index"]
+            rows = [{"index": i, "seed": s, "latency_ns": got[f"ev/{band}/{i}/{s}"]["latency_ns"],
+                     "delta": [a - b for a, b in zip(got[f"ev/{band}/{i}/{s}"]["edge"],
+                                                     got[f"ev/off/{i}/{s}"]["edge"])],
+                     "edge_on": got[f"ev/{band}/{i}/{s}"]["edge"],
+                     "edge_off": got[f"ev/off/{i}/{s}"]["edge"],
+                     "sniped_qty": got[f"ev/{band}/{i}/{s}"]["sniped_qty"]} for s in seeds[i]]
+            sc = score_config(c, rows) | {"ratio": ratios[i][band], "p10b_payer": p10b_payer(c),
+                                          "p10b_shares": queue_front_shares(
+                                              [2 * v for v in rows[0]["latency_ns"]],
+                                              op.UPDATE_INTERVAL_NS, op.SNIPER_LATENCY_NS,
+                                              op.JITTER_NS)}
+            scored.append(sc)
+            ticks.append(_score_tick(c, [got[f"tick/off/{i}/{s}"] for s in range(1, n + 1)],
+                                     [got[f"tick/{band}/{i}/{s}"] for s in range(1, n + 1)]))
+        p10, p10b, tick = classify(scored), classify_p10b(scored), classify_tick(ticks)
+        report["bands"][band] = {
+            "p10": p10, "p10b": p10b, "p10_tick_secondary": tick,
+            "p10_miss_line": "MISS" if "MISS" in (p10["verdict"], tick["verdict"]) else "no miss",
+            "p10_listed_only": classify([c for c in scored if c["family"] == "p10_listed"]),
+            "p10_literal_three_closely_spaced": wilson(
+                sum(c["hit"] for c in scored if frozenset(c["ticks"]) in P10_CLOSE),
+                sum(frozenset(c["ticks"]) in P10_CLOSE for c in scored)),
+            "configs": scored, "tick_configs": ticks}
+    report["verdicts_read_on"] = "paper band (§4); tape band reported beside"
+    report["elapsed_s"] = round(time.time() - t0, 1)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, sort_keys=True, default=float))
+    b = report["bands"]["paper"]
+    print(f"[exp15] paper band: P10 {b['p10']['verdict']}, P10b {b['p10b']['verdict']}, "
+          f"tick {b['p10_tick_secondary']['verdict']} -> {out}", flush=True)
+    return report
+
+
+def _confirm_task(kind, config, seed, arg, horizon_s):
+    return run_market_op(config, seed, arg, horizon_s) if kind == "ev" else run_tick(config, seed, arg)
+
+
 def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser()
@@ -368,7 +576,15 @@ def main(argv=None):
                     help="event-clock length of one tick; P10 fixes 100 ms. Any other "
                          "value is an exploratory rescaling, outside P10's verdict")
     ap.add_argument("--out-name", default="exp15_heldout_who_pays.json")
+    ap.add_argument("--confirmatory", action="store_true", help="P10, P10b, tick secondary")
+    ap.add_argument("--seeds-confirm", type=int, default=None, help="confirmatory smoke only")
+    ap.add_argument("--horizon-s", type=float, default=None, help="confirmatory smoke only")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args(argv)
+    if args.confirmatory:
+        args.configs = args.configs if "--configs" in (argv or sys.argv[1:]) else None
+        return confirmatory(args)
     t0 = time.time()
     configs = generate_configs(args.configs)
     for c in configs:

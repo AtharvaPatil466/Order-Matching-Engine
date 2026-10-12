@@ -150,3 +150,41 @@ def test_queue_front_shares_match_the_scheduler():
     for one_way in ((1_500_000, 3_500_000), (1_000_000, 500_000, 2_500_000)):
         predicted = x.queue_front_shares([2 * v for v in one_way], D, sniper_latency_ns=10_000)
         assert _first_snipe_shares(one_way) == pytest.approx(predicted, abs=0.08)
+
+
+# --- confirmatory mode ----------------------------------------------------------
+
+def _scored(lat, deltas, close=False, payer=None):
+    return {"latencies": lat, "deltas": deltas, "closely_spaced": close, "p10b_payer": payer}
+
+
+def test_p10b_counts_a_tie_as_not_right_and_reports_the_named_rate_beside():
+    right = [_scored([1, 2], [-5.0, 1.0], payer=0)] * 9
+    tied = [_scored([1, 2], [-5.0, 1.0], payer=None)]
+    c = x.classify_p10b(right + tied)
+    assert c["hit_rate"]["k"] == 9 and c["hit_rate"]["n"] == 10
+    assert c["n_no_prediction"] == 1 and c["hit_rate_where_named"]["n"] == 9
+    assert x.classify_p10b([_scored([1, 2], [-5.0, 1.0], payer=1)] * 20)["verdict"] == "MISS"
+
+
+def test_tick_secondary_band_and_miss_lines():
+    slow_pays = _scored([1, 2], [1.0, -5.0])                  # a hit: the slowest pays
+    close_hit = _scored([1, 2], [1.0, -5.0], close=True)
+    close_miss = _scored([1, 2], [-5.0, 1.0], close=True)
+    # 80% overall, closely spaced all wrong: inside [0.60, 0.95] and below 0.50
+    assert x.classify_tick([slow_pays] * 160 + [close_miss] * 40)["verdict"] == "HIT"
+    # closely spaced all right: ">= 70% on closely spaced" is the miss line
+    assert x.classify_tick([slow_pays] * 30 + [close_hit] * 10)["verdict"] == "MISS"
+    assert x.classify_tick([_scored([1, 2], [-5.0, 1.0])] * 40)["verdict"] == "MISS"
+
+
+def test_confirmatory_runs_one_event_and_one_tick_cell():
+    cfg = x.confirm_configs(0)[0]                          # P10's {1, 2}
+    seed = 1
+    on = x.run_market_op(cfg, seed, 0.0049, horizon_s=2)
+    off = x.run_market_op(cfg, seed, None, horizon_s=2)
+    assert len(on["edge"]) == len(off["edge"]) == 2 and on["latency_ns"] == off["latency_ns"]
+    assert sorted(on["latency_ns"]) == [100_000_000, 200_000_000]
+    t = x.run_tick(cfg, seed, 10)
+    assert len(t["maker_pnls"]) == 2 and sorted(t["latency_us"]) == [1000.0, 2000.0]
+    assert x.p10b_payer(cfg) is None                        # integer ticks share one phase

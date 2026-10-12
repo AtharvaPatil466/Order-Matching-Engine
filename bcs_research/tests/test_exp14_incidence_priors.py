@@ -102,3 +102,17 @@ def test_seed_bootstrap_is_deterministic_and_zero_width_without_seed_noise():
     assert a == b
     ci = a["bootstrap_ci"]["mean_tax"]
     assert ci["lo"] == pytest.approx(ci["hi"])
+
+
+# --- confirmatory mode (descriptive) ------------------------------------------------
+
+def test_confirmatory_runs_at_the_operating_point_and_says_it_has_no_prediction(tmp_path):
+    import exp14_incidence_priors as x14
+    base = x14.confirm_base()
+    assert (base["sniper_lat_ns"], base["jitter_ns"], base["depth_lots"]) == (100_000, 80_000, 6_180)
+    assert base["lag_over_eps"] == 0.0
+    r = x14.confirmatory(["--confirmatory", "--seeds", "1", "--horizon-s", "1", "--nodes", "1",
+                          "--workers", "1", "--out-dir", str(tmp_path)])
+    assert r["status"].startswith("smoke") and r["prediction"].startswith("none")
+    assert set(r["sources"]) == set(x14.RATIO_SOURCES)
+    assert r["max_identity_residual"] < 1e-6

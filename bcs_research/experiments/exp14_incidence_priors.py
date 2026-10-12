@@ -279,6 +279,84 @@ def main(n_seeds=PILOT_SEEDS, horizon_s=PILOT_HORIZON_S, n_nodes=PILOT_NODES,
     return report
 
 
+# --- confirmatory mode: the same priors at the operating point -------------------
+#
+# No prediction in PREREGISTRATION §6 covers exp14, so there is no verdict to
+# compute: this mode re-runs the pilot's stratified priors at §5's operating
+# point (snipers 100 us, eps = 80 us, the 6,180-lot quote, the maker as fast as
+# the snipers: lag 0, so it wins 1/(k + 1) of races) with §2's n = 100 seeds per
+# cell and 30-minute runs, and reports it descriptively. Every run is
+# checkpointed.
+
+def confirm_base():
+    import operating_point as op
+    return x13.BASE_POINT | {"sniper_lat_ns": op.SNIPER_LATENCY_NS, "lag_over_eps": 0.0,
+                             "noise_rate": op.INVESTOR_ARRIVAL_PER_S, "n_snipers": 3,
+                             "jitter_ns": op.JITTER_NS, "depth_lots": op.QUOTE_LOTS}
+
+
+def confirm_point(ratio, n_makers, tier, seed):
+    return confirm_base() | {"snipe_ratio": float(ratio), "n_makers": n_makers,
+                             "fee_table": fee_table(tier), "seed": seed}
+
+
+def _sim_task(p, horizon_s, with_snipers):
+    return x13.simulate(p, horizon_s, with_snipers)
+
+
+def confirmatory(argv) -> dict:
+    import argparse
+    import operating_point as op
+    ap = argparse.ArgumentParser(description="exp14 confirmatory (descriptive)")
+    ap.add_argument("--confirmatory", action="store_true")
+    ap.add_argument("--seeds", type=int, default=op.N_SEEDS)
+    ap.add_argument("--horizon-s", type=float, default=op.HORIZON_S)
+    ap.add_argument("--nodes", type=int, default=PILOT_NODES)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out-dir", type=Path, default=None)
+    a = ap.parse_args(argv)
+    out, ck = op.confirmatory_paths("exp14_incidence_priors", a.out_dir)
+    log = op.CellLog(ck)
+    t0 = time.time()
+    seeds = tuple(range(1, a.seeds + 1))
+    nodes = {src: ratio_nodes(src, a.nodes) for src in RATIO_SOURCES}
+    tasks = {f"base/{m}/{sd}": (confirm_point(0.0, m, 0, sd), a.horizon_s, False)
+             for m in MAKER_COUNTS for sd in seeds}
+    keys = [(src, i, mi, t, sd) for src in RATIO_SOURCES for i in range(a.nodes)
+            for mi in range(len(MAKER_COUNTS)) for t in range(len(FEE_TIERS)) for sd in seeds]
+    tasks |= {"/".join(map(str, k)): (confirm_point(nodes[k[0]][k[1]], MAKER_COUNTS[k[2]], k[3], k[4]),
+                                      a.horizon_s, True) for k in keys}
+    got = op.run_cached(_sim_task, tasks, log, a.workers)
+    shape = (a.nodes, len(MAKER_COUNTS), len(FEE_TIERS), len(seeds))
+    arrays = {src: {} for src in RATIO_SOURCES}
+    for k in keys:
+        src, i, mi, t, sd = k
+        row = x13.outcomes_from(got["/".join(map(str, k))], got[f"base/{MAKER_COUNTS[mi]}/{sd}"],
+                                fee_table(t), a.horizon_s)
+        row["tax"] = -(row["maker_delta"] + row["noise_delta"])
+        for name, v in row.items():
+            arrays[src].setdefault(name, np.zeros(shape))[i, mi, t, sd - 1] = v
+    report = {
+        "experiment": "exp14_incidence_priors, confirmatory-mode run (descriptive)",
+        "status": op.smoke_status(a.seeds, a.horizon_s),
+        "prediction": "none: no PREREGISTRATION §6 prediction covers exp14; descriptive only",
+        "seeds": list(seeds), "horizon_s": a.horizon_s, "ratio_nodes_per_prior": a.nodes,
+        "fixed": confirm_base(), "nodes": {k: v.tolist() for k, v in nodes.items()},
+        "units": "USD per second; shares dimensionless",
+        "sources": {src: analyse_source(arr, a.nodes) for src, arr in arrays.items()},
+        "max_identity_residual": max(float(np.abs(arr["identity_residual"]).max())
+                                     for arr in arrays.values()),
+        "elapsed_s": round(time.time() - t0, 1),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=1, allow_nan=True) + "\n")
+    print(f"[exp14] descriptive run -> {out}", flush=True)
+    return report
+
+
 if __name__ == "__main__":
+    if "--confirmatory" in sys.argv[1:]:
+        confirmatory(sys.argv[1:])
+        sys.exit(0)
     a = [int(v) if i != 1 else float(v) for i, v in enumerate(sys.argv[1:])]
     main(*a)

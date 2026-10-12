@@ -138,3 +138,24 @@ def test_theory_free_entry_counts_the_racing_maker():
     assert slow["dissipated_share"] == pytest.approx(5 / 5.5)
     # Outside BCS's domain (c > R/2, footnote 26) there is no prediction.
     assert x.theory(x.CONFIG, 2.0, "zero", "fast", cost=rent * 0.6)["n_star"] is None
+
+
+# --- confirmatory mode (P4, spec geometry) -------------------------------------
+
+def test_entry_stops_at_the_first_entrant_whose_interval_is_not_above_cost():
+    import exp10_speed_entry as x10
+    profit = {2: [10.0, 10.2], 3: [6.0, 6.1], 4: [4.9, 5.2], 5: [3.0, 3.1]}
+    e = x10.entry_stop(profit, 5.0, 2)
+    assert e["n_star"] == 3 and not e["censored"]       # entrant 4's interval straddles 5
+    assert x10.entry_stop(profit, 100.0, 2)["n_star"] == 1
+    assert x10.entry_stop(profit, 0.0, 2)["censored"]
+
+
+def test_confirmatory_mode_writes_p4_verdicts(tmp_path):
+    import exp10_speed_entry as x10
+    r = x10.confirmatory(["--confirmatory", "--seeds", "2", "--duration-s", "3", "--workers", "1",
+                          "--out-dir", str(tmp_path)])
+    assert r["status"].startswith("smoke")
+    assert {"H4a", "H4b", "H4c"} <= set(r["p4"])
+    assert r["max_zero_sum_residual"] < 1e-6
+    assert (tmp_path / "exp10_speed_entry.json").exists()

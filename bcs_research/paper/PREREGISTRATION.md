@@ -1,9 +1,14 @@
 # Pre-registration: the event-driven rebuild of the BCS research program
 
-**Status: DRAFT — pending author sign-off.** Nothing below may be edited after
+**Status: SIGNED OFF 2026-10-12 (§5); amendments in §4.** Nothing below may be edited after
 the first run of any experiment it covers except through the Deviations log
 (§4). The git commit that adds this file is its timestamp; it must precede the
 first commit of any result file under `results/` produced by the event model.
+Between the draft's commit (5125b2a) and the sign-off, PILOT runs were made to
+build and size the experiments. They live in `results/pilot/`, each carries a
+`status` saying it is not a test, and every amendment they informed is logged
+in §4 with "results seen". Confirmatory results go under `results/experiments/`
+only after the commit that records the sign-off.
 
 Theory references are to Budish, Cramton & Shim (2015, QJE 130(4)), cited as
 BCS with their equation and proposition numbers, and to
@@ -75,7 +80,9 @@ the affected experiment had been seen. Rows are never deleted.
 
 | Date | Experiment | Change | Results seen? | Reason |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| 2026-10-12 | §2 tape band; P2, P3, P5, P6, P7 | The paper's 18 cells keep their role under the name **paper band** (snipe/quote {0.0049, 0.0097}); every prediction that counts "tape-band" cells is also evaluated on a **corrected tape band**, {0.052, 0.18} × the same k grid, reported beside it. Verdicts are read on the paper band as pre-registered. | Pilot only (P2, P10 exploratory runs) | The DATA lane found the paper's ratio was computed with the spot exchange's trade aggregation on futures data; the tape's median race/depth is 0.052, 0.18 with fresh snapshots (`results/calibration/race_proxy_v2.json`). |
+| 2026-10-12 | P10 | New secondary prediction **P10b (queue front)**: the maker that most often holds time priority at the stale touch when a jump's first snipe arrives pays, computed EX ANTE from the latency configuration and update cadence by a predictor function committed before the confirmatory run. Primary: right in ≥ 80% of held-out configurations, closely spaced sets included. Miss: below 60%. P10's latency-rank rule and its verdict stand unchanged beside it. | Yes: formed from the P10 pilot (exp15, n = 20 per configuration), where it picked the payer in 29/33 closely spaced sets against 16/33 for latency rank | A post-hoc rule cannot be confirmed by the data that suggested it; recording it now lets the confirmatory run test it honestly. |
+| 2026-10-12 | P11 H11c | H11c is recast as an equivalence test: the noise-trader toll attributable to sniping (paired difference, with vs without snipers) lies within ±10% of mean sniper rent. HIT if its 95% interval lies inside that band, MISS if disjoint, INCONCLUSIVE otherwise (§2's band rule). | Yes: the exp13 pilot (n = 64) | The toll is ≈ 0 in absolute terms (sd 0.03 USD/s against 11 USD/s of rent), so total-order indices of k on it are noise and the original H11c was ill-posed. |
 
 ## 5. Sign-off
 
@@ -84,10 +91,10 @@ numerical evaluations in §6 are pending, the formulas are not.
 
 | Item | Value |
 |---|---|
-| Event-model operating point (latencies, jitter ε, λ_noise, λ_jump, Laplace scale b, diffusion σ, quote and snipe sizes, run length) | *pending* |
-| Random-walk comparison cadence and per-update σ (P3) | *pending* |
-| Cost of speed grid (P4), fee grid (P5), reservation-value law (P6), A–S parameters (P7), strategy grid (P8), batch intervals (P9), Sobol ranges (P11) | *pending; defaults below apply if left blank* |
-| Signed by / date | *pending* |
+| Event-model operating point (latencies, jitter ε, λ_noise, λ_jump, Laplace scale b, diffusion σ, quote and snipe sizes, run length) | Fundamental `JumpDiffusionPath.from_calibration(results/calibration/jump_fit_v2.json)`: public updates every 10 ms, diffusive σ 0.242 bp/√s, λ_jump 0.200/s, Laplace b 0.705 bp. Price grid v0 = 630,927, so one engine unit is the venue's 0.10 USD tick. Investors: Poisson 16.3/s, lognormal sizes fitted to the tape (median 3 lots of 0.001 BTC). Maker quote 6,180 lots (tape top depth 6.18 BTC); snipe size = snipe/quote ratio × quote (paper band and corrected tape band, §4). Snipers: 100 µs total latency, race jitter ε = 80 µs. Maker latencies and k: the grids each prediction states. Fees: maker 0 / taker 1.7 bp (Binance USDⓈ-M VIP 9). 30 simulated minutes per run, n = 100 seeds per cell unless a prediction states otherwise. |
+| Random-walk comparison cadence and per-update σ (P3) | 100 updates/s (10 ms, the operating point's cadence); σ_u from λ_rw·σ_u² = λ_j·2b² (matched quadratic variation). H3a's prediction at that cadence: 1.30. |
+| Cost of speed grid (P4), fee grid (P5), reservation-value law (P6), A–S parameters (P7), strategy grid (P8), batch intervals (P9), Sobol ranges (P11) | The defaults written in §6 for each experiment. |
+| Signed by / date | Atharva Patil, 2026-10-12 (approved in session; §4's three amendments approved at the same time) |
 
 ## 6. The experiments
 

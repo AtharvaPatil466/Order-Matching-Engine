@@ -39,9 +39,10 @@ restate; the jump-diffusion arm is §5's path and the random walk replaces its
 jumps by diffusion of the same total variance rate, sigma^2 + lam_j 2 b^2, on
 the same 10-ms grid (the diffusion is drawn first, so the walk's steps are the
 jump-diffusion's own draws rescaled: common random numbers). The random-walk
-arm's snipers face the 1.7-bp taker fee as their threshold, against steps of
-about 3 ticks; the summary reports its sniper fills so a count that is zero by
-construction is visible as such.
+arm's snipers face the 1.7-bp taker fee (107 ticks) as their threshold, against
+10-ms steps of about 3 ticks and a 600-ms quote staleness of about 25 ticks,
+so they rarely fire; the summary reports each arm's sniper fills so that a
+count the fee all but rules out is visible as such.
 
 Run (from bcs_research/):
     python experiments/exp17_jump_vs_walk.py --confirmatory

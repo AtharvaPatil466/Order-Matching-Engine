@@ -57,7 +57,8 @@ Intervals: percentile bootstrap over seeds (1,000 resamples, seed 0).
 
 Latency tax = -(maker_delta + noise_delta): what the two liquidity-facing
 classes lose to the snipers' presence (= snipers' net + extra exchange fees).
-Maker share = -maker_delta / tax, over cells with tax > 0.
+Maker share = -maker_delta / tax, over cells where a snipe happened and tax > 0
+(see summarise_cells for why cells without a snipe carry no incidence).
 
 Status: PILOT, pre-sign-off; output to results/pilot/.
 
@@ -94,7 +95,7 @@ TIER_PRIOR = np.full(len(FEE_TIERS), 1 / len(FEE_TIERS))
 MAKER_COUNTS = (1, 2, 3, 4, 5)
 MAKER_PRIOR = np.full(len(MAKER_COUNTS), 1 / len(MAKER_COUNTS))
 RETAIL = FEE_TIERS[0]
-PILOT_SEEDS, PILOT_HORIZON_S, PILOT_NODES = 3, 60.0, 4
+PILOT_SEEDS, PILOT_HORIZON_S, PILOT_NODES = 8, 60.0, 4
 N_BOOT, BOOT_SEED = 1000, 0
 QS = (0.1, 0.25, 0.5, 0.75, 0.9)
 PILOT_OUT = _ROOT / "results" / "pilot" / "exp14_incidence_priors.json"
@@ -163,9 +164,17 @@ def _weights(n_nodes) -> np.ndarray:
 
 
 def summarise_cells(cell: dict, w: np.ndarray) -> dict:
-    """Prior-weighted summary of cell means {outcome: (nodes, M, tier) array}."""
+    """Prior-weighted summary of cell means {outcome: (nodes, M, tier) array}.
+
+    Incidence is read only in cells where a snipe happened. Elsewhere the two
+    arms differ only through the scheduler's random stream (the snipers' idle
+    observations reshuffle same-instant events), so maker and noise deltas are
+    mean-zero noise; with retail fees on the noise traders' heavy-tailed sizes
+    that noise is not small, and counting it would turn it into "incidence".
+    """
     tax, md, nd = cell["tax"], cell["maker_delta"], cell["noise_delta"]
-    taxed = tax > 0
+    sniped = cell["sniper_fills"] > 0
+    taxed = sniped & (tax > 0)
     share = np.where(taxed, -md / np.where(taxed, tax, 1.0), np.nan)
     out = {k: weighted_quantile(cell[k], w, QS)
            for k in ("sniper_rent", "maker_delta", "noise_delta", "tax", "gap_rate")}
@@ -173,11 +182,12 @@ def summarise_cells(cell: dict, w: np.ndarray) -> dict:
                    for k in ("sniper_rent", "maker_delta", "noise_delta", "tax")}
     out["maker_share"] = (weighted_quantile(share[taxed], w[taxed], QS) if taxed.any()
                           else [float("nan")] * len(QS))
-    out["maker_share_of_mean_tax"] = (float(np.sum(w * -md) / np.sum(w * tax))
-                                      if np.sum(w * tax) > 0 else float("nan"))
-    out["p_makers_bear_majority"] = float(np.sum(w[md < nd]))
-    out["p_noise_bears_majority"] = float(np.sum(w[nd < md]))
-    out["p_no_tax"] = float(np.sum(w[~taxed]))
+    tax_sniped = np.sum(w[sniped] * tax[sniped])
+    out["maker_share_of_mean_tax"] = (float(np.sum(w[sniped] * -md[sniped]) / tax_sniped)
+                                      if tax_sniped > 0 else float("nan"))
+    out["p_makers_bear_majority"] = float(np.sum(w[sniped & (md < nd)]))
+    out["p_noise_bears_majority"] = float(np.sum(w[sniped & (nd < md)]))
+    out["p_no_snipe"] = float(np.sum(w[~sniped]))
     return out
 
 
@@ -194,7 +204,7 @@ def analyse_source(arrays: dict, n_nodes: int) -> dict:
         boots.append(summarise_cells({k: arrays[k][..., idx].mean(axis=-1) for k in keys}, w))
     ci = {k: {"lo": float(np.nanpercentile([b[k] for b in boots], 2.5)),
               "hi": float(np.nanpercentile([b[k] for b in boots], 97.5))}
-          for k in ("p_makers_bear_majority", "p_noise_bears_majority", "p_no_tax",
+          for k in ("p_makers_bear_majority", "p_noise_bears_majority", "p_no_snipe",
                     "maker_share_of_mean_tax")}
     ci |= {f"mean_{k}": {"lo": float(np.percentile([b["mean"][k] for b in boots], 2.5)),
                          "hi": float(np.percentile([b["mean"][k] for b in boots], 97.5))}
@@ -225,7 +235,7 @@ def _print(report):
             print(f"  {k:12s} p10..p90 " + " ".join(f"{v:9.4g}" for v in s[k]))
         print(f"  P(makers bear majority) {s['p_makers_bear_majority']:.3f} "
               f"[{ci['p_makers_bear_majority']['lo']:.3f}, {ci['p_makers_bear_majority']['hi']:.3f}]"
-              f"  P(no tax) {s['p_no_tax']:.3f}  maker share of mean tax "
+              f"  P(no snipe) {s['p_no_snipe']:.3f}  maker share of mean tax "
               f"{s['maker_share_of_mean_tax']:.3f}")
         print("  spread drivers:", json.dumps(r["spread_drivers_first_order"]))
 

@@ -76,7 +76,7 @@ def test_summary_on_a_grid_where_makers_bear_all_of_a_top_tier_tax():
     r = x.analyse_source(_synthetic(), n_nodes=2)
     s = r["summary"]
     assert s["p_makers_bear_majority"] == pytest.approx(0.1)        # the VIP 9 mass
-    assert s["p_no_tax"] == pytest.approx(0.9) and s["p_noise_bears_majority"] == 0.0
+    assert s["p_no_snipe"] == pytest.approx(0.9) and s["p_noise_bears_majority"] == 0.0
     assert s["maker_share_of_mean_tax"] == pytest.approx(1.0)
     assert s["maker_share"] == pytest.approx([1.0] * len(x.QS))
     d = r["spread_drivers_first_order"]["tax"]
@@ -84,6 +84,17 @@ def test_summary_on_a_grid_where_makers_bear_all_of_a_top_tier_tax():
     assert d["fee_tier"] > d["ratio"] > 0 and d["interaction"] > 0
     assert r["by_fee_tier"]["VIP9"]["tax"] == pytest.approx(1.5)
     assert r["by_fee_tier"]["VIP0"]["tax"] == 0.0
+
+
+def test_cells_without_a_snipe_carry_no_incidence_whatever_their_deltas():
+    a = _synthetic()
+    a["noise_delta"] = a["noise_delta"].copy()
+    a["noise_delta"][:, :, 0, :] = 0.7          # stream noise at VIP 0, where no one snipes
+    a["tax"] = -(a["maker_delta"] + a["noise_delta"])
+    s = x.analyse_source(a, n_nodes=2)["summary"]
+    assert s["p_makers_bear_majority"] == pytest.approx(0.1)
+    assert s["p_noise_bears_majority"] == 0.0 and s["p_no_snipe"] == pytest.approx(0.9)
+    assert s["maker_share_of_mean_tax"] == pytest.approx(1.0)
 
 
 def test_seed_bootstrap_is_deterministic_and_zero_width_without_seed_noise():

@@ -115,3 +115,20 @@ def test_run_cached_skips_logged_keys_and_logs_new_ones(tmp_path):
 def test_smoke_status_is_confirmatory_only_at_full_size():
     assert op.smoke_status(100, 1800) == op.CONFIRMATORY_STATUS
     assert op.smoke_status(2, 60).startswith("smoke — NOT confirmatory")
+
+
+def test_equivalence_reads_tost_hit_miss_and_inconclusive():
+    import numpy as np
+    rng = np.random.default_rng(1)
+    b = 100 + rng.normal(0, 1, 200)
+    assert op.equivalence(b * 1.001, b, 0.05)["verdict"] == "HIT"
+    assert op.equivalence(b * 1.20, b, 0.05)["verdict"] == "MISS"
+    noisy = b * (1.05 + rng.normal(0, 0.3, 200))
+    assert op.equivalence(noisy, b, 0.05)["verdict"] == "INCONCLUSIVE"
+
+
+def test_all_hit_is_a_conjunction():
+    assert op.all_hit(["HIT", "HIT"]) == "HIT"
+    assert op.all_hit(["HIT", "INCONCLUSIVE"]) == "INCONCLUSIVE"
+    assert op.all_hit(["INCONCLUSIVE", "MISS"]) == "MISS"
+    assert op.all_hit([]) == "INCONCLUSIVE"

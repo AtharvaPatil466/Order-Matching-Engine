@@ -220,6 +220,36 @@ def band_verdict(lower: float, upper: float, band_lo: float, band_hi: float) -> 
     return "INCONCLUSIVE"
 
 
+def equivalence(a, b, margin: float, seed: int = BOOT_SEED) -> dict:
+    """§2's TOST for "invariant" predictions, on mean(a)/mean(b) - 1 paired by seed.
+
+    HIT if the 90% bootstrap interval lies inside +-margin (TOST at alpha =
+    0.05), MISS if the 95% interval is disjoint from it ("moving by more than
+    the margin"), INCONCLUSIVE otherwise.
+    """
+    import numpy as np
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if a.shape != b.shape or a.size < 2:
+        raise ValueError("equivalence needs paired samples of equal length >= 2")
+    idx = np.random.default_rng(seed).integers(0, a.size, size=(N_BOOTSTRAP, a.size))
+    r = a[idx].mean(1) / b[idx].mean(1) - 1
+    lo90, hi90, lo95, hi95 = np.percentile(r, [5, 95, 2.5, 97.5])
+    if -margin <= lo90 and hi90 <= margin:
+        verdict = "HIT"
+    elif hi95 < -margin or lo95 > margin:
+        verdict = "MISS"
+    else:
+        verdict = "INCONCLUSIVE"
+    return {"ratio_minus_1": float(a.mean() / b.mean() - 1), "ci90": [float(lo90), float(hi90)],
+            "ci95": [float(lo95), float(hi95)], "margin": margin, "verdict": verdict}
+
+
+def all_hit(verdicts) -> str:
+    """A conjunction of verdicts: MISS if any part misses, HIT only if all hit."""
+    v = list(verdicts)
+    return "MISS" if "MISS" in v else ("HIT" if v and all(x == "HIT" for x in v) else "INCONCLUSIVE")
+
+
 def wilson(k: int, n: int, z: float = 1.959963984540054) -> dict:
     """Wilson score interval for k successes in n (§2: proportions use Wilson)."""
     if n <= 0:

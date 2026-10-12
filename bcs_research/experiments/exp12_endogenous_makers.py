@@ -101,6 +101,7 @@ START = MakerPolicy(half_spread=4, qty=1_000)
 LATENCY_US = 50                    # the facts makers' one-way latency (md = order)
 ASYM_LATENCY_US = (50, 150, 450)   # maker k is 3^k times slower
 COSTS_USD_PER_S = (0.0, 0.1, 0.3, 1.0)
+NO_SNIPERS = {**facts.CFG, "snipers": {**facts.CFG["snipers"], "n": 0}}
 M_GRID = (1, 2, 3)
 
 SHORTLIST = 6
@@ -192,7 +193,8 @@ def summarize(res, makers, secs: float) -> dict:
         "maker_fills": [fills[pid] for pid in maker_ids],
         "maker_rejects": [m.rejects for m in makers],
         "maker_on_maker_fills_per_s": maker_on_maker / secs,
-        "noise_cost": -net(NOISE) / secs,
+        "noise_cost": -net(NOISE) / secs,             # spread paid + fees
+        "noise_edge_cost": -edge.get(NOISE, 0.0) / secs,   # spread paid only: the toll
         "sniper_net": sum(net(p) for p in snipers) / secs,
         "sniper_gross": sum(edge.get(p, 0.0) for p in snipers) / secs,
         "informed_net": net(INFORMED) / secs,
@@ -334,11 +336,13 @@ def report_profile(ev: Evaluator, profile: tuple, latencies_ns: tuple, cost: flo
             "two_sided_share": ci(lambda r: r["two_sided_share"]),
             "maker_total_net_before_F": ci(lambda r: sum(r["maker_net"])),
             "noise_cost": ci(lambda r: r["noise_cost"]),
+            "noise_edge_cost": ci(lambda r: r["noise_edge_cost"]),
             "sniper_net": ci(lambda r: r["sniper_net"]),
             "informed_net": ci(lambda r: r["informed_net"]),
             "exchange": ci(lambda r: r["exchange"]),
             "maker_on_maker_fills_per_s": ci(lambda r: r["maker_on_maker_fills_per_s"]),
-            "max_identity_residual": max(abs(r["identity_residual"]) for r in rows)}
+            "max_identity_residual": max(abs(r["identity_residual"]) for r in rows),
+            "maker_net_per_seed": [[r["maker_net"][k] for r in rows] for k in range(len(profile))]}
 
 
 def _jsonable(x):
@@ -373,6 +377,7 @@ def main(out_path=PILOT_OUT, workers=None, resume=False) -> dict:
     out_path = Path(out_path)
     cells = json.loads(out_path.read_text())["cells"] if resume and out_path.exists() else []
     done = {c["label"]: c for c in cells}
+    inversion = {}
     workers = workers or max(1, (os.cpu_count() or 2) - 1)
 
     def checkpoint():
@@ -384,20 +389,28 @@ def main(out_path=PILOT_OUT, workers=None, resume=False) -> dict:
                   "seeds": {"screen": SCREEN_SEEDS, "confirm": CONFIRM_SEEDS,
                             "report": REPORT_SEEDS},
                   "shortlist": SHORTLIST, "units": "USD per second",
-                  "cells": cells, "elapsed_s": round(time.time() - t0, 1)}
+                  "cells": cells, "elapsed_s": round(time.time() - t0, 1),
+                  "single_maker_inversion": {
+                      "measure": "M=1 best-response maker net, with minus without snipers, "
+                                 "paired by report seed (USD/s)", **inversion}}
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(_jsonable(report), indent=1) + "\n")
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
         ev = Evaluator(facts.CFG, HORIZON_S, pool)
 
-        def cell(label, latencies_us, cost, initial):
-            """The cell's equilibrium profile, run now unless resumed."""
+        def cell(label, latencies_us, cost, initial, on=ev):
+            """The cell's equilibrium profile, run now unless resumed. A resumed
+            cell's report is re-run, so every cell's report comes from this code."""
             if label in done:
-                return tuple(policy_from(d) for d in done[label]["nash"]["profile"])
-            cells.append(_cell(ev, label, latencies_us, cost, initial, t0))
+                profile = tuple(policy_from(d) for d in done[label]["nash"]["profile"])
+                lat = tuple(int(u * 1_000) for u in latencies_us)
+                done[label]["equilibrium"] = report_profile(on, profile, lat, cost)
+            else:
+                cells.append(_cell(on, label, latencies_us, cost, initial, t0))
+                profile = cells[-1]["nash"]["profile"]
             checkpoint()
-            return cells[-1]["nash"]["profile"]
+            return profile
 
         sym = {}
         for m in M_GRID:   # symmetric latencies, F = 0: spreads against M
@@ -407,6 +420,13 @@ def main(out_path=PILOT_OUT, workers=None, resume=False) -> dict:
             cell(f"sym_M3_F{cost}", (LATENCY_US,) * 3, cost, sym[3])
         for m in (2, 3):   # asymmetric latencies, F = 0
             cell(f"asym_M{m}_F0", ASYM_LATENCY_US[:m], 0.0, sym[m])
+        # The single-maker inversion with a maker that re-optimises: its best
+        # response without snipers, paired by report seed against sym_M1_F0.
+        alone = Evaluator(NO_SNIPERS, HORIZON_S, pool)
+        cell("sym_M1_F0_no_snipers", (LATENCY_US,), 0.0, (START,), on=alone)
+        by = {c["label"]: c["equilibrium"]["maker_net_per_seed"][0] for c in cells}
+        inversion.update(paired_ci(by["sym_M1_F0"], by["sym_M1_F0_no_snipers"]))
+        checkpoint()
     print(f"wrote {out_path} in {time.time() - t0:.0f} s")
     return {"cells": cells}
 

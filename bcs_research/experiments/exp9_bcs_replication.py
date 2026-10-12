@@ -30,8 +30,24 @@ with 1 µs jitter, the race-loss share again. Every quantity gets a 95% interval
 the interval sits inside the band, MISS if it is disjoint, INCONCLUSIVE
 otherwise. The spec calls MISS "FAIL"; P1 calls it a miss.
 
-Not run: the batch-auction arm (spec §3.1). EventScheduler has no batch mode
-yet (spec §7), so there is nothing to configure.
+Batch arm (spec §3.1): run only in --confirmatory mode, on
+simulation/event_batch.py's EventBatchScheduler (τ = 1 ms, N ∈ {2, 5}, LP at h*,
+ε ∈ {0, 10 µs}). P1 states the prediction as "stale-quote executions per jump
+match (ε/τ)(N − 1)/(2(N + 1)) within the Poisson interval"; that formula is
+the exposure φ, which the spec's table turns into executions per jump by the
+factor e^(−h*/b) = P(J > h*). Snipers fire only on snipe-able jumps (J > h),
+so executions per SNIPE-ABLE jump is φ itself: that is the reading tested (a
+§4 ambiguity, logged), with the spec's ±25% band reported beside it.
+
+Confirmatory mode (--confirmatory). The spec's sizing (40 seeds × 600 s per
+cell, P1's own statement) in BCS units, NOT the operating point: P1 is the
+replication, configured to BCS's assumptions. Every run is checkpointed as it
+lands (operating_point.run_cached), so a killed batch resumes. A cell with an
+INCONCLUSIVE primary (and every cell of a ratio block whose slope is
+INCONCLUSIVE) is re-run once at 80 seeds and classified again, both reported
+(spec §5). Verdicts use §2's names: the spec's PASS is P1's HIT. P1's one
+primary for the Holm family is the race-loss share; its miss line adds ĥ
+trending in N, so a slope MISS is a P1 MISS too.
 
 Run (from bcs_research/):
     .venv/bin/python experiments/exp9_bcs_replication.py --seeds 40
@@ -64,6 +80,7 @@ from bcs_theory import (SPEC_B, SPEC_JUMP_RATIOS, SPEC_LAM_INVEST, SPEC_N,  # no
                         laplace_equilibrium, laplace_half_spread, race_loss_probability)
 from bootstrap import bootstrap_ci                              # noqa: E402
 from contracts import Cancel, Order, SignalUpdate, Wakeup                     # noqa: E402
+from event_batch import EventBatchScheduler                     # noqa: E402
 from event_scheduler import EventScheduler                      # noqa: E402
 from event_sniper import EventSniper                            # noqa: E402
 from fundamental_paths import JumpDiffusionPath                 # noqa: E402
@@ -245,8 +262,9 @@ def derive_seeds(seed: int) -> dict:
 
 def run_one(lam_jump: float, n_firms: int, half_spread: int, seed: int,
             duration_s: float, jitter_ns: int = 0, b: float = SPEC_B,
-            lam_invest: float = SPEC_LAM_INVEST) -> dict:
-    """One simulated market at the spec's settings; returns the per-run tallies."""
+            lam_invest: float = SPEC_LAM_INVEST, batch_tau_ns: int = 0) -> dict:
+    """One simulated market at the spec's settings; returns the per-run tallies.
+    batch_tau_ns > 0 runs spec §3.1's batch arm (time rationing, engine price rule)."""
     seeds = derive_seeds(seed)
     duration_ns = int(round(duration_s * NS_PER_S))
     path = JumpsOnlyPath(JumpDiffusionPath(V0, 0.0, duration_ns, duration_ns, seed=seeds["path"],
@@ -262,11 +280,17 @@ def run_one(lam_jump: float, n_firms: int, half_spread: int, seed: int,
     harness = be.EngineHarness()
     harness.add_symbol(SYMBOL)
     harness.start(disable_circuit_breaker=True)
-    result = EventScheduler(harness, SYMBOL, seed=seeds["ties"], snapshot_every_ns=duration_ns,
-                            race_jitter_ns=jitter).run(agents, path)
+    common = dict(seed=seeds["ties"], snapshot_every_ns=duration_ns, race_jitter_ns=jitter)
+    sched = (EventBatchScheduler(harness, SYMBOL, batch_tau_ns, **common) if batch_tau_ns
+             else EventScheduler(harness, SYMBOL, **common))
+    try:
+        result = sched.run(agents, path)
+    finally:
+        harness.stop()
     row = measure(result, probe, investor, {s.participant_id for s in snipers}, duration_s)
     return {"lam_jump": lam_jump, "n_firms": n_firms, "half_spread": int(half_spread),
-            "jitter_ns": int(jitter_ns), "duration_s": duration_s, "seeds": seeds, **row}
+            "jitter_ns": int(jitter_ns), "batch_tau_ns": int(batch_tau_ns),
+            "duration_s": duration_s, "seeds": seeds, **row}
 
 
 def measure(result, probe, investor, sniper_ids, duration_s) -> dict:
@@ -535,6 +559,156 @@ def summarize(cells, seeds, duration_s, rows) -> dict:
     return {"cells": by_cell, "h_hat_slope_on_race_loss": slopes, "p1_primary": overall(primary)}
 
 
+# --- confirmatory mode (P1 at the spec's sizing, resumable) ----------------------
+
+CONFIRM_SEEDS, CONFIRM_RERUN_SEEDS, CONFIRM_DURATION_S = 40, 80, 600.0   # spec §5
+BATCH_TAU_NS, BATCH_JITTER_NS, BATCH_N = 1_000_000, 10_000, (2, 5)     # spec §3.1
+
+
+def _task_key(t) -> str:
+    return json.dumps(list(t))
+
+
+def _run_task(lam_jump, n_firms, h, seed, duration_s, jitter_ns, batch_tau_ns=0):
+    return run_one(lam_jump, n_firms, h, seed, duration_s, jitter_ns=jitter_ns,
+                   batch_tau_ns=batch_tau_ns)
+
+
+def _run_cached(tasks, log, workers) -> dict:
+    import operating_point as op
+    got = op.run_cached(_run_task, {_task_key(t): t for t in tasks}, log, workers)
+    return {t: got[_task_key(t)] for t in tasks}
+
+
+def p1_verdict(summary: dict) -> dict:
+    """P1 in §2's terms. Primary: the race-loss share in every cell; its miss line
+    adds ĥ trending in N. The spec's PASS is a HIT."""
+    to_p1 = {"PASS": "HIT", "MISS": "MISS", "INCONCLUSIVE": "INCONCLUSIVE"}
+    race = [to_p1[c["race_loss"]["verdict"]] for c in summary["cells"]]
+    slope = [to_p1[s["verdict"]] for s in summary["h_hat_slope_on_race_loss"].values()]
+    if "MISS" in race or "MISS" in slope:
+        primary = "MISS"
+    else:
+        primary = "HIT" if all(v == "HIT" for v in race) else "INCONCLUSIVE"
+
+    def all_cells(key):
+        return to_p1[overall(c[key]["verdict"] for c in summary["cells"])]
+    return {"primary_race_loss": primary,
+            "h_hat_all_cells": all_cells("h_hat"),
+            "h_hat_slope": to_p1[overall(s["verdict"] for s in summary["h_hat_slope_on_race_loss"].values())],
+            "h0_hat_all_cells": all_cells("h0_hat"),
+            "snipe_profit_all_cells": all_cells("snipe_profit"),
+            "holm": "the 95% verdict; Holm across the 11 primaries is applied at write-up"}
+
+
+def _reruns(summary: dict) -> list[tuple]:
+    """(ratio, N) cells to re-run at 80 seeds: any INCONCLUSIVE primary row, and
+    every cell of a ratio block whose slope is INCONCLUSIVE (spec §5)."""
+    out = {(c["ratio"], c["n_firms"]) for c in summary["cells"]
+           if "INCONCLUSIVE" in c["primary_verdicts"].values()}
+    for ratio, sl in summary["h_hat_slope_on_race_loss"].items():
+        if sl["verdict"] == "INCONCLUSIVE":
+            out |= {(c["ratio"], c["n_firms"]) for c in summary["cells"]
+                    if c["ratio"] == float(ratio)}
+    return sorted(out)
+
+
+def poisson_rate_ci(k: int, n: int) -> dict:
+    """Exact (Garwood) 95% interval of k events, as a rate per unit of n."""
+    from scipy.stats import chi2
+    lo = 0.0 if k == 0 else chi2.ppf(0.025, 2 * k) / 2
+    hi = chi2.ppf(0.975, 2 * k + 2) / 2
+    return {"mean": k / n, "lower": lo / n, "upper": hi / n, "k": k, "n": n}
+
+
+def batch_tasks(ratios, seeds, duration_s) -> list[tuple]:
+    return [(r * SPEC_LAM_INVEST, n, cell_grid(r, n)["grid_star"][3], s, duration_s, eps,
+             BATCH_TAU_NS)
+            for r in ratios for n in BATCH_N for eps in (0, BATCH_JITTER_NS) for s in seeds]
+
+
+def summarize_batch(rows: dict) -> list[dict]:
+    """Spec §3.1 per (ratio, N, ε): stale executions per snipe-able jump against φ."""
+    from bcs_theory import fba_jitter_exposure
+    cells = {}
+    for t, r in rows.items():
+        cells.setdefault((t[0], t[1], t[5]), []).append(r)
+    out = []
+    for (lam_jump, n, eps), rs in sorted(cells.items()):
+        k, m = sum(r["sniper_fills"] for r in rs), sum(r["n_snipeable"] for r in rs)
+        rate = poisson_rate_ci(k, max(1, m))
+        if eps == 0:
+            verdict = "HIT" if k == 0 else "MISS"
+            row = {"theory": 0.0, "verdict": verdict, "rule": "exactly zero stale executions"}
+        else:
+            phi = fba_jitter_exposure(eps, BATCH_TAU_NS, n)
+            row = {"theory": phi,
+                   "verdict": "HIT" if rate["lower"] <= phi <= rate["upper"] else "MISS",
+                   "rule": "phi inside the exact Poisson 95% interval (P1)",
+                   "spec_band_25pct": classify(rate["lower"], rate["upper"], 0.75 * phi, 1.25 * phi)}
+        out.append({"ratio": lam_jump / SPEC_LAM_INVEST, "n_firms": n, "jitter_ns": eps,
+                    "stale_executions_per_snipeable_jump": rate, "n_seeds": len(rs), **row})
+    return out
+
+
+def confirmatory(args) -> dict:
+    import operating_point as op
+    out, ck = op.confirmatory_paths("exp9_bcs_replication", args.out_dir)
+    log = op.CellLog(ck)
+    n_seeds, n_rerun = args.seeds or CONFIRM_SEEDS, 2 * (args.seeds or CONFIRM_SEEDS)
+    duration = args.duration_s
+    seeds = list(range(n_seeds))
+    cells = [cell_grid(r, n) for r in args.ratios for n in args.n_firms]
+    t0 = time.time()
+    rows = _run_cached(tasks_for(cells, seeds, duration), log, args.workers)
+    first = summarize(cells, seeds, duration, rows)
+    rerun = _reruns(first)
+    second = None
+    if rerun:
+        re_cells = [c for c in cells if (c["ratio"], c["n_firms"]) in rerun]
+        re_seeds = list(range(n_rerun))
+        rows |= _run_cached(tasks_for(re_cells, re_seeds, duration), log, args.workers)
+        second = summarize(re_cells, re_seeds, duration, rows)
+    final = first
+    if second:   # the 80-seed classification replaces the 40-seed one for those cells
+        by = {(c["ratio"], c["n_firms"]): c for c in second["cells"]}
+        final = {**first, "cells": [by.get((c["ratio"], c["n_firms"]), c) for c in first["cells"]],
+                 "h_hat_slope_on_race_loss": {**first["h_hat_slope_on_race_loss"],
+                                              **second["h_hat_slope_on_race_loss"]}}
+    batch = summarize_batch(_run_cached(batch_tasks(args.ratios, seeds, duration), log,
+                                        args.workers))
+    verdict = p1_verdict(final)
+    verdict["batch_arm"] = overall_hit(c["verdict"] for c in batch)
+    report = {
+        "status": op.smoke_status(n_seeds, duration, CONFIRM_SEEDS, CONFIRM_DURATION_S),
+        "experiment": "exp9_bcs_replication (P1; paper/bcs_replication_spec.md), confirmatory",
+        "config": {"lam_invest": SPEC_LAM_INVEST, "b": SPEC_B, "v0": V0, "latency_ns": LATENCY_NS,
+                   "reflect_ticks": REFLECT_TICKS, "jitter_arm_ns": JITTER_NS,
+                   "duration_s": duration, "ratios": args.ratios, "n_firms": args.n_firms,
+                   "grid_factors": GRID_FACTORS, "n_bootstrap": N_BOOTSTRAP,
+                   "bootstrap_seed": BOOT_SEED,
+                   "batch_arm": {"tau_ns": BATCH_TAU_NS, "jitter_ns": [0, BATCH_JITTER_NS],
+                                 "n_firms": BATCH_N, "half_spread": "h* (grid point 1.00)"}},
+        "seeds": [derive_seeds(s) for s in seeds],
+        "p1": verdict,
+        "first_pass_40_seeds": first,
+        "rerun_cells_80_seeds": rerun and {"cells": [list(c) for c in rerun], **second},
+        "final": final,
+        "batch_arm": batch,
+        "wall_s": time.time() - t0,
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, sort_keys=True))
+    print(f"[exp9] P1 {verdict}  -> {out}", flush=True)
+    return report
+
+
+def overall_hit(verdicts) -> str:
+    """HIT only if every part hits; MISS if any misses."""
+    v = list(verdicts)
+    return "MISS" if "MISS" in v else ("HIT" if all(x == "HIT" for x in v) else "INCONCLUSIVE")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--seeds", type=int, default=40, help="seeds per cell (spec: 40)")
@@ -545,7 +719,15 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--out", type=Path, default=_ROOT / "results" / "pilot" / "exp9_bcs_replication.json")
     ap.add_argument("--status", default=PILOT_STATUS)
+    ap.add_argument("--confirmatory", action="store_true",
+                    help="P1 at the spec's sizing, resumable, to results/experiments/")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="confirmatory output directory (default results/experiments/)")
     args = ap.parse_args(argv)
+    if args.confirmatory:
+        if args.seeds == 40:
+            args.seeds = None
+        return confirmatory(args)
 
     seeds = list(range(args.first_seed, args.first_seed + args.seeds))
     cells = [cell_grid(r, n) for r in args.ratios for n in args.n_firms]

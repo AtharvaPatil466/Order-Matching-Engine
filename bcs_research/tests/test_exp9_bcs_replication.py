@@ -27,6 +27,7 @@ from exp9_bcs_replication import (V0, BCSLiquidityProvider, JumpsOnlyPath, cell_
                                   classify, grid_root, main, paired_slope, root_estimate,
                                   run_one, tasks_for)
 from fundamental_paths import JumpDiffusionPath  # noqa: E402
+import exp9_bcs_replication as x  # noqa: E402
 
 B, LAM_I = 1000.0, 10.0
 
@@ -180,3 +181,38 @@ def test_main_writes_a_pilot_report_with_seeds_and_verdicts(tmp_path):
     assert report["p1_primary"] in ("PASS", "MISS", "INCONCLUSIVE")
     n_runs = len(tasks_for([cell_grid(1.0, 2), cell_grid(1.0, 3)], [0, 1], 5.0))
     assert out.with_suffix(".runs.jsonl").read_text().count("\n") == n_runs
+
+
+# --- confirmatory mode ------------------------------------------------------------
+
+def test_poisson_rate_ci_is_garwoods_exact_interval():
+    ci = x.poisson_rate_ci(0, 100)
+    assert ci["lower"] == 0.0 and ci["upper"] == pytest.approx(3.689 / 100, abs=1e-4)
+    ci = x.poisson_rate_ci(10, 1000)
+    assert (round(ci["lower"] * 1000, 3), round(ci["upper"] * 1000, 2)) == (4.795, 18.39)
+
+
+def test_p1_verdict_maps_pass_to_hit_and_a_slope_miss_to_a_p1_miss():
+    def cell(race):
+        v = {"verdict": "PASS"}
+        return {"race_loss": {"verdict": race}, "h_hat": v, "h0_hat": v, "snipe_profit": v}
+    good = {"cells": [cell("PASS")] * 2, "h_hat_slope_on_race_loss": {"1.0": {"verdict": "PASS"}}}
+    assert x.p1_verdict(good)["primary_race_loss"] == "HIT"
+    slope_miss = {**good, "h_hat_slope_on_race_loss": {"1.0": {"verdict": "MISS"}}}
+    assert x.p1_verdict(slope_miss)["primary_race_loss"] == "MISS"
+    unsure = {**good, "cells": [cell("PASS"), cell("INCONCLUSIVE")]}
+    assert x.p1_verdict(unsure)["primary_race_loss"] == "INCONCLUSIVE"
+
+
+def test_confirmatory_mode_writes_a_smoke_report_and_resumes_from_its_checkpoint(tmp_path, monkeypatch):
+    argv = ["--confirmatory", "--seeds", "2", "--duration-s", "3", "--ratios", "1",
+            "--n-firms", "2", "--workers", "1", "--out-dir", str(tmp_path)]
+    first = x.main(argv)
+    assert first["status"].startswith("smoke — NOT confirmatory")
+    assert {c["jitter_ns"] for c in first["batch_arm"]} == {0, x.BATCH_JITTER_NS}
+    assert set(first["p1"]) >= {"primary_race_loss", "h_hat_slope", "batch_arm"}
+
+    def no_runs(*a, **k):
+        raise AssertionError("a resumed batch must not re-simulate")
+    monkeypatch.setattr(x, "run_one", no_runs)
+    assert x.main(argv)["p1"] == first["p1"]

@@ -79,10 +79,12 @@ def parse_args(name: str, doc: str, argv=None) -> argparse.Namespace:
     ap.add_argument("--out", type=Path, help="smoke only: summary JSON path")
     ap.add_argument("--workers", type=int,
                     default=int(os.environ.get("WORKERS", DEFAULT_WORKERS)))
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="confirmatory output directory (run_confirmatory.sh passes it)")
     a = ap.parse_args(argv)
     if a.confirmatory:
         a.n_seeds, a.status = op.N_SEEDS, op.CONFIRMATORY_STATUS
-        a.out, a.checkpoint = op.confirmatory_paths(name)
+        a.out, a.checkpoint = op.confirmatory_paths(name, a.out_dir)
     else:
         if a.out is None:
             ap.error("a smoke run needs --out (or pass --confirmatory)")

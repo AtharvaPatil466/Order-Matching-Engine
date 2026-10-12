@@ -175,3 +175,11 @@ def test_end_to_end_summary_on_tiny_runs(tmp_path):
     assert set(s["H2d"]["by_band"]) == {"paper", "tape"}
     again = cc.run_pending(x16.tasks(seeds, horizon_s=1), cc.call, tmp_path / "ck.jsonl", 1, "t")
     assert again == rows                                        # resumed from the checkpoint
+
+
+def test_confirmatory_cli_takes_the_runners_out_dir(tmp_path):
+    # run_confirmatory.sh passes --workers and --out-dir to every driver.
+    import _confirm_common as cc
+    a = cc.parse_args("exp16_race_incidence", "doc", ["--confirmatory", "--out-dir", str(tmp_path)])
+    assert a.out == tmp_path / "exp16_race_incidence.json"
+    assert a.checkpoint == tmp_path / "checkpoints" / "exp16_race_incidence.jsonl"

@@ -84,6 +84,86 @@ the affected experiment had been seen. Rows are never deleted.
 | 2026-10-12 | P10 | New secondary prediction **P10b (queue front)**: the maker that most often holds time priority at the stale touch when a jump's first snipe arrives pays, computed EX ANTE from the latency configuration and update cadence by a predictor function committed before the confirmatory run. Primary: right in ≥ 80% of held-out configurations, closely spaced sets included. Miss: below 60%. P10's latency-rank rule and its verdict stand unchanged beside it. | Yes: formed from the P10 pilot (exp15, n = 20 per configuration), where it picked the payer in 29/33 closely spaced sets against 16/33 for latency rank | A post-hoc rule cannot be confirmed by the data that suggested it; recording it now lets the confirmatory run test it honestly. |
 | 2026-10-12 | P11 H11c | H11c is recast as an equivalence test: the noise-trader toll attributable to sniping (paired difference, with vs without snipers) lies within ±10% of mean sniper rent. HIT if its 95% interval lies inside that band, MISS if disjoint, INCONCLUSIVE otherwise (§2's band rule). | Yes: the exp13 pilot (n = 64) | The toll is ≈ 0 in absolute terms (sd 0.03 USD/s against 11 USD/s of rent), so total-order indices of k on it are noise and the original H11c was ill-posed. |
 
+### 4.1 Clarifications fixed before the confirmatory batch (2026-10-12)
+
+Writing the confirmatory drivers surfaced details §5 and §6 leave open. Each is
+fixed below, before any confirmatory result exists: only 1–2-seed smoke runs had
+been made, into scratch paths. Every driver's docstring carries the same choice.
+Verdicts of record follow these readings; where a literal reading differs it is
+reported beside.
+
+**Operating point.**
+1. The slow informed investor is not part of the operating point (§5 does not
+   list it); only P6 adds it.
+2. Investors cross at the calibrated 16.28/s (§5 prints 16.3); the quote is 6,180 lots.
+3. Maker latencies are one-way, as in the tick model: md latency = order
+   latency = L, so the maker's reaction lag is 2L.
+4. The paper's tick-model maker on the event clock: adverse sensitivity 0.015,
+   decay 0.1 per tick at 1 tick = 100 ms (the tick model's own tick), cap 10,
+   thinning on, no skew. Predictions that state no maker latency (H3c, H5c, P6,
+   H7d, H7e) use its 300 ms.
+
+**P1.** The batch arm's exposure formula φ is tested as executions per snipe-able
+jump; the spec's ±25% band is reported beside. A smoke saw 2 stale executions in
+313 snipe-able jumps at ε = 0 (two jumps inside one 1 ms batch), so an "exactly
+zero" reading may MISS for that reason.
+
+**P2.** Snipe size = quote size; a jump is snipe-able when the snipers fire;
+rent is net of fees; H2b is judged on k ∈ {1, 3}; TOST uses the 90% interval;
+H2c applies the §3.3 gap detector on a 1 ms grid. H2a's interval at n = 100
+nearly fills its ±0.02 band (~34 snipe-able jumps per run), so INCONCLUSIVE is
+likely; n stays at the signed-off 100.
+
+**P3 / P5.** N = 2 firms, 600 s runs, P1's h grid for H3b's sweep. H5b's fee
+splits follow `metrics/accounting.py`'s presets. H3c's random-walk arm rarely
+clears the 1.7 bp taker threshold, so that comparison is close to one against a
+market without sniping.
+
+**P6.** v̄ is not fixed by §6: two arms, e = 0.5 and e = 4, either side of
+H6c's thresholds. H6a pools its cells into one interval; a deadweight interval
+at or below zero is a MISS.
+
+**P7.** A–S (γ, κ, horizon), fading, skew scale and ladder geometry are §6-
+unspecified; the values in `experiments/exp20_maker_strategies.py` are fixed
+now. H7a's non-cancelling twin ignores jump updates; H7c uses snipers that take
+every stale level.
+
+**P8.** H8b–H8d grids: F ∈ {0, 0.1, 0.3, 1}, k ∈ {1, 3, 8}, asymmetric latency
+profiles held fixed for H8c. H8a's M = 1 clause ("inelastic demand") is
+evaluated with the operating point's reservation-value investors, which are
+elastic beyond about 0.5 bp. H8a's M = 5 band (0.8–1.2 × 0.41 ticks) lies below
+the 0.5-tick minimum quotable half-spread, so that clause cannot HIT on the tick
+grid; it is reported as such.
+
+**P9.** k = 3 and snipe ratio 1 (P9 states neither); τ ∈ {1, 10, 100} ms; the
+slow maker for H9c is 5 ms one-way. H9c's "no backfire" HITs only if every upper
+bound is ≤ 0 (a lenient reading is reported beside). H9b(ii) is measured as
+sniper edge per lot. P9 assumes the engine's uncross references the last
+clearing price; it references the session's first order (`event_batch.py`),
+and the verdict reads the engine as it is. H9b(iii)'s aggregate maker P&L
+includes the pressure rule's repricing of investor batches, which can move it
+for reasons unrelated to snipes; it is reported literally.
+
+**P10 / P10b.** Confirmatory configurations come from a fresh generator seed
+(15001), not the pilot's, whose 59 configurations suggested P10b. Each
+configuration draws one (k, snipe ratio) pair and is the unit of replication
+(P10 says "cells"). "Closely spaced" covers P10's three named sets and the
+generator's closely spaced family. P10's tick-model secondary runs on the tick
+model's own tick. P10b's predictor names no payer when makers share a
+phase on the update cycle — P10's nine listed sets all do (whole-tick
+latencies). Its verdict of record is therefore read on the configurations where
+it names a payer; the literal reading (a tie counts as not right), which cannot
+reach 80%, is reported beside.
+
+**P11.** The verdict of record is P11's written N = 512. An extension to
+N = 2,048 runs after every pre-registered verdict and is reported beside it,
+not of record; its first 512 rows are the N = 512 design. P11's pilot-era
+choices carry over: two added factors (noise ε, half-spread), the fee F on the
+taker, the event-clock gap definition, c_speed omitted, a seed factor for run
+noise; the maker's decay is 0.1 per tick at 1 tick = 100 ms. H11b's ranks exclude the seed factor. The cross-experiment Holm
+adjustment over the eleven primaries (§2) is applied in the analysis pass, not
+inside the drivers.
+
 ## 5. Sign-off
 
 Filled in by the author before the first event-model run; until then the

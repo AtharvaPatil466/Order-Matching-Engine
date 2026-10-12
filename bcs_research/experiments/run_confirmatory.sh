@@ -23,11 +23,17 @@
 #   exp10   P4  speed + free entry         100 seeds x 1800 s, 23 cells               6 s           0.2 h
 #   exp11   P9  batch semantics            100 seeds x 1800 s, 31 arms               44 s           1.2 h
 #   exp15   P10, P10b, P10 tick secondary  59 configs x 100 seeds x 1800 s          320 s           8.9 h
-#   ---     CONFIRM-B drivers (P2, P3, P5, P6, P7)                                                  ~16 h (CONFIRM-B's figure)
+#   exp17   P3  jump vs random walk        8,800 runs                                CONFIRM-B       1.5 h
+#   exp19   P6  noise heterogeneity        7,400 runs                                CONFIRM-B       2.4 h
+#   exp18   P5  fee schedules              18,100 runs                               CONFIRM-B       3.3 h
+#   exp20   P7  maker strategies           12,800 runs                               CONFIRM-B       4.2 h
+#   exp16   P2  race incidence             23,800 runs                               CONFIRM-B       4.3 h
 #   exp12   P8  endogenous makers          17 Nash solves + 100 report seeds         see note       5-8 h  (2.8/5.1/7.1/11.1 s per run at M = 1/2/3/5)
-#   exp13   P11 global sensitivity         N = 2048 x 16 x 2 runs at 1800 s         938 s (N=16)   33 h   (the N = 512 prefix runs first: 8.3 h)
-#   exp14   incidence priors (no pred.)    2 x 4 x 5 x 10 cells x 100 seeds          810 s           22.5 h (descriptive; cut first if short of time)
-#   total, CONFIRM-A drivers                                                                        ~72 h  (~25 h with exp13 at N = 512 and no exp14)
+#   exp13   P11 global sensitivity         N = 512 (P11's, the verdict of record)   938 s (N=16)   8.3 h
+#   ------  every pre-registered verdict done                                                       ~41 h
+#   exp13   EXTENSION to N = 2048           shares the N = 512 checkpoint                           +25 h  (reported beside, not of record)
+#   exp14   incidence priors (no pred.)    2 x 4 x 5 x 10 cells x 100 seeds          810 s           22.5 h (descriptive)
+#   total                                                                                           ~88 h
 #
 # Re-time if the engine or the box changes.
 
@@ -70,17 +76,24 @@ run() {   # run <name> <script> [args...]: skip if done, else run with a log, st
   echo "[$(date '+%F %T')] $name: done in $(( (SECONDS - t0) / 60 )) min -> $summary"
 }
 
-run exp9_bcs_replication     exp9_bcs_replication.py
-run exp10_speed_entry        exp10_speed_entry.py
-run exp11_batch_semantics    exp11_batch_semantics.py
-run exp15_heldout_who_pays   exp15_heldout_who_pays.py
+# Every pre-registered verdict first, shortest first, so a batch stopped early
+# has as many complete experiments as possible.
+run exp9_bcs_replication       exp9_bcs_replication.py
+run exp10_speed_entry          exp10_speed_entry.py
+run exp11_batch_semantics      exp11_batch_semantics.py
+run exp17_jump_vs_walk         exp17_jump_vs_walk.py
+run exp19_noise_heterogeneity  exp19_noise_heterogeneity.py
+run exp18_fee_schedules        exp18_fee_schedules.py
+run exp20_maker_strategies     exp20_maker_strategies.py
+run exp16_race_incidence       exp16_race_incidence.py
+run exp12_endogenous_makers    exp12_endogenous_makers.py
+run exp13_global_sensitivity   exp13_global_sensitivity.py
+run exp15_heldout_who_pays     exp15_heldout_who_pays.py
+echo "[$(date '+%F %T')] every pre-registered verdict is done; extras follow"
 
-# ===================== CONFIRM-B drivers (P2, P3, P5, P6, P7) =====================
-# The lead adds them here, one `run <name> <script>` line each, in the same form.
-# ================================================================================
-
-run exp12_endogenous_makers  exp12_endogenous_makers.py
-run exp13_global_sensitivity exp13_global_sensitivity.py
-run exp14_incidence_priors   exp14_incidence_priors.py
+# Extras, not of record: P11 at N = 2,048 (reuses the N = 512 runs) and the
+# descriptive incidence priors.
+run exp13_global_sensitivity_n2048 exp13_global_sensitivity.py --n 2048
+run exp14_incidence_priors     exp14_incidence_priors.py
 
 echo "[$(date '+%F %T')] confirmatory batch complete; summaries in $OUT"

@@ -424,15 +424,14 @@ def main(n=PILOT_N, horizon_s=PILOT_HORIZON_S, out_path=PILOT_OUT, workers=None)
 # tick at 1 tick = 100 ms (CONFIRM_DECAY_PER_S below), not the pilot's 1 ms. Everything else is P11's range or the
 # pilot's documented choice (see `deviations_from_p11` in the report).
 #
-# Sample size: N_base = 2,048, not P11's written 512. P11's verdicts are
-# interval tests on indices against thresholds 0.05-0.5 apart (H11a: latency
-# S1 < 0.05 with its interval; H11b: sum(ST - S1) >= 0.2; H11c: +-10% of rent);
-# the pilot's index intervals were about +-0.1 at n = 64, so at 512 they are
-# about +-0.035 and H11a's "< 0.05" stays INCONCLUSIVE for any true index above
-# ~0.015. 2,048 halves that. Changing a written sample size after sign-off needs
-# a §4 row, so the report also carries the verdicts at N = 512: a scrambled
-# Sobol' sequence is extensible, so the first 512 rows of the 2,048-row design
-# ARE the 512-row design (tested), and that verdict costs nothing.
+# Sample size: P11's written N_base = 512 is the verdict of record. At 30-minute
+# runs a 2,048-row design costs ~33 h against 8.3 h, so 2,048 is an EXTENSION
+# run after every pre-registered verdict, reported beside: a scrambled Sobol'
+# sequence is extensible, so the first 512 rows of the 2,048-row design ARE the
+# 512-row design (tested). Runs are keyed by (matrix, row) — design_key — so the
+# extension shares the N = 512 checkpoint and re-runs nothing. At 512 the index
+# intervals are about +-0.035, so H11a's "< 0.05" stays INCONCLUSIVE for a true
+# latency index above ~0.015; the extension halves that.
 #   H11a  sniper_rent: S1(sniper_lat_ns) interval below 0.05, and S1(jump_rate)
 #         + S1(jump_scale_bp) at least 0.5 (joint bootstrap of the sum); MISS
 #         if the latency S1 is >= 0.1 or the sum < 0.35.
@@ -444,8 +443,9 @@ def main(n=PILOT_N, horizon_s=PILOT_HORIZON_S, out_path=PILOT_OUT, workers=None)
 #   H11c  (recast, §4) toll = -noise_delta over the A and B rows (independent
 #         prior draws): its 95% interval inside +-10% of mean sniper rent.
 
-CONFIRM_N = 2048
 PREREG_N = 512
+CONFIRM_N = PREREG_N             # the verdict of record; larger N is an extension
+EXTENSION_N = 2048
 # The paper maker's decay, 0.1 per tick-model tick, on the pre-registration's
 # clock: one tick = 100 ms (P10; H2d's "300 ms (the tick model's 3 ticks)"), as
 # CONFIRM-B maps it. The pilot used 1 tick = 1 ms (the tick code's dt_us), a
@@ -473,6 +473,14 @@ def confirm_points(n: int):
     mats = [A, B] + [sa.ab_matrix(A, B, i) for i in range(len(params))]
     extra = {"jitter_ns": op.JITTER_NS, "depth_lots": op.QUOTE_LOTS}
     return [pt | extra for U in mats for pt in sa.values(params, U)]
+
+
+def design_key(i: int, n: int) -> str:
+    """Checkpoint key of point i in confirm_points(n): "matrix:row".
+
+    The same Sobol' point has the same key in every design size, so a larger N
+    reuses a smaller N's runs; a flat index would not (it shifts with n)."""
+    return f"{i // n}:{i % n}"
 
 
 def _blocks(rows, key, n_full, n):
@@ -537,39 +545,47 @@ def confirmatory(argv) -> dict:
     import operating_point as op
     ap = argparse.ArgumentParser(description="exp13 confirmatory (P11)")
     ap.add_argument("--confirmatory", action="store_true")
-    ap.add_argument("--n", type=int, default=CONFIRM_N, help="smoke only: a smaller power of 2")
+    ap.add_argument("--n", type=int, default=CONFIRM_N,
+                    help=f"{CONFIRM_N} is the verdict of record; {EXTENSION_N} the extension; less is a smoke")
     ap.add_argument("--horizon-s", type=float, default=op.HORIZON_S)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out-dir", type=Path, default=None)
     a = ap.parse_args(argv)
-    out, ck = op.confirmatory_paths("exp13_global_sensitivity", a.out_dir)
+    name = "exp13_global_sensitivity"
+    out = op.confirmatory_paths(name if a.n <= CONFIRM_N else f"{name}_n{a.n}", a.out_dir)[0]
+    ck = op.confirmatory_paths(name, a.out_dir)[1]          # one checkpoint for every N
     log = op.CellLog(ck)
     t0 = time.time()
     points = confirm_points(a.n)
     # The N = 512 design's rows run first, so a batch stopped early still has P11's
     # written sample size complete.
     order = sorted(range(len(points)), key=lambda i: (i % a.n >= PREREG_N, i))
-    got = op.run_cached(_confirm_task, {str(i): (points[i], a.horizon_s) for i in order},
+    got = op.run_cached(_confirm_task,
+                        {design_key(i, a.n): (points[i], a.horizon_s) for i in order},
                         log, a.workers)
-    rows = [got[str(i)] for i in range(len(points))]
+    rows = [got[design_key(i, a.n)] for i in range(len(points))]
     full = p11_verdicts(rows, a.n, a.n)
     prereg = p11_verdicts(rows, a.n, min(PREREG_N, a.n))
-    status = op.CONFIRMATORY_STATUS if a.n >= CONFIRM_N and a.horizon_s >= op.HORIZON_S else \
-        f"smoke — NOT confirmatory: N = {a.n} x {a.horizon_s:g} s against {CONFIRM_N} x {op.HORIZON_S} s"
+    if a.n < CONFIRM_N or a.horizon_s < op.HORIZON_S:
+        status = f"smoke — NOT confirmatory: N = {a.n} x {a.horizon_s:g} s against {CONFIRM_N} x {op.HORIZON_S} s"
+    elif a.n == CONFIRM_N:
+        status = op.CONFIRMATORY_STATUS
+    else:
+        status = (f"{op.CONFIRMATORY_STATUS}; EXTENSION to N = {a.n} beyond the pre-registered "
+                  f"{CONFIRM_N} — the verdict of record is exp13_global_sensitivity.json")
     report = {
         "experiment": "exp13_global_sensitivity (P11), confirmatory", "status": status,
         "n_base": a.n, "d": len(PARAMS), "runs": 2 * len(points), "horizon_s": a.horizon_s,
         "design_seed": DESIGN_SEED, "jitter_ns": op.JITTER_NS, "depth_lots": op.QUOTE_LOTS,
         "params": [vars(q) for q in confirm_params()],
         "p11": full, "p11_at_prereg_n512": prereg,
-        "verdicts_read_on": f"N = {a.n} (lead's instruction); P11 writes N_base = 512, whose "
-                            "verdicts are p11_at_prereg_n512 — the change needs a §4 row",
+        "verdicts_read_on": (f"N = {a.n}; the verdict of record is P11's pre-registered "
+                             f"N = {CONFIRM_N} (p11_at_prereg_n512)"),
         "deviations_from_p11": [
             "factors added beyond P11's list: noise_eps_bp, half_spread_ticks; c_speed omitted "
             "(mechanically zero on these outcomes); a seed factor measures run noise",
             "F carried entirely by the taker (P11 gives the total only)",
             "gap_rate is the event-clock analogue (IOC empties a side), not the §3.3 grid count",
-            "N_base 2048 instead of 512",
             "decay base: 0.1 per tick at 1 tick = 100 ms (pilot: 1 ms), as CONFIRM-B maps it",
         ],
         "holm": "95% verdicts; Holm across the 11 primaries is applied at write-up",
@@ -579,9 +595,9 @@ def confirmatory(argv) -> dict:
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=1) + "\n")
-    print(f"[exp13] N={a.n}: H11a {full['H11a']['verdict']}, H11b {full['H11b']['verdict']}, "
-          f"H11c {full['H11c']['verdict']} (N=512: {prereg['H11a']['verdict']}, "
-          f"{prereg['H11b']['verdict']}, {prereg['H11c']['verdict']}) -> {out}", flush=True)
+    def _v(d):
+        return ", ".join(f"{h} {d[h]['verdict']}" for h in ("H11a", "H11b", "H11c"))
+    print(f"[exp13] N={a.n}: {_v(full)} (of record, N={CONFIRM_N}: {_v(prereg)}) -> {out}", flush=True)
     return report
 
 

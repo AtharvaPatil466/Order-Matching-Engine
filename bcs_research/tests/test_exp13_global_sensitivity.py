@@ -175,3 +175,22 @@ def test_confirmatory_decay_is_the_papers_per_tick_rate_at_100_ms_ticks():
     assert per_update == pytest.approx(1 - 0.9 ** 0.1)          # CONFIRM-B's mapping
     dec = next(q for q in x13.confirm_params() if q.name == "decay_per_s")
     assert (dec.lo, dec.hi) == pytest.approx((x13.CONFIRM_DECAY_PER_S / 4, x13.CONFIRM_DECAY_PER_S * 4))
+
+
+def test_a_points_checkpoint_key_is_the_same_in_the_512_and_2048_designs():
+    # The N = 2,048 extension shares the N = 512 run's checkpoint, so a point
+    # must be keyed by (matrix, row), not by its position in the flat list,
+    # which differs between the two layouts and would reuse the wrong runs.
+    import exp13_global_sensitivity as x13
+    big, small = x13.confirm_points(2048), x13.confirm_points(512)
+    small_by_key = {x13.design_key(i, 512): p for i, p in enumerate(small)}
+    for i, p in enumerate(big):
+        k = x13.design_key(i, 2048)
+        if k in small_by_key:
+            assert small_by_key[k] == p
+    assert len(small_by_key) == len(small)
+
+
+def test_the_verdict_of_record_is_p11s_pre_registered_n_512():
+    import exp13_global_sensitivity as x13
+    assert x13.CONFIRM_N == x13.PREREG_N == 512

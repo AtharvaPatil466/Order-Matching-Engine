@@ -381,6 +381,222 @@ def tick_interval1_probe(n_seeds=100, boot_seed=0):
             "variants": TICK_VARIANTS, "arms": list(TICK_ARMS), "cells": cells}
 
 
+# --- confirmatory mode: P9 at the operating point ------------------------------
+#
+# The market is operating_point.build_market. P9 states neither k nor the snipe
+# size, so: k = 3 (the operating point's default, ABO's 3.3 per race) and snipe
+# ratio 1, one snipe clears the quote, BCS's assumption and the one under which
+# footnote 34's bound is stated (both logged as §4 ambiguities). The fast maker
+# is the operating point's (lag 0 <= eps); the slow maker (H9c's "tau below the
+# maker's latency") observes and orders 5 ms each way, 10 ms in all.
+# Arms per seed share the path, the investors and the scheduler seed.
+#   H9a  tau in {1, 10, 100} ms, fast maker, time rationing, engine price rule,
+#        stale snipers: sniping loss below continuous (paired interval) and its
+#        upper bound <= 1.2 x lambda_j (eps / 2 tau) prize(h) x quote.
+#   H9b  (i) stale snipers: maker edge and every sniper fill identical across
+#        the engine and pressure price rules, exactly; (ii) competitive snipers:
+#        the snipers' edge per filled lot is the stale prize under the engine
+#        rule (> 2 ticks) and at most ~one tick under pressure (<= 2 ticks): the
+#        measurable form of "clears at the stale quote vs at V' - 1 tick";
+#        (iii) where eps/tau <= 0.01 (tau >= 10 ms) the maker's edge differs
+#        across price rules by less than 1% of continuous sniping loss.
+#   H9c  every tau, both makers, including tau = 50 us below the fast maker's
+#        100 us and tau = 1 ms below the slow maker's 10 ms: MISS if any
+#        batch-minus-continuous loss interval lies above 0; HIT only if every
+#        interval's upper bound is <= 0 (failing to reject is never a hit, §2);
+#        the lenient "none significantly above" reading is reported beside.
+#   H9d  time vs random rationing: maker sniping loss TOST +-2% at each tau.
+
+CONFIRM_TAUS_NS = (1_000_000, 10_000_000, 100_000_000)
+BELOW_FAST_TAU_NS = 50_000
+SLOW_MAKER_ONE_WAY_NS = 5_000_000
+CONFIRM_K, CONFIRM_RATIO = 3, 1.0
+
+
+def confirm_arms() -> list[tuple]:
+    """(maker, sniper_kind, arm) for every run of one seed."""
+    out = [("fast", kind, CONTINUOUS) for kind in SNIPER_KINDS]
+    out += [("fast", kind, (tau, r, p)) for kind in SNIPER_KINDS for tau in CONFIRM_TAUS_NS
+            for r in RATIONINGS for p in PRICE_RULES]
+    out += [("fast", "stale", (BELOW_FAST_TAU_NS, "time", "engine")),
+            ("slow", "stale", CONTINUOUS)]
+    out += [("slow", "stale", (tau, "time", "engine")) for tau in CONFIRM_TAUS_NS]
+    return out
+
+
+def run_op(seed: int, maker: str, sniper_kind: str, arm, horizon_s: float) -> dict:
+    """One operating-point run: the maker's sniping loss and the snipers' fills."""
+    import operating_point as op
+    lat = op.MAKER_ONE_WAY_NS if maker == "fast" else SLOW_MAKER_ONE_WAY_NS
+    mk = op.build_market(seed, maker_latencies_ns=(lat,), k=CONFIRM_K, snipe_ratio=CONFIRM_RATIO,
+                         horizon_s=horizon_s)
+    agents = mk.agents
+    if sniper_kind == "competitive":
+        swap = {s.participant_id: CompetitiveSniper(s.participant_id, s.qty, s.threshold,
+                                                    s.md_latency_ns, s.order_latency_ns)
+                for s in mk.snipers}
+        agents = [swap.get(a.participant_id, a) for a in agents]
+    h = be.EngineHarness()
+    h.add_symbol(1)
+    h.start(disable_circuit_breaker=True)
+    common = dict(seed=seed, snapshot_every_ns=op.SNAPSHOT_MS * 1_000_000,
+                  race_jitter_ns=mk.race_jitter_ns)
+    try:
+        if arm == CONTINUOUS:
+            sched = EventScheduler(h, 1, **common)
+        else:
+            tau, rationing, rule = arm
+            sched = EventBatchScheduler(h, 1, tau, rationing=rationing, price_rule=rule, **common)
+        res = sched.run(agents, mk.path)
+    finally:
+        h.stop()
+    maker_id = mk.makers[0].participant_id
+    snipers = {s.participant_id for s in mk.snipers}
+    loss = edge_units = lots = 0.0
+    fills = []
+    for tr in res.trades:
+        e = res.path.value_at(tr.t_ns) - tr.price           # ticks per lot, buyer's edge
+        if tr.buyer_id in snipers or tr.seller_id in snipers:
+            sniper_edge = e if tr.buyer_id in snipers else -e
+            edge_units += sniper_edge * tr.quantity
+            lots += tr.quantity
+            fills.append((tr.t_ns, tr.price, tr.quantity))
+            if maker_id in (tr.buyer_id, tr.seller_id):
+                loss += sniper_edge * tr.quantity
+    edge = op.edge_by_participant(res.trades, res.path)
+    return {"maker_sniping_loss": loss / be.PRICE_PRECISION / horizon_s,
+            "maker_edge": edge.get(maker_id, 0.0) / horizon_s,
+            "sniper_lots": lots, "sniper_edge_ticks_per_lot": edge_units / lots if lots else None,
+            "sniper_fills_hash": hash(tuple(fills)) if fills else 0,
+            "n_jumps": len(res.races), "repriced": getattr(sched, "repriced", 0)}
+
+
+def _arm_key(maker, kind, arm) -> str:
+    return f"{maker}/{kind}/{arm_label(arm)}"
+
+
+def footnote34_bound(tau_ns: int) -> float:
+    """lambda_j (eps / 2 tau) prize(h) x quote, USD/s, at the operating point."""
+    import operating_point as op
+    from bcs_theory import laplace_jump, sniping_prize
+    b = op.PATH["jump_scale_bp"] * op.BP
+    prize = sniping_prize(op.BCS_HALF_SPREAD_BP * op.BP, laplace_jump(b))
+    return (op.PATH["jump_intensity_per_s"] * op.JITTER_NS / (2 * tau_ns) * prize
+            * op.QUOTE_LOTS / be.PRICE_PRECISION)
+
+
+def p9_verdicts(rows: dict) -> dict:
+    """rows: {arm key: [per-seed run dicts, seeds aligned]}."""
+    import operating_point as op
+
+    def col(key, field="maker_sniping_loss"):
+        return [r[field] for r in rows[key]]
+
+    def diff_ci(key, base):
+        return bootstrap_ci([a - b for a, b in zip(col(key), col(base))], seed=0)
+
+    cont = {m: _arm_key(m, "stale", CONTINUOUS) for m in ("fast", "slow")}
+    cont_loss = float(sum(col(cont["fast"])) / len(rows[cont["fast"]]))
+    h9a = []
+    for tau in CONFIRM_TAUS_NS:
+        k = _arm_key("fast", "stale", (tau, "time", "engine"))
+        d, lvl, bound = diff_ci(k, cont["fast"]), bootstrap_ci(col(k), seed=0), footnote34_bound(tau)
+        below = "HIT" if d["upper"] < 0 else ("MISS" if d["lower"] >= 0 else "INCONCLUSIVE")
+        under = ("HIT" if lvl["upper"] <= 1.2 * bound else
+                 "MISS" if lvl["lower"] > 1.2 * bound else "INCONCLUSIVE")
+        h9a.append({"tau_ns": tau, "batch_minus_continuous": d, "batch_loss": lvl,
+                    "bound_1.2x": 1.2 * bound, "below_continuous": below, "under_bound": under,
+                    "verdict": op.all_hit([below, under])})
+    same = []
+    for tau in CONFIRM_TAUS_NS:
+        for r in RATIONINGS:
+            a, b = (rows[_arm_key("fast", "stale", (tau, r, p))] for p in PRICE_RULES)
+            # Exposure events only: the pressure rule also reprices investor batches,
+            # which H9b(iii) reads through the aggregate maker P&L.
+            same.append(all(x["maker_sniping_loss"] == y["maker_sniping_loss"] and
+                            x["sniper_fills_hash"] == y["sniper_fills_hash"] for x, y in zip(a, b)))
+    per_lot = {}
+    for p in PRICE_RULES:
+        vals = [r["sniper_edge_ticks_per_lot"] for tau in CONFIRM_TAUS_NS
+                for r in rows[_arm_key("fast", "competitive", (tau, "time", p))]
+                if r["sniper_edge_ticks_per_lot"] is not None]
+        per_lot[p] = bootstrap_ci(vals, seed=0) if vals else None
+    eng, prs = per_lot["engine"], per_lot["pressure"]
+    if eng is None or prs is None:
+        comp = "INCONCLUSIVE"
+    elif prs["lower"] > 2 or eng["upper"] <= 2:
+        comp = "MISS"
+    else:
+        comp = "HIT" if prs["upper"] <= 2 and eng["lower"] > 2 else "INCONCLUSIVE"
+    agg = []
+    for tau in CONFIRM_TAUS_NS:
+        if op.JITTER_NS / tau > 0.01:
+            continue
+        for kind in SNIPER_KINDS:
+            a, b = (col(_arm_key("fast", kind, (tau, "time", p)), "maker_edge") for p in PRICE_RULES)
+            d = bootstrap_ci([x - y for x, y in zip(b, a)], seed=0)
+            band = 0.01 * cont_loss
+            agg.append({"tau_ns": tau, "sniper_kind": kind, "pressure_minus_engine": d,
+                        "band": band, "verdict": op.band_verdict(d["lower"], d["upper"], -band, band)})
+    h9b = {"stale_identical_across_price_rules": all(same),
+           "competitive_edge_per_lot_ticks": per_lot, "competitive_verdict": comp,
+           "aggregate_within_1pct": agg,
+           "verdict": op.all_hit(["HIT" if all(same) else "MISS", comp] + [x["verdict"] for x in agg])}
+    h9c = []
+    taus = {"fast": (BELOW_FAST_TAU_NS,) + CONFIRM_TAUS_NS, "slow": CONFIRM_TAUS_NS}
+    for m, ts in taus.items():
+        for tau in ts:
+            d = diff_ci(_arm_key(m, "stale", (tau, "time", "engine")), cont[m])
+            v = "MISS" if d["lower"] > 0 else ("HIT" if d["upper"] <= 0 else "INCONCLUSIVE")
+            h9c.append({"maker": m, "tau_ns": tau, "batch_minus_continuous": d, "verdict": v})
+    h9d = [{"tau_ns": tau, **op.equivalence(col(_arm_key("fast", "stale", (tau, "random", "engine"))),
+                                            col(_arm_key("fast", "stale", (tau, "time", "engine"))),
+                                            0.02)} for tau in CONFIRM_TAUS_NS]
+    return {"H9a": {"cells": h9a, "verdict": op.all_hit(c["verdict"] for c in h9a)},
+            "H9b": h9b,
+            "H9c": {"cells": h9c, "verdict": op.all_hit(c["verdict"] for c in h9c),
+                    "lenient_none_significantly_above":
+                        "MISS" if any(c["verdict"] == "MISS" for c in h9c) else "HIT"},
+            "H9d": {"cells": h9d, "verdict": op.all_hit(c["verdict"] for c in h9d)},
+            "continuous_sniping_loss_usd_per_s": cont_loss}
+
+
+def _run_op_task(seed, maker, kind, arm, horizon_s):
+    return run_op(seed, maker, kind, tuple(arm) if isinstance(arm, list) else arm, horizon_s)
+
+
+def confirmatory(args) -> dict:
+    import operating_point as op
+    out, ck = op.confirmatory_paths("exp11_batch_semantics", args.out_dir)
+    log = op.CellLog(ck)
+    n, horizon = args.seeds or op.N_SEEDS, args.horizon_s or op.HORIZON_S
+    seeds = range(1, n + 1)
+    t0 = time.time()
+    tasks = {f"{_arm_key(m, k, a)}#{s}": (s, m, k, a, horizon)
+             for m, k, a in confirm_arms() for s in seeds}
+    got = op.run_cached(_run_op_task, tasks, log, args.workers)
+    rows = {_arm_key(m, k, a): [got[f"{_arm_key(m, k, a)}#{s}"] for s in seeds]
+            for m, k, a in confirm_arms()}
+    report = {"experiment": "exp11_batch_semantics (P9), confirmatory",
+              "status": op.smoke_status(n, horizon), "seeds": list(seeds), "horizon_s": horizon,
+              "market": {"k": CONFIRM_K, "snipe_ratio": CONFIRM_RATIO,
+                         "fast_maker_one_way_ns": op.MAKER_ONE_WAY_NS,
+                         "slow_maker_one_way_ns": SLOW_MAKER_ONE_WAY_NS,
+                         "jitter_ns": op.JITTER_NS, "taus_ns": CONFIRM_TAUS_NS,
+                         "below_fast_tau_ns": BELOW_FAST_TAU_NS},
+              "units": "USD per second; sniper edge per lot in ticks",
+              "p9": p9_verdicts(rows),
+              "arms": {k: bootstrap_ci_table(v, ["maker_sniping_loss", "maker_edge", "sniper_lots"],
+                                             seed=0) for k, v in rows.items()},
+              "elapsed_s": round(time.time() - t0, 1)}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
+    p9 = report["p9"]
+    print(f"[exp11] H9a {p9['H9a']['verdict']}, H9b {p9['H9b']['verdict']}, H9c "
+          f"{p9['H9c']['verdict']}, H9d {p9['H9d']['verdict']} -> {out}", flush=True)
+    return report
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=None)
@@ -388,7 +604,13 @@ def main(argv=None):
     ap.add_argument("--intervals-ns", type=int, nargs="+", default=INTERVALS_NS)
     ap.add_argument("--rationings", nargs="+", default=list(RATIONINGS))
     ap.add_argument("--out-name", default="exp11_batch_semantics.json")
+    ap.add_argument("--confirmatory", action="store_true", help="P9 at the operating point")
+    ap.add_argument("--horizon-s", type=float, default=None, help="confirmatory smoke only")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args(argv)
+    if args.confirmatory:
+        return confirmatory(args)
     if args.tick_probe:
         report = tick_interval1_probe(args.seeds or 100)
         out = _ROOT / "results" / "experiments" / "exp11_interval1_probe.json"

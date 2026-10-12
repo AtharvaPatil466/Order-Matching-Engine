@@ -132,3 +132,8 @@ def test_all_hit_is_a_conjunction():
     assert op.all_hit(["HIT", "INCONCLUSIVE"]) == "INCONCLUSIVE"
     assert op.all_hit(["INCONCLUSIVE", "MISS"]) == "MISS"
     assert op.all_hit([]) == "INCONCLUSIVE"
+
+
+def test_equivalence_handles_identical_and_zero_baselines():
+    assert op.equivalence([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.02)["verdict"] == "HIT"
+    assert op.equivalence([0.0, 1.0, 0.0], [0.0, 0.0, 0.0], 0.02)["verdict"] == "INCONCLUSIVE"

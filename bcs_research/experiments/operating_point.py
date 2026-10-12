@@ -231,8 +231,15 @@ def equivalence(a, b, margin: float, seed: int = BOOT_SEED) -> dict:
     a, b = np.asarray(a, float), np.asarray(b, float)
     if a.shape != b.shape or a.size < 2:
         raise ValueError("equivalence needs paired samples of equal length >= 2")
+    if np.array_equal(a, b):        # identical arms: no change at all, whatever the level
+        return {"ratio_minus_1": 0.0, "ci90": [0.0, 0.0], "ci95": [0.0, 0.0], "margin": margin,
+                "verdict": "HIT", "note": "arms identical seed by seed"}
     idx = np.random.default_rng(seed).integers(0, a.size, size=(N_BOOTSTRAP, a.size))
-    r = a[idx].mean(1) / b[idx].mean(1) - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = a[idx].mean(1) / b[idx].mean(1) - 1
+    if not np.isfinite(r).all():     # a zero baseline in some resample: no ratio to test
+        return {"ratio_minus_1": None, "ci90": None, "ci95": None, "margin": margin,
+                "verdict": "INCONCLUSIVE", "note": "baseline mean is zero in some resample"}
     lo90, hi90, lo95, hi95 = np.percentile(r, [5, 95, 2.5, 97.5])
     if -margin <= lo90 and hi90 <= margin:
         verdict = "HIT"

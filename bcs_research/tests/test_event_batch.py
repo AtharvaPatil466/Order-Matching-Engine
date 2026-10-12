@@ -380,3 +380,19 @@ def test_an_out_of_band_order_flushed_at_the_boundary_fails_the_run_loudly():
     # Act / Assert
     with pytest.raises(RuntimeError, match="OutOfPriceRange"):
         _batch([agent])
+
+
+def test_exp11_confirmatory_smoke_writes_p9_verdicts(tmp_path):
+    import exp11_batch_semantics as E
+    r = E.main(["--confirmatory", "--seeds", "2", "--horizon-s", "5", "--workers", "1",
+                "--out-dir", str(tmp_path)])
+    assert r["status"].startswith("smoke")
+    assert {"H9a", "H9b", "H9c", "H9d"} <= set(r["p9"])
+    assert len(r["arms"]) == len(E.confirm_arms())
+    # stale-price snipers clear at the stale quote under either price rule
+    assert r["p9"]["H9b"]["stale_identical_across_price_rules"]
+
+
+def test_exp11_footnote34_bound_scales_as_one_over_tau():
+    import exp11_batch_semantics as E
+    assert E.footnote34_bound(1_000_000) == pytest.approx(10 * E.footnote34_bound(10_000_000))

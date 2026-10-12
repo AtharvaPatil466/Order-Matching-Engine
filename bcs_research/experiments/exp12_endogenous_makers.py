@@ -55,7 +55,7 @@ Status: a PILOT. The operating point is not signed off (PREREGISTRATION §5),
 so output goes to results/pilot/ labelled as such; this is not the
 confirmatory test of P8.
 
-Run: bcs_research/.venv/bin/python bcs_research/experiments/exp12_endogenous_makers.py
+Run: bcs_research/.venv/bin/python bcs_research/experiments/exp12_endogenous_makers.py [--resume]
 """
 from __future__ import annotations
 
@@ -130,6 +130,15 @@ def describe(p: MakerPolicy) -> dict:
     return {"quote": True, "half_spread_ticks": p.half_spread, "qty": p.qty,
             "adverse_sensitivity": p.adverse_sensitivity, "spread_decay": p.spread_decay,
             "post_only": p.post_only}
+
+
+def policy_from(d: dict) -> MakerPolicy:
+    """describe()'s inverse, to resume from a checkpointed JSON."""
+    if not d["quote"]:
+        return NO_QUOTE
+    return MakerPolicy(half_spread=d["half_spread_ticks"], qty=d["qty"],
+                       adverse_sensitivity=d["adverse_sensitivity"],
+                       spread_decay=d["spread_decay"], post_only=d["post_only"])
 
 
 # --- one run -----------------------------------------------------------------
@@ -356,11 +365,15 @@ def _cell(ev, label, latencies_us, cost, initial, t0):
     return out
 
 
-def main(out_path=PILOT_OUT, workers=None) -> dict:
+def main(out_path=PILOT_OUT, workers=None, resume=False) -> dict:
+    """Runs every cell, checkpointing the JSON after each. resume=True keeps the
+    cells an interrupted run already wrote and runs only the rest (the run
+    cache is not saved, so a resumed cell re-simulates what it needs)."""
     t0 = time.time()
-    cells = []
-    workers = workers or max(1, (os.cpu_count() or 2) - 1)
     out_path = Path(out_path)
+    cells = json.loads(out_path.read_text())["cells"] if resume and out_path.exists() else []
+    done = {c["label"]: c for c in cells}
+    workers = workers or max(1, (os.cpu_count() or 2) - 1)
 
     def checkpoint():
         report = {"experiment": "exp12_endogenous_makers", "status": STATUS,
@@ -377,21 +390,26 @@ def main(out_path=PILOT_OUT, workers=None) -> dict:
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
         ev = Evaluator(facts.CFG, HORIZON_S, pool)
+
+        def cell(label, latencies_us, cost, initial):
+            """The cell's equilibrium profile, run now unless resumed."""
+            if label in done:
+                return tuple(policy_from(d) for d in done[label]["nash"]["profile"])
+            cells.append(_cell(ev, label, latencies_us, cost, initial, t0))
+            checkpoint()
+            return cells[-1]["nash"]["profile"]
+
         sym = {}
         for m in M_GRID:   # symmetric latencies, F = 0: spreads against M
             start = dataclasses.replace(START, post_only=m > 1)
-            cells.append(_cell(ev, f"sym_M{m}_F0", (LATENCY_US,) * m, 0.0, (start,) * m, t0))
-            sym[m] = cells[-1]["nash"]["profile"]
-            checkpoint()
+            sym[m] = cell(f"sym_M{m}_F0", (LATENCY_US,) * m, 0.0, (start,) * m)
         for cost in COSTS_USD_PER_S[1:]:   # exit: three potential makers, F > 0
-            cells.append(_cell(ev, f"sym_M3_F{cost}", (LATENCY_US,) * 3, cost, sym[3], t0))
-            checkpoint()
+            cell(f"sym_M3_F{cost}", (LATENCY_US,) * 3, cost, sym[3])
         for m in (2, 3):   # asymmetric latencies, F = 0
-            cells.append(_cell(ev, f"asym_M{m}_F0", ASYM_LATENCY_US[:m], 0.0, sym[m], t0))
-            checkpoint()
+            cell(f"asym_M{m}_F0", ASYM_LATENCY_US[:m], 0.0, sym[m])
     print(f"wrote {out_path} in {time.time() - t0:.0f} s")
     return {"cells": cells}
 
 
 if __name__ == "__main__":
-    main()
+    main(resume="--resume" in sys.argv[1:])

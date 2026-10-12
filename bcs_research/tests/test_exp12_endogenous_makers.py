@@ -172,3 +172,8 @@ def test_sampler_charges_F_only_when_quoting_and_never_runs_no_quote():
     assert len(ev.cache) == 1
     assert out.tolist() == [0.0]
     assert quoting.tolist() == [row["maker_net"][0] - 0.25]
+
+
+def test_policy_from_inverts_describe_for_every_policy_in_the_space():
+    space = E.search_space(1)
+    assert [E.policy_from(E.describe(p)) for p in space] == list(space)

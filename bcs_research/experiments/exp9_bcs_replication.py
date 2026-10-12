@@ -678,7 +678,7 @@ def confirmatory(args) -> dict:
     batch = summarize_batch(_run_cached(batch_tasks(args.ratios, seeds, duration), log,
                                         args.workers))
     verdict = p1_verdict(final)
-    verdict["batch_arm"] = overall_hit(c["verdict"] for c in batch)
+    verdict["batch_arm"] = op.all_hit(c["verdict"] for c in batch)
     report = {
         "status": op.smoke_status(n_seeds, duration, CONFIRM_SEEDS, CONFIRM_DURATION_S),
         "experiment": "exp9_bcs_replication (P1; paper/bcs_replication_spec.md), confirmatory",
@@ -701,12 +701,6 @@ def confirmatory(args) -> dict:
     out.write_text(json.dumps(report, indent=2, sort_keys=True))
     print(f"[exp9] P1 {verdict}  -> {out}", flush=True)
     return report
-
-
-def overall_hit(verdicts) -> str:
-    """HIT only if every part hits; MISS if any misses."""
-    v = list(verdicts)
-    return "MISS" if "MISS" in v else ("HIT" if all(x == "HIT" for x in v) else "INCONCLUSIVE")
 
 
 def main(argv=None):

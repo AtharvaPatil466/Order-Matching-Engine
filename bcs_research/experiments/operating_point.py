@@ -229,8 +229,11 @@ def equivalence(a, b, margin: float, seed: int = BOOT_SEED) -> dict:
     """
     import numpy as np
     a, b = np.asarray(a, float), np.asarray(b, float)
-    if a.shape != b.shape or a.size < 2:
-        raise ValueError("equivalence needs paired samples of equal length >= 2")
+    if a.shape != b.shape:
+        raise ValueError("equivalence needs paired samples of equal length")
+    if a.size < 2:                  # a one-seed smoke: no interval to read
+        return {"ratio_minus_1": None, "ci90": None, "ci95": None, "margin": margin,
+                "verdict": "INCONCLUSIVE", "note": "fewer than two seeds"}
     if np.array_equal(a, b):        # identical arms: no change at all, whatever the level
         return {"ratio_minus_1": 0.0, "ci90": [0.0, 0.0], "ci95": [0.0, 0.0], "margin": margin,
                 "verdict": "HIT", "note": "arms identical seed by seed"}

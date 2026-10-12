@@ -137,3 +137,9 @@ def test_all_hit_is_a_conjunction():
 def test_equivalence_handles_identical_and_zero_baselines():
     assert op.equivalence([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.02)["verdict"] == "HIT"
     assert op.equivalence([0.0, 1.0, 0.0], [0.0, 0.0, 0.0], 0.02)["verdict"] == "INCONCLUSIVE"
+
+
+def test_equivalence_on_one_seed_is_inconclusive_not_an_error():
+    assert op.equivalence([1.0], [1.1], 0.05)["verdict"] == "INCONCLUSIVE"
+    with pytest.raises(ValueError):
+        op.equivalence([1.0, 2.0], [1.0], 0.05)

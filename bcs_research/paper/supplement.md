@@ -192,6 +192,10 @@ All experiment code is in `bcs_research/`: agents in `agents/`, the latency and 
 
 Drivers are under `experiments/` and results under `results/experiments/` unless another directory is named.
 
+**Event model, confirmatory (main text §4).** `experiments/run_confirmatory.sh` runs every driver below with `--confirmatory`, each importing the signed-off operating point from `experiments/operating_point.py` and checkpointing every run so a killed batch resumes; each writes `results/experiments/<driver>.json`. P1: `exp9_bcs_replication.py`; P2: `exp16_race_incidence.py`; P3: `exp17_jump_vs_walk.py`; P4: `exp10_speed_entry.py`; P5: `exp18_fee_schedules.py`; P6: `exp19_noise_heterogeneity.py`; P7: `exp20_maker_strategies.py`; P8: `exp12_endogenous_makers.py`; P9: `exp11_batch_semantics.py`; P10 and P10b: `exp15_heldout_who_pays.py`; P11: `exp13_global_sensitivity.py` (the $N = 2{,}048$ extension writes beside the $N = 512$ verdict of record). `exp14_incidence_priors.py` is descriptive and tests no prediction. Calibration: `calibration/fine_grain.py`, `jumps.py`, `race_proxy.py` and `race_by_move_size.py` write `results/calibration/*_v2.json`; the facts pilot is `experiments/facts_event_model.py`. [TODO after results: confirm every output path once the batch finishes.]
+
+**Tick model.**
+
 - **Experiment 1** (S1.1): `exp1_hardening.py` → `exp1_hardening.json`; operating point `CFG` in `exp1_primary.py`.
 - **Experiment 2** (S2.5): `exp2_latency_sweep.py` → `exp2_latency_sweep.json`.
 - **Experiment 3** (Table S4, S5.2): `exp3_hft_count.py` → `exp3_hft_count.json`. At fixed depth: `main(cfg={"thin_liquidity": False})` → `exp3_hft_count_fixed_depth.json`.

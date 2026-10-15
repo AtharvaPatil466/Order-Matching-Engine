@@ -83,7 +83,7 @@ A real-data leg would run the same pipeline on the BTC tape. It needs one new co
 
 ### S2.1 Calibration details (§3.6)
 
-To discipline the operating point against real microstructure, we calibrate the sim's *environment* parameters to Binance BTCUSDT-perpetual order flow recorded by a companion collector (20-level book snapshots at ~10/s and the aggregated-trade stream, both with nanosecond timestamps). The collector drops a few hours on most days (host sleep), which we handle by making each moment gap-safe rather than by discarding gapped days: arrival intensity accumulates each hourly file's own observed span, so missing hours leave the denominator instead of inflating it, and realized volatility keeps only returns between *adjacent* one-second buckets, so no return straddles a gap. Days enter at 18 hours of coverage in both streams; files truncated by a mid-write crash are skipped and recorded. A whole-day span over a 21/24 day biases the arrival rate down by roughly 12%, and demanding 24/24 coverage admits only two of the days the collector has ever produced. Under the gap-safe estimators the sample is 27 days (2026-06-24 to 2026-07-21, less 2026-07-19; 37.0M trades, 4.16M snapshots, 2.27M seconds of coverage), yielding: trade arrival 16.28/s; trade sizes p50/p90/p99 of 0.003/0.177/2.01 BTC; median spread of one exchange tick (≈0.016 bp); median top-of-book depth 6.18 BTC; and 1-second realized volatility of 0.650 bp/√s.
+To discipline the operating point against real microstructure, we calibrate the sim's *environment* parameters to Binance BTCUSDT-perpetual order flow recorded by a companion collector (20-level book snapshots at ~10/s and the aggregated-trade stream; trade timestamps are whole milliseconds, not nanoseconds as an earlier draft said — see S6). The collector drops a few hours on most days (host sleep), which we handle by making each moment gap-safe rather than by discarding gapped days: arrival intensity accumulates each hourly file's own observed span, so missing hours leave the denominator instead of inflating it, and realized volatility keeps only returns between *adjacent* one-second buckets, so no return straddles a gap. Days enter at 18 hours of coverage in both streams; files truncated by a mid-write crash are skipped and recorded. A whole-day span over a 21/24 day biases the arrival rate down by roughly 12%, and demanding 24/24 coverage admits only two of the days the collector has ever produced. Under the gap-safe estimators the sample is 27 days (2026-06-24 to 2026-07-21, less 2026-07-19; 37.0M trades, 4.16M snapshots, 2.27M seconds of coverage), yielding: trade arrival 16.28/s; trade sizes p50/p90/p99 of 0.003/0.177/2.01 BTC; median spread of one exchange tick (≈0.016 bp); median top-of-book depth 6.18 BTC; and 1-second realized volatility of 0.650 bp/√s.
 
 The mapping between sim ticks and wall-clock is a modelling choice we fix at 1 tick = 100 ms: the market maker's 3-tick latency then means 300 ms of quote staleness — slow but plausible — while HFTs react within a tick, preserving the BCS fast/slow asymmetry at realistic crypto scales. Under that convention two environment parameters invert directly, and both fits verify by simulation. The volatility inversion matches: at fitted $\sigma$ the baseline's simulated realized vol is 0.647 vs the target 0.650 bp/√s. The arrival inversion is not: its closed form assumes every noise order trades, but only about half the IOCs find a quote at the operating point, so the fit iterates the arrival intensity against the *simulated* trade rate to a fixed point (converging in three steps from a closed-form 0.204 to 15.94 vs 16.28/s). The fitted values are a per-tick arrival probability of 0.427 and $\sigma$ = 20.6 against the pre-registered operating point's 0.15 and 20.
 
@@ -96,6 +96,8 @@ Two further parameters are not pinned by the data. The snipe size is set to the 
 The calibration does not fit everything. Spread and depth levels are not fitted: the stylized MM quotes a ~1.5 bp median spread where the perp trades at ~0.016 bp, and its depth-to-median-trade ratio is 5× against the perp's ~2060×. The size distribution is not fitted in the experiments of §4: sim order sizes there are constants while real sizes are heavy-tailed (p99/p50 ≈ 670×). A lognormal size model for the calibrated re-run is implemented and parameterized ($\sigma_{\ln} = 2.80$ fitted on the p50/p99 ratio; median 1 unit with a calibrated book depth of ~2061 units, matching the real depth-to-median-trade ratio), with the disclosed compromise that a two-quantile lognormal under-predicts the p90 size ratio, 36× against the observed 59×. And the latency/race structure is not estimable from any public crypto feed — measuring races requires failed-order message data of the kind Aquilina, Budish, and O'Neill (2022) obtained from a regulator — so HFT latency and the race remain swept design parameters throughout. The calibrated claim is therefore narrow: the *environment* the agents trade in (arrival intensity, fundamental volatility) is disciplined by data; the strategic structure is designed, not estimated.
 
 ### S2.2 Tape measurement details (§3.7)
+
+*Superseded.* The ratio this section describes was computed under the spot market's aggregation rule, one record per taker order and price level, which futures records do not follow; the corrected race-size distribution is in §3.9 and Table S11. The text is kept as the record of the earlier measurement.
 
 The distribution is extremely right-skewed, which is why the surface sweeps as far as ratio 1.0. On the collector's current 105-hour sample the unconditional quartiles are p25 0.0011 and p75 0.0493 around a median of 0.0068, with the race-proxy median stable to 0.3%, so nothing in §4.1 turns on the sample boundary. Full alignment rules, the sweep de-fragmentation and aggressor-attribution corrections, and the placebo construction are in the replication materials (Supplement S4).
 
@@ -226,6 +228,88 @@ The paper's earlier version computed every result on a tick model, which is kept
 ### S5.1 The model
 
 Simulation time advanced in ticks of 1,000 simulated microseconds, mapped to 100 ms of wall clock for calibration (S2.1). Each tick the scheduler stepped the fundamental, a Gaussian random walk in fixed-point price space; let every agent emit orders; queued each at its submission time, the current time plus the agent's latency and, for an HFT, a uniform jitter of up to 100 µs; and submitted every order whose time had arrived, draining fills after each. **The maker** observed $V$ three ticks late and posted a bid and ask around that stale view, skewed by inventory. It widened its half-spread only on adverse fills (bought above or sold below the true $V$), decayed it toward base on each requote tick, and thinned resting size as base over current half-spread. **Each HFT** observed $V$ without delay and fired an IOC when the gap between $V$ and a resting quote exceeded its cost, zero at the operating point. **Noise traders** crossed the spread with a fixed per-tick probability on a random side; an elastic-demand arm scaled that probability by $(s_{\text{base}}/s)^{\alpha}$. **Metrics.** Each agent's PnL was cash plus inventory marked at the last two-sided mid; HFT rent was the HFTs' PnL; and the zero-sum residual, the sum over agents, was a bookkeeping check rather than a correctness check. PnL was in simulation currency (engine price units times quantity units), not comparable across environments. The liquidity-gap definition is in S4. **Design.** The operating point fixed 3,000 ticks, eight noise traders against three HFTs, a 100-tick base spread, per-step $\sigma = 20$, a three-tick maker latency against zero-latency snipers and 100 seeds per arm (`CFG` in `experiments/exp1_primary.py`). Experiments 2–4 swept the maker's staleness over 0–20 ticks, the HFT count $k$ over $\{0, 1, 2, 3, 5, 8, 13, 21\}$, and the batch interval over $\{1, 5, 10, 25, 50, 100, 500\}$ ticks against continuous clearing. The calibrated re-runs used the fitted arrival intensity and volatility of S2.1, a lognormal size model, a 2,061-unit quote and an adverse sensitivity of 0.015.
+
+## S6. Calibration details for the event model
+
+The main text's §3.9 summarises these. Trade stamps are whole milliseconds and USDⓈ-M aggregate-trade records merge fills at one price and taking side within 100 ms across takers (`results/calibration/fine_grain_v2.json`, `resolution`), so every quantity below is measured at millisecond resolution and none counts taker orders.
+
+**Table S10.** Jump-diffusion fits by sampling interval (`results/calibration/jump_fit_v2.json`). Volatilities in bp/√s, jump scale in bp.
+
+| interval | jumps/s | Laplace $b$ | diffusive σ | jump share of variance | total σ | jumps | $2b^2$ / measured $E[J^2]$ | KS, $\lvert J\rvert$ vs exponential |
+|---|---|---|---|---|---|---|---|---|
+| 10 ms | 0.2003 | 0.705 | 0.242 | 0.78 | 0.519 | 449,376 | 0.995 / 1.055 | 0.27 |
+| 100 ms | 0.0373 | 1.485 | 0.417 | 0.42 | 0.550 | 83,684 | 4.411 / 3.438 | 0.29 |
+| 1 s | 0.0041 | 3.972 | 0.570 | 0.23 | 0.649 | 9,125 | 31.551 / 23.866 | 0.25 |
+
+**Table S11.** Race footprints on the tape by window $W$ (`results/calibration/race_proxy_v2.json`). Upper bound: every same-side burst of two or more records after a price-moving trigger; lower bound: bursts spanning at least two millisecond stamps. Ratio: race size over the hit side's level-one depth in the last snapshot at most 200 ms old (≤ 20 ms in the last column).
+
+| $W$ (ms) | upper bound, races/s | share of volume | lower bound, races/s | share of volume | P(race \| move trigger) | P(cluster \| placebo trigger) | median ratio ($n$) | median ratio, snapshot ≤ 20 ms ($n$) |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 1.386 | 0.41 | 0.000 | 0.00 | 0.936 | 0.059 | 0.052 (550,014) | 0.179 (109,036) |
+| 1 | 1.190 | 0.43 | 0.291 | 0.26 | 0.945 | 0.070 | 0.063 (470,445) | 0.235 (92,917) |
+| 2 | 1.054 | 0.44 | 0.449 | 0.31 | 0.951 | 0.082 | 0.085 (417,809) | 0.333 (82,510) |
+| 5 | 0.821 | 0.46 | 0.532 | 0.38 | 0.961 | 0.096 | 0.147 (328,132) | 0.491 (64,970) |
+| 10 | 0.659 | 0.48 | 0.490 | 0.42 | 0.968 | 0.108 | 0.213 (263,044) | 0.506 (52,004) |
+| 20 | 0.554 | 0.49 | 0.437 | 0.45 | 0.973 | 0.125 | 0.257 (221,680) | 0.500 (43,798) |
+| 50 | 0.465 | 0.52 | 0.387 | 0.48 | 0.978 | 0.167 | 0.307 (186,039) | 0.590 (36,793) |
+| 100 | 0.402 | 0.53 | 0.350 | 0.51 | 0.983 | 0.230 | 0.373 (161,197) | 0.738 (31,905) |
+
+Aquilina, Budish, and O'Neill (2022) count 537 races per FTSE 100 symbol-day, 0.018 per second over an 8.5-hour session, and put 22% of FTSE 100 volume in races. Those figures are not comparable with Table S11's: they count participants including failed messages, their information horizon averages about 200 µs against the tape's finest window of one millisecond, and a single taker sweeping several levels counts as a race here (`results/calibration/race_proxy_v2.json`, `abo_2022`, `comparability`).
+
+**Table S12.** Every stylized fact in the facts pilot (`results/pilot/stylized_facts_event_model.json`, status: pilot, pre-sign-off operating point; 10 seeds × 1 h). Verdicts use the tolerance stated before the run (§3.9).
+
+| fact | tape | tick model | event model | event model, seed range | verdict |
+|---|---|---|---|---|---|
+| `spread_bp.p10` | 0.01519 | 1.123 | 0.01581 | 0.01576 – 0.01586 | matches |
+| `spread_bp.p50` | 0.01584 | 1.201 | 0.01585 | 0.01578 – 0.01589 | matches |
+| `spread_bp.p90` | 0.01668 | 1.284 | 0.01592 | 0.01583 – 0.01593 | matches |
+| `spread_bp.p99` | 0.01705 | 1.361 | 0.03177 | 0.03159 – 0.03186 | matches |
+| `spread_bp.mean` | 0.01613 | 1.202 | 0.01714 | 0.01709 – 0.01721 | matches |
+| `trades_per_s.p10` | 1 | 16 | 10 | 10 – 10 | closer than tick model |
+| `trades_per_s.p50` | 4 | 21 | 14 | 14 – 14 | closer than tick model |
+| `trades_per_s.p90` | 44 | 26 | 19 | 18 – 19 | misses |
+| `trades_per_s.p99` | 158 | 31 | 23 | 22 – 23 | misses |
+| `trades_per_s.mean` | 15.87 | 20.84 | 14.34 | 14.26 – 14.41 | matches |
+| `trades_per_s.fano` | 125.3 | 0.829 | 0.7875 | 0.7684 – 0.8309 | misses |
+| `trades_per_s.share_of_seconds_without_trades` | 0.04799 | 0 | 0 | 0 – 0 | misses |
+| `volume_per_s_in_mean_trades.p10` | 0.03224 | 10.63 | 1.445 | 1.342 – 1.536 | closer than tick model |
+| `volume_per_s_in_mean_trades.p50` | 1.62 | 21.31 | 7.249 | 7.031 – 7.431 | closer than tick model |
+| `volume_per_s_in_mean_trades.p90` | 31.2 | 31.74 | 41.52 | 39.02 – 44.8 | matches |
+| `volume_per_s_in_mean_trades.p99` | 211.9 | 40.13 | 80.08 | 76.02 – 88.09 | closer than tick model |
+| `returns.0.1.sigma_bp_per_sqrt_s` | 0.5755 | 7.077 | 0.51 | 0.4965 – 0.5305 | matches |
+| `returns.0.1.lag1_autocorrelation` | 0.1007 | 0.3432 | -0.002425 | -0.01336 – 0.00476 | closer than tick model |
+| `returns.1.0.sigma_bp_per_sqrt_s` | 0.6562 | 8.171 | 0.5081 | 0.4933 – 0.526 | matches |
+| `returns.1.0.lag1_autocorrelation` | 0.05226 | -0.71 | -5.99e-05 | -0.02585 – 0.02991 | closer than tick model |
+| `returns.10.0.sigma_bp_per_sqrt_s` | 0.6959 | 2.255 | 0.5071 | 0.481 – 0.5376 | matches |
+| `returns.10.0.lag1_autocorrelation` | 0.02042 | -0.4616 | 0.006289 | -0.04282 – 0.06241 | matches |
+| `trade_sign_autocorrelation.1` | 0.585 | 0.6074 | -0.09346 | -0.09819 – -0.08832 | misses |
+| `trade_sign_autocorrelation.2` | 0.6962 | 0.3527 | -0.01537 | -0.02035 – -0.007783 | misses |
+| `trade_sign_autocorrelation.5` | 0.5867 | 0.0797 | 0.00165 | -0.008465 – 0.005536 | misses |
+| `trade_sign_autocorrelation.10` | 0.524 | -0.1535 | 0.0002933 | -0.005632 – 0.008408 | closer than tick model |
+| `trade_sign_autocorrelation.20` | 0.4038 | -0.07131 | 0.00203 | -0.00322 – 0.008135 | closer than tick model |
+| `trade_sign_autocorrelation.50` | 0.2161 | -0.03186 | 0.0005108 | -0.004146 – 0.005334 | closer than tick model |
+| `trade_sign_autocorrelation.100` | 0.1019 | -0.008252 | 0.001416 | -0.006722 – 0.005366 | closer than tick model |
+| `interarrival_ms.p10` | 0 | 0 | 10 | 10 – 10 | misses |
+| `interarrival_ms.p50` | 0 | 0 | 52 | 51 – 52 | misses |
+| `interarrival_ms.p90` | 196 | 100 | 153 | 151 – 155 | matches |
+| `interarrival_ms.p99` | 854 | 200 | 293 | 288 – 298 | closer than tick model |
+| `interarrival_ms.share_simultaneous` | 0.6018 | 0.5693 | 0.00366 | 0.003278 – 0.004029 | misses |
+| `interarrival_ms.cv` | 2.851 | 1.25 | 0.9117 | 0.9027 – 0.9174 | misses |
+| `impact_bp_per_sd_of_signed_flow.0` | 0.3412 | 3.442 | 0.1237 | 0.1085 – 0.1445 | closer than tick model |
+| `impact_bp_per_sd_of_signed_flow.1` | 0.3409 | -0.5754 | 0.1147 | 0.09038 – 0.1308 | closer than tick model |
+| `impact_bp_per_sd_of_signed_flow.5` | 0.3095 | 1.03 | 0.1086 | 0.07315 – 0.16 | closer than tick model |
+| `impact_bp_per_sd_of_signed_flow.10` | 0.3258 | 1.089 | 0.1028 | 0.07873 – 0.1626 | closer than tick model |
+| `impact_bp_per_sd_of_signed_flow.30` | 0.311 | 1.21 | 0.1136 | 0.03851 – 0.1696 | closer than tick model |
+| `impact_bp_by_flow_decile_same_second.0` | -0.676 | -5.492 | -0.2053 | -0.2397 – -0.1544 | closer than tick model |
+| `impact_bp_by_flow_decile_same_second.1` | -0.1804 | -4.174 | 0.01185 | -0.01158 – 0.05537 | closer than tick model |
+| `impact_bp_by_flow_decile_same_second.2` | -0.03913 | -2.665 | -0.002089 | -0.05127 – 0.02865 | closer than tick model |
+| `impact_bp_by_flow_decile_same_second.3` | -0.003884 | -2.411 | -0.002636 | -0.02076 – 0.04168 | matches |
+| `impact_bp_by_flow_decile_same_second.4` | -0.0003332 | -0.02818 | -0.007178 | -0.02559 – 0.01948 | matches |
+| `impact_bp_by_flow_decile_same_second.5` | 0.0001217 | 0.6609 | -0.006898 | -0.02684 – 0.01523 | matches |
+| `impact_bp_by_flow_decile_same_second.6` | 0.002274 | 1.586 | 0.003142 | -0.02755 – 0.02674 | matches |
+| `impact_bp_by_flow_decile_same_second.7` | 0.03316 | 2.654 | 0.003947 | -0.02785 – 0.03947 | closer than tick model |
+| `impact_bp_by_flow_decile_same_second.8` | 0.1739 | 4.184 | 0.009493 | -0.02114 – 0.03619 | closer than tick model |
+| `impact_bp_by_flow_decile_same_second.9` | 0.6987 | 5.441 | 0.2042 | 0.1387 – 0.2565 | closer than tick model |
 
 ## References (cited only in this supplement)
 

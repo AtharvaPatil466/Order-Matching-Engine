@@ -142,7 +142,9 @@ The welfare decomposition closes at every point on the sweep, and the HFT fill r
 | 13 | 2.65 [1.97, 3.45] | 34.43 [25.63, 44.87] | 0.0223 [0.0222, 0.0225] | 32.79 [31.73, 33.91] |
 | 21 | 1.60 [1.21, 2.07] | 33.70 [25.39, 43.45] | 0.0139 [0.0137, 0.0140] | 47.47 [46.22, 48.85] |
 
-### S2.6 Limitations in full (§6.2)
+### S2.6 The tick model's limitations (superseded)
+
+These were the earlier version's limitations, kept as its record. The event model replaces the 100 ms clock and adds fees (§3); the main text's §6.2 states the limitations that remain.
 
 **First, the elasticity of uninformed demand is the assumption the incidence result leans on hardest, even now that it is measured.** Noise traders cross at a fixed per-tick probability in every arm through the competition surface (§3.2), so the volume a maker earns its widened spread on cannot fall when it widens. §4.2 relaxes this to unit elasticity and the maker-gains region largely remains: eighteen of eighteen tape-band cells gain inelastically and seventeen at both mild and unit elasticity ($n=20$), the single loss turning indeterminate rather than maker-pays, with the 0.0243 boundary retreating one grid step and the lower band edge untouched. That resolves the limit in the direction §4.1's leg decomposition predicts — elasticity deepens an already-negative revenue leg without touching the loss-reduction channel that produces the gain — but it does not eliminate it. Elasticity above unit is untested, as is its interaction with the maker-count axis, where the within-class split has not been tested against elastic demand at all.
 

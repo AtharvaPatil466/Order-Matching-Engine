@@ -329,7 +329,34 @@ The main text's §3.9 summarises these. Trade stamps are whole milliseconds and 
 
 Aquilina, Budish, and O'Neill (2022) count 537 races per FTSE 100 symbol-day, 0.018 per second over an 8.5-hour session, and put 22% of FTSE 100 volume in races. Those figures are not comparable with Table S11's: they count participants including failed messages, their information horizon averages about 200 µs against the tape's finest window of one millisecond, and a single taker sweeping several levels counts as a race here (`results/calibration/race_proxy_v2.json`, `abo_2022`, `comparability`).
 
-**Table S12.** Every stylized fact in the facts pilot (`results/pilot/stylized_facts_event_model.json`, status: pilot, pre-sign-off operating point; 10 seeds × 1 h). Verdicts use the tolerance stated before the run (§3.9).
+The race proxy triggers on any price move. Tables S12 and S13 come from an exploratory analysis, not pre-registered and not a test of any prediction, that sorts each race by the size of the move behind it (`calibration/race_by_move_size.py`). Its thresholds were set before it ran.
+
+**Table S12.** Tape races by the size of the move behind them (exploratory, not pre-registered; `results/calibration/race_by_move_size_v2.json`, `paper/race_gap_note.md`). Upper bound at $W = 0$, lower bound at $W = 1$ ms, the proxy's own pair. A race's move runs from the implied mid before its first millisecond to the furthest implied mid its own records reach. Brackets are 95% day-block bootstrap intervals (27 days, 2,000 draws). The "any" row reproduces Table S11.
+
+| move ≥ (bp) | upper bound, races/s | lower bound, races/s | share of volume in races, upper / lower | share of moves followed by a race, within the same ms / within 1 ms |
+|---|---|---|---|---|
+| any | 1.3859 [1.1048, 1.6978] | 0.2906 [0.2282, 0.3590] | 0.410 / 0.262 | 0.65 / 0.68 |
+| 0.1 | 0.9032 [0.7057, 1.1253] | 0.2463 [0.1928, 0.3067] | 0.345 / 0.252 | 0.95 / 0.96 |
+| 0.25 | 0.4072 [0.3108, 0.5141] | 0.1593 [0.1232, 0.1999] | 0.285 / 0.234 | 0.95 / 0.96 |
+| 0.5 | 0.1262 [0.0946, 0.1626] | 0.0659 [0.0502, 0.0835] | 0.220 / 0.207 | 0.92 / 0.94 |
+| 1.0 | 0.0290 [0.0219, 0.0372] | 0.0197 [0.0152, 0.0247] | 0.137 / 0.171 | 0.84 / 0.89 |
+| 1.7 | 0.0097 [0.0071, 0.0128] | 0.0084 [0.0064, 0.0106] | 0.061 / 0.135 | 0.79 / 0.86 |
+| 2.5 | 0.0042 [0.0029, 0.0057] | 0.0045 [0.0034, 0.0057] | 0.018 / 0.104 | 0.73 / 0.85 |
+| 5.0 | 0.0013 [0.0008, 0.0018] | 0.0012 [0.0009, 0.0016] | 0.004 / 0.051 | 0.74 / 0.86 |
+| fee + half-spread | 0.0096 [0.0070, 0.0126] | 0.0083 [0.0064, 0.0105] | 0.060 / 0.134 | 0.79 / 0.86 |
+
+**Table S13.** Price moves that clear the 1.7 bp fee plus a half-spread, on the tape and in the model as run (the 10 ms jump fit's jumps plus diffusion), by sampling grid (exploratory; same sources). The last row is $\lambda_j e^{-h/b}$ from each horizon's own jump fit (Table S10), which at 1 s files most fee-sized moves under diffusion.
+
+| grid | 10 ms | 100 ms | 1 s |
+|---|---|---|---|
+| tape, moves/s | 0.0087 [0.0065, 0.0112] | 0.0142 [0.0103, 0.0190] | 0.0321 [0.0240, 0.0411] |
+| model as run, moves/s | 0.0178 | 0.0180 | 0.0192 |
+| tape ÷ model as run | 0.49 [0.36, 0.63] | 0.79 [0.57, 1.06] | 1.67 [1.26, 2.14] |
+| own-horizon fit, $\lambda_j e^{-h/b}$, /s | 0.0178 | 0.0118 | 0.0026 |
+
+At 10 ms, moves of at least 5 bp arrive at 0.0010/s on the tape against 0.00017/s in the model as run.
+
+**Table S14.** Every stylized fact in the facts pilot (`results/pilot/stylized_facts_event_model.json`, status: pilot, pre-sign-off operating point; 10 seeds × 1 h). Verdicts use the tolerance stated before the run (§3.9).
 
 | fact | tape | tick model | event model | event model, seed range | verdict |
 |---|---|---|---|---|---|

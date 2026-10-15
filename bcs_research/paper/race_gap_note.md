@@ -62,8 +62,12 @@ almost no fee-clearing races.
 
 1. **The shape of the jump law.** At 10 ms the model supplies 2× the tape's
    fee-clearing jumps but only about a sixth of its 5 bp jumps (0.0002
-   against 0.0010/s). That fits the jump fit's own tail diagnostic: the scale
-   fitted to exceedances is 0.31 bp, not 0.705. Matching rates near the fee
+   against 0.0010/s). A single exponential tail cannot do both: the scale
+   fitted to exceedances just above the detection threshold is 0.31 bp,
+   steeper than 0.705, which would predict even fewer 5 bp jumps, yet the
+   tape has more. The tape's jump sizes are steep near the threshold and
+   heavy in the far tail — not Laplace at all, as the fit's Kolmogorov–
+   Smirnov distance of 0.27 already says. Matching rates near the fee
    does not validate rent per snipe, which depends on how far jumps
    overshoot the fee.
 2. **Slow fee-sized moves.** Over 1 s the tape clears the fee 1.7× as often

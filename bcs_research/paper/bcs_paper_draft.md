@@ -167,7 +167,90 @@ Eleven predictions, P1–P11, were written before the event-model experiments th
 
 ## 4. Results
 
-The earlier version's results, computed on the tick model, are in Supplement S5.
+This section reports the confirmatory runs and nothing else (§3.11). The predictions are grouped in the order a reader needs them: validation first, then the race and its incidence, welfare and waste, market design, and sensitivity. Each subsection states what was predicted, in substance as pre-registered, and gives the verdict, the estimate and its interval. Counts over tape-band cells are read on the paper band and reported beside on the corrected band (§3.11). The earlier version's results are in Supplement S5.
+
+[RESULT PENDING: number of primaries HIT, MISS and INCONCLUSIVE, before and after the Holm adjustment. If more than three of the eleven are INCONCLUSIVE, say here, before anything else, that the program is underpowered.]
+
+**Table 2.** Results summary, one row per prediction. Primaries form one Holm family; P10b is secondary.
+
+| prediction | hypothesis of record (abbreviated) | test | estimate [95% CI] | verdict | Holm-adjusted |
+|---|---|---|---|---|---|
+| P1 | race-loss share $=(N-1)/N$, $N\in\{2,3,5,10\}$, ±0.02 | band rule, Wilson | | | |
+| P2 (H2a) | maker's cancel-first share $= P_{\text{win}}(\ell,\varepsilon,k)$, ±0.02 | band rule, Wilson | | | |
+| P3 (H3a) | Laplace ÷ random-walk rent rate = closed form (1.30), ±10% | bootstrap ratio | | | |
+| P4 (H4a) | entry stops at $N^*=5$; waste/rent $0.909\pm0.05$ | marginal-profit intervals, band rule | | | |
+| P5 (H5a) | taker fee scales snipes per jump by $e^{-f_t/b}$, profit per snipe $b$, ±5% | band rule | | | |
+| P6 (H6a) | participation ratio $e^{-(\bar h_{\text{HFT}}-\bar h_0)/\bar v}$ ±10%; deadweight > 0 | band rule, bootstrap | | | |
+| P7 (H7a) | cancelling ÷ non-cancelling maker loss $=1-P_{\text{win}}$, ±0.03 | band rule | | | |
+| P8 (H8a) | Nash half-spread non-increasing in $M$; within 20% of breakeven at $M=5$ | bootstrap, band rule | | | |
+| P9 (H9a) | batch sniping loss < continuous and ≤ 1.2 × footnote-34 bound | bootstrap | | | |
+| P10 | "slowest maker pays" right in ≥ 80% of held-out configurations | binomial against $1/M$ | | | |
+| P10b | queue-front maker pays in ≥ 80% of held-out configurations | binomial against $1/M$ | | | — |
+| P11 (H11a) | sniper-latency first-order index < 0.05; $\lambda_j$ and $b$ together ≥ 0.5 | Sobol, bootstrap | | | |
+
+### 4.1 Validation: the BCS replication (P1)
+
+Configured to BCS's assumptions — one liquidity provider and $N-1$ equally fast snipers at 10 µs, a pure-jump Laplace signal, one-unit Poisson investors and no fees, 40 seeds of 600 s per cell — the event model was predicted to recover BCS's equilibrium: a race-loss share of $(N-1)/N$ within ±0.02 for $N \in \{2,3,5,10\}$ (primary); an indifference half-spread within ±3% of $h^* = b\,W(\lambda_j/\lambda_i)$ that does not trend in $N$; a zero-profit half-spread within ±3% of $h_0(N)$; profit per successful snipe of $b$ within ±3%; and, in the batch arm, no stale executions at zero jitter and $(\varepsilon/\tau)(N-1)/(2(N+1))$ per snipe-able jump at positive jitter. A miss here would indict the scheduler rather than BCS, and every later verdict depends on this one.
+
+[RESULT PENDING: P1 — verdict; race-loss share per cell (3 jump ratios × 4 values of $N$) with Wilson intervals; $\hat h$, $\hat h_0$, the slope of $\hat h$ on $(N-1)/N$ and profit per snipe, each with its interval; the jitter arm; the batch arm at $\varepsilon = 0$ and 10 µs; cells re-run at 80 seeds, both classifications.]
+
+[FIGURE PENDING: Figure 1 — measured against predicted race-loss share and $\hat h/h^*$ in all twelve cells, with the ±0.02 and ±3% bands.]
+
+### 4.2 Validation: jumps against a random walk (P3)
+
+At matched quadratic variation, the ratio of sniper rent rates under Laplace jumps and under a Gaussian random walk was predicted to equal $[\lambda_j b\,e^{-h/b}] / [\lambda_{rw}\,2(\sigma_u\phi(h/\sigma_u) - h(1-\Phi(h/\sigma_u)))]$ within ±10%, 1.30 at the signed-off cadence of 100 random-walk updates a second (primary); profit per successful snipe to stay at $b$ (±5%) at every spread under jumps but to fall with the spread under the random walk (H3b); and the earlier maker to show fewer tape-band maker-gains cells under jumps than under the random walk (H3c), a comparison close to one against a market without sniping, since the random walk rarely clears the 1.7 bp fee.
+
+[RESULT PENDING: P3 — H3a verdict, ratio [95% CI]; H3b per-snipe profit by spread and slope [CI] under each fundamental; H3c counts, paper band with corrected band beside.]
+
+### 4.3 The race and its incidence (P2, P8, P10, P10b)
+
+**The race (P2).** On the nanosecond clock the share of snipe-able jumps on which the maker's cancel arrives first was predicted to equal $P_{\text{win}}(\ell,\varepsilon,k)$ within ±0.02 for $k \in \{1,3,8,21\}$ and $\ell/\varepsilon \in \{0, 0.25, 0.5, 1.5\}$ (primary, H2a; at $n=100$ its interval nearly fills the band, so INCONCLUSIVE was expected to be likely). With snipe size equal to quote size, total sniper rent was predicted to grow as $k/(k+1)$ at $\ell = 0$ and to be flat beyond $\varepsilon$ (H2b); liquidity gaps not to grow linearly in $k$, $\text{gaps}(21)/\text{gaps}(3) < 2$ (H2c); and the earlier maker, cancelling on every observed update, to show the single-maker inversion only when slow — at most 2 of 18 tape-band cells maker-gains at latencies of 1 ms or less, at least 12 at 300 ms, and a count non-decreasing in latency (H2d).
+
+[RESULT PENDING: P2 — H2a verdict and the 16 cells' cancel-first shares [Wilson]; H2b rent ratios at $k = 1, 3$ [CI] and the flat-rent TOST beyond $\varepsilon$; H2c ratio at both lags [CI]; H2d maker-gains counts at each maker latency, paper band with corrected band beside.]
+
+[FIGURE PENDING: Figure 2 — the maker's cancel-first share against $\ell/\varepsilon$ for each $k$, with the $P_{\text{win}}$ curves and ±0.02 bands (H2a), beside the earlier maker's tape-band maker-gains count against its latency (H2d).]
+
+**Endogenous makers (P8).** With makers choosing widening, decay, size and whether to quote by best response, the Nash quoted half-spread was predicted to be non-increasing in the number of makers $M \in \{1,2,3,5\}$ and, at $M=5$, within 20% of the liquidity provider's breakeven half-spread (primary, H8a; that clause lies below the minimum quotable half-spread on the tick grid and cannot hit); the number of active makers to fall in a fixed cost of quoting and in $k$ (H8b); the within-class split to survive but turn monotone in latency, the slowest maker having the lowest PnL delta in at least 90% of tape-band cells (H8c); and a maker lagging every sniper by more than $\varepsilon$ to stop quoting at the touch in at least two-thirds of ratio-1 cells with $k \ge 3$ (H8d).
+
+[RESULT PENDING: P8 — H8a Nash half-spread by $M$ [CI] and verdict; H8b active makers by $F_q$ and $k$; H8c share of cells where the slowest maker is lowest; H8d share of cells.]
+
+**Who pays among makers (P10, P10b).** In held-out latency configurations, none of them among the earlier version's eight, the rule "the slowest maker pays" was predicted to be right in at least 80% of configurations, closely spaced sets included, with the Spearman correlation of latency and PnL delta negative in at least 80% (primary); on the tick model, run on the same configurations, the rule was predicted to be right in 60–95% overall but in under 50% of the closely spaced sets. P10b, added at sign-off, predicts that the maker most often holding time priority at the stale touch when a jump's first snipe arrives is the one that pays, in at least 80% of configurations.
+
+[RESULT PENDING: P10 — hit rate overall and on closely spaced sets [binomial interval], Spearman share, tick-model hit rates.]
+
+[RESULT PENDING: P10b — hit rate on configurations where the predictor names a payer [interval]; literal reading beside.]
+
+### 4.4 Welfare and waste (P4, P5, P6, P7)
+
+**The cost of speed (P4).** With a cost of speed $c$ and free entry in the replication geometry, entry was predicted to stop at $N^* = \lfloor \lambda_i h^*/c \rfloor$, five firms at $c = $ rent/5.5, with measured waste $N^* c$ equal to 0.909 of the rent within ±0.05 (primary, H4a); waste over rent to follow $\lfloor R/c\rfloor c/R$ across three costs while investor revenue and sniping rent stay invariant (H4b); and, against the earlier, slower maker, free entry to dissipate at least $(1 - c/R)$ of the rent with the noise-trader toll invariant to $c$ (H4c).
+
+[RESULT PENDING: P4 — $N$ at which entry stops, marginal-profit intervals, waste/rent [CI]; H4b by cost; H4c dissipated share and toll TOST.]
+
+**Fees (P5).** Holding the liquidity provider's quotes fixed, a taker fee $f_t$ was predicted to scale snipes per jump by $e^{-f_t/b}$ and leave net profit per successful snipe at $b$, each within ±5% (primary, H5a); with the provider re-pricing, the all-in investor half-spread to depend on the total fee and not on its split between maker and taker (H5b); and the earlier maker, which does not re-price, to keep at least as many maker-gains cells under taker-heavy and maker-rebate schedules as under zero fees (H5c).
+
+[RESULT PENDING: P5 — H5a ratios [CI] and verdict; H5b all-in half-spreads by schedule against the tabulated values; H5c counts by schedule.]
+
+**Participation and the slow informed investor (P6).** With investors who trade only when their gain from trade exceeds the all-in half-spread, HFT presence was predicted to lower participation by the factor $e^{-(\bar h_{\text{HFT}} - \bar h_0)/\bar v}$ within ±10% and to create a deadweight loss whose interval excludes zero (primary, H6a); a slow informed investor's realised edge not to be positive (H6b); and the single-maker inversion to survive where participation elasticity at the base spread is at most 1 and to fail where it is at least 2 (H6c).
+
+[RESULT PENDING: P6 — participation ratio [CI] against the prediction; deadweight [CI]; H6b edge upper bound; H6c counts at $e = 0.5$ and $e = 4$.]
+
+**Maker strategies (P7).** A maker that cancels on every observed update was predicted to lose, per snipe-able jump, the fraction $1 - P_{\text{win}}(\ell,\varepsilon,k)$ of what an otherwise identical non-cancelling maker loses, within ±0.03 (primary, H7a); inventory skew to raise sniping loss by the factor $E[\cosh(\delta/b)]$ (H7b); per-unit sniping loss on a ladder to fall with depth as $e^{-(h_j - h_1)/b}$ (H7c); an Avellaneda–Stoikov maker to show no inversion and lower PnL than the adverse-selection maker (H7d); and quote fading to reproduce the earlier version's leg pattern, a negative revenue leg and a positive sniping leg (H7e).
+
+[RESULT PENDING: P7 — H7a loss ratio [CI] by cell; H7b–H7e estimates and verdicts.]
+
+### 4.5 Market design: frequent batch auctions (P9)
+
+For batch intervals $\tau \in \{1, 10, 100\}$ ms and a maker within $\varepsilon$ of the snipers, the maker's sniping loss was predicted to be below continuous trading's at every interval and at or below BCS's footnote-34 bound $\lambda_j(\varepsilon/2\tau)\,\text{prize}(h)$, its upper interval bound within 1.2 times the bound (primary, H9a). Stale-price snipers were predicted to clear at the stale quote under every tie-break rule, and price-competitive snipers at the stale quote under the engine's reference-first rule but near the new value under the pressure rule (H9b); no interval, including those shorter than the maker's latency, to leave the maker significantly worse off than continuous trading (H9c); and rationing within a batch to change which sniper fills but not the maker's loss (H9d). The verdicts read the engine's uncross as it is, with its reference at the session's first order (§3.7).
+
+[RESULT PENDING: P9 — H9a loss by $\tau$ [CI] against continuous and the bound; H9b price differences across rules and aggregate maker P&L difference; H9c upper bounds by $\tau$, strict and lenient readings; H9d TOST.]
+
+[FIGURE PENDING: Figure 3 — the maker's sniping loss against $\tau$ under batching and under continuous trading, with the footnote-34 bound.]
+
+### 4.6 Sensitivity (P11)
+
+Over Sobol indices from Saltelli sampling with 512 base samples across the hand-set parameters, the sniper latency level, with the maker's lag held fixed, was predicted to have a first-order index below 0.05 for total sniper rent, while the jump rate and jump scale together carry at least half its variance (primary, H11a; BCS Prop. 5); for the maker's PnL delta, adverse sensitivity and the snipe-to-quote ratio to rank among the top three total-order indices, with interactions summing to at least 0.2 (H11b); and the noise-trader toll attributable to sniping to lie within ±10% of mean sniper rent (H11c, as amended).
+
+[RESULT PENDING: P11 — first-order and total-order indices with bootstrap intervals for each outcome at $N = 512$ (verdict of record); the $N = 2{,}048$ extension beside it; H11c equivalence.]
 
 ## 5. Differential testing against the verified engine
 

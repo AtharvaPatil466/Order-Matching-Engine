@@ -95,6 +95,36 @@ def test_level_helpers_hit_the_drivers_95_percent_exactly():
     assert 1 - cr.ALPHA == 0.95
 
 
+def test_holm_levels_resample_20000_times_and_95_percent_keeps_the_drivers_2000():
+    # Arrange
+    values = np.random.default_rng(3).normal(size=40)
+    holm_levels = cr.holm_thresholds()[:-1]                 # the last one is 0.05 itself
+
+    # Act / Assert
+    assert cr._n_boot(cr.ALPHA) == op.N_BOOTSTRAP == 2_000
+    assert {cr._n_boot(a) for a in holm_levels} == {20_000}
+    assert cr._boot(values, cr.ALPHA) == cc.boot(values)
+    assert cr._boot(values, holm_levels[0]) == cr.bootstrap_ci(
+        list(values), n_bootstrap=20_000, ci=1 - holm_levels[0], seed=0)
+
+
+@pytest.mark.parametrize("zero_den", [False, True])
+def test_ratio_ci_rederived_equals_the_drivers_at_2000_resamples(zero_den):
+    # Arrange: cc.ratio_ci fixes its count at 2,000, so the report re-derives it
+    rng = np.random.default_rng(11)
+    num, den = rng.gamma(2.0, size=30), rng.gamma(3.0, size=30)
+    if zero_den:
+        den[:27] = 0.0                                   # resamples with a zero denominator
+
+    # Act
+    mine, driver = cr._ratio_ci(num, den, cr.ALPHA), cc.ratio_ci(num, den)
+
+    # Assert: the same numbers, bit for bit
+    assert mine == driver
+    wide = cr._ratio_ci(num, den, cr.ALPHA / cr.FAMILY)
+    assert wide["lower"] <= driver["lower"] and driver["upper"] <= wide["upper"]
+
+
 # --- toy smoke outputs from the drivers' own code ---------------------------------------------
 
 def _confirm_b(out: Path, name: str) -> None:
@@ -239,13 +269,13 @@ def test_each_primary_reproduces_its_drivers_95_percent_verdict_and_intervals(sm
 
 
 @pytest.mark.parametrize("primary", cr.PRIMARIES, ids=[p.pid for p in cr.PRIMARIES])
-def test_holm_level_intervals_contain_the_95_percent_ones(smoke, primary):
-    # Arrange
+def test_holm_level_intervals_are_nested(smoke, primary):
+    # Arrange: Holm's strictest and loosest adjusted levels, both at 20,000 resamples
     d = cr.load_driver(smoke, primary.driver)
 
     # Act
     wide = primary.evaluate(d.summary, d.rows, cr.ALPHA / cr.FAMILY)["parts"]
-    narrow = primary.evaluate(d.summary, d.rows, cr.ALPHA)["parts"]
+    narrow = primary.evaluate(d.summary, d.rows, cr.ALPHA / 2)["parts"]
 
     # Assert: nested intervals are what make a primary's p-value well defined
     for w, n in zip(wide, narrow):
@@ -301,7 +331,9 @@ def test_confirmatory_outputs_go_through_holm_and_are_written(smoke, tmp_path):
         assert e["matches_driver"], e["pid"]
         assert e["holm_verdict"] in ("HIT", "MISS", "INCONCLUSIVE")
         if e["recomputed_95"] == "MISS":
-            assert e["holm_verdict"] == "MISS" and e["p"] == 1.0         # MISS is never adjusted
+            assert e["holm_verdict"] == "MISS"                           # MISS is never adjusted
+        if e["recomputed_95"] != "HIT":
+            assert e["p"] == 1.0                                         # no HIT claim open
         if e["holm_verdict"] == "HIT":
             assert e["recomputed_95"] == "HIT" and e["p"] <= e["holm_threshold"]
     ranks = sorted(e["holm_rank"] for e in report["primaries"])

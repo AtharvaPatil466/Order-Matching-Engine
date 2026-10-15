@@ -17,15 +17,19 @@ conditions define a test at level a; its Holm-compatible p-value is
     p_k = inf { a : the HIT conditions hold with (1 - a) intervals }.
 
 Every HIT condition below is an interval lying inside a band or beyond a
-bound, and the percentile-bootstrap (same 2,000 resamples, seed 0) and Wilson
-intervals are nested in a, so the set of a where a primary HITs is an up-set
-and p_k is well defined; for a conjunction of cells it is the largest cell p
+bound, and the percentile-bootstrap (same resamples, seed 0) and Wilson
+intervals are nested in a at a fixed resample count, so across Holm's
+adjusted levels (all drawn with the same 20,000 resamples, see A2) the set of
+a where a primary HITs is an up-set and p_k is well defined; for a conjunction of cells it is the largest cell p
 (an intersection-union test, valid without a further adjustment). Holm
 compares the j-th smallest p to alpha / (m - j + 1), m = 11, and only those 11
 thresholds can change a decision, so p_k is computed as its ceiling on that
 grid (`grid_p_value`): exact for Holm's decisions, and it needs the rule
 evaluated at no more than 11 levels. A primary that is missing, refused
-(non-confirmatory status) or a MISS at 95% enters with p = 1, so a partial
+(non-confirmatory status) or not a HIT at the drivers' own 95% enters with
+p = 1 (with nested intervals a stricter-level HIT implies the 95% one; the
+rule keeps that true when the two levels use different resample counts), so a
+partial
 batch is never more lenient than the full one (Holm is monotone in the others'
 p-values). The family size stays 11 whatever has finished.
 
@@ -45,7 +49,7 @@ Each primary, as its driver computes it, and its HIT conditions at level 1 - a:
       Wilson (op.wilson with z = Phi^-1(1 - a/2)), band
       race_win_probability +- 0.02. HIT: all 16 inside.
   P3  exp17 `h3a`. One paired ratio of sniper rent rates, Laplace / random
-      walk at h = 567: cc.ratio_ci(ci = 1 - a), band 1.30 +- 10%.
+      walk at h = 567: cc.ratio_ci re-derived at level 1 - a, band 1.30 +- 10%.
   P4  exp10 `p4_verdicts` H4a at c = R/5.5. N* comes from P4's Setup, the
       driver's entry rule ("enter while the next entrant's interval lies above
       c"), at the driver's 95%: it defines the market's equilibrium, not the
@@ -54,11 +58,11 @@ Each primary, as its driver computes it, and its HIT conditions at level 1 - a:
       inside 0.909 +- 0.05. MISS clauses: N* != 5 with the 5th/6th entrants'
       intervals excluding 5, or waste disjoint from the band.
   P5  exp18 `h5a`. Four paired ratios (snipes per jump vs e^(-f_t/b), net
-      profit per snipe vs b, f_t in {100, 300}) via cc.ratio_ci(ci = 1 - a),
+      profit per snipe vs b, f_t in {100, 300}) via cc.ratio_ci at 1 - a,
       bands +- 5%. HIT: all four inside.
   P6  exp19 H6a. Per v-bar arm on the paper band: participation-over-
       predicted ratio (the driver's joint seed bootstrap, percentiles at a/2)
-      inside [0.9, 1.1], and the deadweight interval (cc.boot, ci = 1 - a)
+      inside [0.9, 1.1], and the deadweight interval (cc.boot's bootstrap at 1 - a)
       above zero; x19.h6a_verdict judges. HIT: both arms.
   P7  exp20 `h7a`. 16 cells: per-jump loss ratio cancelling / non-cancelling
       (the driver's joint seed bootstrap at a/2), band 1 - race_win_probability
@@ -92,8 +96,13 @@ Ambiguities for the lead to log in §4 (none is silently resolved):
       miss clause "deadweight interval including zero" is a failure-to-reject
       clause that a wider interval makes EASIER, so a symmetric adjustment
       would turn a 95% HIT into a Holm MISS.
-  A2  Bootstrap resolution: §2 fixes 2,000 resamples, kept here, so at
-      a = 0.05/11 each percentile bound rests on about 4.5 resamples per tail.
+  A2  Bootstrap resolution. §2 fixes 2,000 resamples, which at a = 0.05/11
+      leaves about 4.5 resamples per tail. At every Holm-ADJUSTED level the
+      bootstrap intervals (P3-P9, P11; Wilson needs none) use 20,000
+      resamples, same seed 0, so a tail rests on about 45 (lead's decision,
+      2026-10-16). At a = 0.05 itself, the plain 95% recomputation and Holm's
+      last threshold, they use the drivers' 2,000, so they reproduce the
+      drivers' intervals exactly.
   A3  Procedure intervals stay at 95%: P4's entry rule (Setup) and P8's
       best-response confirmations define the estimand, so they are not
       Holm-adjusted; only the intervals that test a prediction are.
@@ -188,6 +197,36 @@ def grid_p_value(hit_at: Callable[[float], bool], thresholds) -> float:
 # --- intervals at a level ---------------------------------------------------------------
 # The drivers' bootstraps at 1 - a. Percentiles are 100 a/2 and 100 - 100 a/2, which at
 # a = 0.05 are exactly the drivers' 2.5 and 97.5; functions that take ci= get 1 - a.
+# Resamples: the drivers' 2,000 at a = 0.05, 20,000 at a Holm-adjusted level (A2).
+
+DRIVER_N_BOOT = op.N_BOOTSTRAP       # §2's 2,000, every driver's
+HOLM_N_BOOT = 20_000                 # about 45 resamples per tail at 0.05/11
+
+
+def _n_boot(alpha: float) -> int:
+    return DRIVER_N_BOOT if alpha == ALPHA else HOLM_N_BOOT
+
+
+def _boot(values, alpha: float) -> dict:
+    """cc.boot / bootstrap_ci(seed 0) at level 1 - a with _n_boot(a) resamples."""
+    return bootstrap_ci(list(values), n_bootstrap=_n_boot(alpha), ci=1 - alpha, seed=op.BOOT_SEED)
+
+
+def _ratio_ci(num, den, alpha: float) -> dict:
+    """cc.ratio_ci at level 1 - a with _n_boot(a) joint resamples. Its count is fixed at
+    2,000, so it is re-derived here, line for line (tested equal to it at a = 0.05)."""
+    num, den = np.asarray(num, float), np.asarray(den, float)
+    rng = np.random.default_rng(op.BOOT_SEED)
+    idx = rng.integers(0, len(num), size=(_n_boot(alpha), len(num)))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        boots = num[idx].mean(1) / den[idx].mean(1)
+    boots = boots[np.isfinite(boots)]
+    a = (1 - (1 - alpha)) / 2                  # the driver's arithmetic: ci = 1 - alpha first
+    lo, hi = (np.percentile(boots, [100 * a, 100 * (1 - a)]) if boots.size
+              else (math.nan, math.nan))
+    return {"mean": float(num.mean() / den.mean()) if den.mean() else math.nan,
+            "lower": float(lo), "upper": float(hi), "n": len(num)}
+
 
 def _pct(boots, alpha: float) -> tuple:
     q = 100 * alpha / 2
@@ -195,9 +234,9 @@ def _pct(boots, alpha: float) -> tuple:
 
 
 def _seed_boot(stat, n: int, alpha: float, finite_only: bool = False) -> dict:
-    """The drivers' joint seed bootstrap loop (2,000 resamples, seed 0) at level 1 - a."""
+    """The drivers' joint seed bootstrap loop (seed 0) at level 1 - a, _n_boot(a) resamples."""
     rng = np.random.default_rng(op.BOOT_SEED)
-    boots = np.array([stat(rng.integers(0, n, n)) for _ in range(op.N_BOOTSTRAP)])
+    boots = np.array([stat(rng.integers(0, n, n)) for _ in range(_n_boot(alpha))])
     if finite_only:
         boots = boots[np.isfinite(boots)]
     lo, hi = _pct(boots, alpha) if boots.size else (math.nan, math.nan)
@@ -266,7 +305,7 @@ def p3_h3a(summary: dict, rows: dict, alpha: float) -> dict:
     rate = {p: [rows[cc.key("bcs", p, x17.H3A_H, s)]["sniper_rate"] for s in summary["seeds"]]
             for p in x17.PATHS}
     th = x17.h3a_theory()
-    j = cc.judged(cc.ratio_ci(rate["laplace"], rate["rw"], ci=1 - alpha), th,
+    j = cc.judged(_ratio_ci(rate["laplace"], rate["rw"], alpha), th,
                   th * (1 - x17.RATIO_BAND), th * (1 + x17.RATIO_BAND))
     return _all([_judged("rent rate ratio, Laplace / random walk", j)])
 
@@ -279,10 +318,10 @@ def p4_h4a(summary: dict, rows: dict, alpha: float) -> dict:
 
     per = {n: col(n, "per_sniper") for n in x10.FIRMS_GRID}
     n_star = x10.entry_stop(per, c, 2)["n_star"]         # Setup's rule, the driver's 95% (A3)
-    ci5, ci6 = (bootstrap_ci(per[j], ci=1 - alpha, seed=0) for j in (5, 6))
+    ci5, ci6 = (_boot(per[j], alpha) for j in (5, 6))
     share = None
     if n_star >= 2:
-        r = bootstrap_ci(col(n_star, "rent"), ci=1 - alpha, seed=0)
+        r = _boot(col(n_star, "rent"), alpha)
         share = {"mean": n_star * c / r["mean"], "lower": n_star * c / r["upper"],
                  "upper": n_star * c / r["lower"]}
     waste = op.band_verdict(share["lower"], share["upper"], *H4A_WASTE_BAND) if share else "MISS"
@@ -309,8 +348,8 @@ def p5_h5a(summary: dict, rows: dict, alpha: float) -> dict:
     parts, band, b = [], x18.H5A_BAND, x18.B
     for f_t in x18.H5A_FT:
         th = math.exp(-f_t / b)
-        snipes = cc.ratio_ci(col(f_t, "snipes_per_jump"), col(0.0, "snipes_per_jump"), ci=1 - alpha)
-        net = cc.ratio_ci(col(f_t, "sniper_net"), col(f_t, "sniper_fills"), ci=1 - alpha)
+        snipes = _ratio_ci(col(f_t, "snipes_per_jump"), col(0.0, "snipes_per_jump"), alpha)
+        net = _ratio_ci(col(f_t, "sniper_net"), col(f_t, "sniper_fills"), alpha)
         parts.append(_judged(f"snipes per jump ratio, f_t={f_t:g}",
                              cc.judged(snipes, th, th * (1 - band), th * (1 + band))))
         parts.append(_judged(f"net profit per snipe, f_t={f_t:g}",
@@ -342,8 +381,8 @@ def p6_h6a(summary: dict, rows: dict, alpha: float) -> dict:
                                   [[r["half_spread_ticks"] for r in c] for c in cells],
                                   [r["crossings"] / r["arrivals"] for r in base],
                                   [r["half_spread_ticks"] for r in base], vbar, alpha)
-        dwl = cc.boot([np.mean([(b["gains_usd"] - c[i]["gains_usd"]) / b["duration_s"]
-                                for c in cells]) for i, b in enumerate(base)], ci=1 - alpha)
+        dwl = _boot([np.mean([(b["gains_usd"] - c[i]["gains_usd"]) / b["duration_s"]
+                              for c in cells]) for i, b in enumerate(base)], alpha)
         verdicts.append(x19.h6a_verdict(ratio, dwl))
         band = [1 - x19.PART_BAND, 1 + x19.PART_BAND]
         parts.append(_part(f"e={e}: participation / predicted", ratio,
@@ -393,11 +432,11 @@ def _h8a_spreads(summary: dict, rows: dict) -> dict:
 
 
 def p8_h8a(summary: dict, rows: dict, alpha: float) -> dict:
-    spreads, ci = _h8a_spreads(summary, rows), 1 - alpha
+    spreads = _h8a_spreads(summary, rows)
     ms, parts = sorted(spreads), []
     for a, b in zip(ms, ms[1:]):
         pairs = [y - x for x, y in zip(spreads[a], spreads[b]) if x is not None and y is not None]
-        d = bootstrap_ci(pairs, ci=ci) if pairs else None
+        d = _boot(pairs, alpha) if pairs else None
         parts.append(_part(f"spread M={b} minus M={a}", d or {},
                            x12._step(d) if d else "INCONCLUSIVE", rule="upper <= 0"))
     k = summary["market"]["k"]
@@ -406,7 +445,7 @@ def p8_h8a(summary: dict, rows: dict, alpha: float) -> dict:
                             laplace_jump(op.PATH["jump_scale_bp"])) / op.TICK_BP
     band = [0.8 * breakeven, 1.2 * breakeven]
     vals = [v for v in spreads[max(ms)] if v is not None]
-    top = bootstrap_ci(vals, ci=ci) if vals else None
+    top = _boot(vals, alpha) if vals else None
     parts.append(_part(f"M={max(ms)} spread vs breakeven", top or {},
                        op.band_verdict(top["lower"], top["upper"], *band) if top else "MISS", band))
     m1 = x12.policy_from(summary["cells"][f"sym_M{min(ms)}_F0"]["profile"][0])
@@ -426,8 +465,8 @@ def p9_h9a(summary: dict, rows: dict, alpha: float) -> dict:
     cont, parts, verdicts = col(x11.CONTINUOUS), [], []
     for tau in x11.CONFIRM_TAUS_NS:
         batch = col((tau, "time", "engine"))
-        d = bootstrap_ci([a - b for a, b in zip(batch, cont)], ci=1 - alpha, seed=0)
-        lvl = bootstrap_ci(batch, ci=1 - alpha, seed=0)
+        d = _boot([a - b for a, b in zip(batch, cont)], alpha)
+        lvl = _boot(batch, alpha)
         cap = 1.2 * x11.footnote34_bound(tau)
         below = "HIT" if d["upper"] < 0 else ("MISS" if d["lower"] >= 0 else "INCONCLUSIVE")
         under = "HIT" if lvl["upper"] <= cap else ("MISS" if lvl["lower"] > cap else "INCONCLUSIVE")
@@ -457,17 +496,21 @@ def p10_event_model(summary: dict, rows: dict, alpha: float) -> dict:
     return {"verdict": verdict, "parts": parts}
 
 
-def _joint_ci(y, fn, alpha: float, n_boot: int = 2000, seed: int = 0) -> dict:
-    """x13._joint_ci at level 1 - a (same design-row resamples)."""
+def _joint_cis(y, fns, alpha: float, seed: int = 0) -> list:
+    """x13._joint_ci at level 1 - a for each statistic in fns, _n_boot(a) design-row
+    resamples (its count is fixed). The driver redraws the same seed-0 resamples for each
+    statistic, so one pass over them serves all: the same numbers at half the cost."""
+    n_boot = _n_boot(alpha)
     s1, st = x13.sa._indices(y[0], y[1], y[2:])
     n = y.shape[1]
     idx = np.random.default_rng(seed).integers(0, n, size=(n_boot, n))
-    vals = []
+    vals = [[] for _ in fns]
     for c in np.array_split(idx, -(-n_boot // 200)):
         b1, bt = x13.sa._indices(y[0][c], y[1][c], y[2:][:, c])
-        vals.append(fn(b1, bt))
-    lo, hi = _pct(np.concatenate(vals), alpha)
-    return {"mean": float(fn(s1[:, None], st[:, None])[0]), "lower": lo, "upper": hi}
+        for v, fn in zip(vals, fns):
+            v.append(fn(b1, bt))
+    return [dict(zip(("lower", "upper"), _pct(np.concatenate(v), alpha)),
+                 mean=float(fn(s1[:, None], st[:, None])[0])) for v, fn in zip(vals, fns)]
 
 
 def p11_h11a(summary: dict, rows: dict, alpha: float) -> dict:
@@ -475,8 +518,8 @@ def p11_h11a(summary: dict, rows: dict, alpha: float) -> dict:
     ordered = [rows[x13.design_key(i, n)] for i in range((len(x13.PARAMS) + 2) * n)]
     rent = x13._blocks(ordered, "sniper_rent", n, n)
     ix = {name: i for i, name in enumerate(x13.NAMES)}
-    lat = _joint_ci(rent, lambda s1, st: s1[ix["sniper_lat_ns"]], alpha)
-    jb = _joint_ci(rent, lambda s1, st: s1[ix["jump_rate"]] + s1[ix["jump_scale_bp"]], alpha)
+    lat, jb = _joint_cis(rent, [lambda s1, st: s1[ix["sniper_lat_ns"]],
+                                lambda s1, st: s1[ix["jump_rate"]] + s1[ix["jump_scale_bp"]]], alpha)
     if lat["lower"] >= 0.1 or jb["upper"] < 0.35:
         verdict = "MISS"
     else:
@@ -629,7 +672,7 @@ def _first_pass(primary: Primary, d: Driver | None) -> dict:
         driver95 = primary.driver_verdict(d.summary)
         at = _evaluator(primary, d)
         at95 = at(ALPHA)
-        hit_open = d.confirmatory and at95["verdict"] != "MISS"
+        hit_open = d.confirmatory and at95["verdict"] == "HIT"
         p = grid_p_value(lambda a: at(a)["verdict"] == "HIT", holm_thresholds()) if hit_open else 1.0
     except Exception as exc:                    # surfaced as a failure, never swallowed
         return {**base, "state": "error" if d.confirmatory else state,
@@ -668,7 +711,7 @@ def assess_primaries(drivers: dict) -> list:
         at = e.pop("_at", None)
         e |= {"holm_rank": h["rank"], "holm_threshold": h["threshold"],
               "holm_verdict": _holm_verdict(e, h["rejected"])}
-        if at is not None:
+        if at is not None and e["state"] == "ok":    # outside the family, no Holm level
             e |= _at_holm_level(e, at, h["threshold"])
         out.append(e)
     return out
@@ -740,6 +783,10 @@ def p11_readings(drivers: dict, primaries: list) -> list:
         row = {"driver": name, "role": role, "n_base": d.summary.get("n_base"),
                "confirmatory": ok, "status": d.status,
                "verdicts_95": {h: d.summary["p11"][h]["verdict"] for h in ("H11a", "H11b", "H11c")}}
+        if not (ok and p11["state"] == "ok"):
+            row["H11a_at_p11_holm_level"] = "— (not confirmatory)"
+            out.append(row)
+            continue
         try:
             row["H11a_at_p11_holm_level"] = p11_h11a(d.summary, d.rows, p11["holm_threshold"])["verdict"]
         except Exception as exc:
@@ -844,10 +891,9 @@ def _primary_table(r: dict) -> list:
 def _primary_details(r: dict) -> list:
     lines = []
     for e in r["primaries"]:
-        if "parts_holm" not in e:
+        if "parts_holm" not in e:                     # only counted primaries have a Holm level
             continue
-        shown = "" if e["state"] == "ok" else " — NOT CONFIRMATORY: shown, not counted"
-        lines += [f"### {e['pid']} — {e['claim']} ({e['driver']}){shown}", "",
+        lines += [f"### {e['pid']} — {e['claim']} ({e['driver']})", "",
                   f"Holm threshold α_k = {_num(e['holm_threshold'])} (level {_num(1 - e['holm_threshold'])}); "
                   f"the full rule at that level reads {e['rule_at_holm_level']}.", "",
                   "| part | 95% interval | Holm-level interval | band / rule | 95% | Holm level |",

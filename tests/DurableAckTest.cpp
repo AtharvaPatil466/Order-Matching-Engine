@@ -18,6 +18,7 @@
 #include "OrderBook.h"
 
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -61,6 +62,10 @@ struct Fixture {
         engine.addSymbol(kSym);
         engine.getOrderBook(kSym)->setEventListener(&client);
         engine.enableJournal(path);
+        // These tests watch the batch hold; D3's 200 µs bound would commit it
+        // whenever the box is slow between two submits (JournalCommitDelayTest
+        // pins the bound itself).
+        engine.getJournal()->setMaxCommitDelay(std::chrono::hours(1));
         engine.start();
     }
     ~Fixture() {

@@ -451,11 +451,7 @@ public:
             // Stop on no progress rather than spinning: if a commit writes
             // nothing at all, retrying cannot help, and the caller checks
             // pendingEntries() to find out.
-            while (!batch_.empty()) {
-                const size_t before = batch_.size();
-                commitBatch();
-                if (batch_.size() >= before) break;
-            }
+            commitPending();
         } else {
             std::fflush(file_);
         }
@@ -538,6 +534,9 @@ public:
             // instead of buffering the whole book.
             constexpr size_t kSnapshotBatch = 4096;
             Journal temp(tmpPath, SyncPolicy::GroupCommit, kSnapshotBatch);
+            // No time bound either (D3): nothing here is acked, and a commit
+            // every 200 µs would put an fsync per ~2,000 entries back.
+            temp.setMaxCommitDelay(std::chrono::nanoseconds::max());
             temp.truncate();
             // The rewrite INHERITS the source's content epoch. A checkpoint is
             // a snapshot of the book this journal built, so it can be no more
@@ -644,6 +643,31 @@ public:
     // 1.4-D4; see halt()). Sticky: nothing clears it, so a restart is what
     // brings the journal back. Readable from any thread.
     bool halted() const { return halted_.load(std::memory_order_acquire); }
+
+    // Group commit is bounded in TIME as well as count (roadmap 1.4-D3, JRN-3):
+    // an append commits the batch once its oldest entry has waited this long.
+    // A count bound alone left a quiet book's acked orders in batch_ for as
+    // long as the quiet lasted, and kill -9 took them. Appends only see the
+    // age when they happen, so a writer that goes quiet also calls
+    // commitPending() before it idles (MatchingEngine's workers and TcpGateway
+    // do). Ignored by Immediate, which commits every append.
+    static constexpr std::chrono::microseconds kDefaultMaxCommitDelay{200};
+    void setMaxCommitDelay(std::chrono::nanoseconds d) {
+        maxCommitDelay_ = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(d).count());
+    }
+
+    // Commit everything batched now, without waiting for the batch to fill or
+    // age: for a writer about to go idle, when nothing more will join it.
+    // Unlike flush() it does not wait for an io_uring chain to become durable.
+    // Stops on no progress (see flush()); a no-op when halted.
+    void commitPending() {
+        while (!batch_.empty()) {
+            const size_t before = batch_.size();
+            commitBatch();
+            if (batch_.size() >= before) break;
+        }
+    }
 
     // Cut a torn final write found at open (JRN-2, roadmap D2): fewer bytes
     // than one record after the last replayable one. That is what a crash
@@ -917,7 +941,8 @@ protected:
         // exactly which appends are now durable. See DurabilityGate.
         ++entriesAppended_;
 
-        if (syncPolicy_ == SyncPolicy::Immediate || batch_.size() >= batchSize_) {
+        if (syncPolicy_ == SyncPolicy::Immediate || batch_.size() >= batchSize_ ||
+            now() - batch_.front().timestamp >= maxCommitDelay_) {   // D3
             commitBatch();
         }
     }
@@ -2017,6 +2042,11 @@ private:
     OnCommitFn onCommit_;
     std::function<void(size_t)> onDurable_;
     size_t maxSizeMb_{0};
+    // In steady_clock ticks, the unit of JournalEntry::timestamp. See
+    // setMaxCommitDelay().
+    uint64_t maxCommitDelay_{static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            kDefaultMaxCommitDelay).count())};
 
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
     // Per-Journal io_uring ring. Depth 8 is ample — the async path keeps a

@@ -668,6 +668,16 @@ enable_assertions(JournalSubmitFailureTest)
 add_test(NAME JournalSubmitFailureTest COMMAND JournalSubmitFailureTest)
 set_tests_properties(JournalSubmitFailureTest PROPERTIES TIMEOUT 60 LABELS "project;recovery;chaos")
 
+# D3 (JRN-3): group commit is bounded in time. 40 acked orders, 200 ms quiet,
+# SIGKILL: all 40 restored — async (OrderEngine's GroupCommit(64)) via the
+# worker idle path, and a sync engine behind TcpGateway via its event loop.
+# Ports 49100-49109.
+add_executable(JournalCommitDelayTest JournalCommitDelayTest.cpp)
+target_link_libraries(JournalCommitDelayTest PRIVATE OrderMatcher)
+enable_assertions(JournalCommitDelayTest)
+add_test(NAME JournalCommitDelayTest COMMAND JournalCommitDelayTest)
+set_tests_properties(JournalCommitDelayTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # The order-entry port must journal what it acknowledges: GatewayServer had no
 # journal at all, so a restart lost every order it had accepted. Driven against
 # the real binary through the order port — acknowledge, restart, then cancel the

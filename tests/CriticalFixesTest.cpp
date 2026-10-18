@@ -1207,6 +1207,7 @@ TEST(AuditFixes, FlushDrainsEveryAppendedEntry) {
     std::remove(path.c_str());
     {
         Journal j(path, Journal::SyncPolicy::GroupCommit, 4096);
+        j.setMaxCommitDelay(std::chrono::hours(1));   // count batching only (not D3)
         for (int i = 0; i < 100; ++i)
             j.logAddOrder(OrderId(i + 1), 1, 1, Side::Buy, PX, 10, OrderType::Limit,
                           TimeInForce::GTC, 0, 0, 0, 0, PegType::None, 0, 0, 0, false);

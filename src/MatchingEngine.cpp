@@ -743,6 +743,13 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             continue;
         }
 
+        // D3: about to park, so nothing more joins the journal's batch until
+        // the next order arrives — which on a quiet book may be never. Commit
+        // it now rather than leave acked orders in memory for kill -9.
+        // ponytail: the spin/yield above is the bound's ceiling while idle
+        // (tens of µs, longer on an overloaded box); appends enforce 200 µs.
+        if (journal_) commitJournal();
+
         queueWakeups_[threadIndex].wait(observedWake, std::memory_order_relaxed);
         observedWake = queueWakeups_[threadIndex].load(std::memory_order_relaxed);
         idleSpins = 0;
@@ -2281,6 +2288,11 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
             routeSessionControl(symbolId, OrderRequest::Type::TradingState,
                                 TradingState::Continuous);
     }
+}
+
+void MatchingEngine::commitJournal() {
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (journal_) journal_->commitPending();
 }
 
 bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy policy) {

@@ -442,6 +442,12 @@ public:
     // Write full snapshot of all active orders to journal (checkpoint)
     void checkpoint();
 
+    // Put what the journal has batched on disk now (roadmap 1.4-D3). The
+    // thread that submits to a SYNC engine calls this before it idles, as
+    // TcpGateway's event loop does: an append commits an aged batch, but only
+    // when one happens. Async workers do it themselves before they park.
+    void commitJournal();
+
     // Async stats (aggregates across all threads)
     uint64_t getSubmittedCount() const;
     uint64_t getProcessedCount() const;

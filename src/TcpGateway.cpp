@@ -310,6 +310,8 @@ void TcpGateway::eventLoop() {
         }
         checkIdleTimeouts();
         if (tick_) tick_();
+        // D3: a sync engine journals on this thread; commit before blocking.
+        if (!engine_.isAsync()) engine_.commitJournal();
     }
 
 #elif defined(USE_EPOLL)
@@ -336,6 +338,8 @@ void TcpGateway::eventLoop() {
         }
         checkIdleTimeouts();
         if (tick_) tick_();
+        // D3: a sync engine journals on this thread; commit before blocking.
+        if (!engine_.isAsync()) engine_.commitJournal();
     }
 #endif
 }

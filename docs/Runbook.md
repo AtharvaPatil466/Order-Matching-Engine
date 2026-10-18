@@ -1,146 +1,503 @@
-# Operational Runbook — Order Matching Engine
+# Operational Runbook
 
-> This document covers day-to-day operations, incident response, and maintenance procedures for the matching engine deployment.
+This runbook covers the two binaries this repository builds and ships:
+`OrderEngine` (`src/main.cpp`) and `GatewayServer` (`src/gateway_main.cpp`).
+It describes what they do today, including what they do not do.
+
+**Every `bash` block below is executed.** `scripts/runbook_smoke.sh` builds both
+binaries and `JournalReplayCLI` in an `ubuntu:24.04` container, puts them on
+`PATH`, and runs the blocks top to bottom in one shell, as an operator working
+through this page would. A block preceded by a `runbook-smoke: skip` marker is
+not run, and the marker says why (it needs systemd, Docker, a real NIC, or it
+is a config file or sample output rather than a command). The script prints
+every block it skips. It also fails if a flag listed in a table here is not in
+the `--help` of the binary that table describes.
 
 ---
 
-## 1. Starting the Engine
+## 1. What ships
 
-### Journal Storage Pre-Flight (RUN BEFORE EVERY START)
+| Binary | Takes client orders | Admin HTTP port | Journal | Market data |
+|---|---|---|---|---|
+| `OrderEngine` | No TCP order-entry port. Orders reach it only through the admin port's `/chaos/order` (off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set), or as OUCH in a build with `-DENABLE_DPDK=ON` (off by default) started with `OB_DPDK=1`. | Yes (default 8080) | Optional (`--journal`), group commit | None |
+| `GatewayServer` | Yes: a TCP port (default 9876) speaking the binary protocol in `include/GatewayProtocol.h` | None | Optional (`--journal`), each order synced before its ack | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
 
-> **HARD REQUIREMENT: the journal MUST be on instance-store (local) NVMe or a
-> RAM-backed tmpfs.** A tmpfs journal is lost on any host reboot or power
-> loss, and replication — which the snippet below used to say durability
-> "must come from" — is disabled by default and has known CRITICAL defects
-> (see §4). On a single node, tmpfs means no durability across a host failure.
-> **EBS / Persistent Disk / Managed Disk / any network block
-> device is NOT acceptable for the journal path** — every group-commit flush
-> would pay a network round-trip that shows up directly in the order-entry P99
-> tail. See [CapacityPlanning.md](./CapacityPlanning.md) §3 "Journal Storage
-> Backing". This is also why the published Path C P99 (3,568 ns; its journal
-> was on `/tmp`, backing device not recorded) must be re-benchmarked on
-> instance-store NVMe before it is quoted as the production number.
+`OrderEngine` runs a multi-threaded engine (`--threads`) over `--symbols`
+symbols numbered from 0. `GatewayServer` runs a single-threaded engine over
+symbols 0 and 1. The two do not talk to each other: each has its own book and
+its own journal.
 
-Verify the journal path resolves to a local NVMe or tmpfs device before launch:
+Both binaries refuse an argument they do not understand, and a value flag with
+nothing after it, before doing anything else:
+
+<!-- runbook-smoke: skip — sample output, not a command -->
+```text
+[Config] FATAL: unknown argument '--lean' — refusing to start. See --help.
+[Gateway] FATAL: --journal needs a value — refusing to start. See --help.
+```
+
+`--help` on either binary prints every flag it accepts, generated from the same
+table the check uses. A flag always wins over its environment variable.
+
+Both binaries write progress lines to stdout without flushing and FATAL lines
+to stderr. Under systemd or with stdout redirected to a file, stdout is block
+buffered, so progress lines can arrive late; the commands below run
+`OrderEngine` under `stdbuf -oL` (coreutils) to get them line by line.
+
+The commands below assume the binaries are on `PATH`. A CMake build puts
+`OrderEngine`, `GatewayServer` and `MdSubscriber` in the build directory and
+`JournalReplayCLI` in its `tools/` subdirectory.
+
+---
+
+## 2. Before the first start
+
+### Journal storage
+
+Put the journal on local storage: instance-store NVMe, a local SSD, or tmpfs if
+losing it on a host reboot is acceptable. A network block device (EBS,
+Persistent Disk, a SAN) puts a network round trip into every journal sync. On
+AWS Nitro both instance-store and EBS volumes appear as `/dev/nvme*`; the
+device model string tells them apart. This check prints what backs the journal
+directory and exits non-zero on a network filesystem or an EBS volume:
 
 ```bash
-# Point this at your actual --journal path directory.
 JOURNAL_DIR=/var/lib/orderengine
-
-# What device backs it, and what kind of device is it?
+mkdir -p "$JOURNAL_DIR"
 SRC=$(findmnt -no SOURCE --target "$JOURNAL_DIR")
 FSTYPE=$(findmnt -no FSTYPE --target "$JOURNAL_DIR")
-echo "journal dir $JOURNAL_DIR -> source=$SRC fstype=$FSTYPE"
-
-# Accept tmpfs (RAM), reject anything that looks like a network block device.
+echo "journal dir $JOURNAL_DIR: source=$SRC fstype=$FSTYPE"
 case "$FSTYPE" in
-  tmpfs|ramfs) echo "WARN: RAM-backed journal — lost on host reboot; replication is disabled by default";;
-  nfs*|cifs|9p) echo "FATAL: journal is on a network filesystem ($FSTYPE) — abort"; exit 1;;
+  nfs*|cifs|9p) echo "FATAL: network filesystem ($FSTYPE)"; exit 1 ;;
+  tmpfs|ramfs)  echo "WARN: RAM-backed, lost on host reboot" ;;
   *)
-    # Block device: confirm it is local NVMe / instance-store, not EBS/PD/SAN.
-    DEV=$(lsblk -no NAME,TRAN,ROTA "$SRC" 2>/dev/null)
-    echo "backing block device: $DEV"
-    # EBS on Nitro shows up as an 'nvme' TRAN too, so also check the model string:
-    MODEL=$(cat "/sys/block/$(lsblk -no PKNAME "$SRC" 2>/dev/null || basename "$SRC")/device/model" 2>/dev/null)
-    echo "device model: $MODEL"
+    DISK=$(lsblk -no PKNAME "$SRC" 2>/dev/null || true)
+    MODEL=$(cat "/sys/block/${DISK:-none}/device/model" 2>/dev/null || true)
     case "$MODEL" in
-      *"Instance Storage"*|*"Amazon EC2 NVMe Instance Storage"*) echo "OK: instance-store NVMe";;
-      *"Elastic Block Store"*|*"EBS"*) echo "FATAL: journal is on EBS (network block device) — move to instance-store NVMe or tmpfs"; exit 1;;
-      *) echo "WARN: could not classify '$MODEL' — MANUALLY confirm this is local NVMe, not a network volume";;
-    esac
-    ;;
+      *"Elastic Block Store"*) echo "FATAL: EBS volume"; exit 1 ;;
+      *"Instance Storage"*)    echo "OK: instance-store NVMe" ;;
+      *) echo "WARN: device '${MODEL:-unknown}' not classified; confirm it is local by hand" ;;
+    esac ;;
 esac
 ```
 
-> On AWS Nitro, **both** instance-store and EBS present as `/dev/nvme*`, so
-> `TRAN=nvme` alone is NOT sufficient — the model string (`Amazon EC2 NVMe
-> Instance Storage` vs `Amazon Elastic Block Store`) is the discriminator.
-> Wire this snippet into your systemd `ExecStartPre=` or container entrypoint
-> so a mis-provisioned host fails fast instead of silently shipping the EBS
-> latency into production.
+### Upgrading onto an existing journal
 
-### Upgrading Onto an Existing Journal (READ BEFORE THE FIRST START AFTER AN UPGRADE)
+Builds before `cdd45ac` seeded up to 200 synthetic Limit orders
+per symbol, as participants 1 and 2, at startup, and journaled them. A journal
+whose lineage began with such a build carries content epoch 0 in its header;
+journals this build creates carry 1, and a checkpoint keeps the epoch of the
+journal it was taken from. Both binaries refuse to replay an epoch-0 journal
+that holds entries:
 
-The engine replays its journal on boot. Builds up to and including the one that
-seeded startup "warmup" orders wrote **200 synthetic Limit orders per symbol** —
-participants 1 and 2, around price 100000 — into the journal before serving any
-client, because journaling was enabled before that loop ran. Replaying such a
-file restores those orders as real resting liquidity that clients then trade
-against.
-
-The engine refuses to start on one, and says why:
-
-```
+<!-- runbook-smoke: skip — sample output, not a command -->
+```text
 [Engine] FATAL: <path> may hold orders nobody sent
-        (journal content epoch 0; this build writes 1). Its
-        lineage began with a build that seeded synthetic orders at startup: ...
+        (journal content epoch 0; this build writes 1). ...
 ```
-
-The signal is `contentEpoch` in the journal header: `0` for any file written
-before this was fixed, `1` for a file this build creates. It is **not** a format
-version — the records are perfectly readable, and `JournalReplayCLI` will still
-dump them.
-
-**The mark is inherited.** A checkpoint — including the one every clean shutdown
-takes — copies the source journal's epoch rather than stamping its own. So a
-legacy journal stays legacy for life, however many times it is checkpointed. An
-earlier build stamped checkpoints clean, which meant one `--replay-legacy-journal`
-boot followed by any ordinary restart silently turned the journal into a trusted
-one, synthetic orders and all.
-
-Choose one:
 
 | Situation | Action |
 |---|---|
-| The journal holds only warmup orders (a node that never took client traffic) | Move it aside and start fresh: `mv journal.wal journal.wal.preupgrade` |
-| It holds real client orders too | Inspect first: `JournalReplayCLI --journal journal.wal --stats`, then see below |
-| A checkpoint whose lineage never held warmup orders, written by this build or later | Start from it; it is stamped `1` |
+| The node never took client traffic | Move the journal aside and start fresh |
+| It holds real client orders too | Inspect it (`JournalReplayCLI --journal <copy> --tail 1000` shows each entry's participant), then start with `--replay-legacy-journal` (`OB_REPLAY_LEGACY_JOURNAL=1`) and cancel the participant 1 and 2 orders by id |
 
-To replay a mixed journal, start with `--replay-legacy-journal`
-(`OB_REPLAY_LEGACY_JOURNAL=1`), then **cancel the synthetic orders by id**. They
-are indistinguishable from real orders once replayed, so nothing can clean them
-up for you — that is why this is a flag and not an automatic migration. Warmup
-order ids run from 1 upward, two per iteration, alternating participant 1 (buy)
-and participant 2 (sell), 200 per symbol. Confirm with `GET /book?symbolId=<n>`
-that no participant 1 or 2 liquidity remains.
+Once replayed, synthetic and real orders cannot be told apart, and the journal
+stays epoch 0 through every checkpoint, so that node needs the flag on every
+boot from then on.
 
-Because the mark is inherited, **that journal needs the flag on every boot from
-then on**, even after the synthetic orders are cancelled — the engine cannot
-certify a mixed book clean, and neither can a checkpoint of it. Keep the flag
-scoped to that one node's configuration, so it can never quietly accept a
-different legacy journal.
+---
 
-### Bare Metal
+## 3. Starting OrderEngine
+
+`OrderEngine` refuses to start without an admin token (or an explicit
+`--admin-no-auth`). Without `--journal` it keeps no journal, and a restart loses
+every resting order.
+
 ```bash
-# OrderEngine refuses to start without an admin token: set OB_ADMIN_TOKEN
-# (or pass --admin-token, or --admin-no-auth to run the admin port open).
-# Without --journal / OB_JOURNAL_PATH it keeps no journal at all.
-export OB_ADMIN_TOKEN=...
-
-# Start with 4 worker threads
-./bin/OrderEngine --threads 4 --port 8080 --symbols 4 --journal /var/lib/orderengine/journal.wal
-
-# With config file. SIGHUP re-reads it, but only rate_limit.default_rate /
-# rate_limit.default_burst take effect (§5)
-./bin/OrderEngine --threads 4 --port 8080 --symbols 4 --config /etc/orderengine/engine.conf
-
-# Hot-reload config without restart
-kill -SIGHUP $(pidof OrderEngine)
+mkdir -p /var/lib/orderengine /etc/orderengine
+export OB_ADMIN_TOKEN=replace-with-a-long-random-secret
+stdbuf -oL OrderEngine --threads 2 --symbols 2 --port 8080 \
+    --journal /var/lib/orderengine/journal.wal \
+    > /var/lib/orderengine/engine.log 2>&1 &
+echo $! > /var/lib/orderengine/engine.pid
+# The admin port opens only after the journal is replayed; retry until it answers.
+curl -sf --retry 50 --retry-delay 1 --retry-connrefused http://127.0.0.1:8080/readyz
+grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
 ```
 
-There is no `--lean` flag. OrderEngine ignores flags it does not know, so
-`--lean` was silently dropped. Lean mode is a build option
-(`./build.sh --lean`, or `-DUSE_LEAN_MODE=ON`) that compiles out the risk and
-stats features.
+### Flags
 
-### Docker
+| Flag | Environment | Default | Meaning |
+|---|---|---|---|
+| `--threads N` | — | 4 | Worker threads |
+| `--symbols S` | — | 4 | Symbols 0..S-1 |
+| `--port P` | — | 8080 | Admin HTTP port |
+| `--admin-bind ADDR` | `OB_ADMIN_BIND` | 127.0.0.1 | Admin listen address (IPv4). The Docker image sets 0.0.0.0. |
+| `--admin-token TOKEN` | `OB_ADMIN_TOKEN` | — | Bearer token for every endpoint except `/health` and `/readyz` |
+| `--admin-no-auth` | `OB_ADMIN_NO_AUTH=1` | off | Run the admin port without a token, on purpose |
+| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6) |
+| `--journal PATH` | `OB_JOURNAL_PATH` | — | Journal file; replayed at boot (§7) |
+| `--journal-max-mb MB` | `OB_JOURNAL_MAX_SIZE_MB` | off | Checkpoint once the journal reaches MB megabytes |
+| `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | off | Replay an epoch-0 journal (§2) |
+| `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` | `OB_SESSION_SCHEDULE` | off | Session timetable, HH:MM UTC |
+| `--role primary\|backup` | `OB_NODE_ROLE` | standalone | Replication role; refused without the next flag (§10) |
+| `--allow-unsafe-replication` | `OB_ALLOW_UNSAFE_REPLICATION=1` | off | Run replication despite its known defects |
+| `--node-id N` | `OB_NODE_ID` | 1 | Replication node id |
+| `--repl-port P` | `OB_REPLICATION_PORT` | 9002 | Primary's replication listen port |
+| `--primary-host HOST` | `OB_PRIMARY_HOST` | — | Backup only: the primary's host |
+| `--primary-port P` | `OB_PRIMARY_REPLICATION_PORT` | 9002 | Backup only: the primary's port |
+| `--help` | — | — | Print the flags and exit |
+
+Other environment variables `OrderEngine` reads: `OB_CHAOS_INJECT` and
+`OB_CHAOS_TOKEN` (arm `/chaos/order`, §4), every config key as `OB_<KEY>` (§6),
+and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
+
+### What happens at boot, in order
+
+1. Arguments are checked; an unknown one is fatal.
+2. The config file is loaded, if one is named. A file that cannot be read is a
+   `[Config] WARNING`, and the engine starts without it.
+3. Startup validation: the `instrument.*` and `participant.*` keys, the journal
+   path's parent directory, and a replication role without
+   `--allow-unsafe-replication`. Any failure prints
+   `[Config] FATAL: startup configuration is invalid` with one line per
+   problem and exits 1.
+4. The journal is opened, a torn final write is cut, and the journal is
+   replayed (§7). The legacy-epoch and unreadable-journal refusals happen here.
+5. The alert webhook is set up if `alert_webhook_url` is set (§6). An
+   `https://` URL is refused: the dispatcher has no TLS client, so point it at
+   a local TLS terminator on `http://127.0.0.1`.
+6. Worker threads, the GTD/DAY expiry timer and, with `--session-schedule`,
+   the session scheduler start.
+7. Replication starts, if a role was allowed.
+8. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
+   is a failed bind.
+9. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
+
+Because the admin port opens only at step 8, a probe during replay gets
+connection refused rather than 503. Give a liveness probe enough initial delay
+for your replay time.
+
+---
+
+## 4. Health and monitoring
+
+| Endpoint | Auth | Returns |
+|---|---|---|
+| `GET /health` | none | `{"status":"ok"}` |
+| `GET /readyz` | none | 200 `{"status":"ready"}`, or 503 before the engine is ready |
+| `GET /metrics` | token | JSON: `submitted`, `processed`, `rateLimited`, `backpressureRejected`, `queueDropped`, `pendingOrders`, `e2eLatency` percentiles in ns |
+| `GET /prometheus` | token | Text exposition of the metrics registry |
+| `GET /book?symbolId=N` | token | 10 levels per side and the last trade |
+| `GET /auction?symbolId=N` | token | Trading state and indicative auction price, paired and imbalance quantity |
+| `GET /audit?symbolId=N` | token | Best bid/ask, spread, 5 levels |
+| `GET /otr?participantId=N` | token | Order and trade counts and order-to-trade ratio, **symbol 0 only** |
+| `GET /fees?participantId=N` | token | Accrued fee (no fee schedule is set by this binary) |
+| `GET /risk?tier=T&entityId=E` | token | Net position at a risk tier (0 Trader … 3 Firm) |
+| `GET /cat` | token | Audit-record count |
+| `GET /role`, `GET /replication` | token | `standalone` unless replication runs |
+| `GET /journal/head` | token | Whether a journal is on and its sequence number |
+| `GET /version` | token | Git SHA and build time |
+| `GET /chaos/order?...` | token + `X-Chaos-Token` | Submits an order. `{"enabled":false}` unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set |
+
+Any other path returns the endpoint list. The token goes in an
+`Authorization: Bearer <token>` header; without it every endpoint but `/health`
+and `/readyz` answers 401.
+
 ```bash
-docker-compose up -d engine-primary
-# Verify health
-curl -sf http://localhost:8080/health
+curl -sf http://127.0.0.1:8080/health
+H="Authorization: Bearer $OB_ADMIN_TOKEN"
+curl -sf -H "$H" http://127.0.0.1:8080/metrics
+curl -sf -H "$H" http://127.0.0.1:8080/prometheus
+curl -sf -H "$H" "http://127.0.0.1:8080/book?symbolId=0"
+curl -sf -H "$H" http://127.0.0.1:8080/journal/head
+test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/metrics)" = 401
 ```
 
-### Systemd
+Prometheus series `OrderEngine` can export (each appears once it is first
+used): `orders_accepted_total`, `orders_rejected_total`,
+`journal_entries_committed_total`, `order_pool_utilization_percent{symbol="N"}`,
+and with replication `replication_entries_shipped_total`,
+`replication_bytes_sent_total`, `replication_snapshot_streams_total`,
+`replication_snapshot_entries_total`. `pendingOrders` and the latency
+percentiles are in `/metrics` JSON only. `GatewayServer` keeps
+`gateway_connections_total` and `gateway_disconnects_total` but has no port to
+read them from.
+
+<!-- runbook-smoke: skip — Prometheus configuration, not a command -->
+```yaml
+scrape_configs:
+  - job_name: orderengine
+    metrics_path: /prometheus
+    authorization:
+      credentials: <admin token>
+    static_configs:
+      - targets: ['localhost:8080']
+```
+
+---
+
+## 5. Stopping and restarting
+
+`SIGTERM` or `SIGINT` shuts `OrderEngine` down cleanly: the admin port closes,
+new orders are refused, the queues drain, and with a journal the engine
+checkpoints every resting order, DAY orders included (§7). `SIGHUP` reloads the
+config (§6). No other signal is handled; anything else takes its default
+action, which for most signals ends the process without the checkpoint.
+
+```bash
+PID=$(cat /var/lib/orderengine/engine.pid)
+kill -TERM "$PID"
+while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
+```
+
+A restart on the same journal replays it before the admin port opens. This one
+also names a config file, used in §6:
+
+```bash
+cat > /etc/orderengine/engine.conf <<'EOF'
+log_sink = stderr
+rate_limit.default_rate = 1000
+rate_limit.default_burst = 100
+EOF
+stdbuf -oL OrderEngine --threads 2 --symbols 2 --port 8080 \
+    --journal /var/lib/orderengine/journal.wal --config /etc/orderengine/engine.conf \
+    > /var/lib/orderengine/engine.log 2>&1 &
+echo $! > /var/lib/orderengine/engine.pid
+curl -sf --retry 50 --retry-delay 1 --retry-connrefused http://127.0.0.1:8080/readyz
+grep -E "\[Engine\] Replayed [0-9]+ of [0-9]+ recoverable journal entries" /var/lib/orderengine/engine.log
+```
+
+---
+
+## 6. Configuration and reload
+
+The config file is `key = value` lines; `#` starts a comment. Every key can be
+overridden by an environment variable `OB_<KEY>`, upper-cased with `.` and `-`
+turned into `_` (`log_sink` → `OB_LOG_SINK`), and the environment wins over the
+file. Keys `OrderEngine` reads:
+
+| Key | When | Effect |
+|---|---|---|
+| `log_sink` | startup | `stderr` sends structured JSON logs to stderr; `null` (default) discards them |
+| `alert_webhook_url`, `alert_webhook_format` (`generic`/`slack`/`pagerduty`), `alert_min_level` (`info`/`warning`/`critical`/`fatal`), `alert_routing_key` | startup | Webhook alerts; an unknown format or level, or an `https://` URL, is fatal |
+| `instruments`, `instrument.<id>.{min_price,max_price,tick_size,lot_size}` | startup | Validated only |
+| `participants`, `participant.<id>.{position_limit,otr_limit}` | startup | Validated only |
+| `journal_path` | startup | Validated only; the journal is `--journal` / `OB_JOURNAL_PATH` |
+| `rate_limit.default_rate`, `rate_limit.default_burst` | `SIGHUP` only | Default rate limit for every participant, applied when the rate is above 0 |
+| `order_pool_capacity`, `trade_history_capacity` | book creation | Book sizing. Read from the file named by `OB_CONFIG_PATH` and from `OB_<KEY>`, **not** from `--config` |
+
+Nothing else in `config/engine.conf.example` is read by either binary.
+`GatewayServer` reads no config file.
+
+`SIGHUP` re-reads the `--config` file and applies only the rate limit. The main
+loop checks for it every 100 ms:
+
+```bash
+kill -HUP "$(cat /var/lib/orderengine/engine.pid)"
+sleep 1
+grep -F "[Config] Rate limiter reconfigured: 1000 msg/s" /var/lib/orderengine/engine.log
+```
+
+Thread count, symbol count, ports, the journal path and the replication role
+take effect only at a restart.
+
+---
+
+## 7. The journal
+
+### What it holds and when it is synced
+
+Each accepted order, cancel, modify and trading-state change is appended as a
+fixed-size record.
+`OrderEngine` uses group commit: appends are batched and synced together.
+`GatewayServer` syncs each append before returning, and holds every event a
+client can see (acks, fills, market data) until the entry behind it is on disk.
+
+### Checkpoints
+
+A checkpoint **replaces the journal** with one snapshot record per resting
+order, plus the trading state of any symbol not in continuous trading; the
+fills and cancels before it are gone. Copy the file first if you
+need that history. Checkpoints run:
+
+- automatically at 250,000 entries or 64 MiB, in both binaries (compiled in;
+  no key changes it);
+- in `OrderEngine`, when `--journal-max-mb` is set and the journal reaches it;
+- on every clean `OrderEngine` shutdown (§5). `GatewayServer` does not
+  checkpoint at shutdown.
+
+There is no other way to trigger one.
+
+### Inspecting a journal
+
+`JournalReplayCLI` reads a journal without starting either binary. Point it at
+a copy, never at the file a running engine is writing:
+
+```bash
+cp /var/lib/orderengine/journal.wal /var/lib/orderengine/journal.inspect
+JournalReplayCLI --journal /var/lib/orderengine/journal.inspect --stats
+JournalReplayCLI --journal /var/lib/orderengine/journal.inspect --tail 20
+JournalReplayCLI --journal /var/lib/orderengine/journal.inspect --dump-orders
+rm /var/lib/orderengine/journal.inspect
+```
+
+`--stats` counts entries by type, `--tail N` prints the last N with symbol,
+order id, participant, side, price and quantity, and `--dump-orders` replays the
+copy in memory and prints the resulting book.
+
+### What boot does with it
+
+Both binaries run the same sequence (`include/JournalBoot.h`) and print the
+result: `[Engine] Replayed X of Y recoverable journal entries`.
+
+- **Torn final write.** Less than one record after the last whole record, which
+  is what a crash partway through a write leaves, is cut at boot and appended
+  to `<path>.torn`: `[Journal] Cut a torn final write: N byte(s) ...`. It cannot
+  hold a record, so nothing replayable is lost, and the engine starts.
+- **Anything longer** may be a corrupt record with valid ones behind it. The
+  engine refuses to start (`[Journal] REFUSING TO APPEND: <path> has N byte(s)
+  after its last replayable record`, then `[Engine] FATAL: journal at <path>
+  could not be opened safely`), leaves the file untouched, and prints the exact
+  repair: copy the file aside and `truncate -s <bytes>` it at the end of the
+  last replayable record. That discards whatever was behind the damage, so
+  reconcile the orders after it by hand.
+- **Unreadable journals** (another format version or record size, no valid
+  record at all, or a log that does not start at sequence 1) are refused the
+  same way. Replay them with the build that wrote them or move them aside.
+- **Legacy epoch**: §2.
+- **Replayed nothing.** If the journal holds recoverable entries and replay
+  applied none, the engine refuses to start rather than serve an empty book.
+
+The replay count is entries consumed, not entries applied: an entry that
+replays and is refused (a duplicate order id, for one) is still counted.
+
+### Write failures
+
+If a write, flush or sync of the journal fails (a full disk, for one), the
+process prints `[Journal] FATAL: <what> failed for <path>` and aborts. A
+restart replays up to the last whole record. Free space before restarting.
+
+Stop the engine before the next section:
+
+```bash
+PID=$(cat /var/lib/orderengine/engine.pid)
+kill -TERM "$PID"
+while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
+```
+
+---
+
+## 8. GatewayServer
+
+### Flags
+
+`GatewayServer [PORT] [options]`. `PORT` is the listen port (default 9876) and
+is read only as the first argument.
+
+| Flag | Environment | Meaning |
+|---|---|---|
+| `--participant-credentials FILE` | `OB_PARTICIPANT_CREDENTIALS` | Credentials, one per line as `user:secret:id[,id...]` |
+| `--no-participant-auth` | `OB_NO_PARTICIPANT_AUTH=1` | Accept every claimed participant id, on purpose |
+| `--journal PATH` | `OB_JOURNAL_PATH` | Journal every accepted order and replay it at start |
+| `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | Replay an epoch-0 journal (§2) |
+| `--help`, `-h` | — | Print the flags and exit |
+
+`OB_ENGINE_HOST` and `OB_ENGINE_PORT`, both set and non-empty, switch to
+forwarding mode (below).
+
+It refuses to start with no credentials and no `--no-participant-auth`, and
+with a credentials file that is unreadable or holds no credentials. A file
+readable by group or other draws a warning.
+
+```bash
+install -m 600 /dev/null /etc/orderengine/participants.conf
+echo 'firm-a:replace-with-a-secret:100,101' > /etc/orderengine/participants.conf
+GatewayServer 9876 --participant-credentials /etc/orderengine/participants.conf \
+    --journal /var/lib/orderengine/gateway.wal \
+    > /var/lib/orderengine/gateway.log 2>&1 &
+echo $! > /var/lib/orderengine/gateway.pid
+for _ in $(seq 50); do grep -qF "Order Gateway listening" /var/lib/orderengine/gateway.log && break; sleep 0.2; done
+grep -F "Order Gateway listening on port 9876" /var/lib/orderengine/gateway.log
+```
+
+Once a second, between orders, it runs order expiry and publishes a 5-level
+snapshot of each symbol to the shared-memory feed. It logs every trade to
+stdout.
+
+A participant's `KillSwitch` message (type 5) cancels all of that
+participant's resting orders. Each cancel is journaled. It is a one-shot sweep,
+not a halt: the participant can send new orders straight away.
+
+### Forwarding mode
+
+With `OB_ENGINE_HOST` and `OB_ENGINE_PORT` set, `GatewayServer` runs no engine:
+it relays each request frame to that host and port and relays the response
+back. The only binary that speaks this protocol on a port is another
+`GatewayServer`. The proxy does not check credentials and ignores
+`--participant-credentials` and `--journal`; the gateway it forwards to does
+both.
+
+```bash
+OB_ENGINE_HOST=127.0.0.1 OB_ENGINE_PORT=9876 GatewayServer 9877 \
+    > /var/lib/orderengine/proxy.log 2>&1 &
+PROXY=$!
+for _ in $(seq 50); do grep -qF "Proxy listening" /var/lib/orderengine/proxy.log && break; sleep 0.2; done
+grep -F "Proxy listening on port 9877 -> 127.0.0.1:9876" /var/lib/orderengine/proxy.log
+kill -TERM "$PROXY"
+```
+
+### Stopping
+
+`SIGTERM` or `SIGINT` stops the listener, the market-data publisher and the
+engine. There is no checkpoint, so the next start replays the whole journal.
+
+```bash
+PID=$(cat /var/lib/orderengine/gateway.pid)
+kill -TERM "$PID"
+while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+grep -F "Shutting down..." /var/lib/orderengine/gateway.log
+```
+
+---
+
+## 9. Incident quick reference
+
+| Symptom | Where to look | Action |
+|---|---|---|
+| Process exits at start | The `FATAL` line on stderr | Each names its cause and the fix: §3 for `OrderEngine`, §8 for `GatewayServer`, §7 for the journal |
+| `OrderEngine` probes refused for a long time after a restart | Journal size | Replay runs before the admin port opens; check `JournalReplayCLI --stats` on a copy |
+| `[Journal] FATAL: ... failed` and an abort | Disk space, I/O errors | §7 "Write failures" |
+| `[Journal] REFUSING TO APPEND` | The repair line in the message | §7; keep a copy of the file before truncating |
+| Webhook alerts never arrive | Startup `[Alert]` line | Only `http://` is delivered; check the sidecar |
+| A client keeps trading after a kill message | Nothing is wrong | The kill is a one-shot cancel, not a halt (§8) |
+
+Trading behaviour (STP, the circuit breaker, auctions, order types) is in
+[MatchingRules.md](./MatchingRules.md).
+
+---
+
+## 10. Replication
+
+Replication between two `OrderEngine` nodes exists but is refused unless
+`--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`) is passed with a
+role, because of open CRITICAL defects (REPL-1..6): a deposed primary is never
+fenced, a promoted backup can execute orders twice, a slow backup freezes acks,
+and entries lost in a disconnect are never re-sent. A backup promotes itself
+when the primary's heartbeats and lease lapse and logs
+`[Replication] PROMOTED to primary — exiting replay mode`; there is no
+operator step and no client failover, since `OrderEngine` has no order-entry
+port. Do not rely on it for business continuity.
+
+---
+
+## 11. Deployment templates
+
+### systemd
+
+<!-- runbook-smoke: skip — a unit file for systemd, not a command -->
 ```ini
 [Unit]
 Description=Order Matching Engine
@@ -148,254 +505,45 @@ After=network.target
 
 [Service]
 Type=simple
-# Fail fast if the journal is on EBS / a network block device. Save the §1
-# "Journal Storage Pre-Flight" snippet as this script (it exits non-zero on EBS).
-ExecStartPre=/opt/orderengine/scripts/check_journal_storage.sh /var/lib/orderengine
-# Without a token OrderEngine refuses to start; without --journal it keeps no journal.
 Environment=OB_ADMIN_TOKEN=<token>
-ExecStart=/opt/orderengine/bin/OrderEngine --threads 4 --port 8080 --symbols 4 --journal /var/lib/orderengine/journal.wal
-WorkingDirectory=/opt/orderengine
+ExecStart=/usr/bin/stdbuf -oL /opt/orderengine/OrderEngine --threads 4 --symbols 4 --port 8080 --journal /var/lib/orderengine/journal.wal
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
-CPUAffinity=0-3
 
 [Install]
 WantedBy=multi-user.target
 ```
 
----
+`systemctl stop` sends `SIGTERM`, which is the clean shutdown in §5.
 
-## 2. Health Monitoring
+### Docker
 
-### Endpoints
+The image (`Dockerfile`) runs `OrderEngine --threads 4 --port 8080 --symbols 4`
+and sets `OB_ADMIN_BIND=0.0.0.0`. `docker-compose.yml` adds
+`OB_JOURNAL_PATH=/app/journal/primary.wal` on a volume and requires
+`OB_ADMIN_TOKEN`. It mounts `config/engine.conf.example` at
+`/app/config/engine.conf` but passes no `--config` or `OB_CONFIG_PATH`, so that
+file is not loaded.
 
-| Endpoint | Purpose | Expected Response |
-|----------|---------|-------------------|
-| `GET /health` | K8s liveness probe | `200 OK {"status":"ok"}` |
-| `GET /readyz` | K8s readiness probe | 200 `{"status":"ready"}` once the engine is up. The admin port opens only after journal replay completes, so during replay both probes get connection refused, not 503 — give the liveness probe enough `initialDelaySeconds`/`failureThreshold` for your recovery time, or k8s restarts the pod mid-replay. Auth-exempt. |
-| `GET /metrics` | Internal counters | JSON: submitted/processed counts, `pendingOrders` (engine-wide queue depth), `e2eLatency` percentiles |
-| `GET /prometheus` | Prometheus scrape | Text exposition format |
-| `GET /book?symbolId=0` | L2 book snapshot | JSON with bids/asks and the last trade |
-| `GET /auction?symbolId=0` | Trading state | JSON with `tradingState` (e.g. `VolatilityAuction`) and indicative price |
-| `GET /otr?participantId=1` | OTR ratio | JSON with order/trade counts |
-
-### Prometheus Scrape Config
-```yaml
-scrape_configs:
-  - job_name: 'orderengine'
-    scrape_interval: 5s
-    static_configs:
-      - targets: ['localhost:8080']
-    metrics_path: '/prometheus'
-```
-
-### Key Metrics to Alert On
-
-| Metric | Warning | Critical | Action |
-|--------|---------|----------|--------|
-| `pendingOrders` in `/metrics` JSON (not exported to Prometheus) | > 50% capacity | > 80% capacity | Check consumer threads |
-| `orders_rejected_total` (rate) | > 100/s | > 1000/s | Check rate limits / risk config |
-| `e2eLatency.p99Ns` in `/metrics` JSON (not exported to Prometheus) | > 1μs (lean) / > 5μs (full) | > 10μs | Check CPU affinity, competing workloads |
-| `journal_entries_committed_total` (rate) | — | drops to 0 | Journal disk may be full |
-| Health endpoint | — | Returns non-200 | Restart engine |
-
----
-
-## 3. Incident Response
-
-### Engine Unresponsive (Health Check Failing)
-1. Check process is running: `ps aux | grep OrderEngine`
-2. Check logs: `journalctl -u orderengine -n 100`
-3. Check disk space (journal): `df -h /var/lib/orderengine/`
-4. If OOM: increase memory limit, check for leak
-5. If stuck: `kill -SIGABRT <pid>` to get core dump, then restart
-
-### Circuit Breaker Triggered
-A priced order more than 5% (fixed; no key sets it) from the book's reference
-price is rejected with `VolatilityCircuitBreaker`, and the trip is logged. The
-symbol keeps trading: the breaker no longer moves it into a volatility auction.
-1. Review the price move that triggered it in the log
-2. If a participant is repeatedly tripping it, check that client's pricing
-3. `price_band_pct` is read by nothing; the price band is off
-
-### Kill Switch Activated
-1. All resting orders for the participant are cancelled immediately. It is a
-   one-shot sweep, **not sticky**: the participant can submit new orders
-   straight away, and nothing needs re-enabling.
-2. Each cancel is journaled and releases the order's working exposure, so a
-   restart does not bring the killed orders back.
-3. GatewayServer, where the kill switch is, has no admin port, so there is
-   no `/otr` to check for its participants (OrderEngine's `/otr` reports
-   symbol 0 of its own engine only)
-4. Review the participant's recent order flow
-
-### Journal Corruption Detected
-A **torn final write** — less than one record after the last whole one, what a
-crash partway through a write leaves — is not corruption and needs no action:
-the engine cuts it at boot, logs `[Journal] Cut a torn final write: N byte(s)
-... saved to <path>.torn`, and starts. The bytes are appended to `<path>.torn`
-(they cannot hold a record, so nothing replayable is lost). Anything longer is:
-
-1. The engine **refuses to start**: `[Journal] REFUSING TO APPEND: <path> has N
-   byte(s) after its last replayable record`, then `[Engine] FATAL: journal ...
-   could not be opened safely`. It leaves the file untouched.
-2. **Do NOT delete the journal** — it's the audit trail
-3. The message prints the exact repair: `cp '<path>' '<path>.damaged' &&
-   truncate -s <bytes> '<path>'`. It means a corrupt record or a gap,
-   possibly with valid records behind it, which truncating discards.
-4. Restart the engine — it replays the records before the cut
-5. Manual reconciliation may be needed for orders after the corruption
-
-### High Latency / Queue Buildup
-1. Check CPU affinity: `taskset -p <pid>` — workers should be pinned
-2. Check for competing processes: `top -H -p <pid>`
-3. Check NUMA topology: workers should be on the same NUMA node
-4. Check journal disk latency: `iostat -x 1`
-5. **Confirm the journal is NOT on EBS / a network block device** — re-run the §1 "Journal Storage Pre-Flight" check. A network-backed journal adds ~1–4 ms per flush and is the single most common cause of an inflated Path C P99; the fix is to move the journal to instance-store NVMe or tmpfs, not to change code.
-6. If disk-bound: there is no switch. `SyncPolicy` has two values, `Immediate`
-   and `GroupCommit`, fixed per binary with no flag or key: OrderEngine uses
-   `GroupCommit`, GatewayServer `Immediate` (its durable acks depend on it)
-7. If CPU-bound: increase thread count or reduce symbol count per thread
-
-### Random Tail-Latency Spikes (50–200 µs P99.9, uncorrelated with load)
-`taskset` is not enough — the kernel still runs timer ticks, RCU callbacks, and NIC
-IRQs on the "pinned" cores. Work through [OSTuning.md](./OSTuning.md):
-1. Kernel isolation (`isolcpus`/`nohz_full`/`rcu_nocbs`) applied and verified in `/proc/cmdline` (§2)
-2. NIC IRQs pinned off the isolated cores: `sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>` (§3)
-3. NIC NUMA node == matching/DPDK cores' node (§4)
-4. Performance governor + deep C-states disabled: `sudo scripts/set_cpu_perf.sh` (§5)
-
----
-
-## 4. Backup / Recovery
-
-### Journal Checkpoint
-The engine checkpoints automatically at 250,000 entries or 64 MiB (compiled
-in; `checkpoint_entries` and `checkpoint_bytes` are read by nothing), when
-OrderEngine's `--journal-max-mb` / `OB_JOURNAL_MAX_SIZE_MB` is reached, and on
-every clean OrderEngine shutdown. **A checkpoint replaces the journal** with a
-snapshot of the resting orders: fills and cancels before it are gone. Copy the
-file first if you need that history.
-
-There is no manual checkpoint. **Do not send SIGUSR1**: nothing handles it, so
-it kills the process.
-
-### Disaster Recovery from Journal
-There is no `--replay-only`. OrderEngine ignores the flag and starts a live
-engine on the journal: it replays on boot, serves the admin port, and on a
-clean shutdown checkpoints — replacing the journal. Copy the journal before
-pointing anything at it.
-
+<!-- runbook-smoke: skip — needs a Docker daemon -->
 ```bash
-cp /var/lib/orderengine/journal.wal /var/lib/orderengine/journal.wal.dr
-
-# Inspect without writing to it
-JournalReplayCLI --journal /var/lib/orderengine/journal.wal.dr --stats
-
-# Recover: a normal start replays the journal before serving
-./bin/OrderEngine --journal /var/lib/orderengine/journal.wal
+OB_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up -d engine-primary
+curl -sf http://localhost:8080/health
 ```
 
-### Backup Promotion
-Replication is disabled unless `--allow-unsafe-replication` is passed, and has
-known CRITICAL defects (REPL-1..6): a deposed primary is never fenced and
-never steps down, so a partition that outlasts the lease leaves two
-primaries, and a promoted backup can execute orders twice. The steps below
-describe what the code does, not a safe failover.
+### Host tuning
 
-If the primary fails and a backup is running:
-1. The backup's `HeartbeatMonitor` detects the failure after 3 consecutive
-   missed heartbeats (compiled in: 100 ms interval, 500 ms timeout;
-   `heartbeat_timeout_ms` is read by nothing); promotion also waits for the
-   primary's 5,000 ms lease to lapse locally
-2. The backup acquires a new `LeaderLease` with a higher epoch
-3. The backup promotes **itself** — no operator action. `ReplicationCoordinator`
-   fires its promotion callback, which `src/main.cpp` wires to
-   `engine.setReplayModeAllBooks(false)`, and the process logs
-   `[Replication] PROMOTED to primary — exiting replay mode`. That log line is
-   what to grep for to confirm promotion happened.
-4. There is no client failover: OrderEngine has no order-entry port (orders
-   reach it only through the chaos-only `/chaos/order`)
+Kernel isolation, IRQ affinity and CPU frequency settings are in
+[OSTuning.md](./OSTuning.md). Its scripts need root on a real host with the NIC
+in question:
 
-> This step previously said "the backup calls `JournalFollower::promote()`".
-> That was wrong in two ways, and both matter during an incident: no shipped
-> binary constructs a `JournalFollower` at all (it is tailed-file replication,
-> a separate mechanism from the TCP log shipping that `OB_NODE_ROLE=backup`
-> actually starts), and promotion here is automatic rather than something an
-> operator invokes. Anyone following the old text would have gone looking for
-> a method they could not reach, while the thing they needed had already
-> happened.
+<!-- runbook-smoke: skip — needs root on a physical host and a real NIC -->
+```bash
+sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>
+sudo scripts/set_cpu_perf.sh
+```
 
----
-
-## 5. Configuration Changes
-
-### Hot-Reloadable Settings
-The following can be changed without restart:
-
-**Via SIGHUP** (send `kill -SIGHUP <pid>` — reloads the config file):
-- Only the rate limiter. Everything else in the file — alert webhooks,
-  sizing, symbols — is read once at startup or not at all.
-- `RateLimiter::reconfigure()` is now called on every SIGHUP: reads `rate_limit.default_rate` and `rate_limit.default_burst` from the reloaded config, updates the default rate/burst, and clears all existing participant token buckets so they inherit the new limits on their next request.
-
-**Via environment variables** (a running process's environment cannot be changed, so in practice these take effect at restart):
-- `OB_RATE_LIMIT_DEFAULT_RATE` / `OB_RATE_LIMIT_DEFAULT_BURST` — the default rate/burst, applied only on a SIGHUP and only when `--config` is set; no per-participant limit is read
-- `OB_ALERT_WEBHOOK_URL` — webhook target, read once at startup
-- `OB_JOURNAL_MAX_SIZE_MB` — maximum journal file size in megabytes before auto-checkpoint. Default: disabled (0). Set to e.g. `256` to rotate at 256 MB. When the threshold is reached, `Journal::needsCheckpoint()` fires and the main loop calls `engine.checkpoint()` automatically.
-
-### Cold Settings (Require Restart)
-- Thread count, symbol count
-- Journal path
-- Network ports
-- Node role (primary/backup)
-
-### Config Precedence
-1. Environment variable `OB_<KEY>` (highest)
-2. Config file value
-3. Compiled default (lowest)
-
----
-
-## 6. Capacity Planning
-
-See [CapacityPlanning.md](./CapacityPlanning.md) for detailed sizing guidance.
-
-Quick reference:
-- **Memory**: ~1 KB per live order **all-in** — i.e. the whole per-book
-  footprint divided by pool capacity, not the marginal cost of one more order.
-  Measured: 10.35 MiB per book at the 10,000-slot default = **1,085 bytes per
-  slot**, which is what this rule of thumb approximates. It includes the price
-  maps, trade ring and inline vectors, all of which are resident whether or not
-  an order ever arrives.
-
-  `docs/CapacityPlanning.md` quotes **~248 bytes per live order** and is not in
-  conflict: that is the MARGINAL cost (192 B `Order` + 16 + 8 + 32). Use 248 B
-  to answer "what does one more order cost", and ~1 KB/slot to answer "how much
-  RAM does this book need" — the second is the one that sizes a box, because
-  the pool is pre-constructed. Both scale with `order_pool_capacity`.
-- **CPU**: 1 core per symbol-partition thread + 1 for gateway + 1 for admin
-- **Disk**: Journal grows at ~100 bytes/entry. At 1M orders/day ≈ 100MB/day
-- **Network**: Each FIX message is 200-500 bytes. At 10K orders/sec ≈ 5 MB/s
-
----
-
-## 7. Maintenance Windows
-
-### Pre-Market
-1. Verify the journal reads cleanly: `JournalReplayCLI --journal <path> --stats` (there is no `--replay-only`)
-2. Check disk space: need at least 10x daily journal size free
-3. Run health check: `curl localhost:8080/health`
-4. Verify time sync: `chronyc tracking` — clock skew < 1ms
-
-### Post-Market
-1. Archive the journal: `cp journal.wal journal.$(date +%Y%m%d).wal`
-2. Run the benchmark regression suite: `./bin/ManualBenchmark`
-3. Check for latency regression in P99 numbers
-4. Rotate logs if using `stderr` sink
-
-### Weekly
-1. Run full test suite: `./build.sh && ./bin/ManualTest && ./bin/StressTest`
-2. Review Prometheus metrics for trends
-3. Check backup replication lag
+Clock sync is checked with your time daemon, for example `chronyc tracking`.
+Sizing guidance is in [CapacityPlanning.md](./CapacityPlanning.md).

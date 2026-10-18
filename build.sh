@@ -77,9 +77,6 @@ $CXX $FLAGS tests/GatewayIntegrationTest.cpp $LIB_OBJS bin/TcpGateway.o -o bin/G
 echo "Compiling property tests..."
 $CXX $FLAGS tests/PropertyTest.cpp $LIB_OBJS -o bin/PropertyTest
 
-echo "Compiling manual benchmarks..."
-$CXX $FLAGS benchmarks/ManualBenchmark.cpp $LIB_OBJS -o bin/ManualBenchmark
-
 echo "Compiling end-to-end benchmarks..."
 $CXX $FLAGS benchmarks/E2EBenchmark.cpp $LIB_OBJS bin/TcpGateway.o bin/AdminServer.o -o bin/E2EBenchmark
 
@@ -142,7 +139,6 @@ echo "To run Tests:            ./bin/ManualTest"
 echo "To run Stress Tests:     ./bin/StressTest"
 echo "To run Property Tests:   ./bin/PropertyTest"
 echo "To run Crash Tests:      ./bin/JournalCrashTest"
-echo "To run Bench:            ./bin/ManualBenchmark"
 echo "To run E2E Bench:        ./bin/E2EBenchmark"
 echo "To run Protocol Tests:   ./bin/GatewayProtocolTest"
 echo "To run GTD Tests:        ./bin/GTDReplayTest"

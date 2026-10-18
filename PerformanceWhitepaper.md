@@ -41,7 +41,7 @@ All three paths process the **identical** deterministic order stream (seed=42):
 
 ### 2.3 Timing Source
 
-`HonestBenchmark` times each order with `nowNs()`, defined in `LatencyTracker.h` as `std::chrono::high_resolution_clock::now().time_since_epoch().count()`. On Apple Silicon ARM64 it reports nanoseconds but ticks at ~41.67 ns (see the measurement-floor note in [BENCHMARKS.md](./BENCHMARKS.md)), so ARM figures are quantized to that grid. (The separate `ManualBenchmark` is the only benchmark that reads raw platform counters — `mach_absolute_time` / `rdtsc` — and is not the source of the numbers in this document.)
+`HonestBenchmark` times each order with `nowNs()`, defined in `LatencyTracker.h` as `std::chrono::high_resolution_clock::now().time_since_epoch().count()`. On Apple Silicon ARM64 it reports nanoseconds but ticks at ~41.67 ns (see the measurement-floor note in [BENCHMARKS.md](./BENCHMARKS.md)), so ARM figures are quantized to that grid. (The separate `DeterministicBenchmark` reads the raw cycle counter — `rdtsc` / `cntvct_el0` — and is not the source of the numbers in this document.)
 
 ### 2.4 Reproducibility
 

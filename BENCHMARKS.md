@@ -535,31 +535,12 @@ The 110× difference between OUCH and SBE encode reflects what each protocol ask
 
 The 1.0 ns/op SBE encode number is approaching the floor of what's measurable on a 24 MHz TSC. Real impact depends on whether the codec is the bottleneck (it's usually not — the engine dominates), but for venues moving billions of messages per day the difference is real.
 
-## Sharding (Separate Measurement)
+## Sharding
 
-> **⚠ These numbers use a DIFFERENT order flow** (pre-partitioned by price
-> range) and are **ARM64 dev-machine (M3 Pro) reference figures**, NOT the x86
-> authoritative numbers. They are NOT comparable to the single-thread paths above.
-
-| Metric (ARM64 dev reference) | Single-Thread | 4 Shards |
-|--------|--------------|----------|
-| Throughput | 7.6M ops/sec | 45.2M ops/sec |
-| P50 | 84 ns | 42 ns |
-| **Speedup** | — | **5.97x** |
-
-> **Not a measurement of matching.** `ShardedBookStressTest` never checks what
-> `addOrder` returned. Its prices are uniform over ±20% of centre (±40% across
-> the shards), while the default 5% circuit breaker anchors on each book's
-> first order price (`OrderBook.cpp`, `admitPriceBand`) and rejects anything
-> outside ±5% of it — tripping the book into a volatility auction nothing
-> resumes. A large share of the timed operations, most of the single-thread
-> baseline's, are therefore rejects, in proportions the benchmark does not
-> report. The P50s are one and two ARM clock ticks. Treat all five numbers as
-> unmeasured.
-
-**Critical caveat**: Real market data clusters around a moving midpoint. The
-cross-shard match rate under realistic conditions is unknown. This is the
-throughput ceiling, not the floor.
+No benchmark measures `ShardedOrderBook`. The former `ShardedBookStressTest`
+timed mostly circuit-breaker rejects and never checked what `addOrder`
+returned, so it was deleted along with its 5.97x table. The engine's scaling
+mechanism is thread-per-symbol; `ScalingBenchmark` measures that.
 
 ## Reproducing
 

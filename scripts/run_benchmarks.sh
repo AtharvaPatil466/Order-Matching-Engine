@@ -31,7 +31,7 @@ ctest --test-dir "$BUILD_DIR" --output-on-failure -L project
   fi
 } > "$OUT_DIR/machine.txt"
 
-"$BUILD_DIR/benchmarks/ManualBenchmark" | tee "$OUT_DIR/manual_benchmark.txt"
+"$BUILD_DIR/benchmarks/HonestBenchmark" | tee "$OUT_DIR/honest_benchmark.txt"
 "$BUILD_DIR/benchmarks/E2EBenchmark" | tee "$OUT_DIR/e2e_benchmark.txt"
 
 cat <<'EOF'

@@ -3,10 +3,9 @@
 // WHY THIS EXISTS
 //
 // Project_Overview.md claimed "horizontal scalability" and nothing in
-// benchmarks/ ever measured it. ShardedBookStressTest is fixed at 4 threads and
-// exercises ShardedOrderBook (price-range sharding inside ONE book) — a
-// different mechanism. JournalContentionBenchmark sweeps threads but asks a
-// journal question. This file asks only: as MatchingEngine async workers go
+// benchmarks/ ever measured it. ShardedOrderBook (price-range sharding inside
+// ONE book) is a different mechanism, and nothing measures it.
+// JournalContentionBenchmark sweeps threads but asks a journal question. This file asks only: as MatchingEngine async workers go
 // 1 -> 2 -> 4 -> 8 -> ..., does aggregate order throughput follow?
 //
 // WHAT IS MEASURED

@@ -96,7 +96,7 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Webhook Alerting**: `AlertDispatcher` — background thread delivery to Slack, PagerDuty, or generic HTTP webhooks with configurable severity filtering
 - **Config Management**: `Config` key-value loader with env var override (`OB_` prefix), type-safe getters, registered-listener callbacks on set/loadFile/loadMap. Hot-reload via SIGHUP wired — `--config PATH` flag, async-signal-safe `g_reload_config` atomic flag, config reloaded on signal receipt; only `rate_limit.default_rate` / `rate_limit.default_burst` take effect, and many keys in `config/engine.conf.example` are read by nothing
 - **End-to-End Latency Tracking**: Ingress timestamps on every order; per-thread `LatencyTracker` histograms for real P50/P99/P99.9 including queue delay
-- **Hardware Timing**: `ManualBenchmark` uses raw platform timers — `mach_absolute_time` (Apple Silicon) / `rdtsc` (x86) — for sub-clock-quantum micro-measurement. The headline `HonestBenchmark` numbers below use `nowNs()`, which is `std::chrono::high_resolution_clock`
+- **Hardware Timing**: `DeterministicBenchmark` reads the cycle counter — `rdtsc` (x86) / `cntvct_el0` (ARM) — for sub-clock-quantum micro-measurement. The headline `HonestBenchmark` numbers below use `nowNs()`, which is `std::chrono::high_resolution_clock`
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes; `.dockerignore` excludes host build artifacts; entrypoint shim conditionally LD_PRELOADs `libfaketime` for chaos clock-skew scenarios
 
 ### Formal Verification & Chaos Engineering
@@ -260,7 +260,7 @@ OB_ADMIN_TOKEN=... ./bin/OrderEngine --threads 4 --port 8080 --symbols 4
 ./bin/SbeSessionTest          # SBE NewOrder → engine + OrderAck
 
 # Benchmarks
-./bin/ManualBenchmark         # Per-order processing latency
+./bin/HonestBenchmark         # Per-order latency: book, engine, engine + journal
 ./bin/E2EBenchmark            # End-to-end latency (includes queue delay)
 ./bin/BinaryCodecBenchmark    # OUCH / ITCH / SBE encode-rate comparison
 ```
@@ -393,7 +393,7 @@ With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordi
 | Category | Tests | Description |
 |----------|-------|-------------|
 | **Functional** | ManualTest, UnitTests (GTest) | All order types, matching, cancellation, edge cases |
-| **Stress** | StressTest, ShardedBookStressTest, SustainedLoadTest | 5 multi-threaded scenarios, 4 concurrent producers, sustained load degradation detection |
+| **Stress** | StressTest, SustainedLoadTest | 5 multi-threaded scenarios, 4 concurrent producers, sustained load degradation detection |
 | **Property** | PropertyTest, JournalReplayPropertyTest, SnapshotConsistencyTest | Randomized invariant checks, replay determinism |
 | **Chaos** | FaultInjectorTest, PoolExhaustionTest, JournalChaosTest, JournalCorruptionTest, GatewayChaosTest, QueueChaosTest, CheckpointChaosTest, CombinedChaosTest | 10+ fault-injection points, short-writes, bit-flips, EAGAIN |
 | **Integration** | GatewayIntegrationTest, FixTcpGatewayTest, AdminServerEndpointsTest, OuchTcpGatewayTest, ItchUdpTransportTest, ItchMarketDataFeedTest | Real-loopback TCP/UDP round-trip, FIX/OUCH/ITCH session, HTTP endpoints |

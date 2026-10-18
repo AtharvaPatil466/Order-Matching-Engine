@@ -590,6 +590,14 @@ enable_assertions(IntegrityOracleTest)
 add_test(NAME IntegrityOracleTest COMMAND IntegrityOracleTest)
 set_tests_properties(IntegrityOracleTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.5-E2 (MATCH-2): match() asserts before printing a zero-quantity
+# trade. The bad state is injected in a forked child, which must abort.
+add_executable(ZeroQuantityTradeTest ZeroQuantityTradeTest.cpp)
+target_link_libraries(ZeroQuantityTradeTest PRIVATE OrderMatcher)
+enable_assertions(ZeroQuantityTradeTest)
+add_test(NAME ZeroQuantityTradeTest COMMAND ZeroQuantityTradeTest)
+set_tests_properties(ZeroQuantityTradeTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

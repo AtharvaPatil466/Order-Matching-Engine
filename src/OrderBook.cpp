@@ -6,6 +6,7 @@
 #include "StructuredLog.h"
 #include <algorithm>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1467,6 +1468,11 @@ void OrderBook::match(Order* incoming) {
         Quantity available = (bookOrder->type == OrderType::Iceberg)
                              ? bookOrder->visibleQty : bookOrder->remainingQty;
         Quantity fillQty = std::min(incoming->remainingQty, available);
+        // A resting order with nothing available (an empty iceberg slice, a
+        // zero-quantity order) printed a TRADE OF ZERO to the tape and both
+        // owners (MATCH-2). Its known routes are closed; this is the backstop.
+        // Pro-rata needs none: it skips a zero allocation before the trade.
+        assert(fillQty > 0 && "match(): a zero-quantity trade");
 
         incoming->remainingQty -= fillQty;
         incoming->cumQty += fillQty;

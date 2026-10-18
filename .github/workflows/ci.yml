@@ -90,7 +90,7 @@ jobs:
 
   latency-gate:
     name: Ubuntu Release Latency Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -156,7 +156,7 @@ jobs:
     # Defining that contract — "lean preserves price-time priority, conservation
     # and FIFO; it does not preserve STP, risk limits or circuit breakers" — is
     # the follow-up, and then this lane runs that subset.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -188,7 +188,7 @@ jobs:
     # runtime one): if io_uring_queue_init fails, the journal falls back to its
     # synchronous path without a word, and this lane would quietly test that
     # instead. Same probe as scripts/verify_linux.sh.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -221,7 +221,7 @@ jobs:
 
   fault-injection:
     name: Ubuntu Fault Injection
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

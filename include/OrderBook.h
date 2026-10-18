@@ -15,7 +15,9 @@
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <optional>
+#include <type_traits>
 #include <variant>
 #include <vector>
 #include <cstdint>
@@ -78,9 +80,22 @@ struct UncrossReport {
 // mutation on every fill. Wraps the fully-formed Trade — every downstream sink
 // (listeners + structured audit log) is derived from it, so no other per-fill
 // state needs buffering.
+//
+// Raw storage, not a Trade member (PERF-1): match() declares kMaxFillsPerOrder
+// of these on the stack per call, and Trade's default member initialisers made
+// that declaration write every slot — ~20 KB of stores per match(), most of an
+// x86 L1d, before the first fill. A slot holds a Trade only once set() runs.
 struct FillEvent {
-    Trade trade;
+    alignas(Trade) unsigned char storage[sizeof(Trade)];
+    void set(const Trade& t) { ::new (static_cast<void*>(storage)) Trade(t); }
+    const Trade& trade() const {
+        return *std::launder(reinterpret_cast<const Trade*>(storage));
+    }
 };
+static_assert(std::is_trivially_default_constructible_v<FillEvent>,
+              "match()'s fill buffer must not be initialised on every call");
+static_assert(std::is_trivially_destructible_v<Trade>,
+              "FillEvent never runs ~Trade()");
 
 // Market Data: single price level
 struct PriceLevel {

@@ -1379,9 +1379,9 @@ void OrderBook::match(Order* incoming) {
         // dispatch it (and its single deferred erase) directly, skipping the loop
         // setup. Falls back to the batched loop for multi-fill sweeps.
         if (fillCount == 1) [[likely]] {
-            dispatchOne(pendingFills[0].trade);
+            dispatchOne(pendingFills[0].trade());
         } else {
-            for (int i = 0; i < fillCount; ++i) dispatchOne(pendingFills[i].trade);
+            for (int i = 0; i < fillCount; ++i) dispatchOne(pendingFills[i].trade());
         }
         if (eraseCount == 1) {
             orderLookup_.erase(toErase[0]);
@@ -1546,7 +1546,7 @@ void OrderBook::match(Order* incoming) {
         // buffer). tradeHistory_ push stays inline (SPSC ring, not a vtable call),
         // so its write ordering — and every nextSequenceNumber_/nowNs() stamp —
         // is byte-for-byte unchanged.
-        pendingFills[fillCount++].trade = t;
+        pendingFills[fillCount++].set(t);
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;

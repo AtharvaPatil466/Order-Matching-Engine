@@ -81,7 +81,7 @@ concurrency:
 
 jobs:
   benchmark:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # This job configures and builds CMake and C++ from the PR head — code the
     # PR author controls executes here at configure time. It must not hold a
     # writable token while doing that.

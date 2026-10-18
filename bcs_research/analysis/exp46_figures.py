@@ -83,7 +83,7 @@ def fig_rent_per_hft() -> Path:
     ax.errorbar(x, m / 1000, yerr=yerr / 1000, fmt="o", color=CB[0],
                 capsize=3, label="per-HFT rent (95% CI)")
     ax.set_xlabel("number of competing HFTs")
-    ax.set_ylabel("per-HFT rent (\\$ thousands)")
+    ax.set_ylabel("per-HFT rent (thousands of simulation money units)")
     ax.set_title("Calibrated: per-HFT rent erodes as competitors enter")
     ax.grid(False)
     ax.spines["top"].set_visible(False)

@@ -72,7 +72,7 @@ def fig_dual_axis(report: dict) -> Path:
     x, rph, rph_err = _series(cells, "treatment_ci", "hft_rent_per_hft")
     ax.errorbar(x, rph, yerr=rph_err, fmt="o-", color=CB[0], capsize=3,
                 label="rent per HFT")
-    ax.set_ylabel("rent per HFT ($)", color=CB[0])
+    ax.set_ylabel("rent per HFT (simulation money units)", color=CB[0])
     ax.tick_params(axis="y", labelcolor=CB[0])
     _style(ax)
 
@@ -80,7 +80,7 @@ def fig_dual_axis(report: dict) -> Path:
     _, wl, wl_err = _series(cells, "delta_ci", "total_welfare_loss")
     ax2.errorbar(x, wl, yerr=wl_err, fmt="s--", color=CB[3], capsize=3,
                  label="total welfare loss")
-    ax2.set_ylabel("total welfare loss ($)", color=CB[3])
+    ax2.set_ylabel("total welfare loss (simulation money units)", color=CB[3])
     ax2.tick_params(axis="y", labelcolor=CB[3])
     ax2.set_ylim(0, max(wl) * 1.5)
     ax2.spines["top"].set_visible(False)
@@ -95,7 +95,7 @@ def fig_3a(report: dict) -> Path:
     ax.errorbar(x, rph, yerr=rph_err, fmt="o", color=CB[0], capsize=3,
                 label="rent per HFT (95% CI)")
     _style(ax)
-    ax.set_ylabel("rent per HFT ($)")
+    ax.set_ylabel("rent per HFT (simulation money units)")
     ax.set_title("Exp 3a - individual HFT rent erodes with competition")
     ax.legend(frameon=False, fontsize=8)
     return _save(fig, "fig3a_rent_per_hft.png")
@@ -107,7 +107,7 @@ def fig_3b(report: dict) -> Path:
     x, wl, wl_err = _series(cells, "delta_ci", "total_welfare_loss")
     ax.errorbar(x, wl, yerr=wl_err, fmt="o-", color=CB[3], capsize=3,
                 label="total welfare loss")
-    ax.set_ylabel("total welfare loss ($)", color=CB[3])
+    ax.set_ylabel("total welfare loss (simulation money units)", color=CB[3])
     ax.tick_params(axis="y", labelcolor=CB[3])
     ax.set_ylim(0, max(wl) * 1.6)
     _style(ax)

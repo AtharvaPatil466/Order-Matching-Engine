@@ -78,7 +78,7 @@ def fig_2a(report: dict, pt: dict) -> Path:
     b = pt["linear_slope_per_tick"] / US_PER_TICK
     xs = np.linspace(x.min(), x.max(), 100)
     ax.plot(xs, a + b * xs, "--", color=CB[3],
-            label=f"linear fit (${pt['linear_slope_per_tick']:.1f}/tick)")
+            label=f"linear fit ({pt['linear_slope_per_tick']:.1f} money units/tick)")
     ax.axhline(0.0, color="0.6", lw=0.8, ls=":")
     sig = pt.get("significance_threshold_us")
     if sig is not None:
@@ -87,7 +87,7 @@ def fig_2a(report: dict, pt: dict) -> Path:
                     xytext=(sig + 1500, mean.max() * 0.25),
                     color=CB[2], fontsize=8)
     _style(ax)
-    ax.set_ylabel("HFT rent ($)")
+    ax.set_ylabel("HFT rent (simulation money units)")
     ax.set_title("Exp 2a - HFT rent scales with the latency advantage")
     ax.legend(frameon=False, fontsize=8)
     return _save(fig, "fig2a_hft_rent.png")
@@ -105,7 +105,7 @@ def fig_2b(report: dict) -> Path:
         ax.errorbar(x, mean, yerr=yerr, fmt="o-", color=color, capsize=3, label=label)
     ax.axhline(0.0, color="0.6", lw=0.8, ls=":")
     _style(ax)
-    ax.set_ylabel("welfare ($, treatment - baseline)")
+    ax.set_ylabel("welfare (simulation money units, treatment - baseline)")
     ax.set_title("Exp 2b - zero-sum welfare transfer vs latency")
     ax.legend(frameon=False, fontsize=8)
     return _save(fig, "fig2b_welfare_decomp.png")

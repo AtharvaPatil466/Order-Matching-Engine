@@ -63,6 +63,12 @@ static size_t configuredSize(const char* key, size_t fallback) {
     return v > 0 ? static_cast<size_t>(v) : fallback;
 }
 
+// The smallest display an iceberg of `total` may show: ceil(total /
+// kMaxIcebergSlices), written so a total near 2^64 cannot overflow.
+static Quantity minIcebergDisplay(Quantity total) {
+    return total / OrderBook::kMaxIcebergSlices + (total % OrderBook::kMaxIcebergSlices != 0);
+}
+
 // requested == 0 keeps the documented ctor semantics: "engine default".
 static size_t resolveOrderPoolCapacity(size_t requested) {
     return requested ? requested
@@ -577,12 +583,15 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
     // computes available == 0 -> fillQty == 0, emits a zero-quantity trade, and
     // the refresh branch re-slices min(remainingQty, 0) == 0 — so
     // `while (incoming->remainingQty > 0)` never terminates and the matching
-    // thread livelocks on a single malformed order. Reject at admission.
+    // thread livelocks on a single malformed order. A display of 1 on a huge
+    // total is the bounded version of the same thing: one aggressor, a trade
+    // and a refresh per share under the lock (MATCH-19). Both are refused by
+    // the floor of ceil(qty / kMaxIcebergSlices), which is at least 1.
     // displayQty > qty is merely nonsensical rather than fatal (every use site
     // already takes min(remainingQty, displayQty)); clamp it so the stored
     // field satisfies displayQty <= initialQty like every other path assumes.
     if (type == OrderType::Iceberg) [[unlikely]] {
-        if (displayQty == 0)
+        if (displayQty < minIcebergDisplay(qty))
             return rejectOrder(orderId, participantId, qty, RejectReason::InvalidDisplayQty);
         if (displayQty > qty) displayQty = qty;
     }
@@ -2322,6 +2331,13 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
     // is refused rather than read as a cancel.
     if (newQty <= order->cumQty) [[unlikely]] {
         reason = RejectReason::InvalidQuantity;
+        return false;
+    }
+    // The display size does not change on a replace, so a total grown past
+    // displayQty * kMaxIcebergSlices is the admission floor bypassed (MATCH-19).
+    if (order->type == OrderType::Iceberg &&
+        order->displayQty < minIcebergDisplay(newQty)) [[unlikely]] {
+        reason = RejectReason::InvalidDisplayQty;
         return false;
     }
 

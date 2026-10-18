@@ -598,6 +598,14 @@ enable_assertions(ZeroQuantityTradeTest)
 add_test(NAME ZeroQuantityTradeTest COMMAND ZeroQuantityTradeTest)
 set_tests_properties(ZeroQuantityTradeTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.5-E2 (MATCH-19): an iceberg is worked in at most
+# kMaxIcebergSlices slices — admission and replace refuse a smaller display.
+add_executable(IcebergMinDisplayTest IcebergMinDisplayTest.cpp)
+target_link_libraries(IcebergMinDisplayTest PRIVATE OrderMatcher)
+enable_assertions(IcebergMinDisplayTest)
+add_test(NAME IcebergMinDisplayTest COMMAND IcebergMinDisplayTest)
+set_tests_properties(IcebergMinDisplayTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

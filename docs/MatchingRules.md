@@ -185,10 +185,15 @@ a refresh size (`displayQty`). Only the slice is public.
 > `include/Order.h:110-112` — `displayQuantity()`, the single definition of "what the market
 > can see" for one order, shared by the L2 aggregation and the order-level feed.
 
-### Rule 3.1 — An iceberg with a zero display size is rejected at admission
+### Rule 3.1 — An iceberg shows at least 1/100 of its size, or it is rejected
 
-`RejectReason::InvalidDisplayQty`. A display size larger than the order is clamped down
-rather than rejected.
+`RejectReason::InvalidDisplayQty` when `displayQty < ceil(qty / kMaxIcebergSlices)`
+(`kMaxIcebergSlices = 100`), which includes a zero display. A replace that grows the total
+past `displayQty * kMaxIcebergSlices` is refused the same way, since a replace does not change
+the display. A display size larger than the order is clamped down rather than rejected.
+The floor bounds the work one aggressor can cause against one iceberg to 100 slices; a
+display of 1 on a total of 1,000,000 used to be a million trades under the book lock
+(MATCH-19). Pinned by `tests/IcebergMinDisplayTest.cpp`.
 
 > `src/OrderBook.cpp:533-537`
 

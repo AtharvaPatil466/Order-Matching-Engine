@@ -315,6 +315,14 @@ public:
     bool validateIntegrity(std::string* err = nullptr) const;
 
 
+    // An iceberg must show at least ceil(total / kMaxIcebergSlices): admission
+    // and a growing replace refuse a smaller display with InvalidDisplayQty.
+    // Without a floor, one aggressor against a 1,000,000 iceberg showing 1 was
+    // a million trades and refreshes under the book lock (MATCH-19).
+    // ponytail: one venue-wide ratio; per-symbol display minimums if a venue
+    // rule needs them.
+    static constexpr Quantity kMaxIcebergSlices = 100;
+
     // Cancel/Replace. newQty is the order's new TOTAL (FIX OrderQty), shares
     // already executed included — not its new leaves. With cumQty executed:
     //   newQty <= cumQty  -> refused, InvalidQuantity, order untouched;

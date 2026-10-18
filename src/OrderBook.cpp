@@ -391,6 +391,10 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     if (tradingState_ == TradingState::Halted)    return RejectReason::MarketHalted;
     if (tradingState_ == TradingState::PostClose) return RejectReason::MarketClosed;
 
+    if (const RejectReason r = checkItchFieldWidths(price, qty, /*stopLimitPrice=*/0);
+        r != RejectReason::None) [[unlikely]]
+        return r;
+
 #ifndef OB_LEAN_MODE
     // Risk limits (maxOrderSize / maxOrderNotional / maxPositionSize). A
     // replace cannot grow an order, but a reprice can raise its notional.
@@ -545,6 +549,19 @@ std::optional<RejectReason> OrderBook::admitForTradingState(OrderId orderId,
     return std::nullopt;
 }
 
+// MD-8: the widths ITCH's price and shares fields can carry (see
+// setItchFieldLimits). A negative price wraps as unsigned, so one compare
+// covers both ends.
+RejectReason OrderBook::checkItchFieldWidths(Price price, Quantity qty,
+                                             Price stopLimitPrice) const {
+    if (!itchFieldLimits_ || replayMode_) return RejectReason::None;
+    constexpr uint64_t kMax = std::numeric_limits<uint32_t>::max();
+    if (qty > kMax) return RejectReason::InvalidQuantity;
+    if (static_cast<uint64_t>(price) > kMax || static_cast<uint64_t>(stopLimitPrice) > kMax)
+        return RejectReason::InvalidPrice;
+    return RejectReason::None;
+}
+
 // --- Input validation + duplicate orderId ---  Precondition: bookLock_ held.
 // `displayQty` is in/out: an Iceberg's display size is clamped here, at exactly
 // the point the original inline block clamped it, and the clamped value is what
@@ -554,9 +571,14 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
                                                             Price price, Quantity qty,
                                                             OrderType type,
                                                             Quantity& displayQty,
-                                                            Quantity minQty) {
+                                                            Quantity minQty,
+                                                            Price stopLimitPrice) {
     if (qty == 0) [[unlikely]]
         return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
+
+    if (const RejectReason r = checkItchFieldWidths(price, qty, stopLimitPrice);
+        r != RejectReason::None) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, r);
 
     // An Iceberg with displayQty == 0 rests with visibleQty == 0. match() then
     // computes available == 0 -> fillQty == 0, emits a zero-quantity trade, and
@@ -1076,7 +1098,8 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     std::unique_lock<std::mutex> lock(bookLock_);
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
-    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty, minQty)) return *r;
+    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty, minQty,
+                                      stopLimitPrice)) return *r;
     // Pool pressure runs before EITHER allocation site (the MOC/LOC park and the
     // main path) so both are covered.
     if (auto r = admitPoolPressure(orderId, participantId, qty)) return *r;

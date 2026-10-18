@@ -386,6 +386,47 @@ void test_UncrossVolumeCountedOnce() {
     } END
 }
 
+// MD-8. ITCH carries price and shares in 32 bits. A book that feeds ITCH must
+// refuse at admission what the wire cannot carry: the encoder truncated a
+// price of 2^32 + 1000 to 1000 and published an order that was not there.
+void test_ItchBookRejectsFieldsTheWireCannotCarry() {
+    TEST(ItchBookRejectsFieldsTheWireCannotCarry) {
+        constexpr Price kWide = Price{1} << 32;
+        MatchingEngine engine;
+        engine.addSymbol(7);
+        engine.addSymbol(8);
+        engine.start();
+        auto* book = engine.getOrderBook(7);
+        book->setCircuitBreakerThreshold(1e9);
+        std::string sent;
+        ItchPublisher pub(*book, [&](std::string_view b) { sent.append(b); });
+        book->setEventListener(&pub);
+
+        auto r = engine.submitOrder(7, 700, 1, Side::Buy, kWide + 1000, 10, OrderType::Limit);
+        if (r.isAccepted())
+            throw std::runtime_error("a 2^32+1000 price was accepted and published as " +
+                                     std::to_string(readU32BE(
+                                         reinterpret_cast<const uint8_t*>(sent.data()) + 32)));
+        CHECK(r.rejectReason == RejectReason::InvalidPrice);
+        r = engine.submitOrder(7, 701, 1, Side::Buy, 1000, Quantity{1} << 32, OrderType::Limit);
+        CHECK(!r.isAccepted() && r.rejectReason == RejectReason::InvalidQuantity);
+        // A StopLimit rests at its limit price once elected.
+        r = engine.submitOrder(7, 702, 1, Side::Buy, 1000, 10, OrderType::StopLimit,
+                               /*stopPrice=*/1100, 0, TimeInForce::GTC, 0,
+                               /*stopLimitPrice=*/kWide + 5);
+        CHECK(!r.isAccepted() && r.rejectReason == RejectReason::InvalidPrice);
+        CHECK(sent.empty() && "nothing reached the wire");
+
+        // A replace is an admission too.
+        CHECK(engine.submitOrder(7, 703, 1, Side::Buy, 1000, 10, OrderType::Limit).isAccepted());
+        RejectReason why = RejectReason::None;
+        CHECK(!book->cancelReplace(703, kWide + 1000, 10, why) && why == RejectReason::InvalidPrice);
+
+        // A book with no ITCH publisher keeps its 64-bit range.
+        CHECK(engine.submitOrder(8, 800, 1, Side::Buy, kWide + 1000, 10, OrderType::Limit).isAccepted());
+    } END
+}
+
 // MD-16. ITCH timestamps are nanoseconds since midnight. Without an injected
 // clock the publisher stamped steady_clock — time since boot — truncated to 48
 // bits, which is no time of day at all.
@@ -680,6 +721,7 @@ int main() {
     test_PublisherEmitsExecutedOnMakerFill();
     test_PublisherReportsCrossExecutionPrice();
     test_UncrossVolumeCountedOnce();
+    test_ItchBookRejectsFieldsTheWireCannotCarry();
     test_PublisherDefaultTimestampIsTimeSinceMidnight();
     test_PublisherEmitsDeleteOnCancel();
     test_PublisherEmitsExecutedThenDeleteOnFullFill();

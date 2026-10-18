@@ -604,6 +604,13 @@ public:
     void setReplayMode(bool replay) { replayMode_ = replay; }
     bool isReplayMode() const { return replayMode_; }
 
+    // MD-8: ITCH carries price and shares in 32 bits. ItchPublisher sets this
+    // on its book, and admission (new orders and replaces) then rejects a
+    // price or limit outside [0, 2^32) as InvalidPrice and shares >= 2^32 as
+    // InvalidQuantity, instead of the encoder truncating them. Set before
+    // traffic, like the other setters. Replay never re-judges it.
+    void setItchFieldLimits(bool on) { itchFieldLimits_ = on; }
+
     Price getBestBid() const;
     Price getBestAsk() const;
     Price getMidPrice() const;
@@ -792,7 +799,9 @@ private:
                                                      Quantity qty, OrderType type);
     OB_ALWAYS_INLINE std::optional<RejectReason> validateOrderRequest(OrderId orderId, ParticipantId participantId,
                                                      Price price, Quantity qty, OrderType type,
-                                                     Quantity& displayQty, Quantity minQty);
+                                                     Quantity& displayQty, Quantity minQty,
+                                                     Price stopLimitPrice);
+    RejectReason checkItchFieldWidths(Price price, Quantity qty, Price stopLimitPrice) const;
     std::optional<RejectReason> admitPoolPressure(OrderId orderId, ParticipantId participantId,
                                                   Quantity qty);
     OB_ALWAYS_INLINE std::optional<RejectReason> admitPriceBand(OrderId orderId, ParticipantId participantId,
@@ -996,6 +1005,7 @@ private:
 
     // Replay mode flag — suppresses callbacks during journal recovery
     bool replayMode_{false};
+    bool itchFieldLimits_{false};  // MD-8, see setItchFieldLimits
 
     // Identity
     SymbolId symbolId_;

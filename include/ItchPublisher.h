@@ -78,8 +78,11 @@ public:
     using SendBytes = std::function<void(std::string_view)>;
     using ClockFn   = std::function<uint64_t()>;
 
+    // MD-8: the book refuses at admission what ITCH's 32-bit fields cannot
+    // carry. ponytail: never cleared — a book that once fed ITCH keeps the
+    // limit; clear it with book.setItchFieldLimits(false) if that matters.
     ItchPublisher(OrderBook& book, SendBytes send)
-        : book_(book), send_(std::move(send)) {}
+        : book_(book), send_(std::move(send)) { book_.setItchFieldLimits(true); }
 
     ~ItchPublisher() override { stopAsyncPublishing(); }
 

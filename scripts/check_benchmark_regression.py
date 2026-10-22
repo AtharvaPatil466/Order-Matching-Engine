@@ -55,20 +55,19 @@ DEFAULT_GATES = {
     "p99": 25.0,
 }
 
-# The workload identity of a run. Both sides must agree on all four, or the
+# The workload identity of a run. Both sides must agree on all five, or the
 # comparison is between two different benchmarks and means nothing.
 #
-# This is not hypothetical bookkeeping. DeterministicBenchmark's argument parser
-# is an if/else-if chain with no terminal else: an unknown or renamed flag is
-# skipped in silence and the binary still exits 0. The base side is built from an
-# arbitrary historical merge base, so if that commit predates a flag this PR
-# renames, the base binary quietly runs its built-in defaults (iterations=100,
-# orders=10000) against head's requested workload, and the gate compares a
-# 1,000,000-sample p99 against a 100,000-sample p99 at a different tail depth.
+# This is not hypothetical bookkeeping. The base side is built from an arbitrary
+# historical merge base, so its binary may not run what head asked for. Today's
+# DeterministicBenchmark rejects an unknown flag, but an old base that predates
+# a flag may not, or may default it differently: `workload` (the order-flow
+# shape) was left out of this tuple while a base and head disagreeing on it
+# still compared equal on everything else (BENCH-13).
 #
-# `count` is the load-bearing one: `orders` is not in the JSON, but count is
-# iterations x orders, so checking count catches a divergence in either.
-WORKLOAD_KEYS = ("seed", "iterations", "mode", "count")
+# `count` is the load-bearing one for size: `orders` is not in the JSON, but
+# count is iterations x orders, so checking count catches a divergence in either.
+WORKLOAD_KEYS = ("seed", "iterations", "mode", "workload", "count")
 
 # Each benchmark process calibrates the timestamp counter against wall time over
 # a single 100 ms sleep, and the resulting ratio multiplies every latency it
@@ -251,7 +250,7 @@ def selftest() -> int:
             path = os.path.join(tmpdir, f"run-{len(written)}.json")
             written.append(path)
             doc = {"seed": 42, "iterations": 20, "mode": "full",
-                   "count": 100000, "tsc_ns_ratio": 0.3125}
+                   "workload": "add-only", "count": 100000, "tsc_ns_ratio": 0.3125}
             doc.update(fields)
             for key in drop:
                 doc.pop(key, None)
@@ -309,10 +308,10 @@ def _assertions(write) -> int:
         raise AssertionError("all-NaN head should have raised SystemExit")
 
     # Two sides that ran different workloads are not comparable, in any of the
-    # four ways they can diverge. This is what catches a base tree whose binary
-    # silently ignored a flag it did not recognise and ran its own defaults.
-    for divergence in ({"seed": 7}, {"iterations": 100},
-                       {"mode": "warm"}, {"count": 1000000}):
+    # five ways they can diverge — including the order-flow shape, which
+    # changes what is measured while leaving seed, iterations and count equal.
+    for divergence in ({"seed": 7}, {"iterations": 100}, {"mode": "warm"},
+                       {"workload": "cancel-heavy"}, {"count": 1000000}):
         try:
             compare([base], [write(100.0, **divergence)], only99)
         except ValueError:

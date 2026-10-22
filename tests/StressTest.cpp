@@ -300,7 +300,7 @@ void testHighThroughputBurst() {
     TradeCounter counter(tradeCount);
     book->setEventListener(&counter);
 
-    auto start = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::steady_clock::now();
 
     // Burst: all threads submit as fast as possible
     constexpr int NUM_THREADS = 4;
@@ -325,7 +325,7 @@ void testHighThroughputBurst() {
 
     engine.waitForDrain();
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::steady_clock::now();
     auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 
     engine.stopAsync();

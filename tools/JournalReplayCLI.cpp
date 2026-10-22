@@ -100,9 +100,9 @@ void replayBenchmark(const std::string& journalPath) {
     engine.enableJournal(journalPath);
     engine.start();
 
-    auto start = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::steady_clock::now();
     size_t entries = engine.replayJournal();
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::steady_clock::now();
 
     double durationMs = std::chrono::duration<double, std::milli>(end - start).count();
     double entriesPerSec = (durationMs > 0)

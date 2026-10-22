@@ -44,8 +44,8 @@
 namespace OrderMatcher {
 
 // Wall-clock nanoseconds since the Unix epoch. Distinct from LatencyTracker's
-// nowNs() (a monotonic high_resolution_clock) — an audit trail needs a real
-// calendar timestamp that survives across process restarts.
+// nowNs(), whose clock differs by platform (see there) — an audit trail needs
+// a real calendar timestamp that survives across process restarts.
 inline uint64_t auditWallNs() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(

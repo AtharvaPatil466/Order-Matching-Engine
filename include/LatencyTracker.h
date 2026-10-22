@@ -8,7 +8,12 @@
 
 namespace OrderMatcher {
 
-// High-resolution nanosecond timestamp
+// Nanosecond timestamp from high_resolution_clock. NOT monotonic on the
+// production platform (BENCH-9): libstdc++ aliases it to system_clock, so on
+// Linux this is wall-clock epoch ns and steps with NTP; libc++ (macOS) aliases
+// it to steady_clock, boot-relative. Engine timestamps (Trade, order, CAT)
+// read it, which is why it is not simply switched. Do not time an interval
+// with it: benchmarks use steady_clock (bench::nowNs, NoWallClockTimingTest).
 inline uint64_t nowNs() {
     return static_cast<uint64_t>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());

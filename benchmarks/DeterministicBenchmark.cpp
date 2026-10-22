@@ -36,7 +36,7 @@ inline uint64_t hwTimestamp() {
     return val;
 #else
     return static_cast<uint64_t>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::chrono::steady_clock::now().time_since_epoch().count());
 #endif
 }
 
@@ -44,12 +44,12 @@ inline uint64_t hwTimestamp() {
 double calibrateTscToNs() {
     constexpr int CALIBRATION_MS = 100;
     uint64_t tscStart = hwTimestamp();
-    auto wallStart = std::chrono::high_resolution_clock::now();
+    auto wallStart = std::chrono::steady_clock::now();
     
     std::this_thread::sleep_for(std::chrono::milliseconds(CALIBRATION_MS));
     
     uint64_t tscEnd = hwTimestamp();
-    auto wallEnd = std::chrono::high_resolution_clock::now();
+    auto wallEnd = std::chrono::steady_clock::now();
     
     double wallNs = static_cast<double>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(

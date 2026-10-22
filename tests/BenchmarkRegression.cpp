@@ -2,10 +2,19 @@
 #include "OrderBook.h"
 #include "LatencyTracker.h"
 
+#include <chrono>
 #include <variant>
 #include <vector>
 
 using namespace OrderMatcher;
+
+namespace {
+// Monotonic. OrderMatcher::nowNs() is system_clock under libstdc++ (BENCH-9).
+uint64_t steadyNs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}  // namespace
 
 // ─── Benchmark Regression Tests ─────────────────────────────────────────────
 // These tests run fixed workloads and assert that p99 latency stays below
@@ -57,9 +66,9 @@ TEST_F(BenchmarkRegressionTest, AddOrder_P99_Under2000ns) {
 
     int acceptedCount = 0;
     for (int i = 0; i < N; ++i) {
-        auto start = nowNs();
+        auto start = steadyNs();
         auto r = book.addOrder(id++, pid, Side::Buy, 1000000 - (i % 1000), 10, OrderType::Limit);
-        tracker.record(nowNs() - start);
+        tracker.record(steadyNs() - start);
         acceptedCount += accepted(r);
     }
     ASSERT_EQ(acceptedCount, N) << "AddOrder timed rejects, not adds";
@@ -94,9 +103,9 @@ TEST_F(BenchmarkRegressionTest, MatchOrder_P99_Under5000ns) {
     ParticipantId buyer = 2;
     int acceptedCount = 0;
     for (int i = 0; i < N; ++i) {
-        auto start = nowNs();
+        auto start = steadyNs();
         auto r = book.addOrder(id++, buyer, Side::Buy, kBuyLimit, 10, OrderType::Limit);
-        tracker.record(nowNs() - start);
+        tracker.record(steadyNs() - start);
         acceptedCount += accepted(r);
     }
     ASSERT_EQ(acceptedCount, N) << "MatchOrder timed rejects, not matches";
@@ -125,9 +134,9 @@ TEST_F(BenchmarkRegressionTest, CancelOrder_P99_Under1000ns) {
     ASSERT_EQ(seeded, N);
 
     for (OrderId cancelId = 1; cancelId <= static_cast<OrderId>(N); ++cancelId) {
-        auto start = nowNs();
+        auto start = steadyNs();
         book.cancelOrder(cancelId);
-        tracker.record(nowNs() - start);
+        tracker.record(steadyNs() - start);
     }
     ASSERT_EQ(restingOrders(), 0u) << "some timed cancels were no-ops";
 
@@ -155,9 +164,9 @@ TEST_F(BenchmarkRegressionTest, Snapshot_P99_Under500ns) {
     constexpr int N = 10000;
     size_t levels = 0;
     for (int i = 0; i < N; ++i) {
-        auto start = nowNs();
+        auto start = steadyNs();
         auto snap = book.getSnapshot(10);
-        tracker.record(nowNs() - start);
+        tracker.record(steadyNs() - start);
         levels += snap.bidCount + snap.askCount;
     }
     ASSERT_EQ(levels, static_cast<size_t>(N) * 20);

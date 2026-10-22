@@ -229,6 +229,10 @@ set_tests_properties(EngineExpiresGtdTest PROPERTIES
     TIMEOUT 180
     LABELS "project;lifecycle")
 
+add_test(NAME NoWallClockTimingTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_wall_clock_timing.sh ${CMAKE_SOURCE_DIR})
+set_tests_properties(NoWallClockTimingTest PROPERTIES TIMEOUT 30 LABELS "project;benchmark")
+
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
                  $<TARGET_FILE:OrderEngine>)

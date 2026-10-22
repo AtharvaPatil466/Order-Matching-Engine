@@ -9,6 +9,7 @@
 #include "TcpGateway.h"
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <csignal>
 #include <cstdlib>
 #include <netinet/in.h>
@@ -65,6 +66,7 @@ private:
         auto* p = static_cast<const char*>(b);
         while (n) {
             const ssize_t r = ::send(fd_, p, n, MSG_NOSIGNAL);
+            if (r < 0 && errno == EINTR) continue;
             if (r <= 0) return false;
             p += r; n -= static_cast<size_t>(r);
         }
@@ -73,7 +75,11 @@ private:
     bool recvAll(void* b, size_t n) {
         auto* p = static_cast<char*>(b);
         while (n) {
+            // EINTR is not an answer. A socket with SO_RCVTIMEO returns it
+            // even with no handler installed, e.g. for io_uring task work
+            // queued to this thread by a ring it tore down.
             const ssize_t r = ::recv(fd_, p, n, 0);
+            if (r < 0 && errno == EINTR) continue;
             if (r <= 0) return false;
             p += r; n -= static_cast<size_t>(r);
         }

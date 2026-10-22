@@ -904,6 +904,9 @@ private:
                               OrderType type, Quantity cumBefore = 0);
     bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
 
+    // STP DecreaseAndCancel: shrink both by the smaller remaining quantity;
+    // true => the resting order reached zero and must be cancelled.
+    bool stpDecreaseBoth(Order* incoming, Order* resting);
     // C1: finalize an order that STP removed mid-match. True => deallocated,
     // caller must not rest or touch it. Shared by all four match() call sites.
     // C1: remove a resting order under STP, reporting CancelledBySTP. Shared

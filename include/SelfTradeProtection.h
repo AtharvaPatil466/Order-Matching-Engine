@@ -8,7 +8,7 @@
 //   CancelResting:      Cancel the resting order, execute nothing.
 //   CancelIncoming:     Cancel the incoming order, leave resting.
 //   CancelBoth:         Cancel both orders.
-//   DecreaseAndCancel:  Decrease resting qty by match amount; cancel if zero.
+//   DecreaseAndCancel:  Decrease both by the smaller qty; cancel whichever hits zero.
 //
 // STP mode is stored per participant. The check is performed in the
 // matching loop before executing a trade. If STP triggers, a cancel
@@ -39,7 +39,7 @@ enum class STPMode : uint8_t {
     CancelResting = 1,     // Cancel resting order
     CancelIncoming = 2,    // Cancel incoming order
     CancelBoth = 3,        // Cancel both orders
-    DecreaseAndCancel = 4  // Decrease resting qty, cancel if zero
+    DecreaseAndCancel = 4  // Decrease both by the smaller qty, cancel at zero
 };
 
 struct STPResult {

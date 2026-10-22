@@ -305,7 +305,7 @@ that permits a self-cross, and the unconfigured default prevents.
 | `CancelResting` (1) | Remove the resting order, incoming continues |
 | `CancelIncoming` (2) | Cancel the incoming order, resting survives |
 | `CancelBoth` (3) | Remove both |
-| `DecreaseAndCancel` (4) | Reduce the resting order; cancel it if it reaches zero — **see [defect B2](#b2--decreaseandcancel-never-decrements-the-incoming-order)** |
+| `DecreaseAndCancel` (4) | Reduce both orders by the smaller remaining quantity; cancel whichever reaches zero (continuous trading; in an auction the older order is cancelled — see [B2](#b2--decreaseandcancel-never-decrements-the-incoming-order-fixed-in-continuous-trading)) |
 
 ### Rule 4.1 — An STP-cancelled order reports `CancelledBySTP`, never `Cancelled` and never `Filled`
 
@@ -1219,30 +1219,18 @@ exercises a level deeper than 1024. Two plausible fixes — allocate in chunks, 
 total over the same capped window so the ratios are at least self-consistent — but this is a
 behaviour change and out of scope here.
 
-### B2 — `DecreaseAndCancel` never decrements the incoming order
+### B2 — `DecreaseAndCancel` never decrements the incoming order (fixed in continuous trading)
 
-On all three matching paths, `DecreaseResting` reduces the resting order by the match quantity
-and leaves the incoming order's `remainingQty` untouched. The sweep therefore re-triggers on
-the same resting order and decrements it again, repeatedly, until it is exhausted and
-cancelled.
+Fixed by roadmap 1.5-E5 (MATCH-10) on the price-time and pro-rata paths: both orders shrink
+by the smaller remaining quantity and whichever reaches zero is cancelled, the CME / Nasdaq
+decrement-and-cancel. A decrease is not a fill, so each order's total shrinks with its leaves.
+It used to reduce only the resting order, so the sweep met it again and again until it was
+gone: a resting 100 met by an incoming 30 ended at 0, not 70, and the incoming order traded on
+at full size. Pinned by `DecreaseAndCancelDecrementsBothOrders` in `tests/StpSemanticsTest.cpp`
+on both paths.
 
-> `src/OrderBook.cpp:1318-1329` (price-time), `src/OrderBook.cpp:1499-1509` (pro-rata),
-> `src/OrderBook.cpp:2560-2570` (auction)
-
-Net effect: `DecreaseAndCancel` is behaviourally identical to `CancelResting` whenever the
-incoming order survives the first pass. A resting 100 met by an incoming 30 ends at **0**, not
-70.
-
-This is acknowledged in prose at `tests/StpSemanticsTest.cpp:411-422`, which calls it *"a
-pre-existing defect of the price-time path"* and pins the current behaviour deliberately so
-the three paths cannot drift. **It is not acknowledged in any document, and the mode's name
-and its header comment (`include/SelfTradeProtection.h:11` — *"Decrease resting qty by match
-amount; cancel if zero"*) both describe the intended behaviour, not the actual one.**
-
-**How venues specify it.** CME and Nasdaq both publish decrement-and-cancel as decrementing
-**both** orders by the minimum of the two quantities and cancelling whichever reaches zero.
-This engine's version is not that. A participant configuring `DecreaseAndCancel` expecting the
-published semantics will lose their entire resting order instead of the overlapping part.
+The auction still cancels the older order outright: its self-cross plan treats
+`DecreaseResting` like `CancelResting` ([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order-by-timestamp)).
 
 ### B3 — Auction price discovery runs before auction STP (fixed)
 

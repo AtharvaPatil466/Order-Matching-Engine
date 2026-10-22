@@ -1239,6 +1239,23 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
 // addOrder's copy (the one the C1 report names) left the other three resting
 // an order that STP had just killed. Sharing the check is what makes the
 // guarantee hold on every path rather than on the one that was reported.
+// DecreaseAndCancel's decrement, shared by match() and matchProRata(): both
+// orders shrink by the smaller remaining quantity. A decrease is not a fill —
+// each total shrinks with its leaves, so cumQty stays what really executed.
+// Returns true when the resting order reached zero and must be cancelled.
+bool OrderBook::stpDecreaseBoth(Order* incoming, Order* resting) {
+    const Quantity dec = std::min(incoming->remainingQty, resting->remainingQty);
+    incoming->remainingQty -= dec;
+    incoming->initialQty   -= dec;
+    if (dec == resting->remainingQty) return true;
+    resting->remainingQty -= dec;
+    resting->initialQty   -= dec;
+    // Keep visibleQty <= remainingQty or a later fill underflows
+    // remainingQty to UINT64_MAX (no-op for a non-iceberg).
+    resting->visibleQty = std::min(resting->visibleQty, resting->remainingQty);
+    return false;
+}
+
 bool OrderBook::finalizeIfStpCancelled(Order* order) {
     if (order->status != OrderStatus::CancelledBySTP) [[likely]] return false;
 
@@ -1465,18 +1482,16 @@ void OrderBook::match(Order* incoming) {
                 stpCancelResting(bookOrder, level);
                 break;
             case STPResult::Action::DecreaseResting:
-                if (stp.decreaseAmount >= bookOrder->remainingQty) {
+                // DecreaseAndCancel: BOTH orders shrink by the smaller of the
+                // two, and whichever reaches zero is cancelled (MATCH-10). Only
+                // the resting one used to shrink, so the sweep met it again
+                // and again until it was gone — O(resting qty) per message —
+                // and the incoming order traded on at full size.
+                if (stpDecreaseBoth(incoming, bookOrder))
                     stpCancelResting(bookOrder, level);
-                } else {
-                    // A decrease is not a fill: the order's total shrinks
-                    // with its leaves, so cumQty stays what really executed.
-                    bookOrder->remainingQty -= stp.decreaseAmount;
-                    bookOrder->initialQty   -= stp.decreaseAmount;
-                    // Preserve the iceberg invariant visibleQty <= remainingQty
-                    // (no-op for non-iceberg, where visibleQty == 0). Without it
-                    // a later fill underflows remainingQty to UINT64_MAX.
-                    bookOrder->visibleQty =
-                        std::min(bookOrder->visibleQty, bookOrder->remainingQty);
+                if (incoming->remainingQty == 0) {
+                    incoming->status = OrderStatus::CancelledBySTP;
+                    break;
                 }
                 continue;  // try next resting order
             }
@@ -1656,14 +1671,12 @@ void OrderBook::matchProRata(Order* incoming) {
                     levelChanged = true;
                     break;
                 case STPResult::Action::DecreaseResting:
-                    if (stp.decreaseAmount >= o->remainingQty) {
+                    // Both shrink; see match() (MATCH-10).
+                    if (stpDecreaseBoth(incoming, o))
                         stpCancelRestingOrder(o, &level, opposite);
-                    } else {
-                        o->remainingQty -= stp.decreaseAmount;
-                        o->initialQty   -= stp.decreaseAmount;  // not a fill
-                        // Keep visibleQty <= remainingQty or a later fill
-                        // underflows remainingQty to UINT64_MAX.
-                        o->visibleQty = std::min(o->visibleQty, o->remainingQty);
+                    if (incoming->remainingQty == 0) {
+                        incoming->status = OrderStatus::CancelledBySTP;
+                        return;
                     }
                     levelChanged = true;
                     break;

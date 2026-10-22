@@ -411,37 +411,56 @@ TEST(StpProRata, CancelBothRemovesTakerAndMaker) {
     book->setEventListener(nullptr);
 }
 
-// NOTE on DecreaseAndCancel, verified identical on BOTH paths and on the
-// price-time reference: the resting order is decremented but the INCOMING order
-// never is, so the sweep re-triggers on the same resting order and decrements
-// it again until it is exhausted and cancelled. Net effect: DecreaseAndCancel
-// is behaviourally identical to CancelResting whenever the incoming order
-// survives the first pass — 100 decremented by 30 ends at 0, not 70.
-//
-// That is a pre-existing defect of the price-time path, not of this change; the
-// requirement here is to mirror match(), and these tests pin that the mirror is
-// faithful. If the mode is ever given its intended semantics (decrement BOTH
-// sides by the match quantity, cancelling whichever hits zero) these two
-// expectations are what will need revisiting.
-TEST(StpProRata, DecreaseRestingConvergesToMakerCancellation) {
-    auto book = proRataBook();
+// DecreaseAndCancel (MATCH-10, roadmap 1.5-E5) decrements BOTH orders by the
+// smaller of the two and cancels whichever reaches zero. It used to decrement
+// only the resting order, so the sweep met the same order again and again and
+// wiped it whole — 100 against an incoming 30 ended at 0, not 70, in work
+// proportional to the resting size — and the incoming order kept its full size
+// to trade on. Pinned on both continuous paths.
+static void expectDecreaseAndCancelDecrementsBoth(OrderBook& book) {
     CaptureListener lis;
-    book->setEventListener(&lis);
+    book.setEventListener(&lis);
     const ParticipantId P = 1;
-    book->setSTPMode(P, STPMode::DecreaseAndCancel);
+    book.setSTPMode(P, STPMode::DecreaseAndCancel);
 
-    book->addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
+    book.addOrder(1, P, Side::Sell, PX, 100, OrderType::Limit);
     lis.clear();
-    book->addOrder(2, P, Side::Buy, PX, 30, OrderType::Limit);
+    book.addOrder(2, P, Side::Buy, PX, 30, OrderType::Limit);
 
     EXPECT_TRUE(lis.trades.empty()) << "a decrease is not a trade";
-    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1)
-        << "repeated decrements exhaust the maker, which is then cancelled";
-    EXPECT_EQ(book->getOrder(1), nullptr);
-    // Identical to the price-time reference — that is the property under test.
-    EXPECT_FALSE(lis.trades.size() > 0);
+    const Order* resting = book.getOrder(1);
+    ASSERT_NE(resting, nullptr) << "100 decremented by 30 is 70, not cancelled";
+    EXPECT_EQ(resting->remainingQty, 70u);
+    EXPECT_EQ(resting->initialQty, 70u) << "a decrease shrinks the size, it is not a fill";
+    EXPECT_EQ(book.getOrder(2), nullptr) << "the incoming 30 reached zero";
+    ASSERT_NE(lis.lastFor(2), nullptr);
+    EXPECT_EQ(lis.lastFor(2)->status, OrderStatus::CancelledBySTP);
+    EXPECT_EQ(lis.lastFor(2)->filledQty, 0u);
+    EXPECT_TRUE(book.validateIntegrity());
 
-    book->setEventListener(nullptr);
+    // The larger incoming survives, smaller by the decrement, and trades on.
+    book.addOrder(3, 2, Side::Sell, PX + 1, 50, OrderType::Limit);
+    lis.clear();
+    book.addOrder(4, P, Side::Buy, PX + 1, 100, OrderType::Limit);
+    EXPECT_EQ(book.getOrder(1), nullptr) << "the resting 70 reached zero";
+    EXPECT_EQ(lis.countStatus(1, OrderStatus::CancelledBySTP), 1);
+    Quantity traded = 0;
+    for (const auto& t : lis.trades) traded += t.quantity;
+    EXPECT_EQ(traded, 30u) << "100 decremented by 70 leaves 30 to trade, not 100";
+    EXPECT_TRUE(book.validateIntegrity());
+
+    book.setEventListener(nullptr);
+}
+
+TEST(StpSemantics, DecreaseAndCancelDecrementsBothOrders) {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(0.99);
+    expectDecreaseAndCancelDecrementsBoth(book);
+}
+
+TEST(StpProRata, DecreaseAndCancelDecrementsBothOrders) {
+    auto book = proRataBook();
+    expectDecreaseAndCancelDecrementsBoth(*book);
 }
 
 // ─── Auction uncross: every mode ────────────────────────────────────────────

@@ -247,3 +247,36 @@ jobs:
         #   BenchmarkRegressionTest — perf-only; FI adds per-push/pop overhead,
         #                             so its thresholds are meaningless here
         run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
+
+  wide-diff-fuzz:
+    name: Ubuntu Wide Differential Fuzz (non-blocking)
+    # The widened differential fuzzer (roadmap 1.3-C1): modify, replace,
+    # icebergs, STP modes, kill switch and execution reports against a
+    # price-time reference, 60 seeds x 2000 ops under ASan/UBSan. NON-BLOCKING
+    # by the user's decision 2 (2026-10-05): it is red on two known classes —
+    # FOK + STP partial fills (GTDIFF-2, roadmap 1.6-F5) and event order
+    # (GTDIFF-7) — and becomes a required lane once 1.6-F5 and an event-order
+    # spec land. Remove continue-on-error then. The second step suppresses the
+    # FOK + STP class, so anything it finds is a new defect.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_SANITIZERS=ON
+          -DBUILD_TESTS=ON
+          -DBUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build --parallel 4 --target WideDifferentialFuzz
+
+      - name: Fuzz, every class
+        run: ./build/tests/WideDifferentialFuzz --seeds 60 --ops 2000 --report 4 --ice --stp-modes --kill
+
+      - name: Fuzz, known FOK + STP class suppressed
+        if: always()
+        run: ./build/tests/WideDifferentialFuzz --seeds 60 --ops 2000 --report 4 --ice --stp-modes --kill --fok-engine --no-fokpartial

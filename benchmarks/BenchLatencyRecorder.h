@@ -215,7 +215,8 @@ private:
         return std::min(bucket, NUM_BUCKETS - 1);
     }
 
-    // Reconstruct the lower edge of a bucket (conservative representative).
+    // Reconstruct the lower edge of a bucket. Percentiles built on it can
+    // understate by up to one bucket width — optimistic, not conservative.
     static uint64_t fromBucket(size_t bucket) {
         if (bucket < LINEAR_LIMIT) return static_cast<uint64_t>(bucket);
         uint64_t idx = static_cast<uint64_t>(bucket) - LINEAR_LIMIT;

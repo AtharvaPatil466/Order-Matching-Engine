@@ -19,9 +19,12 @@ inline uint64_t nowNs() {
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
 }
 
-// Fixed-size HDR-style latency histogram (lock-free, single-writer)
-// Tracks latencies from 0 to ~4 billion nanoseconds (~4 seconds) in 1ns resolution
-// Uses log-linear bucketing for memory efficiency
+// Fixed-size HDR-style latency histogram (lock-free, single-writer).
+// Log-linear buckets: exact below 1,024 ns, then 128 per power of two (each
+// under 0.8% wide). It saturates at ~17.1 s (2^33 + 127 * 2^26 ns, the lower
+// edge of the last bucket); longer intervals all land there (BENCH-12).
+// Percentiles report a bucket's LOWER edge, so they can understate by up to
+// one bucket width — optimistic, not conservative.
 //
 // SINGLE WRITER, ANY NUMBER OF READERS (BENCH-8). Every field is an atomic
 // written with relaxed load+store by the one thread that records — no RMW, so

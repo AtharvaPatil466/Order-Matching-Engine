@@ -25,6 +25,7 @@
 #include "Types.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -208,6 +209,21 @@ public:
 
 private:
     std::vector<uint8_t> dead_;
+};
+
+// Book-side outcomes, counted on whatever thread the book runs on (atomic, so
+// one instance may serve every book of an async engine): async submitOrder()
+// only says "queued". An STP cancel means an order met its own participant's
+// resting order and was cancelled instead of matched; a reject is one the book
+// shed. A cancel the book applied reports Cancelled, so cancels submitted minus
+// that count is how many found their order already gone.
+struct BookOutcomes : EventListener {
+    std::atomic<uint64_t> stpCancelled{0}, rejected{0}, cancelled{0};
+    void onOrderUpdate(const OrderUpdate& u) override {
+        if (u.status == OrderStatus::CancelledBySTP) stpCancelled.fetch_add(1, std::memory_order_relaxed);
+        else if (u.status == OrderStatus::Rejected) rejected.fetch_add(1, std::memory_order_relaxed);
+        else if (u.status == OrderStatus::Cancelled) cancelled.fetch_add(1, std::memory_order_relaxed);
+    }
 };
 
 // Workload check for a book driven by WorkloadGenerator ops (GTPERF-2 class).

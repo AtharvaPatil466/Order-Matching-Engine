@@ -133,20 +133,6 @@ uint64_t measureClockTickNs() {
     return best == UINT64_MAX ? 0 : best;
 }
 
-// Book-side outcomes, counted on the workers: async submitOrder() only says
-// "queued". An STP cancel means an order met its own participant's resting
-// order and was cancelled instead of matched; a reject is one the book shed.
-// A cancel the book applied reports Cancelled, so cancels submitted minus
-// these is the count that found their order already gone.
-struct BookOutcomes : EventListener {
-    std::atomic<uint64_t> stpCancelled{0}, rejected{0}, cancelled{0};
-    void onOrderUpdate(const OrderUpdate& u) override {
-        if (u.status == OrderStatus::CancelledBySTP) stpCancelled.fetch_add(1, std::memory_order_relaxed);
-        else if (u.status == OrderStatus::Rejected) rejected.fetch_add(1, std::memory_order_relaxed);
-        else if (u.status == OrderStatus::Cancelled) cancelled.fetch_add(1, std::memory_order_relaxed);
-    }
-};
-
 struct ArmResult {
     size_t   workers{0};
     size_t   producers{0};
@@ -195,7 +181,7 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
     ::setenv("OB_ORDER_POOL_CAPACITY", "200000", /*overwrite=*/0);
 
     MatchingEngine engine;
-    BookOutcomes outcomes;
+    bench::BookOutcomes outcomes;
 
     // Spread symbolCount symbols over the workers, honouring the engine's own
     // routing hash so each producer only ever feeds its own worker's queue.

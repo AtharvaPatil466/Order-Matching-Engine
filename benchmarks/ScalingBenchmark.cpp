@@ -133,12 +133,28 @@ uint64_t measureClockTickNs() {
     return best == UINT64_MAX ? 0 : best;
 }
 
+// Book-side outcomes, counted on the workers: async submitOrder() only says
+// "queued". An STP cancel means an order met its own participant's resting
+// order and was cancelled instead of matched; a reject is one the book shed.
+// A cancel the book applied reports Cancelled, so cancels submitted minus
+// these is the count that found their order already gone.
+struct BookOutcomes : EventListener {
+    std::atomic<uint64_t> stpCancelled{0}, rejected{0}, cancelled{0};
+    void onOrderUpdate(const OrderUpdate& u) override {
+        if (u.status == OrderStatus::CancelledBySTP) stpCancelled.fetch_add(1, std::memory_order_relaxed);
+        else if (u.status == OrderStatus::Rejected) rejected.fetch_add(1, std::memory_order_relaxed);
+        else if (u.status == OrderStatus::Cancelled) cancelled.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
 struct ArmResult {
     size_t   workers{0};
     size_t   producers{0};
     size_t   symbols{0};
     uint64_t submitted{0};      // submitOrder/submitCancel calls made
     uint64_t rejected{0};       // any non-Accepted SubmitResult (ENQUEUE only)
+    uint64_t cancelsSubmitted{0};
+    uint64_t bookStp{0}, bookRejected{0}, bookCancelled{0};  // see BookOutcomes
     double   peakPoolUtilPct{0.0};  // worst per-book pool utilisation after the run
     uint64_t peakPoolSymbol{0};
     uint64_t processed{0};      // engine-side completions
@@ -179,6 +195,7 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
     ::setenv("OB_ORDER_POOL_CAPACITY", "200000", /*overwrite=*/0);
 
     MatchingEngine engine;
+    BookOutcomes outcomes;
 
     // Spread symbolCount symbols over the workers, honouring the engine's own
     // routing hash so each producer only ever feeds its own worker's queue.
@@ -191,16 +208,32 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
         const size_t remainingWorkers = numWorkers - t;
         const size_t want = (symbolCount - assigned + remainingWorkers - 1) / remainingWorkers;
         perWorker[t] = symbolsForThread(t, numWorkers, want);
-        for (SymbolId s : perWorker[t]) engine.addSymbol(s);
+        for (SymbolId s : perWorker[t]) {
+            engine.addSymbol(s);
+            engine.getOrderBook(s)->setEventListener(&outcomes);
+        }
         assigned += perWorker[t].size();
         r.symbols += perWorker[t].size();
     }
 
     engine.startAsync(numWorkers, kQueueSize);
 
+    // Two participants per producer: one for its buys, one for its sells. With
+    // a single participant per producer, every crossing order met its own
+    // resting order and was STP-cancelled instead of matched (40% of the new
+    // orders at 20k). A cancel names the owner, so the side of each order id
+    // is kept to pick the right one.
+    std::vector<uint8_t> isSell;
+    for (const bench::WorkloadOp& op : ops) {
+        if (op.kind != bench::WorkloadOp::Kind::New) continue;
+        if (op.orderId >= isSell.size()) isSell.resize(op.orderId + 1, 0);
+        isSell[op.orderId] = op.side == Side::Sell;
+    }
+
     std::vector<BenchLatencyRecorder> recorders(numWorkers);
     std::atomic<uint64_t> submitted{0};
     std::atomic<uint64_t> rejected{0};
+    std::atomic<uint64_t> cancelsSubmitted{0};
     std::atomic<bool> go{false};
 
     auto producer = [&](size_t t) {
@@ -209,7 +242,10 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
         uint64_t localSubmitted = 0, localRejected = 0;
         // Disjoint OrderId range per producer so ids never collide across books.
         const OrderId idBase = static_cast<OrderId>(t + 1) * 1'000'000'000ULL;
-        const ParticipantId pid = static_cast<ParticipantId>(t + 1);
+        auto ownerOf = [&](OrderId originalId) {
+            const bool sell = originalId < isSell.size() && isSell[originalId];
+            return static_cast<ParticipantId>(2 * t + 1 + (sell ? 1 : 0));
+        };
 
         while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
 
@@ -227,15 +263,17 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
             SubmitResult sr;
             const uint64_t t0 = bench::nowNs();
             if (op.kind == bench::WorkloadOp::Kind::New) {
-                sr = engine.submitOrder(sym, id, pid, op.side, op.price, op.qty,
+                sr = engine.submitOrder(sym, id, ownerOf(op.orderId), op.side, op.price, op.qty,
                                         OrderType::Limit);
             } else {
-                sr = engine.submitCancel(sym, id, pid);
+                sr = engine.submitCancel(sym, id, ownerOf(op.orderId));
             }
             rec.recordInterval(t0, bench::nowNs());
 
             ++localSubmitted;
             if (!sr.isAccepted()) ++localRejected;
+            if (op.kind == bench::WorkloadOp::Kind::Cancel)
+                cancelsSubmitted.fetch_add(1, std::memory_order_relaxed);
         }
         submitted.fetch_add(localSubmitted, std::memory_order_relaxed);
         rejected.fetch_add(localRejected, std::memory_order_relaxed);
@@ -257,6 +295,10 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
     r.totalSec = std::chrono::duration<double>(drainEnd - wallStart).count();
     r.submitted = submitted.load();
     r.rejected = rejected.load();
+    r.cancelsSubmitted = cancelsSubmitted.load();
+    r.bookStp = outcomes.stpCancelled.load();
+    r.bookRejected = outcomes.rejected.load();
+    r.bookCancelled = outcomes.cancelled.load();
 
     // Sample every book the run touched. Done after waitForDrain so the numbers
     // reflect the settled state rather than a mid-flight snapshot.
@@ -285,7 +327,20 @@ ArmResult runArm(size_t numWorkers, size_t symbolCount,
     r.e2eCount = e2e.getCount();
 
     engine.stop();
+    for (const auto& syms : perWorker)
+        for (SymbolId sym : syms) engine.getOrderBook(sym)->setEventListener(nullptr);
     return r;
+}
+
+// Workload check for one arm: every order matched or rested as submitted.
+bool armWorkloadOk(const ArmResult& r) {
+    const uint64_t dead = r.cancelsSubmitted > r.bookCancelled
+                              ? r.cancelsSubmitted - r.bookCancelled : 0;
+    std::printf("  workload N=%zu: STP-cancelled %llu, book rejects %llu, cancels %llu "
+                "(%llu found their order gone)\n", r.workers,
+                (unsigned long long)r.bookStp, (unsigned long long)r.bookRejected,
+                (unsigned long long)r.cancelsSubmitted, (unsigned long long)dead);
+    return r.bookStp == 0 && r.bookRejected == 0;
 }
 
 std::vector<size_t> parseThreadList(const char* s) {
@@ -442,6 +497,14 @@ int main(int argc, char* argv[]) {
         }
     }
     if (symbolsPerWorker == 0) symbolsPerWorker = 1;
+    for (size_t n : threadCounts) {
+        if (2 * n + 2 > kMaxParticipants) {  // two participant ids per producer
+            std::fprintf(stderr, "--threads %zu needs more than %u participant ids\n", n,
+                         static_cast<unsigned>(kMaxParticipants));
+            return 2;
+        }
+    }
+    bool workloadOk = true;
 
     g_cores = std::thread::hardware_concurrency();
     g_clockTickNs = measureClockTickNs();
@@ -497,6 +560,7 @@ int main(int argc, char* argv[]) {
             ArmResult r = runArm(n, n * symbolsPerWorker, ops);
             if (n == threadCounts.front()) { dispatchBase = r.dispatchRate; e2eBase = r.e2eRate; }
             printRow(r, dispatchBase, e2eBase);
+            workloadOk = armWorkloadOk(r) && workloadOk;
             scaledResults.push_back(std::move(r));
         }
         printSaturationNote();
@@ -516,6 +580,7 @@ int main(int argc, char* argv[]) {
             ArmResult r = runArm(n, starvedSymbols, ops);
             if (n == threadCounts.front()) { dispatchBase = r.dispatchRate; e2eBase = r.e2eRate; }
             printRow(r, dispatchBase, e2eBase);
+            workloadOk = armWorkloadOk(r) && workloadOk;
         }
         printSaturationNote();
         std::printf("\n");
@@ -533,5 +598,10 @@ int main(int argc, char* argv[]) {
     }
 
     std::printf("=======================================================\n");
+    if (!workloadOk) {
+        std::fprintf(stderr, "WORKLOAD CHECK FAILED: orders were STP-cancelled or rejected "
+                             "by their book, so the rows above are not matching throughput\n");
+        return 1;
+    }
     return 0;
 }

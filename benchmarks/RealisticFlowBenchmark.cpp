@@ -1,6 +1,6 @@
 // RealisticFlowBenchmark (P2-18) — latency on a realistic, cancel-heavy order flow.
 //
-// The PGO headline is a seed=42 stream where ~100% of submissions fill and there
+// The PGO headline is a seed=42 stream where ~44% of submissions trade and there
 // is no cancel traffic. Real venues are cancel-dominated churn. This benchmark
 // drives the core matching path with the venue-shaped event mix:
 //

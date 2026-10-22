@@ -164,7 +164,8 @@ There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
 
 **Why this matters for the published numbers.** The current benchmarked
 **Path C P99 of 3,568 ns** was measured with the journal at
-`/tmp/honest_benchmark.journal` (`benchmarks/HonestBenchmark.cpp`), on a host
+`/tmp/honest_benchmark.journal` (the old `benchmarks/HonestBenchmark.cpp`; it
+now takes `--journal PATH` and prints the filesystem type), on a host
 whose `/tmp` backing — EBS or tmpfs — was not recorded. Earlier revisions of
 this page and [BENCHMARKS.md](../BENCHMARKS.md) called it EBS-backed; nothing
 shows that, so how much of the figure is storage latency is unknown.

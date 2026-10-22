@@ -5,7 +5,7 @@
 # Runs, in one shot, and tees everything to a timestamped log:
 #   1. Full ctest suite (Release build).
 #   2. perf stat — L1-dcache-load-misses / branch-misses / IPC on HonestBenchmark.
-#   3. Five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, all 3 paths).
+#   3. Five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, paths A-D).
 #   4. PGO build (scripts/pgo_build.sh) + three runs of the PGO binary.
 #
 # TARGET: x86_64 Linux bare metal (AWS c6in.metal). Requires perf + numactl —
@@ -27,7 +27,11 @@ exec > >(tee -a "$LOG") 2>&1
 NPROC="$(nproc)"
 BUILD_DIR="build-aws"
 BENCH_REL="benchmarks/HonestBenchmark"
-BENCH_ARGS=(--orders 50000 --seed 42)
+# The journal goes where JOURNAL points (default: the repo checkout's disk),
+# and HonestBenchmark prints that path's filesystem type with Paths C and D.
+# Point it at the storage the venue would run on, never at tmpfs.
+JOURNAL="${JOURNAL:-$REPO_ROOT/honest_benchmark.journal}"
+BENCH_ARGS=(--orders 50000 --seed 42 --journal "$JOURNAL")
 NUMA=(numactl --cpunodebind=0 --membind=0)
 
 banner() { printf '\n\033[1m======================================================================\n%s\n======================================================================\033[0m\n' "$*"; }
@@ -90,7 +94,7 @@ banner "STEP 2/4 — perf stat on HonestBenchmark (per path)"
 # Counters are still whole-PROCESS totals for the path that ran: order
 # generation, the timing loop and teardown are all included. Treat them as an
 # upper bound on that path, not as its cost.
-for _p in a b c; do
+for _p in a b c d; do
     echo ""
     echo "--- perf stat: path ${_p} (whole-process totals for THIS path only;"
     echo "    divide by the order count for a per-order upper bound) ---"
@@ -101,7 +105,7 @@ for _p in a b c; do
 done
 
 # ─── Step 3: five NUMA-pinned runs, all three paths ─────────────────────────
-banner "STEP 3/4 — five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, paths A/B/C)"
+banner "STEP 3/4 — five NUMA-pinned HonestBenchmark runs (P50/P90/P99/throughput, paths A-D)"
 run_bench_n "$BUILD_DIR" 5 "step3"
 
 # ─── Step 4: PGO build + three runs ─────────────────────────────────────────

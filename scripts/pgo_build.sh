@@ -4,7 +4,7 @@
 #
 # Three phases:
 #   1. INSTRUMENT  build HonestBenchmark with -fprofile-instr-generate
-#   2. PROFILE     run it (50K orders, seed=42) to emit raw profile data,
+#   2. PROFILE     run it (50K orders, seed=7) to emit raw profile data,
 #                  then merge with `llvm-profdata merge`
 #   3. OPTIMIZE    rebuild with -fprofile-instr-use=<merged .profdata>
 #
@@ -14,8 +14,14 @@
 # Output: build-pgo/benchmarks/HonestBenchmark (PGO-optimized), and a
 #         PGO-optimized libOrderMatcher inside build-pgo/.
 #
-# The profile reflects the HonestBenchmark 50K/seed=42 flow — representative
-# for that benchmark, not a guarantee for arbitrary production order flow.
+# OUT-OF-SAMPLE (BENCH-6). The profile is trained on seed 7 and every
+# published HonestBenchmark run uses seed 42, so the PGO number is measured on
+# input the profile never saw. It used to train on seed 42 itself, so the PGO
+# headline was measured on exactly its training input. Seed 7 is still the
+# same generator (same price walk, no cancels), so this is out-of-sample in
+# the draws, not in the shape of the flow: a PGO gain here is not a guarantee
+# for production order flow. Path D (one fsync per order) is skipped while
+# profiling; it adds wall time, not code coverage.
 
 set -euo pipefail
 
@@ -27,7 +33,7 @@ cd "$REPO_ROOT"
 INSTR_DIR="build-pgo-instr"
 FINAL_DIR="build-pgo"
 PROFDATA="$REPO_ROOT/$INSTR_DIR/default.profdata"
-BENCH_ARGS=(--orders 50000 --seed 42)
+BENCH_ARGS=(--orders 50000 --seed 7 --no-immediate)
 
 # ─── Toolchain detection ────────────────────────────────────────────────────
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"

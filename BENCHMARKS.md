@@ -34,7 +34,7 @@ expected to disagree; quoting any one of them alone misrepresents the engine.
 
 | Benchmark | Question | Load model | Workload |
 |---|---|---|---|
-| `HonestBenchmark` | Floor on the matching path under favourable conditions | Closed-loop | 50K orders, seed=42, no cancels; fill rate unmeasured (its "100% fill" counts accepts) |
+| `HonestBenchmark` | Floor on the matching path under favourable conditions | Closed-loop | 50K orders after a 5K warm-up, seed=42, no cancels; ~44% of orders trade (printed each run) |
 | `RealisticFlowBenchmark` | Cost on venue-shaped flow | Closed-loop | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify |
 | `CoordinatedOmissionBenchmark` | What a client sees when arrivals do not wait for us | **Open-loop**, paced | `RealisticWorkload` New+Cancel stream at a fixed offered rate |
 | `ColdCacheBenchmark` | First-touch cost after an idle gap | Closed-loop | Same `RealisticWorkload` stream, working set evicted before each timed op |
@@ -46,11 +46,12 @@ uses its own inline generator with IOC and modify events and 8 participants.
 The four benchmarks' absolute numbers are not directly comparable to each other.
 
 **`HonestBenchmark`** (seed=42, 50K orders) is the controlled reproducible
-baseline. Its output reports a "100.0% fill rate — 50,000 of 50,000", but the
-printed "Fills" / fill rate counts **accepted** orders (`HonestBenchmark.cpp`
-increments it when `addOrder` returns an id or `submitOrder` returns
-Accepted), not orders that traded, so that line means every order was
-accepted. The share of orders that actually trade is not measured by this benchmark. It measures the hot path
+baseline. Every order is accepted and 43.8% of the timed orders trade on
+arrival; the rest rest. The run prints that share and fails if any order is
+rejected or the paths disagree on the fills. (Its old "100.0% fill rate" line
+counted accepted orders, and the figures in this file come from that version:
+no warm-up, orders 1–50,000 timed, `high_resolution_clock`, journal in
+`/tmp`.) It measures the hot path
 on a dense resting book with predictable price clustering under a
 **closed-loop** harness that
 issues the next order only after the previous one returns. **P50 237 ns (PGO),
@@ -244,9 +245,9 @@ multiple of 42 ns should be read as quantization, not measurement.
 | B Engine wrapper | 250 ns | 500 ns | 791 ns | 1,208 ns | 43,292 ns | 2.95M ops/s |
 | C Full-stack journal | 1,750 ns | 4,096 ns | 1,761,280 ns | 3,899,392 ns | 10,773,458 ns | 24,603 ops/s |
 
-The printed fill rate is 100.0% on all three paths (50,000 of 50,000), but
-that counter counts **accepted** orders, not orders that traded (see "The four
-benchmarks" above). Paths A and B report
+This table is from the old harness (see "The four benchmarks" above): its
+100.0% fill rate counted accepted orders, and Path C's journal sat in `/tmp`
+on a filesystem nobody recorded. Paths A and B report
 an identical 250 ns P50 (6 ticks) because the wrapper overhead is smaller than
 one tick here; x86 measures it at 8 ns (269 − 261). Path C is a macOS/APFS
 `fdatasync` artifact, **not structural** — 615 ns on Linux x86 with the async
@@ -553,9 +554,14 @@ mechanism is thread-per-symbol; `ScalingBenchmark` measures that.
 ## Reproducing
 
 ```bash
-# Three-path benchmark
+# Four-path benchmark. Release build; put the journal on the storage you would
+# deploy on — the run prints its filesystem type next to Paths C and D.
+# Path C acks before the journal is durable; Path D (SyncPolicy::Immediate)
+# times submit to durable ack and costs one fsync per order.
 cd build/
-./benchmarks/HonestBenchmark --orders 50000 --seed 42
+./benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /path/on/target/disk/hb.journal
+# perf stat must be scoped to one path:
+#   perf stat ... ./benchmarks/HonestBenchmark --orders 50000 --seed 42 --only a
 
 # Shadow mode test
 ./tests/ShadowModeTest

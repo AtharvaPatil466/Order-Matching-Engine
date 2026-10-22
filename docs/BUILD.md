@@ -68,7 +68,7 @@ Three phases:
 
 1. **INSTRUMENT** — build `HonestBenchmark` with `-fprofile-instr-generate`
    (`ENABLE_PGO=ON PGO_MODE=generate`) into `build-pgo-instr/`.
-2. **PROFILE** — run it (`--orders 50000 --seed 42`), emitting `pgo-<pid>.profraw`,
+2. **PROFILE** — run it (`--orders 50000 --seed 7 --no-immediate`), emitting `pgo-<pid>.profraw`,
    then `llvm-profdata merge` → `build-pgo-instr/default.profdata`.
 3. **OPTIMIZE** — rebuild with `-fprofile-instr-use=<profdata>`
    (`PGO_MODE=use PGO_PROFILE=<abs path>`) into `build-pgo/`.
@@ -84,7 +84,7 @@ cmake -B build-pgo-instr -DCMAKE_BUILD_TYPE=Release \
       -DENABLE_PGO=ON -DPGO_MODE=generate
 cmake --build build-pgo-instr -j --target HonestBenchmark
 LLVM_PROFILE_FILE="$PWD/build-pgo-instr/pgo-%p.profraw" \
-    ./build-pgo-instr/benchmarks/HonestBenchmark --orders 50000 --seed 42
+    ./build-pgo-instr/benchmarks/HonestBenchmark --orders 50000 --seed 7 --no-immediate
 llvm-profdata merge -o build-pgo-instr/default.profdata build-pgo-instr/pgo-*.profraw
 # optimize
 cmake -B build-pgo -DCMAKE_BUILD_TYPE=Release -DENABLE_PGO=ON -DPGO_MODE=use \
@@ -94,9 +94,10 @@ cmake --build build-pgo -j --target HonestBenchmark
 
 ### Notes / caveats
 
-- **Profile representativeness:** the profile reflects the HonestBenchmark
-  50K/seed=42 order flow — representative for that benchmark, not a guarantee
-  for arbitrary production flow. Re-profile with a workload that matches your
+- **Out-of-sample:** the profile trains on seed 7 and published runs measure
+  seed 42, so a PGO figure is measured on draws the profile never saw. It is
+  the same generator, though — out-of-sample in the draws, not in the shape of
+  the flow — so it is not a guarantee for arbitrary production flow. Re-profile with a workload that matches your
   real traffic if that differs materially.
 - **`-Werror` interaction:** every build type uses `-Wall -Wextra -Werror`. In use-mode
   Clang emits `-Wprofile-instr-unprofiled` (functions the benchmark never

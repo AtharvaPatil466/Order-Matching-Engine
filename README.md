@@ -417,7 +417,7 @@ With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordi
 | `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
 | `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
 | `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) |
-| `Auction.tla` | verified | Auction state machine: no match outside Continuous except the uncross, single clearing price, no trade while halted, volatility auction reopens (no price collar is modelled) |
+| `Auction.tla` | **119,448 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends. Two broken cfgs with an illegal transition must fail. The table itself fails `NoReopenAfterClose` (a closed session reopens through `Halted`); see [docs/Verification.md](./docs/Verification.md) |
 | `EpochDurability.tla` | verified | Epoch-store durability invariant under crash |
 | `FixSession.tla` | verified | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) |
 | `Oco.tla` | verified | OCO one-cancels-other atomicity |

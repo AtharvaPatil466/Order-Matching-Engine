@@ -21,7 +21,7 @@ name: TLA+ Model Checking
 # way. Replication.tla is not checked.
 #
 # A dedicated step also runs the Auction NON-VACUITY variant
-# (AuctionBroken.cfg, BROKEN_NO_REOPEN = TRUE) and asserts that TLC reports a
+# (AuctionBroken.cfg, BUG = "no_reopen") and asserts that TLC reports a
 # counterexample to VolatilityEventuallyReopens — proving the liveness
 # property has teeth.
 

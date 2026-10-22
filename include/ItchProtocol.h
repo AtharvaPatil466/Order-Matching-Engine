@@ -79,6 +79,11 @@ constexpr char ITCH_SE_START_OF_MARKET     = 'Q';
 constexpr char ITCH_SE_END_OF_MARKET       = 'M';
 constexpr char ITCH_SE_END_OF_SYSTEM       = 'E';
 constexpr char ITCH_SE_END_OF_MESSAGES     = 'C';
+// Venue extension, not in ITCH 5.0 (MD-9): the publisher lost events. What
+// follows is a 'D' for every order it had announced, then an 'A' for every
+// displayed order in priority order, so a subscriber that ignores the code
+// still ends up with the right book.
+constexpr char ITCH_SE_RESYNC              = 'R';
 
 // 48-bit big-endian write — ITCH-specific. Takes the low 48 bits of v
 // and writes them MSB-first to *p .. *(p+5). Used for nanoseconds-

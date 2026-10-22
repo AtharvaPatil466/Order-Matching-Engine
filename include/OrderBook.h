@@ -511,6 +511,26 @@ public:
         });
     }
 
+    // MD-9: run fn() under bookLock_, a consistent cut of the book (the
+    // ITCH resync). fn must not call a method that takes bookLock_.
+    template<typename Fn>
+    void withBookLock(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        fn();
+    }
+
+    // Every displayed resting order: bids then asks, each best price first
+    // and in time priority within a level. Caller holds bookLock_.
+    template<typename Fn>
+    void forEachDisplayedOrder(Fn&& fn) const {
+        auto walk = [&](Price, const OrderList& level) {
+            for (const Order* o = level.front(); o; o = o->next)
+                if (!o->isHidden && displayQuantity(*o) > 0) fn(*o);
+        };
+        bids_.forEachLevel(walk);
+        asks_.forEachLevel(walk);
+    }
+
     // Getters
     // H1: getOrder() takes NO lock and hands out a raw pointer into orderPool_.
     // Callers that dereferenced it — every releasePosition(book->getOrder(id))

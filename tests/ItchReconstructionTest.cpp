@@ -25,12 +25,15 @@
 //      neither must the bulk paths (killSwitch, expireOrders)
 //   8. Auction accumulation and uncross, including icebergs
 //   9. Randomised soak: mixed order types, replay must match at every step
+//  10. Async ring drop: signalled on the wire, then a full resync (MD-9)
 
 #include "ItchBookReplay.h"
 #include "ItchPublisher.h"
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -42,6 +45,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using namespace OrderMatcher;
@@ -780,6 +784,104 @@ void test_RandomisedFlowStaysInSync() {
     } END
 }
 
+// MD-9. A full async ring drops events, and the feed then described a book
+// that no longer existed, with nothing on the wire saying so. A drop must be
+// signalled on the wire (an 'S' resync marker) and followed by a resync: a 'D'
+// for every order the feed announced, then an 'A' for every displayed order in
+// priority order.
+void test_RingDropIsSignalledThenResynced() {
+    TEST(RingDropIsSignalledThenResynced) {
+        MatchingEngine engine;
+        engine.addSymbol(1);
+        engine.start();
+        OrderBook* book = engine.getOrderBook(1);
+        std::atomic<bool> open{false};
+        std::atomic<bool> entered{false};
+        std::atomic<int>  markers{0};
+        std::string wire;  // the worker's until stopAsyncPublishing() joins it
+        ItchPublisher pub(*book, [&](std::string_view b) {
+            entered.store(true, std::memory_order_release);
+            while (!open.load(std::memory_order_acquire))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (static_cast<uint8_t>(b[0]) == ITCH_MT_SYSTEM_EVENT) markers.fetch_add(1);
+            wire.append(b);
+        });
+        pub.enableAsyncPublishing(/*ringCapacity=*/8);
+        book->setEventListener(&pub);
+
+        // The sink holds the worker on the first frame, so the ring fills and
+        // the one resync waits until all the traffic below is in.
+        engine.submitOrder(1, 99, 99, Side::Buy, 980, 10, OrderType::Limit);
+        const auto parked = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!entered.load() && std::chrono::steady_clock::now() < parked)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!entered.load()) {
+            open.store(true, std::memory_order_release);
+            throw std::runtime_error("the worker never reached the sink");
+        }
+        OrderId id = 100;
+        for (int i = 0; i < 20; ++i) {
+            engine.submitOrder(1, id++, 1 + i,  Side::Buy,  990 - i % 4, 10, OrderType::Limit);
+            engine.submitOrder(1, id++, 30 + i, Side::Sell, 1000 + i % 4, 10, OrderType::Limit);
+        }
+        const OrderId iceberg = id++;
+        engine.submitOrder(1, iceberg, 60, Side::Buy, 990, 100, OrderType::Iceberg, 0, 15);
+        const OrderId hidden = id++;
+        engine.submitOrder(1, hidden, 61, Side::Buy, 995, 50, OrderType::Hidden);
+        engine.cancelOrder(1, 102);
+        engine.cancelOrder(1, 105);
+        engine.submitOrder(1, id++, 62, Side::Buy, 1001, 25, OrderType::Limit);
+        const uint64_t dropped = pub.droppedEvents();
+        // Open before any CHECK: a throw would otherwise join a worker parked
+        // in the sink forever.
+        open.store(true, std::memory_order_release);
+        CHECK(dropped > 0);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (markers.load() == 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        const bool signalled = markers.load() > 0;
+        pub.stopAsyncPublishing();
+        if (!signalled)
+            throw std::runtime_error("the ring dropped " + std::to_string(dropped) +
+                                     " events and nothing on the wire said so");
+
+        CHECK(pub.resyncsEmitted() == 1);
+        ItchBookReplay reco;
+        reco.feed(wire);
+        assertBooksMatch(reco, *book);
+
+        // After the (last) marker and its deletes, the adds come best price
+        // first and, within a price, in time (here id) order; hidden never
+        // appears.
+        std::vector<const uint8_t*> adds;
+        for (size_t off = 0; off < wire.size();) {
+            const auto* m = reinterpret_cast<const uint8_t*>(wire.data()) + off;
+            if (m[0] == ITCH_MT_SYSTEM_EVENT) {
+                CHECK(m[11] == ITCH_SE_RESYNC);
+                adds.clear();
+            }
+            if (m[0] == ITCH_MT_ADD_ORDER) adds.push_back(m);
+            off += testing::itchMessageSize(m[0]);
+        }
+        std::map<Side, std::pair<Price, OrderId>> last;
+        for (const uint8_t* m : adds) {
+            const auto ref = static_cast<OrderId>(readU64BE(m + 11));
+            const Side side = (m[19] == 'B') ? Side::Buy : Side::Sell;
+            const auto px = static_cast<Price>(readU32BE(m + 32));
+            CHECK(ref != hidden);
+            if (ref == iceberg) CHECK(readU32BE(m + 20) == 15);
+            auto it = last.find(side);
+            if (it != last.end()) {
+                const auto [lastPx, lastId] = it->second;
+                const bool better = (side == Side::Buy) ? px < lastPx : px > lastPx;
+                CHECK((better || (px == lastPx && ref > lastId)) && "resync adds out of priority order");
+            }
+            last[side] = {px, ref};
+        }
+        CHECK(adds.size() == reco.liveCount());
+    } END
+}
+
 int main() {
     std::cout << "\nITCH reconstruction tests\n";
 
@@ -794,6 +896,7 @@ int main() {
     test_TriggeredStopEntersFeedOnRest();
     test_AuctionUncrossReconstructs();
     test_RandomisedFlowStaysInSync();
+    test_RingDropIsSignalledThenResynced();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

@@ -47,6 +47,18 @@
 // Lifecycle: quiesce all event sources BEFORE stopAsyncPublishing()/destruction
 // so no producer races ring teardown; the worker drains buffered events on stop.
 //
+// Loss (MD-9): an event that finds the ring full is dropped and marks a resync.
+// The worker then takes the book's lock (the book dispatches under it, so the
+// matching thread can add nothing meanwhile), drains what was queued before
+// the cut, and encodes an 'S' ITCH_SE_RESYNC marker, a 'D' for every order the
+// feed announced and an 'A' for every displayed order in priority order; it
+// sends them once the lock is released, so the sink never runs under it.
+// ponytail: with MatchingEngine's durable client acks on, the gate releases
+// an order's events after the book lock is dropped, so a resync cut can land
+// before them and double-apply that order's fills on the wire; tag events
+// with the book sequence number and skip those inside the cut if both are
+// ever enabled together.
+//
 // In SYNC mode that MPSC framing is a statement about the ring only, not a
 // licence: serializeAndSend() — and therefore the sink — runs on the calling
 // thread, so two callers means two threads in liveOrders_ and in whatever the
@@ -68,8 +80,10 @@
 #include <memory>
 #include <string_view>
 #include <thread>
+#include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace OrderMatcher {
 
@@ -121,6 +135,7 @@ public:
         running_.store(false, std::memory_order_release);
         if (worker_.joinable()) worker_.join();
         if (ring_) {
+            if (resyncPending_.load(std::memory_order_acquire)) resync();
             RawEvent e;
             while (ring_->pop(e)) serializeAndSend(e);
             ring_.reset();
@@ -131,7 +146,8 @@ public:
     bool     asyncEnabled()   const { return async_.load(std::memory_order_acquire); }
     // Events the matching/control thread could not enqueue because the
     // ring was full (consumer fell behind). Non-zero means market data
-    // was dropped — size the ring larger or speed up the sink.
+    // was dropped — size the ring larger or speed up the sink. Each loss is
+    // followed by a resync on the wire (see the header comment).
     uint64_t droppedEvents()  const { return droppedEvents_.load(std::memory_order_relaxed); }
     // Events drained + serialized by the worker (async) or inline (sync).
     uint64_t eventsProcessed() const { return eventsProcessed_.load(std::memory_order_relaxed); }
@@ -218,6 +234,7 @@ public:
     uint64_t directoriesEmitted()       const { return directoriesEmitted_.load(std::memory_order_relaxed); }
     uint64_t crossTradesEmitted()       const { return crossTradesEmitted_.load(std::memory_order_relaxed); }
     uint64_t messagesEmitted()          const { return messagesEmitted_.load(std::memory_order_relaxed); }
+    uint64_t resyncsEmitted()           const { return resyncsEmitted_.load(std::memory_order_relaxed); }
     // NOTE: liveOrderCount() reflects worker-thread-owned state in async
     // mode; read it only after the ring has drained (tests quiesce first).
     size_t   liveOrderCount()           const { return liveOrders_.size(); }
@@ -368,6 +385,7 @@ private:
         if (async_.load(std::memory_order_acquire)) {
             if (!ring_->push(e)) {
                 droppedEvents_.fetch_add(1, std::memory_order_relaxed);
+                resyncPending_.store(true, std::memory_order_release);
             }
         } else {
             serializeAndSend(e);
@@ -378,12 +396,40 @@ private:
     void publisherLoop() {
         RawEvent e;
         while (running_.load(std::memory_order_acquire)) {
-            if (ring_->pop(e)) {
+            if (resyncPending_.load(std::memory_order_acquire)) {
+                resync();
+            } else if (ring_->pop(e)) {
                 serializeAndSend(e);
             } else {
                 std::this_thread::sleep_for(kIdleSleep);
             }
         }
+    }
+
+    // MD-9, see the header comment. Worker thread (or stop, after the join).
+    // Encoded under the book lock, sent after it: a slow sink must not stall
+    // matching (and a blocked one deadlocked it).
+    void resync() {
+        std::vector<std::string> frames;
+        capture_ = &frames;
+        book_.withBookLock([&] {
+            // Cleared before the drain: a drop after this point marks again.
+            resyncPending_.store(false, std::memory_order_relaxed);
+            RawEvent e;
+            while (ring_->pop(e)) serializeAndSend(e);
+            const uint64_t ts = now();
+            uint8_t buf[ITCH_SIZE_SYSTEM_EVENT];
+            emit(buf, encodeSystemEvent(buf, locateOf(), nextTracking(), ts, ITCH_SE_RESYNC));
+            messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
+            resyncsEmitted_.fetch_add(1, std::memory_order_relaxed);
+            for (const auto& live : liveOrders_) emitOrderDelete(live.first, ts);
+            liveOrders_.clear();
+            book_.forEachDisplayedOrder([&](const Order& o) {
+                emitAdd(o.id, o.side, displayQuantity(o), o.price, ts);
+            });
+        });
+        capture_ = nullptr;
+        for (const std::string& f : frames) send_(f);
     }
 
     // The only place the live-order map / tracking counter / sink are
@@ -397,15 +443,7 @@ private:
             // wire is a delete of the exhausted slice then a fresh add — the
             // standard encoding for an order that lost its time priority.
             if (liveOrders_.count(e.orderId)) emitOrderDelete(e.orderId, e.ts);
-            liveOrders_[e.orderId] = LiveOrder{e.side, e.shares, e.price};
-            uint8_t buf[ITCH_SIZE_ADD_ORDER];
-            size_t n = encodeAddOrder(buf, locateOf(), nextTracking(), e.ts,
-                                      static_cast<uint64_t>(e.orderId),
-                                      e.side, e.shares, book_.getSymbolId(),
-                                      e.price);
-            emit(buf, n);
-            addsEmitted_.fetch_add(1, std::memory_order_relaxed);
-            messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
+            emitAdd(e.orderId, e.side, e.shares, e.price, e.ts);
             break;
         }
         case RawEvent::Kind::Executed: {
@@ -515,7 +553,20 @@ private:
     }
 
     void emit(const uint8_t* buf, size_t n) {
-        send_(std::string_view(reinterpret_cast<const char*>(buf), n));
+        const std::string_view frame(reinterpret_cast<const char*>(buf), n);
+        if (capture_) capture_->emplace_back(frame);
+        else          send_(frame);
+    }
+
+    // Track, encode and send an Add Order.
+    void emitAdd(OrderId orderId, Side side, Quantity shares, Price price, uint64_t ts) {
+        liveOrders_[orderId] = LiveOrder{side, shares, price};
+        uint8_t buf[ITCH_SIZE_ADD_ORDER];
+        emit(buf, encodeAddOrder(buf, locateOf(), nextTracking(), ts,
+                                 static_cast<uint64_t>(orderId), side, shares,
+                                 book_.getSymbolId(), price));
+        addsEmitted_.fetch_add(1, std::memory_order_relaxed);
+        messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Encode + send an Order Delete and bump counters. Does NOT touch
@@ -553,6 +604,7 @@ private:
     SendBytes                                    send_;
     ClockFn                                      clock_;
     std::unordered_map<OrderId, LiveOrder>       liveOrders_;
+    std::vector<std::string>*                    capture_{nullptr};  // set during resync()
     uint16_t                                     trackingCounter_{0};
 
     // Async decoupling state.
@@ -561,6 +613,7 @@ private:
     std::atomic<bool>                            async_{false};
     std::atomic<bool>                            running_{false};
     std::atomic<uint64_t>                        droppedEvents_{0};
+    std::atomic<bool>                            resyncPending_{false};  // MD-9
     std::atomic<uint64_t>                        eventsProcessed_{0};
 
     // Counters are atomic so external observers (tests / metrics) can
@@ -573,6 +626,7 @@ private:
     std::atomic<uint64_t>                        directoriesEmitted_{0};
     std::atomic<uint64_t>                        crossTradesEmitted_{0};
     std::atomic<uint64_t>                        messagesEmitted_{0};
+    std::atomic<uint64_t>                        resyncsEmitted_{0};
 };
 
 }  // namespace OrderMatcher

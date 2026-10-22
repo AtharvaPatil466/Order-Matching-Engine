@@ -9,7 +9,13 @@ This project is a low-latency matching-engine implementation for research and po
   rejects that occur on the worker are delivered through order-update/event channels.
 - Self-match prevention policy variants: cancel taker, cancel maker, decrement-and-cancel, and participant hierarchy rules.
 - Cancel/replace priority rules for every amendment type, including hidden and iceberg orders.
-- ~~Market order protection, price collars, auction states, halt/resume transitions~~: Implemented (LULD, VolatilityAuction, TradingState enum, RejectReason contract).
+- Market order protection, price collars, auction states, halt/resume transitions. What the binaries run:
+  a per-order circuit breaker at 5% (`include/OrderBook.h:992`, checked at `src/OrderBook.cpp:1069`;
+  `BreakerNoAuctionTest`) and, only in OrderEngine with `--session-schedule`, the scheduled auction states
+  (`src/main.cpp:297-301`; `SessionSchedulerTest`). Library only, not enabled: the market-order collar
+  (`marketProtectionPct_` defaults to 0, `include/OrderBook.h:994`, and no binary sets it), price bands,
+  `LULDManager`, and any halt or resume (no binary or admin endpoint sets `TradingState::Halted`).
+  See [Compliance.md](Compliance.md).
 - Iceberg refresh priority and hidden-order allocation rules for the exact venue model.
 - End-to-end sequence guarantees for trades, order updates, market data, replay, and gap recovery.
 - Risk-limit policy for open orders, filled positions, rejected orders, cancels, and cross-symbol exposure.

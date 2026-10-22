@@ -450,9 +450,11 @@ under light load" is the expected shape rather than a fault.
 
 These are **end-to-end ingress→completion** figures, dominated by queue
 residency rather than service time — not comparable to the Path A service-time
-numbers above, and not an SLA. The tool's default `--p99-threshold` of 5 µs is
-uncalibrated for this and fires on every window; it is a measurement tool, not
-a pass/fail gate, until someone picks a threshold against a stated rate.
+numbers above, and not an SLA. The tool has no latency threshold: its old
+uncalibrated `--p99-threshold` (5 µs default) fired on every window and was
+removed. It exits 1 only when an order was rejected or went unprocessed. These
+figures predate that check; at the old fixed 10,000-slot pool most orders in a
+run this long were `PoolCapacityExceeded` rejects, so treat them as unmeasured.
 
 ## GroupCommit Explained
 

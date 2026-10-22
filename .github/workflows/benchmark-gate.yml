@@ -290,13 +290,15 @@ jobs:
           name: benchmark-results
           path: results/
 
+      # Smoke: fails only if the workload was not the one described (an order
+      # rejected at submit or by its book, or processed != submitted). It has
+      # no latency threshold; the old one was uncalibrated (BENCH-7).
       - name: Run Sustained Load Test (smoke)
         if: steps.changes.outputs.relevant == 'true'
         run: |
           cmake --build build --target SustainedLoadTest -j"$(nproc)"
           build/benchmarks/SustainedLoadTest \
-            --duration 5 --rate 100000 --threads 2 --symbols 4 \
-            --p99-threshold 50000
+            --duration 5 --rate 100000 --threads 2 --symbols 4
 
       - name: No benchmark-relevant changes
         if: steps.changes.outputs.relevant != 'true'

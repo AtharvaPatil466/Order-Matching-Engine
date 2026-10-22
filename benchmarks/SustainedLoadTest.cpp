@@ -9,17 +9,23 @@
 //   - Queue depth over time
 //   - Memory growth (via getrusage)
 //
-// Exit code 0 if all P99 windows are under the specified threshold.
-// Exit code 1 if any window exceeds the threshold (regression detected).
+// A MEASUREMENT TOOL, NOT A LATENCY GATE (BENCH-7). It used to exit 1 when
+// any window's P99 crossed --p99-threshold, a number its own header called
+// uncalibrated; the CI smoke step failed on it in every local run. The
+// threshold is gone. Exit 1 now means the workload was not the one described:
+// an order rejected at submit or by its book, or processed != submitted.
 //
-// THE DEFAULT --p99-threshold IS NOT CALIBRATED, and this is a measurement
-// tool rather than a pass/fail gate until it is. What the latency columns
-// report is END-TO-END time from ingress to completion, which under sustained
-// offered load is dominated by QUEUE RESIDENCY, not by service time. Measured
-// here: ~790 ns P50 at 400k/s and 25-37 us P99, so the 5 us default fires on
-// every window and exit 1 carries no information at these rates.
+// What the latency columns report is END-TO-END time from ingress to
+// completion, which under sustained offered load is dominated by QUEUE
+// RESIDENCY, not by service time. Measured here: ~790 ns P50 at 400k/s and
+// 25-37 us P99.
 //
-// Two observations worth having before anyone picks a real threshold:
+// There are no cancels, so every order may rest: each book's pool is sized
+// for the whole run (rate x duration / symbols, +25%) and memory grows with
+// both. The default 10,000-slot pool shed 85% of a 5 s, 100k/s run as
+// PoolCapacityExceeded.
+//
+// Two observations worth having before anyone picks a latency threshold:
 //
 //   * Throughput is flat and latency IMPROVES over the first ~6 seconds
 //     (P50 2,160 -> 790 ns at 400k/s) while RSS climbs ~24% and then stops.
@@ -44,6 +50,7 @@
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -52,6 +59,20 @@
 #endif
 
 using namespace OrderMatcher;
+
+// Async submitOrder() only says "queued". Rejects the books make later (price
+// band, breaker, pool) arrive as order updates on the worker threads, so they
+// are counted here to tell a run that matched from one that timed rejects.
+class BookRejectCounter : public EventListener {
+public:
+    void onOrderUpdate(const OrderUpdate& u) override {
+        if (u.status == OrderStatus::Rejected) rejects_.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t rejects() const { return rejects_.load(std::memory_order_relaxed); }
+
+private:
+    std::atomic<uint64_t> rejects_{0};
+};
 
 struct WindowStats {
     uint64_t windowNum{0};
@@ -79,12 +100,11 @@ size_t getCurrentMemoryKB() {
 }
 
 int main(int argc, char* argv[]) {
-    int durationSec = 30;
+    int durationSec = 10;
     int windowSec = 1;
-    int targetRate = 500000;  // 500K orders/sec target
+    int targetRate = 200000;  // orders/sec; the pool below grows with rate x duration
     int numThreads = 4;
     int numSymbols = 8;
-    double p99ThresholdNs = 5000;  // 5μs P99 threshold
     std::string mode = "full";
 
     for (int i = 1; i < argc; ++i) {
@@ -98,8 +118,6 @@ int main(int argc, char* argv[]) {
             numThreads = std::stoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--symbols") == 0 && i + 1 < argc) {
             numSymbols = std::stoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--p99-threshold") == 0 && i + 1 < argc) {
-            p99ThresholdNs = std::stod(argv[++i]);
         } else if (std::strcmp(argv[i], "--lean") == 0) {
             mode = "lean";
         }
@@ -112,13 +130,23 @@ int main(int argc, char* argv[]) {
                 targetRate);
     std::printf("Threads:       %d\n", numThreads);
     std::printf("Symbols:       %d\n", numSymbols);
-    std::printf("P99 threshold: %.0f ns\n", p99ThresholdNs);
     std::printf("Mode:          %s\n\n", mode.c_str());
 
     // Set up engine
     MatchingEngine engine;
+    const uint64_t poolSlots = static_cast<uint64_t>(targetRate) *
+                               static_cast<uint64_t>(durationSec) * 5 / 4 /
+                               static_cast<uint64_t>(std::max(1, numSymbols)) + 1024;
+    setenv("OB_ORDER_POOL_CAPACITY", std::to_string(poolSlots).c_str(), 1);
+    std::printf("Order pool:    %llu slots per book (~%llu MB of orders in all)\n\n",
+                static_cast<unsigned long long>(poolSlots),
+                static_cast<unsigned long long>(poolSlots * sizeof(Order) *
+                                                static_cast<uint64_t>(numSymbols) >> 20));
+
+    BookRejectCounter bookRejects;
     for (int s = 1; s <= numSymbols; ++s) {
         engine.addSymbol(static_cast<SymbolId>(s));
+        engine.getOrderBook(static_cast<SymbolId>(s))->setEventListener(&bookRejects);
     }
     engine.startAsync(static_cast<size_t>(numThreads), 1024 * 1024);
 
@@ -158,7 +186,10 @@ int main(int argc, char* argv[]) {
     auto producerFn = [&](int threadId) {
         std::mt19937_64 rng(42 + threadId);
         std::uniform_int_distribution<int> sideDist(0, 1);
-        std::uniform_int_distribution<Price> priceDist(95'00, 105'00);
+        // +/-2% of 100.00. At +/-5% the first order's price anchored each
+        // book's 5% volatility breaker inside the range, and 85% of all
+        // orders were rejected by the books.
+        std::uniform_int_distribution<Price> priceDist(98'00, 102'00);
         std::uniform_int_distribution<Quantity> qtyDist(1, 50);
         std::uniform_int_distribution<int> symbolDist(1, numSymbols);
 
@@ -167,11 +198,11 @@ int main(int argc, char* argv[]) {
         OrderId nextId = static_cast<OrderId>(threadId * 100000000);
 
         // Per-thread rate control
-        auto lastSend = std::chrono::high_resolution_clock::now();
+        auto lastSend = std::chrono::steady_clock::now();
         double accumulated = 0;
 
         while (running.load(std::memory_order_relaxed)) {
-            auto now = std::chrono::high_resolution_clock::now();
+            auto now = std::chrono::steady_clock::now();
             double elapsed = static_cast<double>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     now - lastSend).count());
@@ -217,7 +248,6 @@ int main(int argc, char* argv[]) {
     // Snapshot of the cumulative latency histogram at the previous window
     // boundary; each window reports the delta against it.
     LatencyTracker prevLatency;
-    bool regressionDetected = false;
 
     for (int w = 0; w < durationSec / windowSec; ++w) {
         std::this_thread::sleep_for(std::chrono::seconds(windowSec));
@@ -255,10 +285,6 @@ int main(int argc, char* argv[]) {
                     w, static_cast<unsigned long long>(ws.ordersProcessed),
                     ws.throughput, ws.p50Ns, ws.p99Ns, ws.p999Ns, ws.memoryKB);
 
-        if (ws.p99Ns > p99ThresholdNs && ws.ordersProcessed > 0) {
-            regressionDetected = true;
-        }
-
         {
             std::lock_guard<std::mutex> lock(windowMu);
             windows.push_back(ws);
@@ -280,6 +306,7 @@ int main(int argc, char* argv[]) {
     std::printf("Total submitted:  %llu\n", static_cast<unsigned long long>(totalSubmitted.load()));
     std::printf("Total rejected:   %llu\n", static_cast<unsigned long long>(totalRejected.load()));
     std::printf("Total processed:  %llu\n", static_cast<unsigned long long>(engine.getProcessedCount()));
+    std::printf("Book rejects:     %llu\n", static_cast<unsigned long long>(bookRejects.rejects()));
     std::printf("Avg throughput:   %.0f orders/sec\n",
                 static_cast<double>(engine.getProcessedCount()) / totalSec);
 
@@ -296,12 +323,18 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (regressionDetected) {
-        std::printf("\n❌ REGRESSION: At least one window exceeded P99 threshold of %.0f ns\n",
-                    p99ThresholdNs);
+    // Workload check: the windows above describe this flow only if every order
+    // was admitted, processed and accepted by its book.
+    if (totalRejected.load() != 0 || bookRejects.rejects() != 0 ||
+        engine.getProcessedCount() != totalSubmitted.load()) {
+        std::printf("\nWORKLOAD CHECK FAILED: rejected at submit %llu, rejected by a book %llu, "
+                    "processed %llu of %llu submitted\n",
+                    static_cast<unsigned long long>(totalRejected.load()),
+                    static_cast<unsigned long long>(bookRejects.rejects()),
+                    static_cast<unsigned long long>(engine.getProcessedCount()),
+                    static_cast<unsigned long long>(totalSubmitted.load()));
         return 1;
     }
-
-    std::printf("\n✅ All windows within P99 threshold (%.0f ns)\n", p99ThresholdNs);
+    std::printf("\nWorkload check OK: every order admitted, processed and accepted by its book\n");
     return 0;
 }

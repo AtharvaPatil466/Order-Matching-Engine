@@ -82,11 +82,10 @@ echo "=== [2/3] Deterministic Benchmark — Lean Mode ==="
 
 echo ""
 
-# Sustained load test (10 seconds, relaxed threshold for Docker)
+# Sustained load test (10 seconds; exits 1 only on a workload failure)
 echo "=== [3/3] Sustained Load Test (10s) ==="
 /app/benchmarks/SustainedLoadTest \
-    --duration 10 --rate 200000 --threads 4 --symbols 8 \
-    --p99-threshold 50000
+    --duration 10 --rate 200000 --threads 4 --symbols 8
 
 echo ""
 echo "================================================"

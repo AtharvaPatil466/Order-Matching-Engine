@@ -55,8 +55,7 @@ echo ""
 
 echo "[Phase 1] Capturing baseline (30s warm-up)..."
 "${BUILD_DIR}/benchmarks/SustainedLoadTest" \
-    --duration 30 --rate "${RATE}" --threads "${THREADS}" --symbols "${SYMBOLS}" \
-    --p99-threshold 100000 2>&1 | tee "${RESULTS_DIR}/baseline.txt"
+    --duration 30 --rate "${RATE}" --threads "${THREADS}" --symbols "${SYMBOLS}" 2>&1 | tee "${RESULTS_DIR}/baseline.txt"
 
 BASELINE_P99=$(grep -oP 'P99.*?(\d+)' "${RESULTS_DIR}/baseline.txt" | grep -oP '\d+$' || echo "5000")
 echo "  Baseline P99: ${BASELINE_P99} ns"
@@ -88,8 +87,7 @@ while true; do
     # Run sustained load for one check interval
     CHUNK_OUTPUT=$("${BUILD_DIR}/benchmarks/SustainedLoadTest" \
         --duration "${CHUNK_DURATION}" --rate "${RATE}" \
-        --threads "${THREADS}" --symbols "${SYMBOLS}" \
-        --p99-threshold 100000 2>&1) || true
+        --threads "${THREADS}" --symbols "${SYMBOLS}" 2>&1) || true
 
     # Extract metrics
     CURRENT_P99=$(echo "$CHUNK_OUTPUT" | grep -oP 'P99.*?(\d+)' | grep -oP '\d+$' || echo "0")

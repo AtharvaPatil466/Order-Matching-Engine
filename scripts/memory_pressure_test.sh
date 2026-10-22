@@ -34,8 +34,7 @@ echo ""
 # Step 1: Baseline — measure normal working set
 echo "[1/3] Measuring baseline memory usage..."
 BASELINE_OUTPUT=$("${BUILD_DIR}/benchmarks/SustainedLoadTest" \
-    --duration 5 --rate "${RATE}" --threads "${THREADS}" --symbols "${SYMBOLS}" \
-    --p99-threshold 100000 2>&1)
+    --duration 5 --rate "${RATE}" --threads "${THREADS}" --symbols "${SYMBOLS}" 2>&1)
 
 BASELINE_RSS=$(echo "$BASELINE_OUTPUT" | grep -i "peak.*rss\|memory" | head -1 || echo "N/A")
 echo "  Baseline: ${BASELINE_RSS:-completed}"
@@ -56,8 +55,7 @@ echo "  Memory limit: $((LIMIT_KB / 1024)) MB"
 # macOS uses ulimit -v in KB
 CONSTRAINED_OUTPUT=$(ulimit -v "${LIMIT_KB}" 2>/dev/null; \
     "${BUILD_DIR}/benchmarks/SustainedLoadTest" \
-    --duration "${DURATION}" --rate "${RATE}" --threads "${THREADS}" --symbols "${SYMBOLS}" \
-    --p99-threshold 100000 2>&1) || true
+    --duration "${DURATION}" --rate "${RATE}" --threads "${THREADS}" --symbols "${SYMBOLS}" 2>&1) || true
 
 echo "$CONSTRAINED_OUTPUT" | tail -5
 

@@ -79,12 +79,16 @@ uint64_t jsonU64(const std::string& body, const std::string& key) {
 // LF-8: /metrics computed pendingOrders = submitted - processed from two
 // separate reads, so a processed count that moved past the submitted one
 // read before it wrapped to ~1.8e19.
+// /otr read the book's participant-stats hash map with no lock while the
+// worker inserted into it, and /auction read the trading state the worker
+// writes on every Halted/Continuous flip. /otr reads book 0 only, so the flow
+// covers symbols 0 and 1, and a toggler flips symbol 1's state throughout.
 void scrapeUnderLiveFlow() {
-    constexpr SymbolId kSym = 1;
+    constexpr SymbolId kSyms = 2;  // symbols 0 and 1
     constexpr int kScrapes = 2000;
     constexpr OrderId kProducers = 16;
     MatchingEngine engine;
-    engine.addSymbol(kSym);
+    for (SymbolId s = 0; s < kSyms; ++s) engine.addSymbol(s);
     engine.startAsync(1);
     AdminServer admin(engine, 0);
     admin.setAuthDisabled(true);
@@ -99,17 +103,32 @@ void scrapeUnderLiveFlow() {
         producers.emplace_back([&, base] {
             // Levels come and go: alternating sides over a spread of prices.
             for (OrderId id = base; !stop.load(std::memory_order_acquire); id += kProducers) {
-                const Side side = (id % 2) ? Side::Buy : Side::Sell;
+                const SymbolId sym = static_cast<SymbolId>(id % kSyms);
+                const Side side = ((id / kSyms) % 2) ? Side::Buy : Side::Sell;
                 const Price px = 100 + static_cast<Price>(id % 9);
-                engine.submitOrder(kSym, id, 7, side, px, 1, OrderType::Limit);
+                engine.submitOrder(sym, id, static_cast<ParticipantId>(7 + id % 3), side, px, 1,
+                                   OrderType::Limit);
                 std::this_thread::sleep_for(std::chrono::microseconds(20));
             }
         });
     }
 
+    std::thread toggler([&] {
+        for (bool halt = true; !stop.load(std::memory_order_acquire); halt = !halt) {
+            engine.setTradingStateBatch({1}, halt ? TradingState::Halted
+                                                  : TradingState::Continuous);
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+
     for (int i = 0; i < kScrapes; ++i) {
         const std::string audit = httpGet(admin.port(), "/audit?symbolId=1");
         assert(audit.find("\"bidLevels\":") != std::string::npos);
+
+        const std::string otr = httpGet(admin.port(), "/otr?participantId=7");
+        assert(otr.find("\"ordersSubmitted\":") != std::string::npos);
+        const std::string auction = httpGet(admin.port(), "/auction?symbolId=1");
+        assert(auction.find("\"tradingState\":") != std::string::npos);
 
         const std::string metrics = httpGet(admin.port(), "/metrics");
         const uint64_t submitted = jsonU64(metrics, "submitted");
@@ -124,9 +143,10 @@ void scrapeUnderLiveFlow() {
 
     stop.store(true, std::memory_order_release);
     for (auto& t : producers) t.join();
+    toggler.join();
     admin.stop();
     engine.stopAsync();
-    std::puts("/audit and /metrics under live order flow: ok");
+    std::puts("/audit, /metrics, /otr and /auction under live order flow: ok");
 }
 
 }  // namespace

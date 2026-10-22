@@ -2020,6 +2020,7 @@ void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
                      .kv("to",   tradingStateName(s)));
     obSink().log(logTradingStateChange(symbolId_, tradingStateName(tradingState_), tradingStateName(s)));
     tradingState_ = s;
+    publishedState_.store(s, std::memory_order_release);
     if (s == TradingState::VolatilityAuction) volatilityClockStarted_ = false;  // a new dwell
     if (s == TradingState::AuctionClose) {
         releaseOnCloseOrders();

@@ -454,6 +454,7 @@ public:
 
     void resetStatus() {
         tradingState_ = TradingState::Continuous;
+        publishedState_.store(TradingState::Continuous, std::memory_order_release);
         referencePrice_ = 0;
         priceUpdates_ = 0;
         sessionBegun_ = false;
@@ -481,7 +482,11 @@ public:
     // 0 = undated, which PostClose refuses). Same rules as above.
     void beginSession(uint32_t tradingDate);
     uint32_t sessionDate() const { return sessionDate_; }  // 0 = none/undated
-    TradingState getTradingState() const { return tradingState_; }
+    // Safe from any thread: reads publishedState_, the atomic copy the owner
+    // stores after every change. Admin /auction, checkpoint and the
+    // replication snapshot call it off the worker; tradingState_ itself is
+    // the worker's plain copy for the hot path.
+    TradingState getTradingState() const { return publishedState_.load(std::memory_order_acquire); }
     // Convenience: legacy callers checking the binary halt flag still work.
     // True iff the book is currently in TradingState::Halted.
 
@@ -514,7 +519,10 @@ public:
     // clear the book at runaway prices.
     void setMarketProtectionPct(double pct) { marketProtectionPct_ = pct < 0 ? 0 : pct; }
     double getMarketProtectionPct() const   { return marketProtectionPct_; }
+    // Takes bookLock_: the admin /otr endpoint calls this from its own thread
+    // while the owning worker inserts into participantRisk_ under that lock.
     ParticipantStats getParticipantStats(ParticipantId id) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
         auto* state = participantRisk_.find(OTRKey(id, symbolId_));
         if (state) {
             ParticipantStats stats;
@@ -1119,6 +1127,7 @@ private:
     TradingState tradingState_{TradingState::Continuous};
     bool     sessionBegun_{false};  // decision 7: a PreOpen has happened
     uint32_t sessionDate_{0};       // its trading date; 0 = undated
+    std::atomic<TradingState> publishedState_{TradingState::Continuous};  // see getTradingState
     size_t maxDepthPerSide_{0};  // 0 = unlimited
     double cbThreshold_{0.05};   // Circuit breaker threshold (default 5%)
     uint64_t volatilityDwellNs_;          // set in the ctor (config or 5 min)

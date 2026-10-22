@@ -14,9 +14,9 @@ name: TLA+ Model Checking
 #   - Snapshot         : lockless snapshot (properties that hold)
 #   - SnapshotLocked   : locked snapshot (strong-consistency properties)
 #
-# MatchingEngine.tla (MatchingEngine4.cfg: ~17 min, 171M distinct states) and
-# Replication.tla are checked
-# out-of-band rather than on every push, to keep CI fast.
+# MatchingEngine.tla is checked at MatchingEngine.cfg (a few minutes), and
+# each of its seven MatchingEngineBroken*.cfg variants must fail with the
+# counterexample its injected bug produces. Replication.tla is not checked.
 #
 # A dedicated step also runs the Auction NON-VACUITY variant
 # (AuctionBroken.cfg, BROKEN_NO_REOPEN = TRUE) and asserts that TLC reports a
@@ -55,6 +55,40 @@ jobs:
             ./check.sh "$module"
             echo "::endgroup::"
           done
+
+      - name: Check MatchingEngine
+        working-directory: spec
+        run: ./check.sh MatchingEngine
+
+      - name: Non-vacuity checks (each injected MatchingEngine bug must be caught)
+        working-directory: spec
+        run: |
+          fail=0
+          while read -r cfg expect; do
+            set +e
+            ./check.sh MatchingEngine "$cfg" > "$cfg.log" 2>&1
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$cfg unexpectedly PASSED — its property is vacuous"
+              fail=1
+            elif ! grep -qF "$expect" "$cfg.log"; then
+              cat "$cfg.log"
+              echo "::error::$cfg failed for the wrong reason (expected: $expect)"
+              fail=1
+            else
+              echo "$cfg: $expect"
+            fi
+          done <<'EOF'
+          MatchingEngineBroken.cfg Action property FIFOExecution is violated
+          MatchingEngineBrokenPrice.cfg Action property PricePriority is violated
+          MatchingEngineBrokenExecPrice.cfg Action property ExecPriceIsPassive is violated
+          MatchingEngineBrokenCross.cfg Invariant NoCrossedBookAfterStep is violated
+          MatchingEngineBrokenStp.cfg Invariant NoSelfTrade is violated
+          MatchingEngineBrokenModify.cfg Invariant NoEmptyRestingOrder is violated
+          MatchingEngineBrokenReplace.cfg Invariant FIFO_Preservation is violated
+          EOF
+          exit "$fail"
 
       - name: Non-vacuity check (Auction liveness must be violable)
         working-directory: spec

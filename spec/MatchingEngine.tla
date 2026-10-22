@@ -1,347 +1,309 @@
 ---- MODULE MatchingEngine ----
 (***************************************************************************)
-(* TLA+ Specification for the Order Matching Engine                        *)
+(* Continuous price-time matching for one symbol, as OrderBook::match,     *)
+(* modifyOrder and cancelReplace do it (src/OrderBook.cpp).                *)
 (*                                                                         *)
-(* Roadmap Phase 2, Week 5: Matching Engine TLA+ Specification             *)
+(* An order is matched when it arrives, before it can rest: Submit makes   *)
+(* it the in-flight `aggressor`, and while one is in flight only Match,    *)
+(* StpCancelIncoming and Rest can fire. That models the engine taking the  *)
+(* book lock for the whole of addOrder. The aggressor is not on the book   *)
+(* while it matches, so the resting book is never crossed in ANY state.    *)
 (*                                                                         *)
-(* Models a simplified order book. The Next-state relation has exactly     *)
-(* five actions: PlaceLimit, Match, CancelOrder, ExpireGTD, AdvanceTime.   *)
-(*   - Two price levels, two participants.                                 *)
-(*   - PlaceLimit places LIMIT orders only. The OrderTypes set also        *)
-(*     names Market/IOC/FOK/GTD, but no action submits those types.        *)
-(*   - Match models the matching/cross layer (P1-6): when the book is      *)
-(*     crossed (best bid >= best ask) the FIFO-earliest resting order at   *)
-(*     the best bid trades against the FIFO-earliest resting order at the  *)
-(*     best ask for min(remainingQty). Fully-filled orders leave the book; *)
-(*     partial fills update remainingQty. The spec now proves price-time   *)
-(*     execution, not just book-management safety.                         *)
-(*   - Per-order accounting fields filledQty and cancelledQty are carried  *)
-(*     so that qty = remainingQty + filledQty + cancelledQty always holds  *)
-(*     for every order (this is what makes conservation checkable even     *)
-(*     after cancellation, which zeroes remainingQty).                     *)
+(* Actions:                                                                *)
+(*   Submit            a Limit order arrives and becomes the aggressor     *)
+(*   Match             the aggressor fills against the front order of the  *)
+(*                     best opposite level it crosses, at that order's     *)
+(*                     price                                               *)
+(*   StpCancelIncoming the front order belongs to the aggressor's own      *)
+(*                     participant: the aggressor's remainder is cancelled *)
+(*                     (STPMode::DefaultCancelIncoming, the only mode      *)
+(*                     either binary runs; no binary calls setSTPMode)     *)
+(*   Rest              the aggressor crosses nothing: its remainder joins  *)
+(*                     the back of its level                               *)
+(*   Cancel            a resting order leaves the book                     *)
+(*   Modify            modifyOrder: reduce a resting order's quantity in   *)
+(*                     place, keeping its queue position (0 < new < old)   *)
+(*   Replace           cancelReplace to a new price, quantity unchanged:   *)
+(*                     the order leaves the book, takes a new timestamp    *)
+(*                     and arrives again as an aggressor. To the same      *)
+(*                     price it rests at the back of its level.            *)
 (*                                                                         *)
-(* Non-vacuity (P1-7): CONSTANT BROKEN_NO_FIFO toggles a bug-injected      *)
-(* variant of Match that consumes a NON-earliest resting order at the best *)
-(* price. Under MatchingEngineBroken.cfg (BROKEN_NO_FIFO = TRUE) TLC finds *)
-(* a reachable state violating FIFOExecution — proving Match actually      *)
-(* fires and the invariant is not vacuously true. See MatchingEngine.cfg   *)
-(* (BROKEN_NO_FIFO = FALSE) for the real spec.                             *)
+(* Not modelled: Market/IOC/FOK/iceberg/hidden orders, the other three STP *)
+(* modes, a replace that changes price and quantity together, auctions,    *)
+(* pro-rata, risk and admission checks, the journal and crash recovery,    *)
+(* and concurrency between symbols or threads.                             *)
 (*                                                                         *)
-(* Invariants proved:                                                      *)
-(*   - NoNegativeQuantity                                                  *)
-(*   - FIFO_Preservation                                                   *)
-(*   - MatchingConservation  (P1-6, checked)                               *)
-(*   - FIFOExecution         (P1-6/P1-7, checked; non-vacuous)             *)
-(*   - Quantity_Conservation (legacy, defined but not in the .cfg)         *)
-(*   - GTD_Expiry_Correctness                                             *)
+(* Non-vacuity: CONSTANT BUG injects one defect at a time. Each            *)
+(* MatchingEngineBroken*.cfg names one and checks only the property that   *)
+(* defect must break; .github/workflows/tla.yml requires each to fail with *)
+(* that property's counterexample.                                         *)
+(*   "no_fifo"                 Match takes the youngest order at the level *)
+(*                             -> FIFOExecution                            *)
+(*   "worst_price_first"       Match takes the worst level it crosses      *)
+(*                             -> PricePriority                            *)
+(*   "aggressor_price"         a fill prints at the aggressor's limit      *)
+(*                             -> ExecPriceIsPassive                       *)
+(*   "rest_crossed"            Rest may fire while the aggressor crosses   *)
+(*                             -> NoCrossedBookAfterStep                   *)
+(*   "no_stp"                  same-participant orders trade               *)
+(*                             -> NoSelfTrade                              *)
+(*   "modify_to_zero"          Modify accepts 0 and leaves the order       *)
+(*                             resting (MATCH-2) -> NoEmptyRestingOrder    *)
+(*   "replace_keeps_priority"  Replace keeps the old timestamp             *)
+(*                             -> FIFO_Preservation                        *)
 (***************************************************************************)
 
-EXTENDS Integers, Sequences, FiniteSets, TLC
+EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
-    MaxOrders,      \* Maximum number of orders to place
-    Participants,   \* Set of participant IDs {1, 2}
-    Prices,         \* Set of valid prices {100, 200}
-    MaxQty,         \* Maximum order quantity
-    MaxTime,        \* Maximum simulation time
-    BROKEN_NO_FIFO  \* Non-vacuity flag (P1-7). FALSE = real spec: Match
-                    \* consumes the FIFO-earliest resting order at the best
-                    \* price. TRUE = bug-injected: Match may consume a
-                    \* NON-earliest resting order, so FIFOExecution is
-                    \* violated and TLC must report a counterexample. This
-                    \* proves the invariant has teeth (Match actually fires).
+    MaxOrders,      \* orders submitted over a whole behaviour
+    MaxReplaces,    \* Replace steps over a whole behaviour
+    Participants,
+    Prices,
+    MaxQty,
+    BUG             \* "none" in MatchingEngine.cfg; see the header
+
+ASSUME BUG \in {"none", "no_fifo", "worst_price_first", "aggressor_price",
+                "rest_crossed", "no_stp", "modify_to_zero",
+                "replace_keeps_priority"}
 
 VARIABLES
-    bids,           \* Map: Price -> Sequence of orders (FIFO)
-    asks,           \* Map: Price -> Sequence of orders (FIFO)
-    orders,         \* Map: OrderId -> Order record
-    trades,         \* Sequence of executed trades
-    nextOrderId,    \* Next order ID to assign
-    nextTradeId,    \* Next trade ID to assign
-    seqNum,         \* Global sequence number
-    currentTime     \* Simulated clock
+    bids,       \* Prices -> Seq(order id), front = oldest
+    asks,
+    orders,     \* Seq of order records; an order's id is its index
+    aggressor,  \* id of the order being matched, 0 when none
+    replaces,   \* Replace steps taken so far
+    lastTrade   \* the fill this step made, or NoTrade
 
-vars == <<bids, asks, orders, trades, nextOrderId, nextTradeId, seqNum, currentTime>>
+vars == <<bids, asks, orders, aggressor, replaces, lastTrade>>
 
-(* ─── Types ──────────────────────────────────────────────────────── *)
-
-OrderTypes == {"Limit", "Market", "IOC", "FOK", "GTD"}
 Sides == {"Buy", "Sell"}
-Statuses == {"New", "PartialFill", "Filled", "Cancelled"}
-Qtys == 1..MaxQty
-Times == 0..MaxTime
+NoTrade == [aggressorId |-> 0, restingId |-> 0, price |-> 0, qty |-> 0]
 
-NullOrder == [id |-> 0, participant |-> 0, side |-> "Buy",
-              price |-> 0, qty |-> 0, remainingQty |-> 0,
-              filledQty |-> 0, cancelledQty |-> 0,
-              type |-> "Limit", status |-> "New",
-              timestamp |-> 0, expiryTime |-> 0]
+\* Priority time. Strictly increases at every Submit and Replace, the two
+\* actions that stamp an order.
+Now == Len(orders) + replaces
 
-(* ─── Helpers ────────────────────────────────────────────────────── *)
+Book(side) == IF side = "Buy" THEN bids ELSE asks
+Opposite(side) == IF side = "Buy" THEN "Sell" ELSE "Buy"
 
-\* Best bid: highest price with non-empty queue
-BestBid == IF \E p \in DOMAIN bids : bids[p] /= <<>>
-           THEN CHOOSE p \in DOMAIN bids :
-                    bids[p] /= <<>> /\
-                    \A q \in DOMAIN bids : bids[q] /= <<>> => q <= p
-           ELSE 0
+Min(S) == CHOOSE x \in S : \A y \in S : x <= y
+Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 
-\* Best ask: lowest price with non-empty queue
-BestAsk == IF \E p \in DOMAIN asks : asks[p] /= <<>>
-           THEN CHOOSE p \in DOMAIN asks :
-                    asks[p] /= <<>> /\
-                    \A q \in DOMAIN asks : asks[q] /= <<>> => q >= p
-           ELSE MaxQty * 1000  \* Sentinel "no ask"
+BidLevels == {p \in Prices : bids[p] /= <<>>}
+AskLevels == {p \in Prices : asks[p] /= <<>>}
 
-\* Total quantity on a side at a price
-SideQtyAt(book, price) ==
-    IF price \in DOMAIN book /\ book[price] /= <<>>
-    THEN LET orderIds == book[price]
-         IN  \* Sum remaining quantities
-             LET SumQty[i \in 0..Len(orderIds)] ==
-                 IF i = 0 THEN 0
-                 ELSE SumQty[i-1] + orders[orderIds[i]].remainingQty
-             IN SumQty[Len(orderIds)]
-    ELSE 0
+Resting(o) == \E i \in 1..Len(Book(orders[o].side)[orders[o].price]) :
+                  Book(orders[o].side)[orders[o].price][i] = o
 
-(* ─── Init ───────────────────────────────────────────────────────── *)
+\* Opposite levels order o's limit reaches.
+CrossLevels(o) ==
+    IF orders[o].side = "Buy"
+    THEN {p \in AskLevels : orders[o].price >= p}
+    ELSE {p \in BidLevels : orders[o].price <= p}
+
+\* The level Match takes: the best one (lowest ask, highest bid).
+MatchLevel(o) ==
+    IF (orders[o].side = "Buy") = (BUG /= "worst_price_first")
+    THEN Min(CrossLevels(o)) ELSE Max(CrossLevels(o))
+
+\* The resting order the aggressor meets next: the front of MatchLevel.
+Contra(o) ==
+    LET q == Book(Opposite(orders[o].side))[MatchLevel(o)]
+    IN  IF BUG = "no_fifo" /\ Len(q) > 1 THEN q[Len(q)] ELSE q[1]
+
+Drop(q, o) == SelectSeq(q, LAMBDA x : x /= o)
+
+\* Book after removing order o from its level.
+WithoutBids(o) == IF orders[o].side = "Buy"
+                  THEN [bids EXCEPT ![orders[o].price] = Drop(@, o)] ELSE bids
+WithoutAsks(o) == IF orders[o].side = "Sell"
+                  THEN [asks EXCEPT ![orders[o].price] = Drop(@, o)] ELSE asks
 
 Init ==
     /\ bids = [p \in Prices |-> <<>>]
     /\ asks = [p \in Prices |-> <<>>]
     /\ orders = <<>>
-    /\ trades = <<>>
-    /\ nextOrderId = 1
-    /\ nextTradeId = 1
-    /\ seqNum = 1
-    /\ currentTime = 0
+    /\ aggressor = 0
+    /\ replaces = 0
+    /\ lastTrade = NoTrade
 
-(* ─── PlaceLimit ─────────────────────────────────────────────────── *)
+Submit(pt, side, price, qty) ==
+    /\ aggressor = 0
+    /\ Len(orders) < MaxOrders
+    /\ orders' = Append(orders,
+           [participant |-> pt, side |-> side, price |-> price, qty |-> qty,
+            remainingQty |-> qty, filledQty |-> 0, cancelledQty |-> 0,
+            timestamp |-> Now])
+    /\ aggressor' = Len(orders) + 1
+    /\ lastTrade' = NoTrade
+    /\ UNCHANGED <<bids, asks, replaces>>
 
-PlaceLimit(participant, side, price, qty) ==
-    /\ nextOrderId <= MaxOrders
-    /\ price \in Prices
-    /\ qty \in Qtys
-    /\ participant \in Participants
-    /\ LET oid == nextOrderId
-           order == [id |-> oid, participant |-> participant,
-                     side |-> side, price |-> price,
-                     qty |-> qty, remainingQty |-> qty,
-                     filledQty |-> 0, cancelledQty |-> 0,
-                     type |-> "Limit", status |-> "New",
-                     timestamp |-> seqNum, expiryTime |-> 0]
-       IN /\ orders' = orders @@ (oid :> order)
-          /\ IF side = "Buy"
-             THEN bids' = [bids EXCEPT ![price] = Append(@, oid)]
-                  /\ asks' = asks
-             ELSE asks' = [asks EXCEPT ![price] = Append(@, oid)]
-                  /\ bids' = bids
-          /\ nextOrderId' = nextOrderId + 1
-          /\ seqNum' = seqNum + 1
-          /\ UNCHANGED <<trades, nextTradeId, currentTime>>
-
-(* ─── Match ──────────────────────────────────────────────────────── *)
-\* Cross / matching action (P1-6).
-\*
-\* Fires whenever the book is crossed: the best bid price is >= the best
-\* ask price (equivalently, the aggressive buy at best bid crosses the
-\* best ask, or the aggressive sell at best ask crosses the best bid).
-\*
-\* FIFO selection: the resting order chosen at each side is the
-\* earliest-timestamped order at the best price level. Because each queue
-\* is maintained in FIFO order (front = oldest, see FIFO_Preservation),
-\* the earliest order is at index 1. The BROKEN_NO_FIFO variant instead
-\* picks the LAST (youngest) order at the best price when more than one
-\* rests there — a genuine time-priority violation.
-\*
-\* Fill quantity is min(incoming.remainingQty, resting.remainingQty), so
-\* at least one of the two orders is fully filled and leaves the book;
-\* Match therefore fires only finitely often (state space stays bounded).
-\* Quantity is conserved: both sides' remainingQty drop by fillQty while
-\* their filledQty rise by fillQty, and one trade of size fillQty is
-\* recorded (counted once per side => filledQty total = 2 * traded).
 Match ==
-    /\ \E bp \in DOMAIN bids : bids[bp] /= <<>>
-    /\ \E ap \in DOMAIN asks : asks[ap] /= <<>>
-    /\ BestBid >= BestAsk                        \* book is crossed
-    /\ LET bp   == BestBid
-           ap   == BestAsk
-           \* FIFO picks the front (oldest); the broken variant picks the
-           \* youngest resting order at the best price when one exists.
-           buyIdx  == IF BROKEN_NO_FIFO /\ Len(bids[bp]) > 1
-                      THEN Len(bids[bp]) ELSE 1
-           sellIdx == IF BROKEN_NO_FIFO /\ Len(asks[ap]) > 1
-                      THEN Len(asks[ap]) ELSE 1
-           buyId   == bids[bp][buyIdx]
-           sellId  == asks[ap][sellIdx]
-           buyOrd  == orders[buyId]
-           sellOrd == orders[sellId]
-           fillQty == IF buyOrd.remainingQty <= sellOrd.remainingQty
-                      THEN buyOrd.remainingQty ELSE sellOrd.remainingQty
-           \* Execution at the passive (earlier-resting) order's price.
-           execPrice == IF buyOrd.timestamp <= sellOrd.timestamp
-                        THEN buyOrd.price ELSE sellOrd.price
-           buyRem  == buyOrd.remainingQty - fillQty
-           sellRem == sellOrd.remainingQty - fillQty
-           trade   == [id |-> nextTradeId, buyId |-> buyId, sellId |-> sellId,
-                       price |-> execPrice, quantity |-> fillQty,
-                       buyTs |-> buyOrd.timestamp, sellTs |-> sellOrd.timestamp,
-                       timestamp |-> seqNum]
-       IN /\ fillQty > 0
+    LET a == aggressor IN
+    /\ a /= 0
+    /\ CrossLevels(a) /= {}
+    /\ LET r     == Contra(a)
+           fill  == Min({orders[a].remainingQty, orders[r].remainingQty})
+           price == IF BUG = "aggressor_price" THEN orders[a].price
+                    ELSE orders[r].price
+           aRem  == orders[a].remainingQty - fill
+           rRem  == orders[r].remainingQty - fill
+       IN /\ orders[r].participant /= orders[a].participant \/ BUG = "no_stp"
           /\ orders' = [orders EXCEPT
-                 ![buyId].remainingQty = buyRem,
-                 ![buyId].filledQty    = buyOrd.filledQty + fillQty,
-                 ![buyId].status       = IF buyRem = 0 THEN "Filled"
-                                         ELSE "PartialFill",
-                 ![sellId].remainingQty = sellRem,
-                 ![sellId].filledQty    = sellOrd.filledQty + fillQty,
-                 ![sellId].status       = IF sellRem = 0 THEN "Filled"
-                                          ELSE "PartialFill"]
-          \* Remove fully-filled orders from their queues (by id, so the
-          \* broken variant can drop a non-front order without disturbing
-          \* the relative order of the survivors).
-          /\ bids' = [bids EXCEPT ![bp] = IF buyRem = 0
-                          THEN SelectSeq(@, LAMBDA x : x /= buyId) ELSE @]
-          /\ asks' = [asks EXCEPT ![ap] = IF sellRem = 0
-                          THEN SelectSeq(@, LAMBDA x : x /= sellId) ELSE @]
-          /\ trades' = Append(trades, trade)
-          /\ nextTradeId' = nextTradeId + 1
-          /\ seqNum' = seqNum + 1
-          /\ UNCHANGED <<nextOrderId, currentTime>>
+                 ![a].remainingQty = aRem,
+                 ![a].filledQty    = @ + fill,
+                 ![r].remainingQty = rRem,
+                 ![r].filledQty    = @ + fill]
+          /\ bids' = IF rRem = 0 THEN WithoutBids(r) ELSE bids
+          /\ asks' = IF rRem = 0 THEN WithoutAsks(r) ELSE asks
+          /\ aggressor' = IF aRem = 0 THEN 0 ELSE a
+          /\ lastTrade' = [aggressorId |-> a, restingId |-> r,
+                           price |-> price, qty |-> fill]
+          /\ UNCHANGED replaces
 
-(* ─── CancelOrder ────────────────────────────────────────────────── *)
+StpCancelIncoming ==
+    LET a == aggressor IN
+    /\ a /= 0
+    /\ BUG /= "no_stp"
+    /\ CrossLevels(a) /= {}
+    /\ orders[Contra(a)].participant = orders[a].participant
+    /\ orders' = [orders EXCEPT ![a].cancelledQty = @ + orders[a].remainingQty,
+                                ![a].remainingQty = 0]
+    /\ aggressor' = 0
+    /\ lastTrade' = NoTrade
+    /\ UNCHANGED <<bids, asks, replaces>>
 
-CancelOrder(oid) ==
-    /\ oid \in DOMAIN orders
-    /\ orders[oid].status \in {"New", "PartialFill"}
-    /\ LET order == orders[oid]
-           side == order.side
-           price == order.price
-       IN /\ orders' = [orders EXCEPT ![oid].status = "Cancelled",
-                                       ![oid].cancelledQty = order.remainingQty,
-                                       ![oid].remainingQty = 0]
-          /\ IF side = "Buy"
-             THEN bids' = [bids EXCEPT ![price] =
-                      SelectSeq(@, LAMBDA x : x /= oid)]
-                  /\ asks' = asks
-             ELSE asks' = [asks EXCEPT ![price] =
-                      SelectSeq(@, LAMBDA x : x /= oid)]
-                  /\ bids' = bids
-          /\ seqNum' = seqNum + 1
-          /\ UNCHANGED <<nextOrderId, nextTradeId, trades, currentTime>>
+Rest ==
+    LET a == aggressor IN
+    /\ a /= 0
+    /\ CrossLevels(a) = {} \/ BUG = "rest_crossed"
+    /\ IF orders[a].side = "Buy"
+       THEN /\ bids' = [bids EXCEPT ![orders[a].price] = Append(@, a)]
+            /\ UNCHANGED asks
+       ELSE /\ asks' = [asks EXCEPT ![orders[a].price] = Append(@, a)]
+            /\ UNCHANGED bids
+    /\ aggressor' = 0
+    /\ lastTrade' = NoTrade
+    /\ UNCHANGED <<orders, replaces>>
 
-(* ─── ExpireGTD ──────────────────────────────────────────────────── *)
+Cancel(o) ==
+    /\ aggressor = 0
+    /\ Resting(o)
+    /\ orders' = [orders EXCEPT ![o].cancelledQty = @ + orders[o].remainingQty,
+                                ![o].remainingQty = 0]
+    /\ bids' = WithoutBids(o)
+    /\ asks' = WithoutAsks(o)
+    /\ lastTrade' = NoTrade
+    /\ UNCHANGED <<aggressor, replaces>>
 
-ExpireGTD ==
-    /\ \E oid \in DOMAIN orders :
-        /\ orders[oid].type = "GTD"
-        /\ orders[oid].status \in {"New", "PartialFill"}
-        /\ orders[oid].expiryTime <= currentTime
-        /\ CancelOrder(oid)
+Modify(o, newQty) ==
+    /\ aggressor = 0
+    /\ Resting(o)
+    /\ newQty < orders[o].remainingQty
+    /\ newQty > 0 \/ BUG = "modify_to_zero"
+    /\ orders' = [orders EXCEPT
+           ![o].cancelledQty = @ + (orders[o].remainingQty - newQty),
+           ![o].remainingQty = newQty]
+    /\ lastTrade' = NoTrade
+    /\ UNCHANGED <<bids, asks, aggressor, replaces>>
 
-(* ─── AdvanceTime ────────────────────────────────────────────────── *)
-
-AdvanceTime ==
-    /\ currentTime < MaxTime
-    /\ currentTime' = currentTime + 1
-    /\ UNCHANGED <<bids, asks, orders, trades, nextOrderId, nextTradeId, seqNum>>
-
-(* ─── Next ───────────────────────────────────────────────────────── *)
+Replace(o, newPrice) ==
+    /\ aggressor = 0
+    /\ replaces < MaxReplaces
+    /\ Resting(o)
+    /\ orders' = [orders EXCEPT
+           ![o].price     = newPrice,
+           ![o].timestamp = IF BUG = "replace_keeps_priority" THEN @ ELSE Now]
+    /\ bids' = WithoutBids(o)
+    /\ asks' = WithoutAsks(o)
+    /\ aggressor' = o
+    /\ replaces' = replaces + 1
+    /\ lastTrade' = NoTrade
 
 Next ==
-    \/ \E p \in Participants, s \in Sides, pr \in Prices, q \in Qtys :
-        PlaceLimit(p, s, pr, q)
+    \/ \E pt \in Participants, s \in Sides, p \in Prices, q \in 1..MaxQty :
+           Submit(pt, s, p, q)
     \/ Match
-    \/ \E oid \in DOMAIN orders : CancelOrder(oid)
-    \/ ExpireGTD
-    \/ AdvanceTime
-
-(* ─── Spec ───────────────────────────────────────────────────────── *)
+    \/ StpCancelIncoming
+    \/ Rest
+    \/ \E o \in DOMAIN orders :
+           \/ Cancel(o)
+           \/ \E q \in 0..MaxQty : Modify(o, q)
+           \/ \E p \in Prices : Replace(o, p)
 
 Spec == Init /\ [][Next]_vars
 
-(* ─── Invariants ─────────────────────────────────────────────────── *)
+(* ─── State invariants ───────────────────────────────────────────── *)
 
-\* INV1: No order or trade has negative quantity
 NoNegativeQuantity ==
-    /\ \A oid \in DOMAIN orders : orders[oid].remainingQty >= 0
-    /\ \A oid \in DOMAIN orders : orders[oid].qty >= 0
+    \A o \in DOMAIN orders :
+        /\ orders[o].remainingQty >= 0
+        /\ orders[o].filledQty >= 0
+        /\ orders[o].cancelledQty >= 0
 
-\* INV2: FIFO preservation — for two resting orders at the same price,
-\*       if A was placed before B, A appears before B in the queue
+\* A resting order always has quantity left (MATCH-2 was a resting order
+\* modified to zero).
+NoEmptyRestingOrder ==
+    \A o \in DOMAIN orders : Resting(o) => orders[o].remainingQty > 0
+
+\* Queue order is priority-time order at every level.
 FIFO_Preservation ==
-    \A p \in Prices :
-        /\ \A i, j \in 1..Len(bids[p]) :
-            i < j => orders[bids[p][i]].timestamp < orders[bids[p][j]].timestamp
-        /\ \A i, j \in 1..Len(asks[p]) :
-            i < j => orders[asks[p][i]].timestamp < orders[asks[p][j]].timestamp
+    \A p \in Prices, side \in Sides :
+        LET q == Book(side)[p]
+        IN  \A i \in 1..(Len(q) - 1) :
+                orders[q[i]].timestamp < orders[q[i + 1]].timestamp
 
-\* INV3: Total placed quantity = total resting + total traded + total cancelled
-Quantity_Conservation ==
-    LET totalPlaced == IF DOMAIN orders = {} THEN 0
-                       ELSE LET ids == DOMAIN orders
-                                SumPlaced[S \in SUBSET ids] ==
-                                    IF S = {} THEN 0
-                                    ELSE LET x == CHOOSE x \in S : TRUE
-                                         IN orders[x].qty + SumPlaced[S \ {x}]
-                            IN SumPlaced[ids]
-        totalRemaining == IF DOMAIN orders = {} THEN 0
-                          ELSE LET ids == DOMAIN orders
-                                   SumRem[S \in SUBSET ids] ==
-                                       IF S = {} THEN 0
-                                       ELSE LET x == CHOOSE x \in S : TRUE
-                                            IN orders[x].remainingQty + SumRem[S \ {x}]
-                               IN SumRem[ids]
-        totalTraded == IF trades = <<>> THEN 0
-                       ELSE LET SumTrd[i \in 0..Len(trades)] ==
-                                IF i = 0 THEN 0
-                                ELSE SumTrd[i-1] + trades[i].quantity
-                            IN SumTrd[Len(trades)]
-    IN totalPlaced = totalRemaining + (totalTraded * 2)  \* Each trade counted for both sides
-
-\* INV4: Matching conservation (P1-6). Across the whole lifecycle every
-\* unit of placed quantity is accounted for as exactly one of: still
-\* resting (remainingQty), filled by a cross (filledQty), or cancelled
-\* (cancelledQty). This holds because every action preserves the per-order
-\* identity qty = remainingQty + filledQty + cancelledQty, and summing over
-\* all orders gives:
-\*     totalPlacedQty = totalRestingQty + totalFilledQty + totalCancelledQty
+\* Every unit an order was given is resting, filled or cancelled, and every
+\* fill moved the same quantity on both sides.
 MatchingConservation ==
-    LET ids == DOMAIN orders
-        SumF(f(_)) == LET S[T \in SUBSET ids] ==
-                          IF T = {} THEN 0
-                          ELSE LET x == CHOOSE x \in T : TRUE
-                               IN f(x) + S[T \ {x}]
-                      IN S[ids]
-        totalPlacedQty    == SumF(LAMBDA o : orders[o].qty)
-        totalRestingQty   == SumF(LAMBDA o : orders[o].remainingQty)
-        totalFilledQty    == SumF(LAMBDA o : orders[o].filledQty)
-        totalCancelledQty == SumF(LAMBDA o : orders[o].cancelledQty)
-    IN totalPlacedQty = totalRestingQty + totalFilledQty + totalCancelledQty
+    LET SumFilled(side) ==
+            LET S[i \in 0..Len(orders)] ==
+                    IF i = 0 THEN 0
+                    ELSE S[i - 1] + (IF orders[i].side = side
+                                     THEN orders[i].filledQty ELSE 0)
+            IN  S[Len(orders)]
+    IN  /\ \A o \in DOMAIN orders :
+               orders[o].qty = orders[o].remainingQty + orders[o].filledQty
+                                 + orders[o].cancelledQty
+        /\ SumFilled("Buy") = SumFilled("Sell")
 
-\* INV5: FIFO execution / time priority (P1-6, non-vacuity P1-7).
-\* Fills always consume the earliest-timestamped resting order at a price
-\* level, never an arbitrary one. Stated as a reachable-state predicate:
-\* at the same side and price, an order that has received a fill
-\* (filledQty > 0) can never be YOUNGER than an order that is still resting
-\* completely untouched (status "New", filledQty = 0). If it were, a later
-\* order would have executed ahead of an earlier resting one — a time-
-\* priority violation. The correct Match (front-of-queue) preserves this;
-\* the BROKEN_NO_FIFO variant breaks it and TLC reports a counterexample.
+\* The book is never crossed. Named for the roadmap item; it holds in every
+\* state, not only between submissions, because the aggressor is off the
+\* book while it matches.
+NoCrossedBookAfterStep ==
+    BidLevels /= {} /\ AskLevels /= {} => Max(BidLevels) < Min(AskLevels)
+
+NoSelfTrade ==
+    lastTrade /= NoTrade =>
+        orders[lastTrade.aggressorId].participant
+            /= orders[lastTrade.restingId].participant
+
+(* ─── Properties of each fill (checked on every step) ────────────── *)
+
+TradeStep == lastTrade' /= NoTrade
+Filled    == lastTrade'.restingId
+
+\* The resting order filled was on the best level of its side.
+PricePriority ==
+    [][TradeStep =>
+        IF orders[Filled].side = "Sell"
+        THEN orders[Filled].price = Min(AskLevels)
+        ELSE orders[Filled].price = Max(BidLevels)]_vars
+
+\* The resting order filled was the oldest at its level.
 FIFOExecution ==
-    \A a \in DOMAIN orders, b \in DOMAIN orders :
-        ( /\ orders[a].side  = orders[b].side
-          /\ orders[a].price = orders[b].price
-          /\ orders[b].filledQty > 0
-          /\ orders[a].filledQty = 0
-          /\ orders[a].status = "New"
-        ) => orders[a].timestamp > orders[b].timestamp
+    [][TradeStep =>
+        Head(Book(orders[Filled].side)[orders[Filled].price]) = Filled]_vars
 
-\* INV6: No GTD order exists past its expiry time
-GTD_Expiry_Correctness ==
-    \A oid \in DOMAIN orders :
-        orders[oid].type = "GTD" /\
-        orders[oid].expiryTime < currentTime
-        => orders[oid].status = "Cancelled"
+\* A fill prints at the resting (passive) order's price, which is never
+\* worse than the aggressor's limit.
+ExecPriceIsPassive ==
+    [][TradeStep =>
+        LET a == lastTrade'.aggressorId
+            px == lastTrade'.price
+        IN  /\ px = orders[Filled].price
+            /\ IF orders[a].side = "Buy" THEN px <= orders[a].price
+                                         ELSE px >= orders[a].price]_vars
 
 ====

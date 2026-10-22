@@ -1,109 +1,118 @@
 # TLA+ Verification Report
 
-> **MatchingEngine.tla** (order book **+ matching/cross layer**): VERIFIED — 368,192,427 states generated, 171,187,419 distinct, **zero violations**, complete exploration · 2026-07-12 · `MatchingEngine4.cfg` (MaxOrders=4, MaxTime=2) · BFS depth 11 · 17m 21s · non-vacuity: `MatchingEngineBroken.cfg` (BROKEN_NO_FIFO=TRUE) reproduces a `FIFOExecution` violation, so the time-priority invariant is not vacuous · **scope:** no invariant checks price priority, `GTD_Expiry_Correctness` is vacuous (the model only places Limit orders), and `Quantity_Conservation` is not checked and is false (see below)  
+> **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,796,145 states generated, 2,726,157 distinct, depth 14, complete · each of the seven `MatchingEngineBroken*.cfg` variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`)
 > **Replication.tla** (lease-propagation model): **VACUOUS** — zero violations at both cfgs, but in both the backup can never promote, so `NoSplitBrain` and `NoCommittedLoss` hold trivially. `TickDegraded` stops advancing the timers once `heartbeatTimer` reaches `HeartbeatTimeout + 1`, the two timers are always equal, and `BackupPromote` needs `leaseTimer > LeaseTimeout`, which is larger (2 vs 5; 3 vs 7). The bug-injected variant (lease check stripped) is the only configuration in which promotion is reachable, and there it splits the brain — the spec has no primary step-down. No `ReplicationBroken` cfg is committed, and CI does not run this spec.
 
 > **New specs (2026-05-28)**: Auction.tla · EpochDurability.tla · FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states)
 
-## Model Configuration
+## MatchingEngine.tla
+
+### What it models
+
+One symbol's continuous book, as `OrderBook::match`, `modifyOrder` and
+`cancelReplace` run it (`src/OrderBook.cpp`):
+
+- **Submit**: a Limit order arrives and becomes the in-flight aggressor. While
+  one is in flight nothing but Match, StpCancelIncoming and Rest can fire,
+  which is how the engine holds the book lock for a whole `addOrder`.
+- **Match**: the aggressor fills against the front order of the best opposite
+  level it crosses, for the smaller of the two quantities, at the resting
+  order's price.
+- **StpCancelIncoming**: the front order is the aggressor's own participant's,
+  so the aggressor's remainder is cancelled and nothing trades. This is
+  `STPMode::DefaultCancelIncoming`, the only mode either binary runs (neither
+  calls `setSTPMode`).
+- **Rest**: the aggressor crosses nothing, and its remainder joins the back of
+  its level.
+- **Cancel**: a resting order leaves the book.
+- **Modify** (`modifyOrder`): a resting order's quantity is reduced in place
+  and it keeps its queue position. Zero and increases are refused, as in the
+  code.
+- **Replace** (`cancelReplace` to a new price, quantity unchanged): the order
+  leaves the book, takes a new timestamp and arrives again as an aggressor, so
+  it can trade or be STP-cancelled. Replaced to its own price, it rests at the
+  back of its level.
+
+Not modelled: Market, IOC, FOK, iceberg and hidden orders; the other three
+STP modes (library only, see [Compliance.md](Compliance.md)); a replace that
+changes price and quantity together; auctions; pro-rata; risk and admission
+checks; the journal and crash recovery; and any concurrency between threads or
+symbols. The earlier spec's `ExpireGTD`, `AdvanceTime` and
+`GTD_Expiry_Correctness` are gone: no action ever placed a GTD order, so the
+invariant held vacuously.
+
+### Properties
+
+| Property | Kind | Says | Broken cfg (`BUG`) that must break it |
+|---|---|---|---|
+| `NoNegativeQuantity` | invariant | No order's remaining, filled or cancelled quantity is negative | — |
+| `NoEmptyRestingOrder` | invariant | Every resting order has quantity left | `MatchingEngineBrokenModify.cfg` (`modify_to_zero`: Modify accepts 0, MATCH-2) |
+| `FIFO_Preservation` | invariant | At every level, queue order is timestamp order | `MatchingEngineBrokenReplace.cfg` (`replace_keeps_priority`) |
+| `MatchingConservation` | invariant | For every order, quantity = remaining + filled + cancelled; total filled on buys = total filled on sells | — |
+| `NoCrossedBookAfterStep` | invariant | Best bid < best ask whenever both sides rest. Holds in every state, not only between submissions, because the aggressor is off the book while it matches | `MatchingEngineBrokenCross.cfg` (`rest_crossed`) |
+| `NoSelfTrade` | invariant | No fill has the same participant on both sides | `MatchingEngineBrokenStp.cfg` (`no_stp`) |
+| `PricePriority` | action property | The resting order a fill takes is on the best level of its side | `MatchingEngineBrokenPrice.cfg` (`worst_price_first`) |
+| `FIFOExecution` | action property | The resting order a fill takes is the oldest at its level | `MatchingEngineBroken.cfg` (`no_fifo`) |
+| `ExecPriceIsPassive` | action property | A fill prints at the resting order's price, never worse than the aggressor's limit | `MatchingEngineBrokenExecPrice.cfg` (`aggressor_price`) |
+
+The action properties are `[][...]_vars` formulas checked on every step TLC
+generates. `MatchingConservation` and `NoNegativeQuantity` have no broken cfg,
+so nothing yet shows that either can fail.
+
+### Last run
+
+Every number below is from one run on 2026-10-18 of the files in this tree,
+with `spec/tla2tools.jar` (TLC2 version 2026.05.04), 2 workers, on an Apple
+Silicon machine shared with other jobs. CI downloads the jar from the
+tlaplus `v1.8.0` release tag, so its version and timing can differ; the
+distinct-state count of an exhaustive run should not.
 
 ```
-SPECIFICATION Spec
-CONSTANTS
-    MaxOrders      = 4
-    Participants   = {1, 2}
-    Prices         = {100, 200}
-    MaxQty         = 3
-    MaxTime        = 2
-    BROKEN_NO_FIFO = FALSE
+MatchingEngine.cfg
+CONSTANTS MaxOrders = 3, MaxReplaces = 1, Participants = {1, 2},
+          Prices = {100, 200}, MaxQty = 3, BUG = "none"
+
+Model checking completed. No error has been found.
+6796145 states generated, 2726157 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 14.
+Fingerprint collision probability: calculated 6.0E-7, from actual fingerprints 1.5E-6
+Finished in 03min 16s   (exit 0)
 ```
 
-MaxOrders=4 admits up to 3 resting orders on one side at a single price level
-(place 3, cross with a 4th) — the regime where FIFO time-priority defects
-manifest. MaxOrders=5 was attempted and is intractable on commodity hardware
-(>228M distinct states with >200M still queued after ~20 min, no convergence);
-4 is the largest exhaustively-checkable bound. The default `MatchingEngine.cfg`
-runs MaxOrders=3 (1.26M distinct) for a fast exhaustive check; `MatchingEngine4.cfg`
-is the deeper run reported here.
+| Broken cfg | TLC result | Distinct states when it stopped | Exit |
+|---|---|---:|---:|
+| `MatchingEngineBroken.cfg` | Action property FIFOExecution is violated | 7,032 | 13 |
+| `MatchingEngineBrokenPrice.cfg` | Action property PricePriority is violated | 8,518 | 13 |
+| `MatchingEngineBrokenExecPrice.cfg` | Action property ExecPriceIsPassive is violated | 645 | 13 |
+| `MatchingEngineBrokenCross.cfg` | Invariant NoCrossedBookAfterStep is violated | 427 | 12 |
+| `MatchingEngineBrokenStp.cfg` | Invariant NoSelfTrade is violated | 355 | 12 |
+| `MatchingEngineBrokenModify.cfg` | Invariant NoEmptyRestingOrder is violated | 84 | 12 |
+| `MatchingEngineBrokenReplace.cfg` | Invariant FIFO_Preservation is violated | 3,435 | 12 |
 
-**Workers**: 11 (Apple Silicon M-series, auto-detected)  
-**Memory**: 4096MB heap + 64MB offheap  
-**Search**: Breadth-first, no symmetry reduction
+With `MaxOrders = 3`, two orders can rest at one level and a third can cross
+both, or two levels can rest on one side and a third can reach both, so FIFO
+selection, price priority, partial fills, sweeps, STP and a re-aggressing
+replace are all reachable (each broken cfg's counterexample is one of those
+interleavings). No larger bound has been run on this spec.
 
-## Verified Invariants
+### Earlier figures
 
-| Invariant | Description | Status |
-|-----------|-------------|--------|
-| `NoNegativeQuantity` | No order has negative `qty` or `remainingQty` | ✅ Verified |
-| `FIFO_Preservation` | Orders at the same price maintain timestamp ordering | ✅ Verified |
-| `MatchingConservation` | `placed = resting + filled + cancelled` across every order's lifecycle | ✅ Verified |
-| `FIFOExecution` | A fill always consumes the earliest-timestamped resting order at a price (time priority within a price level; no invariant checks price priority) — **non-vacuous**, broken variant violates it | ✅ Verified |
-| `GTD_Expiry_Correctness` | Expired GTD orders are always cancelled | ⚠️ Vacuous — `PlaceLimit` is the only order-creating action and it sets `type = "Limit"`, so no GTD order ever exists |
+README and other documents used to cite 171,187,419 distinct states
+(`MatchingEngine4.cfg`, MaxOrders=4) and 1.26M (`MatchingEngine.cfg`,
+MaxOrders=3), and before that 181,004,838. All three came from earlier versions
+of this spec: no STP, no Modify or Replace, orders resting before they matched
+(so the book could rest crossed), and no price-priority check. They do not
+describe the spec in this tree. `MatchingEngine4.cfg` and `MatchingEngine5.cfg`
+were deleted with them.
 
-## State Space Coverage
+### What it does NOT show
 
-```
-368,192,427 states generated
-171,187,419 distinct states found
-11 levels deep (BFS depth)
-0 states left on queue (complete exploration)
-```
-
-**Fingerprint collision probability**: ~0.18% (calculated, optimistic; 0.13% from
-actual fingerprints) — acceptable for this state space size
-
-### Which count comes from which `MaxOrders`
-
-The state count is a function of the `MaxOrders` bound, so a bare "N states
-verified" claim is ambiguous. Every count this repository publishes maps to
-exactly one config:
-
-| Config | `MaxOrders` | States generated | Distinct | Runtime | Role |
-|--------|------------:|-----------------:|---------:|--------:|------|
-| `spec/MatchingEngine.cfg`  | 3 | — | 1,260,000 (1.26M) | seconds | Fast exhaustive check. Not run by CI: `tla.yml` checks MatchingEngine and Replication "out-of-band" |
-| `spec/MatchingEngine4.cfg` | 4 | **368,192,427** | **171,187,419** | 17m 21s | **Authoritative** — the deepest exhaustively-checkable bound, reported above and cited in README / BENCHMARKS / PerformanceWhitepaper |
-| (attempted)                | 5 | — | >228M distinct with >200M still queued after ~20 min | no convergence | Intractable on commodity hardware |
-
-**`MaxOrders=4` is the figure to cite.** MaxOrders counts orders *placed over
-the whole behaviour*, not orders resting simultaneously: 4 admits up to 3
-resting on one side at a single price plus a 4th that crosses them — the
-smallest bound that exercises FIFO time-priority against a multi-order queue.
-MaxOrders=3 cannot construct that interleaving, which is why the 1.26M figure
-is a regression gate rather than the headline.
-
-A superseded figure — 454,022,166 generated / 181,004,838 distinct, 12m 35s —
-circulated in earlier revisions of README.md, BENCHMARKS.md,
-PerformanceWhitepaper.md, Project_Overview.md, Architecture.md and
-PRODUCTION_ROADMAP.md. It came from the pre-matching-layer version of the spec
-(no `Match` action, so neither `MatchingConservation` nor `FIFOExecution` was
-checked) and does not describe the spec in this tree. It has been removed
-everywhere; if it reappears, it is stale.
-
-## What This Proves
-
-The spec models a simplified order book **with matching** at:
-- 4 orders maximum, 2 participants, 2 price levels, quantities 1–3
-- Order types: Limit only. `OrderTypes` names GTD and others, but no action places them, so `ExpireGTD` never fires
-- Actions: PlaceLimit, **Match** (price-cross, FIFO front-of-queue, min-fill),
-  CancelOrder, ExpireGTD, AdvanceTime
-
-All safety properties hold across every reachable state — no sequence of
-events can produce negative quantities, violate FIFO ordering, execute out of
-time priority at a price level, or lose quantity across a fill/cancel
-(`MatchingConservation`). The GTD invariant also holds, but only because no GTD
-order is ever placed.
-
-## What This Does NOT Prove
-
-- **No concurrent access**: Single-threaded sequential model only.
-- **Small constants**: 2 participants, 2 prices, qty ≤ 3. Real systems operate
-  at much larger scales — the spec proves the algorithm is correct for the
-  modeled domain, not that the implementation handles edge cases at scale.
-- **`Quantity_Conservation` not checked, and false**: it is defined as
-  `placed = remaining + 2 × traded` and leaves out cancelled quantity, so a
-  single place-then-cancel violates it. This line used to say it was excluded
-  because its `SUBSET` enumeration is too expensive; `MatchingConservation`
-  uses the same `SUBSET` recursion and is in every cfg.
+- That the C++ does what the spec does. No refinement mapping links the two.
+  `Refinement.tla`, which claimed to be one, never parsed and has been
+  deleted.
+- Anything at scale: 2 participants, 2 prices, quantities 1–3, 3 orders and 1
+  replace per behaviour.
+- Anything about the parts listed under "Not modelled" above.
 
 ## Replication.tla — Lease-Propagation Model
 
@@ -144,13 +153,11 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 
 | File | Purpose |
 |------|---------|
-| `spec/MatchingEngine.tla` | Core matching engine spec — order book + matching/cross layer (171M distinct states verified at MaxOrders=4) |
-| `spec/MatchingEngine.cfg` | Fast exhaustive config, MaxOrders=3 (1.26M distinct) |
-| `spec/MatchingEngine4.cfg` | Deep config, MaxOrders=4 (171M distinct, reported above) |
-| `spec/MatchingEngineBroken.cfg` | Non-vacuity variant (BROKEN_NO_FIFO=TRUE → FIFOExecution violation) |
+| `spec/MatchingEngine.tla` | Continuous price-time matching with STP, Modify and Replace (section above) |
+| `spec/MatchingEngine.cfg` | The bounds CI checks (MaxOrders=3, MaxReplaces=1) |
+| `spec/MatchingEngineBroken*.cfg` | Seven non-vacuity variants, one injected bug each; CI requires each to fail on its property |
 | `spec/Replication.tla` | Primary-backup replication spec with lease propagation (passes vacuously — promotion unreachable) |
 | `spec/Replication.cfg` | TLC configuration for Replication |
-| `spec/Refinement.tla` | C++ → TLA+ refinement mapping — prose sketch only, never checked: it uses `IntrusiveListToSeq`, which nothing defines, maps actions (`PlaceMarket`, `PlaceGTD`, ...) the spec does not have, and has no cfg |
 | `spec/MpscQueue.tla` | Lock-free ring buffer linearizability |
 | `spec/EngineConsumer.tla` | Worker loop shutdown safety |
 | `spec/Snapshot.tla` / `spec/SnapshotLocked.tla` | Torn-snapshot prevention |
@@ -181,12 +188,11 @@ Each new spec follows the same pattern as `Replication.tla`: a correct spec is v
 
 ```bash
 cd spec/
-# Deep MatchingEngine verification, MaxOrders=4 (~17 min, 171M distinct states):
-./check.sh MatchingEngine MatchingEngine4.cfg
-# Fast exhaustive check, MaxOrders=3 (~seconds, 1.26M distinct):
-./check.sh MatchingEngine MatchingEngine.cfg
-# Non-vacuity: broken variant must report "Invariant FIFOExecution is violated":
-./check.sh MatchingEngine MatchingEngineBroken.cfg
+# MatchingEngine at the CI bounds (a few minutes):
+./check.sh MatchingEngine
+# Each broken variant must fail with its property's counterexample, e.g.
+# "Action property PricePriority is violated":
+./check.sh MatchingEngine MatchingEngineBrokenPrice.cfg
 
 # Replication lease-propagation verification (seconds):
 ./check.sh Replication

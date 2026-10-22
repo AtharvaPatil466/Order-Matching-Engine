@@ -618,10 +618,21 @@ public:
             return false;
         }
 
+        // The rename is a change to the directory, and durable only once the
+        // directory is synced (JRN-9). Until then a power cut can bring the old
+        // file back, and with it lose everything appended to the new one, so a
+        // sync that fails halts the journal like any other (see halt()). Both
+        // files describe the same book, so a restart from either loses nothing.
+        const bool dirSynced = syncDirOf(filePath_);
+        const int dirErr = errno;
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
         persistedEntries_.store(static_cast<size_t>(sequence_),
                                 std::memory_order_relaxed);
+        if (!dirSynced) {
+            halt("syncing the directory after the checkpoint rename", dirErr);
+            return false;
+        }
         return true;
     }
 
@@ -1694,14 +1705,24 @@ private:
 #endif
     }
 
-    // Make a new directory entry next to `path` durable.
+    // Make a new directory entry next to `path` durable. False, errno set, when
+    // the directory cannot be opened or synced.
     static bool syncDirOf(const std::string& path) {
         const size_t slash = path.find_last_of('/');
         const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash + 1);
         const int fd = ::open(dir.c_str(), O_RDONLY);
         if (fd < 0) return false;
+#ifdef __APPLE__
+        // fsync on macOS stops at the drive's cache; F_FULLFSYNC is the barrier
+        // (as in syncFd). A filesystem that refuses it on a directory still
+        // gets fsync, as SQLite does.
+        const bool ok = ::fcntl(fd, F_FULLFSYNC) == 0 || ::fsync(fd) == 0;
+#else
         const bool ok = ::fsync(fd) == 0;
+#endif
+        const int err = errno;
         ::close(fd);
+        errno = err;
         return ok;
     }
 

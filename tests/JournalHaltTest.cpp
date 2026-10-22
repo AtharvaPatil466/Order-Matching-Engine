@@ -25,6 +25,7 @@
 #include <functional>
 #include <string>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -218,12 +219,55 @@ void testCheckpointFailureKeepsTheJournal() {
     assert(!tmpLeft && "a failed checkpoint left its temp file behind");
 }
 
+// D5 (JRN-9): a checkpoint's rename is a change to the DIRECTORY, durable only
+// once the directory is synced; until then a power cut can bring the old file
+// back and drop everything appended to the new one. A directory this process
+// may write but not open (0300) makes that sync fail for real. The checkpoint
+// must halt the journal rather than carry on behind a rename it cannot keep.
+void testCheckpointDirectorySyncFailureHalts() {
+    if (::geteuid() == 0) {
+        std::puts("  directory sync: SKIP (root opens a 0300 directory)");
+        return;
+    }
+    constexpr int kOrders = 5;
+    const std::string dir = uniqueTempPath("journal_halt_dirsync");
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directory(dir);
+    const std::string path = dir + "/live.wal";
+    bool halted = false;
+    RejectReason next = RejectReason::None;
+    {
+        MatchingEngine engine;
+        engine.addSymbol(kSym);
+        engine.enableJournal(path);
+        engine.start();
+        for (OrderId id = 1; id <= kOrders; ++id) restingBuy(engine, id);
+        engine.getJournal()->flush();
+        assert(::chmod(dir.c_str(), 0300) == 0);
+        engine.checkpoint();
+        halted = engine.getJournal()->halted();
+        next = restingBuy(engine, 99).rejectReason;
+        assert(::chmod(dir.c_str(), 0700) == 0);
+        engine.stop();
+    }
+    const size_t resting = restoredFrom(path, kOrders);
+    std::filesystem::remove_all(dir);
+    std::printf("  directory sync: halted=%d, next order rejected %s, %zu of %d resting "
+                "after restart\n", halted ? 1 : 0,
+                next == RejectReason::JournalHalted ? "JournalHalted" : "otherwise",
+                resting, kOrders);
+    assert(halted && "the checkpoint renamed over the journal without syncing the directory");
+    assert(next == RejectReason::JournalHalted);
+    assert(resting == static_cast<size_t>(kOrders));
+}
+
 }  // namespace
 
 int main() {
     testSyncPathRejectsAndHolds();
     testAsyncAdmissionRejects();
     testCheckpointFailureKeepsTheJournal();
+    testCheckpointDirectorySyncFailureHalts();
     std::puts("JournalHaltTest passed");
     return 0;
 }

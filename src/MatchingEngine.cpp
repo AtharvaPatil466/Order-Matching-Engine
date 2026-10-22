@@ -1021,8 +1021,10 @@ void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
 void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
     // Buffer executions only while OCO is active; drained by driveOco after
     // the triggering request completes. A partial fill counts — the first
-    // execution of any leg wins.
-    if (ocoActive && ocoActive->load(std::memory_order_relaxed) && isExecution(u.status)) {
+    // execution of any leg wins. Keyed on executed quantity, not status: an
+    // order cut short after real fills ends Cancelled / CancelledBySTP with
+    // filledQty > 0 (GTDIFF-4), and a zero-fill STP kill still cannot win (C1).
+    if (ocoActive && ocoActive->load(std::memory_order_relaxed) && u.filledQty > 0) {
         executed.push_back(u.orderId);
     }
 }

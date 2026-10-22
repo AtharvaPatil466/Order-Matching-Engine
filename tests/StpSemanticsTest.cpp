@@ -286,10 +286,13 @@ TEST(StpSemantics, PartialFillThenSelfCrossStillReportsTheRealFill) {
     const OrderUpdate* u = lis.lastFor(3);
     ASSERT_NE(u, nullptr);
     EXPECT_EQ(u->filledQty, 40u) << "the executed quantity must be reported";
-    EXPECT_TRUE(isExecution(u->status))
+    // The OCO gate counts filledQty > 0, not the status (GTDIFF-4), so this
+    // leg — 40 shares genuinely traded — still wins its group.
+    EXPECT_GT(u->filledQty, 0u)
         << "40 shares genuinely traded, so this leg DID execute and must be "
            "able to win an OCO group";
-    EXPECT_NE(u->status, OrderStatus::Filled) << "it did not fully fill";
+    EXPECT_EQ(u->status, OrderStatus::CancelledBySTP)
+        << "STP ended it: the last update is terminal, not PartiallyFilled";
 
     book.setEventListener(nullptr);
 }

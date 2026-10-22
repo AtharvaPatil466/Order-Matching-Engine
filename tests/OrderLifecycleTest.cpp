@@ -111,12 +111,52 @@ void electedStopThatRestsIsPublished() {
     std::puts("  elected stop, rests: market-data Add");
 }
 
+// GTDIFF-4: an IOC/FOK/Market remainder, and an order STP cut short after real
+// fills, ended on a PartiallyFilled update with nothing left — a status that
+// says "still working" for an order that is gone, so nothing downstream ever
+// closed it. The last update must be terminal and still carry the fills.
+void cutShortOrdersEndTerminal() {
+    {
+        OrderBook book(1);
+        book.setCircuitBreakerThreshold(1e9);
+        Capture cap;
+        book.setEventListener(&cap);
+        book.addOrder(1, 1, Side::Sell, PX, 4, OrderType::Limit);
+        book.addOrder(2, 2, Side::Buy, PX, 10, OrderType::IOC);
+        const OrderUpdate* u = cap.lastFor(2);
+        assert(u && book.getOrder(2) == nullptr);
+        if (!isTerminalStatus(u->status))
+            std::printf("  FAIL IOC 2 filled 4 of 10 and is gone; last update status %d "
+                        "is not terminal\n", static_cast<int>(u->status));
+        assert(u->status == OrderStatus::Cancelled && u->filledQty == 4 &&
+               u->remainingQty == 0 && "an IOC remainder ends Cancelled, fills reported");
+    }
+    {
+        OrderBook book(1);
+        book.setCircuitBreakerThreshold(1e9);
+        Capture cap;
+        book.setEventListener(&cap);
+        book.addOrder(1, 2, Side::Sell, PX, 40, OrderType::Limit);
+        book.addOrder(2, 1, Side::Sell, PX, 60, OrderType::Limit);
+        book.addOrder(3, 1, Side::Buy, PX, 100, OrderType::Limit);  // 40, then itself
+        const OrderUpdate* u = cap.lastFor(3);
+        assert(u && book.getOrder(3) == nullptr);
+        if (!isTerminalStatus(u->status))
+            std::printf("  FAIL order 3 filled 40 and STP stopped it; last update status %d "
+                        "is not terminal\n", static_cast<int>(u->status));
+        assert(u->status == OrderStatus::CancelledBySTP && u->filledQty == 40 &&
+               "an STP-cut order ends CancelledBySTP and still reports its fills");
+    }
+    std::puts("  IOC remainder / STP cut after fills: terminal status, fills reported");
+}
+
 }  // namespace
 
 int main() {
     minQtyRestThatDoesNotFitIsCancelled();
     electedStopThatFillsIsReportedFilled();
     electedStopThatRestsIsPublished();
+    cutShortOrdersEndTerminal();
     std::puts("OrderLifecycleTest passed");
     return 0;
 }

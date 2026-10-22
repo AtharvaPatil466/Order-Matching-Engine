@@ -1063,9 +1063,11 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
                                      OrderType type) {
     if (order->remainingQty > 0) [[likely]] {
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
-            const Quantity filled = order->cumQty;
-            OrderStatus st = (filled > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Cancelled;
-            notifyOrderUpdate(orderId, st, filled, 0);
+            // Cancelled even after fills: the remainder is gone, so the status
+            // is terminal and filledQty carries what executed. PartiallyFilled
+            // with nothing left said "still working" and closed nothing
+            // downstream (GTDIFF-4).
+            notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
         } else {
@@ -1234,15 +1236,12 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
 bool OrderBook::finalizeIfStpCancelled(Order* order) {
     if (order->status != OrderStatus::CancelledBySTP) [[likely]] return false;
 
-    const Quantity filled = order->cumQty;
-    // Fills against OTHER participants before the self-cross are real: they
-    // must still count as an execution so the client sees the quantity and an
-    // OCO leg that genuinely traded can still win. Only a zero-fill STP
-    // termination reports CancelledBySTP.
-    const OrderStatus st = (filled > 0) ? OrderStatus::PartiallyFilled
-                                        : OrderStatus::CancelledBySTP;
-    order->status = st;
-    notifyOrderUpdate(order->id, st, filled, 0);
+    // Terminal, with or without fills (GTDIFF-4). Fills against OTHER
+    // participants before the self-cross are real: filledQty reports them, and
+    // the OCO gate counts any update with filledQty > 0, so a leg that
+    // genuinely traded still wins its group. This used to report
+    // PartiallyFilled with nothing left, a status that never closes.
+    notifyOrderUpdate(order->id, OrderStatus::CancelledBySTP, order->cumQty, 0);
     orderLookup_.erase(order->id);
     orderPool_.deallocate(order);
     return true;

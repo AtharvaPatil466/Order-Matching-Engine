@@ -113,7 +113,8 @@ struct Ref {
   bool cancel(OrderId id, ParticipantId req) { RO* o = find(id); if (!o || (req != kAnyParticipant && o->owner != req)) return false; return erase(id); }
   bool modify(OrderId id, Quantity nq, ParticipantId req) {
     RO* o = find(id); if (!o || (req != kAnyParticipant && o->owner != req)) return false;
-    if (nq == 0 || nq >= o->qty) return false; o->qty = nq; o->vis = std::min(o->vis, nq); return true;
+    if (nq == 0 || nq >= o->qty) return false;
+    o->qty = nq; o->vis = std::min(o->vis, nq); return true;
   }
   bool replace(const Op& op, std::vector<Tr>& out) {
     Side sd; Price px; RO* o = find(op.id, &sd, &px);

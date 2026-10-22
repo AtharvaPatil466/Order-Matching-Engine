@@ -178,6 +178,8 @@ static std::string filesystemType(const std::string& path) {
         case 0x794C7630: return "overlayfs";
         case 0x6969:     return "nfs";
         case 0x01021994: return "tmpfs (RAM: says nothing about disk durability)";
+        case 0x65735546: return "fuse (userspace: a sync may not reach a disk)";
+        case 0x6A656A63: return "virtiofs (host passthrough: a sync may not reach a disk)";
         default: {
             char buf[48];
             std::snprintf(buf, sizeof buf, "unrecognised (f_type 0x%lx)",

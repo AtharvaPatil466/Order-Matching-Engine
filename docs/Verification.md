@@ -3,7 +3,7 @@
 > **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,796,145 states generated, 2,726,157 distinct, depth 14, complete · each of the seven `MatchingEngineBroken*.cfg` variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`)
 > **Replication.tla** (lease-propagation model): **VACUOUS** — zero violations at both cfgs, but in both the backup can never promote, so `NoSplitBrain` and `NoCommittedLoss` hold trivially. `TickDegraded` stops advancing the timers once `heartbeatTimer` reaches `HeartbeatTimeout + 1`, the two timers are always equal, and `BackupPromote` needs `leaseTimer > LeaseTimeout`, which is larger (2 vs 5; 3 vs 7). The bug-injected variant (lease check stripped) is the only configuration in which promotion is reachable, and there it splits the brain — the spec has no primary step-down. No `ReplicationBroken` cfg is committed, and CI does not run this spec.
 
-> **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg` — 318,551 states generated, 119,448 distinct · three broken cfgs fail as required · `NoReopenAfterClose` is violated by the table itself (see below) · 2026-10-22
+> **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22
 
 > **New specs (2026-05-28)**: EpochDurability.tla · FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states)
 
@@ -121,72 +121,70 @@ were deleted with them.
 ### What it models
 
 The session state machine, with every state change going through the table
-`OrderBook::transitionAllowed` enforces (docs/MatchingRules.md Rule 7.7, lane
-M commit `15bcf01`, not yet on `main`). `LegalEdges` is that table edge for
+`OrderBook::transitionAllowed` enforces (docs/MatchingRules.md Rule 7.7).
+`LegalEdges` is that table edge for
 edge: any state to `Halted`; `PreOpen` to `Continuous` or `AuctionOpen`;
 `AuctionOpen` to `Continuous` or `AuctionClose`; `Continuous` to
 `AuctionOpen`, `AuctionClose`, `VolatilityAuction`, `PostClose` or `PreOpen`;
 `AuctionClose` to `PostClose`; `VolatilityAuction` to `Continuous`,
-`AuctionClose` or `PostClose`; `Halted` to `Continuous` or `PostClose`;
-`PostClose` to `PreOpen`. It also has the table's two side conditions:
-`Continuous -> PreOpen` only before the book's first session, and
+`AuctionClose` or `PostClose`; `Halted` to any other state; `PostClose` to
+`PreOpen`. It also has the table's three side conditions:
+`Continuous -> PreOpen` only before the book's first session,
 `PostClose -> PreOpen` only with a trading date later than the closed
-session's. Books boot in `Continuous`. As in `setTradingStateLocked`, leaving
+session's, and `Halted` only to the state it was halted from (`preHalt`, as
+`OrderBook::preHaltState_`) or to `PostClose`: a halt is a pause, not a
+route. Books boot in `Continuous`. As in `setTradingStateLocked`, leaving
 an auction state for `Continuous` or `PostClose` is the uncross, and every
 other change prints nothing. The book is abstract (a sequence of quantities
 with no prices), so a crossed book cannot be expressed.
 
 | Property | Kind | Says | Broken cfg (`BUG`) that must break it |
 |---|---|---|---|
-| `ValidTransitions` | action property | Every state change is on `LegalEdges` and meets both side conditions | `AuctionBrokenEdge.cfg` (`postclose_continuous`), `AuctionBrokenDate.cfg` (`same_day_reopen`) |
+| `ValidTransitions` | action property | Every state change is on `LegalEdges` and meets its side conditions | `AuctionBrokenEdge.cfg` (`postclose_continuous`), `AuctionBrokenDate.cfg` (`same_day_reopen`) |
 | `VolatilityEventuallyReopens` | liveness (weak fairness on the reopening) | A `VolatilityAuction` always ends | `AuctionBroken.cfg` (`no_reopen`) |
 | `NoMatchOutsideContinuousExceptUncross` | invariant | A trade prints in `Continuous`, or is the uncross of an auction state | — |
 | `NoTradeWhileHalted` | invariant | No trade prints in `Halted` or `PostClose` | — |
 | `SingleClearingPrice`, `TypeOK` | invariants | An uncross prints one record at one price; types | — |
-| `NoReopenAfterClose` | invariant, **not in `Auction.cfg`** | Once a session reaches `AuctionClose` or `PostClose`, nothing trades or auctions until the next `PreOpen` | **Violated by the enforced table**, see below |
+| `NoReopenAfterClose` | invariant | Once a session reaches `AuctionClose` or `PostClose`, nothing trades or auctions until the next `PreOpen` | `AuctionBrokenHalt.cfg` (`halt_detour`: `Halted -> Continuous` from any pre-halt state) |
 
 ### Last run
 
-One run on 2026-10-22 of the files in this tree, with the same TLC jar,
-worker count and machine as MatchingEngine above.
+One run on 2026-10-22 of the files in this tree (TLC2 2026.05.04, 2 workers,
+the Apple Silicon dev box).
 
 ```
 Auction.cfg
 CONSTANTS MaxOrders = 3, MaxEvents = 6, MaxDate = 2, Prices = {100, 200}, BUG = "none"
 
 Model checking completed. No error has been found.
-318551 states generated, 119448 distinct states found, 0 states left on queue.
-The depth of the complete state graph search is 13.
-Fingerprint collision probability: calculated 1.3E-9, from actual fingerprints 1.9E-9
-Finished in 08s   (exit 0)
+478401 states generated, 199348 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 15.
+Finished in 26s   (exit 0)
 ```
 
 | Cfg | TLC result | Distinct states when it stopped | Exit |
 |---|---|---:|---:|
-| `AuctionBroken.cfg` | Temporal property VolatilityEventuallyReopens was violated | 53,780 | 13 |
-| `AuctionBrokenEdge.cfg` | Action property ValidTransitions is violated | 125 | 13 |
-| `AuctionBrokenDate.cfg` | Action property ValidTransitions is violated | 1,539 | 13 |
-| `Auction.cfg` + `NoReopenAfterClose` | Invariant NoReopenAfterClose is violated: `Continuous -> AuctionClose -> Halted -> Continuous` | 504 | 12 |
+| `AuctionBroken.cfg` | Temporal property VolatilityEventuallyReopens was violated | 48,209 | 13 |
+| `AuctionBrokenEdge.cfg` | Action property ValidTransitions is violated | 127 | 13 |
+| `AuctionBrokenDate.cfg` | Action property ValidTransitions is violated | 1,395 | 13 |
+| `AuctionBrokenHalt.cfg` | Invariant NoReopenAfterClose is violated: `Continuous -> AuctionClose -> Halted -> Continuous` | 509 | 12 |
 
-Every one of the 22 edges in `LegalEdges` is taken in some behaviour at
+Every one of the 26 edges in `LegalEdges` is taken in some behaviour at
 these bounds: for each edge, a run with a property saying that edge is never
-taken fails (exit 13). The same check on `PostClose -> Continuous`, which is
-not on the table, passes (exit 0).
+taken fails (exit 13). The same check on `PostClose -> Continuous` and
+`AuctionClose -> Continuous`, which are not on the table, passes (exit 0).
 
-### The table still reopens a closed session
+### A halt is no detour around the table
 
-Rule 7.7 says it took `PostClose -> Continuous` (reopening a closed market)
-and `AuctionClose -> Continuous` (abandoning a closing auction) off the
-table. Both are still reachable in two steps, because any state may halt and
-`Halted` may go to `Continuous`. TLC's shortest counterexample to
-`NoReopenAfterClose` is `Continuous -> AuctionClose -> Halted ->
-Continuous`. With the invariant narrowed to `PostClose` alone, it is
-`Continuous -> PostClose -> Halted -> Continuous` (exit 12). The same detour
-also takes an opening or volatility auction to `Continuous` without its
-uncross (`Halted` is not an auction state), which this abstract book cannot
-show. `NoReopenAfterClose` goes into `Auction.cfg` once the table closes the
-detour (for example, resume to the pre-halt state, or no halt from
-`AuctionClose` or `PostClose`).
+Before the pause rule, any state could halt and `Halted` could go to
+`Continuous`, so the two moves Rule 7.7 took off the table were reachable in
+two steps: TLC's shortest counterexample to `NoReopenAfterClose` was
+`Continuous -> AuctionClose -> Halted -> Continuous`, and
+`Continuous -> PostClose -> Halted -> Continuous` reopened a closed market.
+The same detour took an opening or volatility auction to `Continuous`
+without its uncross. Now `Halted` resumes only to the state it was halted
+from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
+`AuctionBrokenHalt.cfg` puts the detour back and must fail it.
 
 ## Replication.tla — Lease-Propagation Model
 

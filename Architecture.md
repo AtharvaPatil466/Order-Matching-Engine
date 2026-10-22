@@ -211,7 +211,7 @@ Concurrency is notoriously difficult to test. We rely on **11 TLA+ Specification
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
 - `EngineConsumer.tla`: Verifies worker thread shutdown safety.
 - `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.
-- `Auction.tla`: the session state machine through the enforced transition table (Rule 7.7), order admission per state, and the uncross. It models no price collar. The table fails its `NoReopenAfterClose` invariant (see docs/Verification.md).
+- `Auction.tla`: the session state machine through the enforced transition table (Rule 7.7), order admission per state, and the uncross. It models no price collar. `NoReopenAfterClose` holds: a halt resumes only to the state it paused (see docs/Verification.md).
 - `EpochDurability.tla`: Epoch-store durability invariant under crash.
 - `FixSession.tla`: FIX session state machine safety (logon/heartbeat/gap-fill).
 - `Oco.tla`: OCO one-cancels-other atomicity.

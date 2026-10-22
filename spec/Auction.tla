@@ -5,11 +5,13 @@
 (* only way an auction state turns into trades.                            *)
 (*                                                                         *)
 (* LegalEdges is the table OrderBook::transitionAllowed enforces           *)
-(* (docs/MatchingRules.md Rule 7.7, lane M commit 15bcf01), edge for edge, *)
-(* with its two side conditions:                                           *)
+(* (docs/MatchingRules.md Rule 7.7), edge for edge, with its three side    *)
+(* conditions:                                                             *)
 (*   Continuous -> PreOpen  only before the book's first session           *)
 (*   PostClose  -> PreOpen  only with a trading date later than the date   *)
 (*                          of the session it closed (beginSession)        *)
+(*   Halted     -> s        only to the state it was halted from, or to    *)
+(*                          PostClose: a halt is a pause, not a route      *)
 (* Every state change in this spec is a Transition through that table, as  *)
 (* setTradingStateLocked applies it: leaving an auction state for          *)
 (* Continuous or PostClose is the uncross; any other change prints nothing. *)
@@ -28,6 +30,9 @@
 (*   "same_day_reopen"      PostClose -> PreOpen on the closed session's   *)
 (*                          own date is allowed                            *)
 (*                          -> ValidTransitions (AuctionBrokenDate)         *)
+(*   "halt_detour"          Halted -> Continuous whatever it was halted    *)
+(*                          from                                           *)
+(*                          -> NoReopenAfterClose (AuctionBrokenHalt)       *)
 (***************************************************************************)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -39,7 +44,7 @@ CONSTANTS
     Prices,         \* clearing / trade prices, e.g. {100, 200}
     BUG             \* "none" in Auction.cfg; see the header
 
-ASSUME BUG \in {"none", "no_reopen", "postclose_continuous", "same_day_reopen"}
+ASSUME BUG \in {"none", "no_reopen", "postclose_continuous", "same_day_reopen", "halt_detour"}
 
 States == {"PreOpen", "AuctionOpen", "Continuous", "AuctionClose",
            "PostClose", "Halted", "VolatilityAuction"}
@@ -50,9 +55,10 @@ AuctionStates == {"PreOpen", "AuctionOpen", "AuctionClose", "VolatilityAuction"}
 \* New orders rejected (MarketHalted / MarketClosed); cancels still allowed.
 ClosedStates == {"Halted", "PostClose"}
 
-\* OrderBook::transitionAllowed, without its two side conditions (Allowed).
+\* OrderBook::transitionAllowed, without its side conditions (Allowed).
 LegalEdges ==
     { <<s, "Halted">> : s \in States \ {"Halted"} }          \* any state may halt
+    \cup { <<"Halted", s>> : s \in States \ {"Halted"} }     \* resume (pre-halt state) or close
     \cup { <<"PreOpen", "Continuous">>, <<"PreOpen", "AuctionOpen">>,
            <<"AuctionOpen", "Continuous">>, <<"AuctionOpen", "AuctionClose">>,
            <<"Continuous", "AuctionOpen">>, <<"Continuous", "AuctionClose">>,
@@ -62,7 +68,6 @@ LegalEdges ==
            <<"VolatilityAuction", "Continuous">>,
            <<"VolatilityAuction", "AuctionClose">>,
            <<"VolatilityAuction", "PostClose">>,
-           <<"Halted", "Continuous">>, <<"Halted", "PostClose">>,
            <<"PostClose", "PreOpen">> }
 
 VARIABLES
@@ -73,9 +78,10 @@ VARIABLES
     eventCount,     \* state changes taken so far (reopenings excluded)
     sessionBegun,   \* OrderBook::sessionBegun_: a PreOpen has happened
     date,           \* OrderBook::sessionDate_: date of the current session, 0 = undated
-    closing         \* history: AuctionClose or PostClose entered since the last PreOpen
+    closing,        \* history: AuctionClose or PostClose entered since the last PreOpen
+    preHalt         \* OrderBook::preHaltState_: the state Halted resumes to
 
-vars == <<state, book, trades, nextOrderId, eventCount, sessionBegun, date, closing>>
+vars == <<state, book, trades, nextOrderId, eventCount, sessionBegun, date, closing, preHalt>>
 
 Init ==
     /\ state = "Continuous"
@@ -86,6 +92,7 @@ Init ==
     /\ sessionBegun = FALSE
     /\ date = 0
     /\ closing = FALSE
+    /\ preHalt = "Continuous"
 
 (* ─── Order admission ────────────────────────────────────────────────── *)
 
@@ -98,7 +105,7 @@ SubmitAccumulate ==
     /\ \E q \in 1..2 :
         book' = Append(book, q)
     /\ nextOrderId' = nextOrderId + 1
-    /\ UNCHANGED <<state, trades, eventCount, sessionBegun, date, closing>>
+    /\ UNCHANGED <<state, trades, eventCount, sessionBegun, date, closing, preHalt>>
 
 \* SubmitContinuousRest: in Continuous, an incoming order may rest without
 \* crossing (no contra interest). It joins the book, no trade prints.
@@ -108,7 +115,7 @@ SubmitContinuousRest ==
     /\ \E q \in 1..2 :
         book' = Append(book, q)
     /\ nextOrderId' = nextOrderId + 1
-    /\ UNCHANGED <<state, trades, eventCount, sessionBegun, date, closing>>
+    /\ UNCHANGED <<state, trades, eventCount, sessionBegun, date, closing, preHalt>>
 
 \* SubmitContinuousMatch: in Continuous, an incoming order crosses an existing
 \* resting order and prints a trade IMMEDIATELY at one of the valid prices.
@@ -125,7 +132,7 @@ SubmitContinuousMatch ==
                           kind |-> "continuous", inState |-> "Continuous"])
     /\ book' = Tail(book)               \* the resting order is consumed
     /\ nextOrderId' = nextOrderId + 1
-    /\ UNCHANGED <<state, eventCount, sessionBegun, date, closing>>
+    /\ UNCHANGED <<state, eventCount, sessionBegun, date, closing, preHalt>>
 
 \* CancelOrder: allowed in EVERY state (including Halted / PostClose), and
 \* never prints a trade. Models the un-gated cancel path: cancelOrder() has
@@ -133,7 +140,7 @@ SubmitContinuousMatch ==
 CancelOrder ==
     /\ Len(book) > 0
     /\ book' = Tail(book)
-    /\ UNCHANGED <<state, trades, nextOrderId, eventCount, sessionBegun, date, closing>>
+    /\ UNCHANGED <<state, trades, nextOrderId, eventCount, sessionBegun, date, closing, preHalt>>
 
 (* ─── State changes ──────────────────────────────────────────────────── *)
 
@@ -147,7 +154,9 @@ Allowed(to, d) ==
               /\ \/ date = 0
                  \/ d > date
                  \/ BUG = "same_day_reopen" /\ d = date
+       /\ state = "Halted" => to \in {preHalt, "PostClose"}
     \/ BUG = "postclose_continuous" /\ state = "PostClose" /\ to = "Continuous"
+    \/ BUG = "halt_detour" /\ state = "Halted" /\ to = "Continuous"
 
 \* One applied change, as setTradingStateLocked does it.
 Step(to, d) ==
@@ -168,6 +177,7 @@ Step(to, d) ==
     /\ date' = IF to = "PreOpen" /\ d /= 0 THEN d ELSE date
     /\ closing' = IF to = "PreOpen" THEN FALSE
                   ELSE closing \/ to \in {"AuctionClose", "PostClose"}
+    /\ preHalt' = IF to = "Halted" THEN state ELSE preHalt
     /\ UNCHANGED nextOrderId
 
 \* Every change but the volatility reopening spends the event budget, which
@@ -207,6 +217,7 @@ TypeOK ==
     /\ sessionBegun \in BOOLEAN
     /\ date \in 0..MaxDate
     /\ closing \in BOOLEAN
+    /\ preHalt \in States \ {"Halted"}
     /\ \A i \in 1..Len(book) : book[i] \in 1..2
     /\ \A i \in 1..Len(trades) :
         /\ trades[i].price \in Prices
@@ -222,7 +233,8 @@ ValidTransitions ==
         \/ /\ <<state, state'>> \in LegalEdges
            /\ (state = "Continuous" /\ state' = "PreOpen") => ~sessionBegun
            /\ (state = "PostClose" /\ state' = "PreOpen") => date' > date
-      ]_<<state, date, sessionBegun>>
+           /\ state = "Halted" => state' \in {preHalt, "PostClose"}
+      ]_<<state, date, sessionBegun, preHalt>>
 
 \* A trade prints in Continuous, or is the uncross of an auction state.
 NoMatchOutsideContinuousExceptUncross ==
@@ -239,11 +251,10 @@ NoTradeWhileHalted ==
     \A i \in 1..Len(trades) : trades[i].inState \notin ClosedStates
 
 \* Once a session reaches its closing auction or its close, nothing trades
-\* continuously, or auctions, until the next PreOpen. VIOLATED by the table
-\* above, through Halted: PostClose -> Halted -> Continuous reopens a closed
-\* market and AuctionClose -> Halted -> Continuous abandons a closing
-\* auction, the two moves Rule 7.7 says it took off the table. Not in
-\* Auction.cfg until the table is fixed; see docs/Verification.md.
+\* continuously, or auctions, until the next PreOpen. A halt resumes only to
+\* the state it paused, so it is no detour around the table; under
+\* BUG = "halt_detour" Continuous -> AuctionClose -> Halted -> Continuous
+\* abandons the closing auction (AuctionBrokenHalt.cfg).
 NoReopenAfterClose ==
     closing => state \in {"AuctionClose", "PostClose", "Halted"}
 

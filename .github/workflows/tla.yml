@@ -17,8 +17,9 @@ name: TLA+ Model Checking
 # MatchingEngine.tla is checked at MatchingEngine.cfg (a few minutes), and
 # each of its seven MatchingEngineBroken*.cfg variants must fail with the
 # counterexample its injected bug produces. Auction.tla's AuctionBrokenEdge.cfg
-# and AuctionBrokenDate.cfg (an illegal session transition) must fail the same
-# way. Replication.tla is not checked.
+# and AuctionBrokenDate.cfg (an illegal session transition) and
+# AuctionBrokenHalt.cfg (a halt that resumes to Continuous from a closing
+# auction) must fail the same way. Replication.tla is not checked.
 #
 # A dedicated step also runs the Auction NON-VACUITY variant
 # (AuctionBroken.cfg, BUG = "no_reopen") and asserts that TLC reports a
@@ -91,6 +92,7 @@ jobs:
           MatchingEngine MatchingEngineBrokenReplace.cfg Invariant FIFO_Preservation is violated
           Auction AuctionBrokenEdge.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenDate.cfg Action property ValidTransitions is violated
+          Auction AuctionBrokenHalt.cfg Invariant NoReopenAfterClose is violated
           EOF
           exit "$fail"
 

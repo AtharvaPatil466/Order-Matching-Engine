@@ -919,7 +919,10 @@ private:
                            Side side, Price price, Quantity quantity);
 
     void removeFromBook(Order* order);
-    bool addToBook(Order* order);  // returns false if depth limit exceeded
+    // false: depth limit or price range — the order is NOT in the book and the
+    // caller must finish it (MATCH-11: two callers ignored this and left an
+    // acked, live order in no price level).
+    [[nodiscard]] bool addToBook(Order* order);
     bool canAddToBook(const Order* order) const;
     void ensurePriceRange(Price price);
 

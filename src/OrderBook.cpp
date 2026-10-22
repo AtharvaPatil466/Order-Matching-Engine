@@ -1043,9 +1043,13 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
                 return orderId;
             }
-            addToBook(order);
-            if (!order->isHidden)
+            if (!addToBook(order)) {
+                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, 0);
+                orderLookup_.erase(orderId);
+                orderPool_.deallocate(order);
+            } else if (!order->isHidden) {
                 notifyMarketData(MarketDataUpdate::Action::Add, side, price);
+            }
             return orderId;
         }
     }
@@ -1853,6 +1857,7 @@ void OrderBook::matchProRata(Order* incoming) {
 
         for (size_t i = 0; i < removeCount; ++i) {
             stpNoteRemoved(toRemove[i]);
+            untrackOrder(toRemove[i]);  // as match() does (MATCH-15)
             level.remove(toRemove[i]);
             orderLookup_.erase(toRemove[i]->id);
             orderPool_.deallocate(toRemove[i]);
@@ -2440,7 +2445,14 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             removeFromBook(order);
             order->remainingQty = newLeaves;
             order->timestamp = nowNs();
-            addToBook(order);  // re-announces: back of the queue, new size
+            if (!addToBook(order)) {  // re-announces: back of the queue, new size
+                notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
+                if (!order->isHidden)
+                    notifyMarketData(MarketDataUpdate::Action::Delete, order->side, order->price);
+                orderLookup_.erase(orderId);
+                orderPool_.deallocate(order);
+                return true;
+            }
         }
         if (!order->isHidden)
             notifyMarketData(MarketDataUpdate::Action::Modify, order->side, order->price);
@@ -2735,6 +2747,15 @@ void OrderBook::updatePeggedOrders() {
                 notifyMarketData(MarketDataUpdate::Action::Delete, order->side, oldPrice);
                 if (rested)
                     notifyMarketData(MarketDataUpdate::Action::Add, order->side, newPrice);
+            }
+            if (!rested) {
+                // Off the book at its old price and not on it at the new one:
+                // finish it rather than leave it live in no level (MATCH-11).
+                notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
+                peggedOrders_.erase_swap(i);
+                orderLookup_.erase(order->id);
+                orderPool_.deallocate(order);
+                continue;
             }
         }
 

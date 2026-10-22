@@ -606,6 +606,14 @@ enable_assertions(IcebergMinDisplayTest)
 add_test(NAME IcebergMinDisplayTest COMMAND IcebergMinDisplayTest)
 set_tests_properties(IcebergMinDisplayTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.5-E3 (MATCH-11, MATCH-8, GTDIFF-4): every way an order ends or
+# comes to rest is reported, on every path that finishes one.
+add_executable(OrderLifecycleTest OrderLifecycleTest.cpp)
+target_link_libraries(OrderLifecycleTest PRIVATE OrderMatcher)
+enable_assertions(OrderLifecycleTest)
+add_test(NAME OrderLifecycleTest COMMAND OrderLifecycleTest)
+set_tests_properties(OrderLifecycleTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # JRN-4: a REAL write failure — RLIMIT_FSIZE landing mid-record, not a fault
 # point — must never be reported durable, and must stop the process. The child
 # reports every durability callback through a pipe, so the count survives the

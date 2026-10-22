@@ -222,14 +222,13 @@ The matching engine's P99.9 (4ms) is entirely within expected NVMe tail behavior
 
 The `MatchingEngine.tla` specification was model-checked with TLC:
 
-- **368,192,427 states generated**, 171,187,419 distinct — `MatchingEngine4.cfg`
-  (MaxOrders=4, MaxTime=2), BFS depth 11, complete exploration
-- **0 invariant violations** across 5 safety properties:
-  - `NoNegativeQuantity` — no order ever has negative qty/remainingQty
-  - `FIFO_Preservation` — timestamp ordering maintained at each price level
-  - `GTD_Expiry_Correctness` — expired GTD orders always cancelled
-  - `MatchingConservation` — placed = resting + filled + cancelled
-  - `FIFOExecution` — a fill consumes the earliest resting order at a price
+- **6,796,145 states generated**, 2,726,157 distinct — `MatchingEngine.cfg`
+  (MaxOrders=3, MaxReplaces=1, MaxQty=3), BFS depth 14, complete exploration
+- **0 violations** of PricePriority, FIFOExecution, ExecPriceIsPassive,
+  NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation,
+  MatchingConservation and NoNegativeQuantity, over Limit orders with default
+  STP, modify and replace
+- Seven broken variants, one injected bug each, all fail; CI checks all eight
 
 See [docs/Verification.md](./docs/Verification.md) for full details and limitations.
 
@@ -249,7 +248,7 @@ Shadow comparison validated against a deliberate FIFO violation:
 | Full-stack (x86): **615 ns** P50 | HonestBenchmark Path C, AWS c6in.metal, async io_uring ack (batch=64) | Measured at `d2e688c` (5 runs); no raw log committed; not re-run since |
 | Core matching (ARM dev ref): ~125 ns P50 | HonestBenchmark Path A, Apple M3 Pro — reference only | **Did not reproduce** (BENCHMARKS.md); withdrawn |
 | Journal dominates P99 | 2.7ms = fdatasync, not matching | Structural |
-| Safety invariants hold | TLC: 171,187,419 distinct states, 0 violations | Formally verified |
+| Safety invariants hold | TLC: 2,726,157 distinct states, 0 violations, at small bounds | Model-checked |
 | Shadow mode catches bugs | FIFO violation → trade divergence detected | Validated |
 
 The x86 rows describe commit `d2e688c` and have no committed raw log; rerun `HonestBenchmark` at the commit you deploy before relying on them.

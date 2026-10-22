@@ -18,7 +18,7 @@ This is a C++20 low-latency order matching engine drawing on exchange design pri
 | Source files (`src/`) | 14 |
 | Test files | 102 |
 | Individual test cases | 524 CTest targets |
-| TLA+ specifications | 12 (171M distinct states — matching + replication layers) |
+| TLA+ specifications | 11 (`MatchingEngine.tla`: 2.7M distinct states at MaxOrders=3, checked in CI) |
 | Documentation files | 8 in `docs/` (plus architecture/benchmark docs) |
 
 ---
@@ -656,9 +656,9 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 
 ### Formal Verification (TLA+)
 
-**12 TLA+ specifications**, model-checked with TLC:
-- **`MatchingEngine.tla`**: 171,187,419 distinct states verified at `MatchingEngine4.cfg` (MaxOrders=4), zero violations — now including the matching/cross layer (`Match` action) with `MatchingConservation` and `FIFOExecution`, alongside `NoNegativeQuantity`, `FIFO_Preservation`, `GTD_Expiry_Correctness`.
-- **`Replication.tla`**: Realistic lease-propagation model (no god-mode `~primaryAlive` guard on `BackupPromote`; promotion requires both heartbeat-miss AND local-lease-expiry). 1373 → 4192 states verified at `MaxEntries=6 → 10`, zero violations. A bug-injected variant (lease check stripped) reproduces split brain in 188 states, confirming the verification is genuine.
+**11 TLA+ specifications**, model-checked with TLC:
+- **`MatchingEngine.tla`**: price-time matching with STP, modify and replace; zero violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. Properties and scope: `docs/Verification.md`.
+- **`Replication.tla`**: Realistic lease-propagation model (no god-mode `~primaryAlive` guard on `BackupPromote`; promotion requires both heartbeat-miss AND local-lease-expiry). 1373 → 4192 states at `MaxEntries=6 → 10`, zero violations, but vacuously: the backup can never promote. A bug-injected variant (lease check stripped), the only configuration where promotion happens, splits the brain in 188 states.
 - **`MpscQueue.tla`**: Lock-free ring buffer linearizability.
 - **`SnapshotLocked.tla`**: Mutex torn-snapshot prevention.
 
@@ -672,7 +672,7 @@ src/                  14 source files — thin compilation units
 tests/                103 test files, 524 CTest targets
 benchmarks/           11 benchmark binaries
 fuzz/                 3 libFuzzer harnesses + standalone driver
-spec/                 TLA+ formal specifications (12 specs)
+spec/                 TLA+ formal specifications (11 specs)
 tools/                CLI tools and data utilities
 config/               Example configuration files
 docs/                 Runbooks, CapacityPlanning, ProductionReadiness
@@ -715,4 +715,4 @@ audit of the codebase and are tracked as code work.
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · 102 test executables · 524 CTest targets · 19 multi-container chaos scenarios · 171M distinct TLA+ states verified on the matching-inclusive MatchingEngine.tla · 12 TLA+ specifications*
+*C++20 · 102 test executables · 524 CTest targets · 19 multi-container chaos scenarios · MatchingEngine.tla checked in CI · 11 TLA+ specifications*

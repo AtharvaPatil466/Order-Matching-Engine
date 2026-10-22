@@ -84,14 +84,14 @@
 
 ## Formal Verification
 
-12 TLA+ specifications cover the core safety and liveness properties of the engine.
+11 TLA+ specifications model parts of the engine at small bounds. None is linked to the C++ by a refinement proof; see [Verification.md](Verification.md) for what each checks.
 
 | Component | Spec File | Invariants Verified |
 |-----------|-----------|-------------------|
 | MPSC Queue | `spec/MpscQueue.tla` | Linearizability, No data loss |
 | Engine Consumer Loop | `spec/EngineConsumer.tla` | Shutdown completeness |
 | Snapshot Consistency | `spec/Snapshot.tla` | No torn reads |
-| Matching Engine | `spec/MatchingEngine.tla` | FIFO preservation, matching conservation, no negative qty, time priority at a price level. (`Quantity_Conservation` is not checked and is false; GTD expiry holds vacuously — the model places no GTD order. See [Verification.md](Verification.md).) |
+| Matching Engine | `spec/MatchingEngine.tla` | Price priority, time priority, execution at the passive price, no crossed book, no self-trade (default STP), no empty resting order, FIFO queues, quantity conservation — Limit orders, modify and replace, at `MatchingEngine.cfg` bounds; each property but conservation and non-negativity has a broken cfg that CI requires to fail |
 | Replication Protocol | `spec/Replication.tla` | No committed loss, No duplicate execution, No split-brain — **vacuously**: under the shipped configs the backup can never promote. See [Verification.md](Verification.md). |
 | Auction Protocol | `spec/Auction.tla` | Uncross price validity, admission rules |
 | OCO Atomicity | `spec/Oco.tla` | No double-fill on OCO pairs |

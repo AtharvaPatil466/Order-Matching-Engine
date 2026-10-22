@@ -19,7 +19,7 @@
 |-------|----------|--------|
 | Core matching (x86, PGO): **237 ns** P50 · 3.10M ops/s | Clang IR-PGO on the seed=42 workload (AWS c6in.metal); 261 ns non-PGO baseline | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
 | Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack; journal at `/tmp/honest_benchmark.journal` — whether that host's `/tmp` was EBS or tmpfs is not recorded | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
-| Safety invariants | TLC: 171,187,419 distinct states, 0 violations (matching/cross layer modeled; `MatchingEngine4.cfg`, MaxOrders=4) | ✅ Verified |
+| Safety invariants | TLC: 2,726,157 distinct states, 0 violations (`MatchingEngine.cfg`, MaxOrders=3; small bounds, see docs/Verification.md) | ✅ Model-checked |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
 | **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
 | **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |
@@ -479,20 +479,18 @@ is the true overhead structure.)
 The `MatchingEngine.tla` specification was model-checked with TLC:
 
 ```
-368,192,427 states generated
-171,187,419 distinct states found
-11 levels deep (BFS depth), 0 states left on queue
-0 invariant violations
-Config: MatchingEngine4.cfg (MaxOrders=4, MaxTime=2)
-Duration: 17 min 21 sec
+6,796,145 states generated
+2,726,157 distinct states found
+14 levels deep (BFS depth), 0 states left on queue
+0 violations
+Config: MatchingEngine.cfg (MaxOrders=3, MaxReplaces=1, MaxQty=3)
+TLC2 2026.05.04, 2 workers, 3 min 16 s (2026-10-18)
 ```
 
-**Invariants verified**:
-- `NoNegativeQuantity` — no order has negative quantity
-- `FIFO_Preservation` — timestamp ordering maintained at each price level
-- `GTD_Expiry_Correctness` — expired GTD orders always cancelled
-- `MatchingConservation` — placed = resting + filled + cancelled
-- `FIFOExecution` — a fill consumes the earliest resting order at a price
+**Properties checked**: PricePriority, FIFOExecution, ExecPriceIsPassive,
+NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation,
+MatchingConservation, NoNegativeQuantity. Seven `MatchingEngineBroken*.cfg`
+variants each inject one bug, and CI requires each to fail.
 
 See [`docs/Verification.md`](docs/Verification.md) for full details and
 limitations of what the proof covers.

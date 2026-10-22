@@ -205,9 +205,9 @@ The `ReplicationCoordinator` is instantiated in `src/main.cpp` when `OB_NODE_ROL
 - **Atomic teardown**: `peerFd_`, `listenFd_`, `sendSeq_` are `std::atomic`; `stop()` calls `shutdown(2)` before `close()` to wake blocked `recv`. `ReplicationProtocolTest` runs TSan-clean under CI.
 
 ### 4.3 Formal Verification
-Concurrency is notoriously difficult to test. We rely on **12 TLA+ Specifications**:
-- `MatchingEngine.tla`: 171,187,419 distinct states verified at `MatchingEngine4.cfg` (MaxOrders=4) — NoNegativeQuantity, FIFO_Preservation, GTD_Expiry_Correctness, MatchingConservation, FIFOExecution.
-- `Replication.tla`: Realistic lease-propagation model. `BackupPromote` requires heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Verified at `MaxEntries=10` / `LeaseTimeout=7`, zero violations. A bug-injected variant (lease check stripped from `BackupPromote`) reproduces split brain in 188 states, confirming the verification is genuine.
+Concurrency is notoriously difficult to test. We rely on **11 TLA+ Specifications**:
+- `MatchingEngine.tla`: price-time matching with STP, modify and replace; 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. Properties and scope: [docs/Verification.md](docs/Verification.md).
+- `Replication.tla`: Realistic lease-propagation model. `BackupPromote` requires heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Zero violations at `MaxEntries=10` / `LeaseTimeout=7`, but vacuously: under both cfgs the backup can never promote. A bug-injected variant (lease check stripped from `BackupPromote`) is the only configuration where promotion happens, and it splits the brain in 188 states.
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
 - `EngineConsumer.tla`: Verifies worker thread shutdown safety.
 - `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.

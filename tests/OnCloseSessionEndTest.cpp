@@ -48,8 +48,10 @@ void parkedOnCloseOrdersEndWithTheSession() {
     assert(rec.last[2].status == OrderStatus::Cancelled);
     assert(rec.last[3].status == OrderStatus::Cancelled);
 
-    // Next day: the closing cross must not see yesterday's orders.
-    book.setTradingState(TradingState::PreOpen);
+    // Next day: the closing cross must not see yesterday's orders. A closed
+    // book reopens only for a later date (decision 7).
+    book.beginSession(/*tradingDate=*/5);
+    assert(book.getTradingState() == TradingState::PreOpen);
     book.setTradingState(TradingState::Continuous);
     book.setTradingState(TradingState::AuctionClose);
     book.setTradingState(TradingState::PostClose);

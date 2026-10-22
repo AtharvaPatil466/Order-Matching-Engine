@@ -418,6 +418,8 @@ public:
         tradingState_ = TradingState::Continuous;
         referencePrice_ = 0;
         priceUpdates_ = 0;
+        sessionBegun_ = false;
+        sessionDate_ = 0;
     }
 
     // Trading state machine (regulator/engine controls; participants observe).
@@ -427,7 +429,20 @@ public:
     // accumulation state (PreOpen / AuctionOpen / AuctionClose /
     // VolatilityAuction) to Continuous or PostClose runs uncross() first,
     // under the same lock: the flip is the opening / closing cross.
+    //
+    // Decision 7: the transition table (docs/MatchingRules.md Rule 7.7) is
+    // enforced. A transition off it is refused — the book stays where it
+    // was, logs `trading_state_refused`, and the caller sees it in
+    // getTradingState(). PreOpen begins a session: from Continuous only
+    // before the book's first session (books boot Continuous), and from
+    // PostClose only through beginSession() with a later trading date.
+    // Replay applies what the journal holds without judging it: the engine
+    // journals only transitions that were applied.
     void setTradingState(TradingState s);
+    // Enter PreOpen for trading date `tradingDate` (days since 1970-01-01;
+    // 0 = undated, which PostClose refuses). Same rules as above.
+    void beginSession(uint32_t tradingDate);
+    uint32_t sessionDate() const { return sessionDate_; }  // 0 = none/undated
     TradingState getTradingState() const { return tradingState_; }
     // Convenience: legacy callers checking the binary halt flag still work.
     // True iff the book is currently in TradingState::Halted.
@@ -770,7 +785,8 @@ private:
     // Lock-free bodies of uncross() / setTradingState(), so a transition can
     // run the cross under the same bookLock_ as the flip (H4).
     void uncrossLocked();
-    void setTradingStateLocked(TradingState s);
+    void setTradingStateLocked(TradingState s, uint32_t tradingDate = 0);
+    bool transitionAllowed(TradingState to, uint32_t tradingDate) const;
     // H5: the orders STP takes out before discovery (see the definition).
     void planAuctionSelfCrosses(std::vector<Order*>& victims) const;
     void stpCancelAuctionOrder(Order* o);
@@ -1049,6 +1065,8 @@ private:
     // Safety
     Price referencePrice_{0};
     TradingState tradingState_{TradingState::Continuous};
+    bool     sessionBegun_{false};  // decision 7: a PreOpen has happened
+    uint32_t sessionDate_{0};       // its trading date; 0 = undated
     size_t maxDepthPerSide_{0};  // 0 = unlimited
     double cbThreshold_{0.05};   // Circuit breaker threshold (default 5%)
     uint64_t volatilityDwellNs_;          // set in the ctor (config or 5 min)

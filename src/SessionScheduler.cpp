@@ -132,7 +132,10 @@ void SessionScheduler::applyPhase(SessionPhase target) {
         case SessionPhase::PreOpen:
             // Pre-session accumulation. Orders rest and seed the opening
             // auction; no continuous matching yet.
-            engine_.setTradingStateBatch(symbols_, TradingState::PreOpen);
+            // A new session for this trading date. A book that already
+            // closed on it stays closed (decision 7), so a same-date
+            // resetSession() cannot run a second session.
+            engine_.beginTradingSession(symbols_, static_cast<uint32_t>(sessionDate_));
             break;
         case SessionPhase::Continuous:
             // Opening auction: cross the accumulated book into a single set

@@ -1209,7 +1209,12 @@ size_t MatchingEngine::endTradingSession(const std::vector<SymbolId>& symbols) {
     // then DAY orders. Process stop is not session end (gracefulShutdown keeps
     // them by default); this is the only other path that retires them.
     setTradingStateBatch(symbols, TradingState::PostClose);
-    return cancelDayOrders(symbols);
+    std::vector<SymbolId> closed;
+    for (SymbolId s : symbols) {
+        const OrderBook* book = getOrderBook(s);
+        if (book && book->getTradingState() == TradingState::PostClose) closed.push_back(s);
+    }
+    return cancelDayOrders(closed);
 }
 
 size_t MatchingEngine::cancelDayOrders(const std::vector<SymbolId>& symbols) {
@@ -2025,8 +2030,12 @@ void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
 uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
     auto* book = getOrderBook(req.symbolId);
     if (!book) return 0;
+    const auto state = static_cast<TradingState>(req.newQty);
+    const auto tradingDate = static_cast<uint32_t>(req.expiryTime);
     if (req.type == OrderRequest::Type::TradingState) {
-        book->setTradingState(static_cast<TradingState>(req.newQty));
+        if (state == TradingState::PreOpen) book->beginSession(tradingDate);
+        else book->setTradingState(state);
+        if (book->getTradingState() != state) return 0;  // refused: nothing happened
     } else {
         book->uncross();
     }
@@ -2034,7 +2043,7 @@ uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
     if (journal_) {
         std::lock_guard<std::mutex> lock(journalMutex_);
         if (req.type == OrderRequest::Type::TradingState) {
-            journal_->logTradingState(req.symbolId, static_cast<TradingState>(req.newQty));
+            journal_->logTradingState(req.symbolId, state, tradingDate);
         } else {
             journal_->logUncross(req.symbolId);
         }
@@ -2049,11 +2058,12 @@ uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
 }
 
 void MatchingEngine::routeSessionControl(SymbolId symbolId, OrderRequest::Type type,
-                                         TradingState state) {
+                                         TradingState state, uint32_t tradingDate) {
     OrderRequest req{};
     req.type = type;
     req.symbolId = symbolId;
     req.newQty = static_cast<Quantity>(state);
+    req.expiryTime = tradingDate;
     if (async_) {
         enqueueControl(getThreadIndex(symbolId), req);
         return;
@@ -2070,17 +2080,31 @@ void MatchingEngine::uncross(SymbolId symbolId) {
 
 size_t MatchingEngine::setTradingStateBatch(
         const std::vector<SymbolId>& symbols, TradingState state) {
-    size_t transitioned = 0;
+    return transitionBatch(symbols, state, /*tradingDate=*/0);
+}
+
+size_t MatchingEngine::beginTradingSession(const std::vector<SymbolId>& symbols,
+                                           uint32_t tradingDate) {
+    return transitionBatch(symbols, TradingState::PreOpen, tradingDate);
+}
+
+size_t MatchingEngine::transitionBatch(const std::vector<SymbolId>& symbols,
+                                       TradingState state, uint32_t tradingDate) {
     {
         std::lock_guard<std::mutex> lock(bookMutex_);
         for (SymbolId s : symbols) {
             if (!getOrderBook(s)) continue;
-            routeSessionControl(s, OrderRequest::Type::TradingState, state);
-            ++transitioned;
+            routeSessionControl(s, OrderRequest::Type::TradingState, state, tradingDate);
         }
     }
     waitForDrain();
-    return transitioned;
+    // Counted after the drain: a book may have refused (decision 7).
+    size_t inState = 0;
+    for (SymbolId s : symbols) {
+        const OrderBook* book = getOrderBook(s);
+        if (book && book->getTradingState() == state) ++inState;
+    }
+    return inState;
 }
 
 size_t MatchingEngine::uncrossBatch(const std::vector<SymbolId>& symbols) {
@@ -2474,7 +2498,8 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                                        entry.newPrice, entry.newQty);
             break;
         case JournalEntry::Type::TradingStateChange:
-            journal_->logTradingState(entry.symbolId, journaledTradingState(entry));
+            journal_->logTradingState(entry.symbolId, journaledTradingState(entry),
+                                      static_cast<uint32_t>(entry.expiryTime));
             break;
         case JournalEntry::Type::Uncross:
             journal_->logUncross(entry.symbolId);
@@ -2579,8 +2604,11 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // A book's trading state goes in before its orders: replay restores
         // them under it, and an accumulated auction book restored into a
         // Continuous one would trade on arrival (AUCT-1). Continuous is the
-        // default, so it needs no record.
-        std::vector<std::pair<SymbolId, TradingState>> states;
+        // default, so it needs no record. A session's trading date goes first,
+        // as a dated PreOpen, so a restored book still refuses a second
+        // session that date (decision 7).
+        struct SessionState { SymbolId symbolId; TradingState state; uint32_t date; };
+        std::vector<SessionState> states;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
             for (SymbolId symbolId : symbolIds_) {
@@ -2588,8 +2616,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (!book) {
                     continue;
                 }
-                if (book->getTradingState() != TradingState::Continuous)
-                    states.emplace_back(symbolId, book->getTradingState());
+                if (book->getTradingState() != TradingState::Continuous || book->sessionDate() != 0)
+                    states.push_back({symbolId, book->getTradingState(), book->sessionDate()});
                 book->forEachOrderLocked([&](const Order& order) {
                     resting.emplace_back(symbolId, order);
                 });
@@ -2597,8 +2625,11 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         }
 
         const auto writeSnapshot = [&](Journal& snapshotJournal) {
-            for (const auto& [symbolId, state] : states)
-                snapshotJournal.logTradingState(symbolId, state);
+            for (const auto& [symbolId, state, date] : states) {
+                if (date != 0) snapshotJournal.logTradingState(symbolId, TradingState::PreOpen, date);
+                const TradingState replayed = date != 0 ? TradingState::PreOpen : TradingState::Continuous;
+                if (state != replayed) snapshotJournal.logTradingState(symbolId, state);
+            }
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,

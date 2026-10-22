@@ -531,7 +531,11 @@ TEST(AuditFixes, CancelReplaceHonoursTradingState) {
     EXPECT_FALSE(book.cancelReplace(1, PX, 50))
         << "and after the close";
 
+    // PostClose -> Continuous is off the session table (decision 7): trading
+    // resumes with the next date's session.
+    book.beginSession(/*tradingDate=*/1);
     book.setTradingState(TradingState::Continuous);
+    ASSERT_EQ(book.getTradingState(), TradingState::Continuous);
     EXPECT_TRUE(book.cancelReplace(1, PX, 50)) << "allowed again once trading";
 }
 

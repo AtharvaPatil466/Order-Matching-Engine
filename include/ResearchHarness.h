@@ -224,7 +224,10 @@ private:
 
             // Session control carries its symbol.
             case JournalEntry::Type::TradingStateChange:
-                engine_.setTradingStateBatch({e.symbolId}, journaledTradingState(e));
+                if (journaledTradingState(e) == TradingState::PreOpen)  // carries its date
+                    engine_.beginTradingSession({e.symbolId}, static_cast<uint32_t>(e.expiryTime));
+                else
+                    engine_.setTradingStateBatch({e.symbolId}, journaledTradingState(e));
                 break;
             case JournalEntry::Type::Uncross:
                 engine_.uncrossBatch({e.symbolId});

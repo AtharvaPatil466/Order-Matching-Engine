@@ -534,6 +534,14 @@ enable_assertions(SessionEndTest)
 add_test(NAME SessionEndTest COMMAND SessionEndTest)
 set_tests_properties(SessionEndTest PROPERTIES TIMEOUT 60 LABELS "project;session;lifecycle")
 
+# Decision 7 (roadmap 1.8-H4): the session transition table is enforced, and
+# PostClose -> PreOpen happens only for a later trading date.
+add_executable(SessionTransitionTest SessionTransitionTest.cpp)
+target_link_libraries(SessionTransitionTest PRIVATE OrderMatcher)
+enable_assertions(SessionTransitionTest)
+add_test(NAME SessionTransitionTest COMMAND SessionTransitionTest)
+set_tests_properties(SessionTransitionTest PROPERTIES TIMEOUT 60 LABELS "project;session;auction")
+
 # Roadmap 0.12: Stop with price <= 0, Market with minQty and Pegged each left
 # the book holding an order it must never hold; refused at admission.
 add_executable(OrderTypeAdmissionTest OrderTypeAdmissionTest.cpp)

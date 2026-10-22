@@ -10,8 +10,9 @@
 //      via observable side effects — uncross prints + state changes).
 //   3. A coarse tick that jumps past several boundaries at once still fires
 //      each intervening phase, in order.
-//   4. A midnight wrap (clock running backwards) and an explicit
-//      resetSession() both re-arm the full sequence.
+//   4. A new trading date and an explicit resetSession() both re-arm the
+//      full sequence; but a book closed on a date reopens only on a later
+//      one, so a same-date reset leaves it in PostClose (decision 7).
 //   5. Sessions run Monday to Friday only: a weekend date fires nothing,
 //      not even after Friday's close (roadmap 1.8-H8).
 //
@@ -182,11 +183,12 @@ void test_session_reset() {
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::Idle);
 
-    // Drive into PreOpen again to confirm the sequence re-fires post-reset.
+    // The sequence re-fires post-reset, but the books closed today refuse
+    // a second session on the same date (decision 7).
     vnow = sched.preOpenMs;
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::PreOpen);
-    assertAllState(engine, symbols, TradingState::PreOpen);
+    assertAllState(engine, symbols, TradingState::PostClose);
 
     // Now a new trading day WITHOUT an explicit reset: advance to Continuous,
     // then move to the next date. The next tick should auto-reset and, since
@@ -202,10 +204,11 @@ void test_session_reset() {
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::Idle);
 
-    // And the fresh day proceeds normally.
+    // And the fresh day proceeds normally: the books reopen for it.
     vnow = sched.preOpenMs;
     sched_.tick();
     assert(sched_.currentPhase() == SessionPhase::PreOpen);
+    assertAllState(engine, symbols, TradingState::PreOpen);
 
     engine.stopAsync();
     PASS();

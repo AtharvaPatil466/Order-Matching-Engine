@@ -42,7 +42,8 @@ struct OrderRequest {
         ExpireCheck = 7,
         // Session control (roadmap 1.8-H1 / G1): applied and journaled by the
         // book's owning worker, in order with that book's order flow.
-        // TradingState carries the target state in newQty.
+        // TradingState carries the target state in newQty and, for PreOpen,
+        // the trading date in expiryTime (0 = undated; decision 7).
         TradingState = 8,
         Uncross = 9
     };
@@ -313,10 +314,19 @@ public:
     // could have one symbol still matching while a sibling has already
     // halted, producing observably-inconsistent market states.
     //
-    // Symbols not registered are skipped silently. Returns the count of
-    // symbols that were transitioned.
+    // Symbols not registered are skipped silently. A book refuses a
+    // transition off the session table (OrderBook::setTradingState), and a
+    // refusal is not journaled. Returns the count of listed books now in
+    // `state`.
     size_t setTradingStateBatch(const std::vector<SymbolId>& symbols,
                                 TradingState state);
+
+    // Begin the trading session for `tradingDate` (days since 1970-01-01):
+    // PreOpen. A book closed earlier the same date, or later, stays in
+    // PostClose (decision 7). SessionScheduler's pre-open calls it. Returns
+    // the count of listed books now in PreOpen.
+    size_t beginTradingSession(const std::vector<SymbolId>& symbols,
+                               uint32_t tradingDate);
 
     // Convenience: uncross a group of symbols atomically. Same rationale
     // as setTradingStateBatch — opening/closing auctions across a group
@@ -335,8 +345,9 @@ public:
     // End the trading session for `symbols`: move them to PostClose (which
     // runs the closing cross from AuctionClose), then cancel — and journal —
     // every DAY order on them. The explicit session-end command; a process
-    // stop is not one. SessionScheduler's close calls it. Returns the number
-    // of DAY orders cancelled.
+    // stop is not one. SessionScheduler's close calls it. A book that
+    // refuses PostClose (PreOpen, AuctionOpen) keeps its DAY orders. Returns
+    // the number of DAY orders cancelled.
     size_t endTradingSession(const std::vector<SymbolId>& symbols);
 
     // Time management
@@ -581,7 +592,10 @@ private:
     // Route one session-control request: to the owning worker in async mode
     // (the caller then waitForDrain()s), applied here in sync mode.
     void routeSessionControl(SymbolId symbolId, OrderRequest::Type type,
-                             TradingState state = TradingState::Continuous);
+                             TradingState state = TradingState::Continuous,
+                             uint32_t tradingDate = 0);
+    size_t transitionBatch(const std::vector<SymbolId>& symbols, TradingState state,
+                           uint32_t tradingDate);
     void maybeTriggerAutoCheckpoint();
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);

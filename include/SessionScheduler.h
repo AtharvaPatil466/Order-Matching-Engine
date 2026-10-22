@@ -99,7 +99,7 @@ public:
     // Begin a fresh session: forget which phases have been applied so the
     // full sequence can fire again. Called automatically when the trading
     // date changes, and available explicitly for a host that restarts a
-    // session out of band.
+    // session out of band (books already closed that date stay closed).
     void resetSession();
 
     // Clock seam — mirrors setExpiryClock/clearExpiryClock on the engine.
@@ -115,8 +115,11 @@ public:
     // step back looks like too. The weekday is derived from it: sessions run
     // Monday to Friday, and a Saturday or Sunday fires no phase. Default: the
     // UTC day of the default clock. With an injected clock and no date
-    // function the date stays 0 (a Thursday) and never changes, so only
-    // resetSession() starts a new session.
+    // function the date stays 0 (a Thursday) and never changes: one long
+    // day. The pre-open passes the date to the books, and a book closed on
+    // a date reopens only for a later one (decision 7), so resetSession()
+    // re-arms the phases but cannot reopen a book closed that day; date 0
+    // counts as undated and never reopens a closed book.
     using DateFn = std::function<uint32_t()>;
     void setTradingDateFn(DateFn date) { dateFn_ = std::move(date); }
     uint32_t tradingDate() const;

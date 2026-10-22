@@ -184,7 +184,8 @@ struct JournalEntry {
 };
 #pragma pack(pop)
 
-// The state a TradingStateChange record carries.
+// The state a TradingStateChange record carries, and for PreOpen its trading
+// date (expiryTime; 0 = undated, which is also what older records hold).
 inline TradingState journaledTradingState(const JournalEntry& e) {
     return static_cast<TradingState>(e.quantity);
 }
@@ -193,8 +194,12 @@ inline TradingState journaledTradingState(const JournalEntry& e) {
 // these the same way. A template so this header need not include OrderBook.h.
 template <typename Book>
 void applySessionRecord(Book& book, const JournalEntry& e) {
-    if (e.entryType == JournalEntry::Type::TradingStateChange)
-        book.setTradingState(journaledTradingState(e));
+    if (e.entryType == JournalEntry::Type::TradingStateChange) {
+        if (journaledTradingState(e) == TradingState::PreOpen)
+            book.beginSession(static_cast<uint32_t>(e.expiryTime));  // restores the date
+        else
+            book.setTradingState(journaledTradingState(e));
+    }
     else if (e.entryType == JournalEntry::Type::Uncross)
         book.uncross();
 }
@@ -371,12 +376,13 @@ public:
 
     // Session control. Replay applies them to the book in journal order, so
     // the orders around an auction are re-run under the same states (AUCT-1).
-    void logTradingState(SymbolId symbolId, TradingState state) {
+    void logTradingState(SymbolId symbolId, TradingState state, uint32_t tradingDate = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::TradingStateChange;
         entry.timestamp = now();
         entry.symbolId = symbolId;
         entry.quantity = static_cast<Quantity>(state);
+        entry.expiryTime = tradingDate;
         appendEntry(entry);
     }
 

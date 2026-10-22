@@ -1919,9 +1919,52 @@ void OrderBook::setTradingState(TradingState s) {
     setTradingStateLocked(s);
 }
 
+void OrderBook::beginSession(uint32_t tradingDate) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    setTradingStateLocked(TradingState::PreOpen, tradingDate);
+}
+
+// Decision 7: the session transition table, docs/MatchingRules.md Rule 7.7.
+// Auction.tla's LegalEdges plus the edges the engine's callers need: the
+// opening auction (PreOpen -> AuctionOpen -> Continuous), an intraday call
+// auction (Continuous <-> AuctionOpen, the BCS batch arm), a close with no
+// closing auction (Continuous -> PostClose), an auction or a halt running
+// into the close, and the next day's PreOpen. Precondition: bookLock_ held.
+bool OrderBook::transitionAllowed(TradingState to, uint32_t tradingDate) const {
+    using T = TradingState;
+    if (to == T::Halted) return true;  // any state may halt
+    switch (tradingState_) {
+    case T::PreOpen:      return to == T::Continuous || to == T::AuctionOpen;
+    case T::AuctionOpen:  return to == T::Continuous || to == T::AuctionClose;
+    case T::Continuous:
+        return to == T::AuctionOpen || to == T::AuctionClose || to == T::VolatilityAuction ||
+               to == T::PostClose || (to == T::PreOpen && !sessionBegun_);  // boot
+    case T::AuctionClose: return to == T::PostClose;
+    case T::VolatilityAuction:
+        return to == T::Continuous || to == T::AuctionClose || to == T::PostClose;
+    case T::Halted:       return to == T::Continuous || to == T::PostClose;
+    case T::PostClose:  // the next session, on a later date
+        return to == T::PreOpen && tradingDate != 0 &&
+               (sessionDate_ == 0 || tradingDate > sessionDate_);
+    }
+    return false;
+}
+
 // Precondition: bookLock_ held.
-void OrderBook::setTradingStateLocked(TradingState s) {
+void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
     if (tradingState_ == s) return;  // no-op transitions don't emit events
+    if (!replayMode_ && !transitionAllowed(s, tradingDate)) {
+        obSink().log(obEvent("trading_state_refused", LogSeverity::Warn)
+                         .kv("symbol", (long long)symbolId_)
+                         .kv("from", tradingStateName(tradingState_))
+                         .kv("to",   tradingStateName(s))
+                         .kv("trading_date", (long long)tradingDate));
+        return;
+    }
+    if (s == TradingState::PreOpen) {
+        sessionBegun_ = true;
+        if (tradingDate != 0) sessionDate_ = tradingDate;
+    }
     // H4 (AUCT-4, MATCH-12, TLA-3): leaving an accumulation state for one that
     // trades or closes IS the cross. The open used to be two calls — uncross,
     // then this, which only assigned the field — so an order that arrived in

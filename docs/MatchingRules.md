@@ -919,6 +919,45 @@ Everything described in Rules 7.4 and 7.5 is done by `referencePrice_` / `cbThre
 **Status: [Defect B8](#b8--luldmanager-is-dead-code).** Listed here so nobody reads
 `LULDManager.h` and believes it describes engine behaviour. It does not.
 
+### Rule 7.7 — The session transition table is enforced
+
+`OrderBook::setTradingState` refuses a transition that is not on this table: the book stays
+where it was, a `trading_state_refused` event is logged, and the engine journals nothing.
+`setTradingStateBatch` and `beginTradingSession` return how many books are now in the
+requested state.
+
+| From | To |
+|---|---|
+| any state | `Halted` |
+| `PreOpen` | `Continuous` (opening cross), `AuctionOpen` |
+| `AuctionOpen` | `Continuous` (cross), `AuctionClose` |
+| `Continuous` | `AuctionOpen` (intraday call auction), `AuctionClose`, `VolatilityAuction`, `PostClose` (no closing auction), `PreOpen` only before the book's first session |
+| `AuctionClose` | `PostClose` (closing cross) |
+| `VolatilityAuction` | `Continuous` (reopening cross), `AuctionClose`, `PostClose` |
+| `Halted` | `Continuous`, `PostClose` |
+| `PostClose` | `PreOpen` only for a later trading date |
+
+`PreOpen` begins a session. Books boot in `Continuous`, so the first `PreOpen` may come from
+there. After that, a book reaches `PreOpen` only from `PostClose`, through `beginSession` /
+`MatchingEngine::beginTradingSession` with a trading date (days since 1970-01-01) later than
+the date of the session it closed. An undated `PreOpen` (`setTradingState(PreOpen)`) never
+reopens a closed book. `SessionScheduler`'s pre-open passes its trading date, so a same-date
+`resetSession()` re-runs the scheduler's phases while the books stay in `PostClose`. The date is
+journaled with the `PreOpen` record and kept by a checkpoint, so a restarted engine still
+refuses a second session on that date. Replay applies the journal without checking the table,
+because only applied transitions are journaled.
+
+Off the table: `PostClose -> Continuous` reopened a closed market, `AuctionClose -> Continuous`
+abandoned a closing auction, and `PreOpen` / `AuctionOpen -> PostClose` would print a cross at
+the close of a session that never opened. `spec/Auction.tla`'s `LegalEdges` is a subset of
+this table; the `AuctionOpen` edges, the closes from `Continuous`, `Halted` and
+`VolatilityAuction`, and the next day's `PreOpen` are not modelled yet.
+
+> `OrderBook::transitionAllowed` in `src/OrderBook.cpp`
+
+**Status: Deliberate — commented and pinned** (`tests/SessionTransitionTest.cpp`; decision 7,
+roadmap 1.8-H4).
+
 ---
 
 ## 8. Time in force and expiry

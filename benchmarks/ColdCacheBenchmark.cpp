@@ -61,23 +61,38 @@ private:
 // before every op (cold path); the eviction is outside the timed region.
 static void runPass(OrderBook& book, const std::vector<WorkloadOp>& ops,
                     size_t warmup, BenchLatencyRecorder& rec,
-                    CacheThrasher* thrasher) {
+                    CacheThrasher* thrasher, bench::OpAudit& audit) {
+    bench::TerminalTracker tracker(ops.size());  // ids never exceed the op count
+    book.setEventListener(&tracker);
     for (size_t i = 0; i < ops.size(); ++i) {
         const WorkloadOp& op = ops[i];
         const bool measure = i >= warmup;
 
+        // A cancel whose target a marketable order already consumed would
+        // time a hash miss: skip it, untimed and counted.
+        if (op.kind == WorkloadOp::Kind::Cancel && !tracker.live(op.orderId)) {
+            if (measure) ++audit.skippedCancels;
+            continue;
+        }
+
         if (thrasher) thrasher->evict();  // NOT timed
 
+        const size_t liveBefore = book.poolInUse();
+        AddOrderResult res = RejectReason::None;
         uint64_t t0 = bench::nowNs();
         if (op.kind == WorkloadOp::Kind::New)
-            book.addOrder(op.orderId, op.participantId, op.side,
-                          op.price, op.qty, OrderType::Limit);
+            res = book.addOrder(op.orderId, op.participantId, op.side,
+                                op.price, op.qty, OrderType::Limit);
         else
             book.cancelOrder(op.orderId);
         uint64_t t1 = bench::nowNs();
 
-        if (measure) rec.recordInterval(t0, t1);
+        if (measure) {
+            rec.recordInterval(t0, t1);
+            audit.note(op, &res, liveBefore, book.poolInUse());
+        }
     }
+    book.setEventListener(nullptr);
 }
 
 int main(int argc, char* argv[]) {
@@ -122,13 +137,22 @@ int main(int argc, char* argv[]) {
     std::printf("\nRunning WARM pass...\n");
     OrderBook warmBook(0, MatchAlgorithm::PriceTime);
     BenchLatencyRecorder recWarm;
-    runPass(warmBook, ops, warmup, recWarm, nullptr);
+    bench::OpAudit auditWarm;
+    runPass(warmBook, ops, warmup, recWarm, nullptr, auditWarm);
 
     // COLD pass — evict the working set before each op.
     std::printf("Running COLD pass (evict before each op)...\n");
     OrderBook coldBook(0, MatchAlgorithm::PriceTime);
     BenchLatencyRecorder recCold;
-    runPass(coldBook, ops, warmup, recCold, &thrasher);
+    bench::OpAudit auditCold;
+    runPass(coldBook, ops, warmup, recCold, &thrasher, auditCold);
+
+    // The tables describe the New+Cancel mix only if every timed op did its job.
+    const bool warmOk = auditWarm.ok("warm");
+    if (!auditCold.ok("cold") || !warmOk) {
+        std::fprintf(stderr, "WORKLOAD CHECK FAILED: a timed op did not do its job\n");
+        return 1;
+    }
 
     std::printf("\n── WARM cache ──\n");
     recWarm.printTable("warm");

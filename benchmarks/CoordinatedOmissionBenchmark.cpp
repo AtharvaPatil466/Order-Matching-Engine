@@ -82,6 +82,9 @@ int main(int argc, char* argv[]) {
     BenchLatencyRecorder recNaive;      // completion − actual_start
     BenchLatencyRecorder recCorrected;  // completion − intended_start
     uint64_t backlogSamples = 0;        // ops where actual_start ran late
+    bench::OpAudit audit;
+    bench::TerminalTracker tracker(ops.size());  // ids never exceed the op count
+    book.setEventListener(&tracker);
 
     // Anchor intended-start schedule after warmup so warmup drift is excluded.
     // We still process warmup ops (to fill the book) but do not time them.
@@ -102,6 +105,13 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // A cancel whose target a marketable order already consumed would time
+        // a hash miss: skip it (no schedule slot, untimed, counted).
+        if (op.kind == WorkloadOp::Kind::Cancel && !tracker.live(op.orderId)) {
+            ++audit.skippedCancels;
+            continue;
+        }
+
         if (scheduleBase == 0) scheduleBase = bench::nowNs();
         uint64_t intended =
             scheduleBase + static_cast<uint64_t>(periodNs * static_cast<double>(measuredIndex));
@@ -113,16 +123,25 @@ int main(int argc, char* argv[]) {
         while (actualStart < intended) actualStart = bench::nowNs();
         if (actualStart > intended + static_cast<uint64_t>(periodNs)) ++backlogSamples;
 
+        const size_t liveBefore = book.poolInUse();
+        AddOrderResult res = RejectReason::None;
         if (op.kind == WorkloadOp::Kind::New)
-            book.addOrder(op.orderId, op.participantId, op.side,
-                          op.price, op.qty, OrderType::Limit);
+            res = book.addOrder(op.orderId, op.participantId, op.side,
+                                op.price, op.qty, OrderType::Limit);
         else
             book.cancelOrder(op.orderId);
 
         uint64_t completion = bench::nowNs();
         recNaive.recordInterval(actualStart, completion);
         recCorrected.recordInterval(intended, completion);
+        audit.note(op, &res, liveBefore, book.poolInUse());
         ++measuredIndex;
+    }
+
+    // The tables describe the New+Cancel mix only if every timed op did its job.
+    if (!audit.ok("open-loop")) {
+        std::fprintf(stderr, "WORKLOAD CHECK FAILED: a timed op did not do its job\n");
+        return 1;
     }
 
     std::printf("\n── CO-NAIVE (completion − actual_start) ──\n");

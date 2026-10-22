@@ -39,6 +39,7 @@
 
 #include "OrderBook.h"
 #include "BenchLatencyRecorder.h"
+#include "RealisticWorkload.h"  // bench::TerminalTracker
 
 #include <algorithm>
 #include <cmath>
@@ -119,29 +120,6 @@ constexpr Quantity  kMaxQty      = 10000;   // power-law tail clamp
 constexpr double    kParetoAlpha = 1.5;     // size exponent (most small, some large)
 constexpr uint64_t  kParticipants = 8;      // so IOCs cross others, not self-trade
 
-// Marks orders the book has finished with (filled, cancelled, STP-cancelled,
-// rejected), so the cancel/modify picker only ever times a cancel of a live
-// order. Without it 66-79% of timed cancels hit ids an IOC had already
-// consumed and timed a hash miss (GTPERF-2). Inside the timed region this adds
-// one byte store per terminal update to the virtual dispatch the book makes
-// anyway; the liveness check itself reads only this vector, so it does not warm
-// the book's lookup structures before the timed cancel.
-class TerminalTracker : public EventListener {
-public:
-    explicit TerminalTracker(size_t maxId) : dead_(maxId + 1, 0) {}
-    void onOrderUpdate(const OrderUpdate& u) override {
-        // remainingQty == 0 as well: an order that traded and was then
-        // STP-cancelled leaves the book with a final PartiallyFilled, rem 0
-        // update and no terminal status (finalizeIfStpCancelled).
-        const bool gone = isTerminalStatus(u.status) || u.remainingQty == 0;
-        if (gone && u.orderId < dead_.size()) dead_[u.orderId] = 1;
-    }
-    bool live(OrderId id) const { return id < dead_.size() && !dead_[id]; }
-
-private:
-    std::vector<uint8_t> dead_;
-};
-
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -195,7 +173,9 @@ int main(int argc, char* argv[]) {
 
     OrderBook book(0, MatchAlgorithm::PriceTime);
     book.setTradingState(TradingState::Continuous);
-    TerminalTracker tracker(events + 1);  // every event mints at most one id
+    // The cancel/modify picker only ever times a cancel of a live order:
+    // without this 66-79% of timed cancels hit ids an IOC had consumed.
+    bench::TerminalTracker tracker(events + 1);  // every event mints at most one id
     book.setEventListener(&tracker);
 
     // Ids we submitted as resting orders. Entries the book has since finished

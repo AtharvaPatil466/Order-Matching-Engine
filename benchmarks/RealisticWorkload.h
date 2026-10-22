@@ -21,11 +21,13 @@
 // the targets.
 #pragma once
 
+#include "OrderBook.h"
 #include "Types.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <queue>
 #include <random>
 #include <vector>
@@ -187,6 +189,50 @@ private:
     size_t marketableCount_{0};
     size_t passiveCount_{0};
     size_t scheduledCancels_{0};
+};
+
+// Marks orders a book has finished with (filled, cancelled, STP-cancelled,
+// rejected), so a benchmark can tell a live cancel target from a dead one
+// without touching the book's own structures before the timed call. Install
+// it as the book's listener. remainingQty == 0 counts as finished too: an
+// order that traded and was then STP-cancelled leaves with a final
+// PartiallyFilled, rem 0 update and no terminal status.
+class TerminalTracker : public EventListener {
+public:
+    explicit TerminalTracker(size_t maxId) : dead_(maxId + 1, 0) {}
+    void onOrderUpdate(const OrderUpdate& u) override {
+        const bool gone = isTerminalStatus(u.status) || u.remainingQty == 0;
+        if (gone && u.orderId < dead_.size()) dead_[u.orderId] = 1;
+    }
+    bool live(OrderId id) const { return id < dead_.size() && !dead_[id]; }
+
+private:
+    std::vector<uint8_t> dead_;
+};
+
+// Workload check for a book driven by WorkloadGenerator ops (GTPERF-2 class).
+// The generator schedules cancels offline and cannot know which resting order
+// a marketable one consumes first, so some cancels name an order already gone.
+// Feed every TIMED op through note(), with the book's live count read outside
+// the timed region; ok() is false if a timed NEW was rejected or a timed
+// cancel removed nothing.
+struct OpAudit {
+    uint64_t rejectedNew = 0, deadCancels = 0, skippedCancels = 0;
+
+    void note(const WorkloadOp& op, const AddOrderResult* res, size_t liveBefore,
+              size_t liveAfter) {
+        if (op.kind == WorkloadOp::Kind::New)
+            rejectedNew += res && std::holds_alternative<RejectReason>(*res);
+        else
+            deadCancels += liveAfter == liveBefore;
+    }
+    bool ok(const char* label) const {
+        std::printf("  [%s] workload: rejected new %llu, dead cancels %llu, "
+                    "cancels skipped untimed (target gone) %llu\n", label,
+                    (unsigned long long)rejectedNew, (unsigned long long)deadCancels,
+                    (unsigned long long)skippedCancels);
+        return rejectedNew == 0 && deadCancels == 0;
+    }
 };
 
 } // namespace bench

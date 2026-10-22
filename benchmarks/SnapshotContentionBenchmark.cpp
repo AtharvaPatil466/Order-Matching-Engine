@@ -116,6 +116,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -136,8 +137,11 @@ constexpr uint64_t kQuantizationTicks = 3;
 
 // Book is centred here. FlatPriceMap anchors its band on the first price seen
 // (OrderBook::ensurePriceRange centres a 200,001-tick window), so every price
-// used below stays comfortably in range.
-constexpr Price kMidPrice = 100000;
+// used below stays comfortably in range. High enough that the deepest book
+// (10,000 levels plus the producer's 1,000-tick offset) stays inside the 5%
+// volatility breaker anchored on the first order: at 100,000 that book reached
+// 11% out and half its 200,000 adds were rejected.
+constexpr Price kMidPrice = 10'000'000;
 
 // The producer parks its order this far below the deepest resting bid, so its
 // insert never collides with a level the snapshot walks and never crosses.
@@ -198,18 +202,30 @@ double toMiB(uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 102
 
 // ─── Book construction ───────────────────────────────────────────────────────
 
+// Workload check (K2): every point's book must have the shape its row names,
+// and every timed producer add must be accepted. Cleared on the first miss.
+bool g_workloadOk = true;
+
 // `levels` price levels per side, `ordersPerLevel` resting orders on each.
 // Bids descend from kMidPrice-1, asks ascend from kMidPrice+1 — nothing ever
 // crosses, so the book shape this builds is exactly the shape it keeps.
 OrderId buildBook(OrderBook& book, size_t levels, size_t ordersPerLevel, OrderId firstId) {
     OrderId id = firstId;
+    size_t rejected = 0;
     for (size_t i = 0; i < levels; ++i) {
         const Price bid = kMidPrice - static_cast<Price>(i) - 1;
         const Price ask = kMidPrice + static_cast<Price>(i) + 1;
         for (size_t k = 0; k < ordersPerLevel; ++k) {
-            book.addOrder(id++, kBookPid, Side::Buy, bid, kOrderQty, OrderType::Limit);
-            book.addOrder(id++, kBookPid, Side::Sell, ask, kOrderQty, OrderType::Limit);
+            rejected += std::holds_alternative<RejectReason>(
+                book.addOrder(id++, kBookPid, Side::Buy, bid, kOrderQty, OrderType::Limit));
+            rejected += std::holds_alternative<RejectReason>(
+                book.addOrder(id++, kBookPid, Side::Sell, ask, kOrderQty, OrderType::Limit));
         }
+    }
+    if (rejected) {
+        std::printf("  *** book %zu levels x %zu orders: %zu of %zu adds REJECTED\n",
+                    levels, ordersPerLevel, rejected, 2 * levels * ordersPerLevel);
+        g_workloadOk = false;
     }
     return id;
 }
@@ -234,6 +250,7 @@ struct ArmStats {
     uint64_t ops{0};
     uint64_t scrapes{0};
     uint64_t behind{0};     // paced arm only: deadlines missed by a full period
+    uint64_t rejected{0};   // timed producer adds the book rejected
     long double wallNs{0};  // total producer wall time
 };
 
@@ -298,10 +315,11 @@ void runRound(OrderBook& book, Arm arm, const RoundConfig& cfg,
     while (done < cfg.opsTarget) {
         const OrderId id = nextId++;
         const uint64_t a = bench::nowNs();
-        book.addOrder(id, kProducerPid, Side::Buy, cfg.producerPrice,
-                      kOrderQty, OrderType::Limit);
+        const AddOrderResult res = book.addOrder(id, kProducerPid, Side::Buy, cfg.producerPrice,
+                                                 kOrderQty, OrderType::Limit);
         const uint64_t b = bench::nowNs();
         out.match.recordInterval(a, b);
+        out.rejected += std::holds_alternative<RejectReason>(res);
         book.cancelOrder(id);
         ++done;
         lastNs = b;
@@ -311,6 +329,7 @@ void runRound(OrderBook& book, Arm arm, const RoundConfig& cfg,
     stop.store(true, std::memory_order_relaxed);
     scraper.join();
 
+    if (out.rejected) g_workloadOk = false;
     out.ops += done;
     out.wallNs += static_cast<long double>(lastNs - startNs);
     out.snap.mergeFrom(snap);
@@ -779,5 +798,10 @@ int main(int argc, char** argv) {
     std::printf("    'below clock resolution' percentiles are unresolvable, not\n");
     std::printf("    fast.\n");
     std::printf("=======================================================\n");
+    if (!g_workloadOk) {
+        std::fprintf(stderr, "WORKLOAD CHECK FAILED: a book did not have the shape its row "
+                             "names, or a timed add was rejected (see *** above)\n");
+        return 1;
+    }
     return 0;
 }

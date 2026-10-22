@@ -2595,13 +2595,11 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
             }
             ++executed;
 
-            bool becameMarket = false;
             if (order->type == OrderType::StopLimit) {
                 order->type = OrderType::Limit;
                 order->price = order->stopLimitPrice;
             } else if (order->type == OrderType::MIT) {
                 order->type = OrderType::Market;   // MIT fires a market order
-                becameMarket = true;
             } else {
                 order->type = OrderType::Limit;
             }
@@ -2614,19 +2612,11 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
             // without incrementing i, exactly as the tail of this block does.
             if (finalizeIfStpCancelled(order)) continue;
 
-            if (order->remainingQty > 0) {
-                // A triggered MIT is a market order — its unfilled remainder
-                // must not rest; cancel it (also the addToBook-failure path).
-                if (becameMarket || !addToBook(order)) {
-                    notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
-                    orderLookup_.erase(order->id);
-                    orderPool_.deallocate(order);
-                }
-            } else {
-                order->status = OrderStatus::Filled;
-                orderLookup_.erase(order->id);
-                orderPool_.deallocate(order);
-            }
+            // The same tail as addOrder (MATCH-8): this sweep's hand-copied one
+            // freed a full fill with no Filled update and rested without the
+            // L2 Add. A triggered MIT is now a Market order, so its remainder
+            // is cancelled there rather than rested.
+            finalizeRemainingQty(order, order->id, order->side, order->price, order->type);
             // Don't increment i — erase_swap moved the last element here
         } else {
             ++i;
@@ -2688,17 +2678,7 @@ void OrderBook::updateTrailingStops(Price lastTradePrice) {
 
             if (finalizeIfStpCancelled(order)) continue;
 
-            if (order->remainingQty > 0) {
-                if (!addToBook(order)) {
-                    notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
-                    orderLookup_.erase(order->id);
-                    orderPool_.deallocate(order);
-                }
-            } else {
-                order->status = OrderStatus::Filled;
-                orderLookup_.erase(order->id);
-                orderPool_.deallocate(order);
-            }
+            finalizeRemainingQty(order, order->id, order->side, order->price, order->type);
         } else {
             ++i;
         }

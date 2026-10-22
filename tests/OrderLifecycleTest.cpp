@@ -63,10 +63,60 @@ void minQtyRestThatDoesNotFitIsCancelled() {
     std::puts("  minQty rest without room: Cancelled, not left live outside the book");
 }
 
+// MATCH-8: the stop and trailing-stop sweeps carried their own copy of the
+// post-match tail. An elected stop that filled completely was freed with no
+// Filled update, and one that rested was never announced to the L2 feed.
+void electedStopThatFillsIsReportedFilled() {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(1e9);
+    Capture cap;
+    book.setEventListener(&cap);
+
+    book.addOrder(1, 1, Side::Sell, PX, 10, OrderType::Limit);
+    book.addOrder(2, 2, Side::Buy, PX, 5, OrderType::Stop, /*stopPrice=*/PX);
+    book.addOrder(3, 3, Side::Buy, PX, 1, OrderType::Limit);   // prints PX: elects 2
+
+    const OrderUpdate* u = cap.lastFor(2);
+    if (!u || u->status != OrderStatus::Filled)
+        std::printf("  FAIL elected stop 2 filled 5 and is gone (%s), last update %s\n",
+                    book.getOrder(2) ? "live" : "freed",
+                    u ? std::to_string(static_cast<int>(u->status)).c_str() : "none");
+    assert(book.getOrder(2) == nullptr);
+    assert(u && u->status == OrderStatus::Filled && u->filledQty == 5 &&
+           "an elected stop that fills completely gets its Filled update");
+    checkIntegrity(book);
+    std::puts("  elected stop, fully filled: Filled update");
+}
+
+void electedStopThatRestsIsPublished() {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(1e9);
+    Capture cap;
+    book.setEventListener(&cap);
+
+    book.addOrder(1, 1, Side::Sell, PX, 2, OrderType::Limit);
+    book.addOrder(2, 2, Side::Buy, PX, 5, OrderType::Stop, /*stopPrice=*/PX);
+    cap.md.clear();
+    book.addOrder(3, 3, Side::Buy, PX, 1, OrderType::Limit);   // prints PX: elects 2
+    // Stop 2 takes the 1 left and rests 4 @ PX as a limit.
+    assert(book.getOrder(2) && book.getOrder(2)->remainingQty == 4);
+
+    bool announced = false;
+    for (const auto& m : cap.md)
+        announced |= m.action == MarketDataUpdate::Action::Add && m.side == Side::Buy &&
+                     m.level.price == PX;
+    if (!announced) std::puts("  FAIL elected stop 2 rests 4 @ PX with no market-data Add");
+    assert(announced && "an elected stop that rests is announced like any rest");
+    checkIntegrity(book);
+    std::puts("  elected stop, rests: market-data Add");
+}
+
 }  // namespace
 
 int main() {
     minQtyRestThatDoesNotFitIsCancelled();
+    electedStopThatFillsIsReportedFilled();
+    electedStopThatRestsIsPublished();
     std::puts("OrderLifecycleTest passed");
     return 0;
 }

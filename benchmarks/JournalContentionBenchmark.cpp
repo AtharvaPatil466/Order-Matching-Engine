@@ -27,6 +27,7 @@
 #include "Journal.h"
 #include "FaultInjector.h"
 #include "BenchLatencyRecorder.h"
+#include "RealisticWorkload.h"  // bench::BookOutcomes
 
 #include <atomic>
 #include <chrono>
@@ -79,6 +80,8 @@ struct ArmResult {
     uint64_t backpressure{0};
     uint64_t processed{0};
     uint64_t journalAppends{0};   // sanity: how many orders actually journaled
+    uint64_t bookRejected{0};     // shed by a book after "Accepted" (= queued)
+    uint64_t stpCancelled{0};
 };
 
 // ─── Experiment A: end-to-end engine ────────────────────────────────────────
@@ -89,12 +92,16 @@ ArmResult runEngineArm(size_t numThreads, size_t symbolsPerThread,
         std::string(kJournalDir) + "/h6_bench_" + std::to_string(numThreads) + ".journal";
     std::remove(journalPath.c_str());
 
+    bench::BookOutcomes outcomes;  // declared first: outlives the engine's books
     MatchingEngine engine;
 
     std::vector<std::vector<SymbolId>> perThreadSymbols(numThreads);
     for (size_t t = 0; t < numThreads; ++t) {
         perThreadSymbols[t] = symbolsForThread(t, numThreads, symbolsPerThread);
-        for (SymbolId s : perThreadSymbols[t]) engine.addSymbol(s);
+        for (SymbolId s : perThreadSymbols[t]) {
+            engine.addSymbol(s);
+            engine.getOrderBook(s)->setEventListener(&outcomes);
+        }
     }
 
     if (journalOn) engine.enableJournal(journalPath);
@@ -109,7 +116,16 @@ ArmResult runEngineArm(size_t numThreads, size_t symbolsPerThread,
         std::mt19937_64 rng(1234 + t);
         // Wide price band so nearly every order RESTS rather than crossing: a
         // resting add is what journals, so this maximises journal pressure.
-        std::uniform_int_distribution<Price> priceDist(1'000'00, 1'100'00);
+        // +/-1.9% of 1,050.00: the old 1,000.00-1,100.00 band reached past the
+        // 5% volatility breaker anchored on each book's first order, and the
+        // books rejected the orders outside it.
+        std::uniform_int_distribution<Price> priceDist(1'030'00, 1'070'00);
+        // Buys and sells from different participants, so a crossing order
+        // never meets its own resting order and gets STP-cancelled instead of
+        // matched (it did, for ~20% of orders, with one participant).
+        auto ownerOf = [t](Side s) {
+            return static_cast<ParticipantId>(2 * t + 1 + (s == Side::Sell ? 1 : 0));
+        };
         std::uniform_int_distribution<Quantity> qtyDist(1, 100);
         BenchLatencyRecorder& rec = recorders[t];
         OrderId nextId = static_cast<OrderId>(t + 1) * 100'000'000ULL;
@@ -120,7 +136,8 @@ ArmResult runEngineArm(size_t numThreads, size_t symbolsPerThread,
         // further add is rejected with PoolCapacityExceeded, and NOTHING
         // journals — which silently turns the "journal ON" arm into a no-op.
         constexpr size_t kLiveDepth = 2000;
-        std::vector<std::pair<SymbolId, OrderId>> live(kLiveDepth, {0, 0});
+        struct Live { SymbolId sym; OrderId id; Side side; };
+        std::vector<Live> live(kLiveDepth, Live{0, 0, Side::Buy});
 
         while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
 
@@ -130,21 +147,19 @@ ArmResult runEngineArm(size_t numThreads, size_t symbolsPerThread,
             const OrderId id = nextId++;
 
             const uint64_t t0 = nowNanos();
-            SubmitResult sr = engine.submitOrder(sym, id,
-                                                 static_cast<ParticipantId>(t + 1),
+            SubmitResult sr = engine.submitOrder(sym, id, ownerOf(side),
                                                  side, priceDist(rng), qtyDist(rng),
                                                  OrderType::Limit);
             rec.recordInterval(t0, nowNanos());
             if (!sr.isAccepted()) ++localBp;
 
             auto& slot = live[i % kLiveDepth];
-            if (slot.second != 0) {
+            if (slot.id != 0) {
                 // Evicting the oldest: cancel it so the book stays bounded.
                 // A no-longer-resting order just returns early in the worker.
-                engine.submitCancel(slot.first, slot.second,
-                                    static_cast<ParticipantId>(t + 1));
+                engine.submitCancel(slot.sym, slot.id, ownerOf(slot.side));
             }
-            slot = {sym, id};
+            slot = {sym, id, side};
         }
         backpressure.fetch_add(localBp, std::memory_order_relaxed);
     };
@@ -178,6 +193,8 @@ ArmResult runEngineArm(size_t numThreads, size_t symbolsPerThread,
     r.e2eP999 = e2e.getP999();
 
     engine.stop();
+    r.bookRejected = outcomes.rejected.load();
+    r.stpCancelled = outcomes.stpCancelled.load();
     std::remove(journalPath.c_str());
     return r;
 }
@@ -322,6 +339,13 @@ int main(int argc, char* argv[]) {
             return 0;
         }
     }
+    for (size_t n : threadCounts) {
+        if (2 * n + 2 > kMaxParticipants) {  // two participant ids per producer
+            std::fprintf(stderr, "--threads %zu needs more than %u participant ids\n", n,
+                         static_cast<unsigned>(kMaxParticipants));
+            return 2;
+        }
+    }
 
     std::printf("=== H6: journalMutex_ contention ===\n");
     std::printf("Orders per producer thread: %zu\n", ordersPerThread);
@@ -338,6 +362,7 @@ int main(int argc, char* argv[]) {
         std::printf("----+---------+--------------+----------+----------+----------"
                     "+------------+------------+------------------\n");
         double base[2] = {0, 0};
+        bool workloadOk = true;
         for (size_t n : threadCounts) {
             for (int j = 0; j < 2; ++j) {
                 const bool journalOn = (j == 1);
@@ -354,10 +379,23 @@ int main(int argc, char* argv[]) {
                             (unsigned long long)r.journalAppends,
                             (unsigned long long)r.processed,
                             r.backpressure ? "  [BACKPRESSURE]" : "");
+                if (r.bookRejected || r.stpCancelled) {
+                    std::printf("      book rejected %llu, STP-cancelled %llu\n",
+                                (unsigned long long)r.bookRejected,
+                                (unsigned long long)r.stpCancelled);
+                    workloadOk = false;
+                }
                 std::fflush(stdout);
             }
         }
         std::printf("\n");
+        // The rows describe resting-order journal pressure only if the books
+        // took every order the engine queued.
+        if (!workloadOk) {
+            std::fprintf(stderr, "WORKLOAD CHECK FAILED: books rejected or STP-cancelled "
+                                 "orders in experiment A\n");
+            return 1;
+        }
     }
 
     if (only.find('b') != std::string::npos) {

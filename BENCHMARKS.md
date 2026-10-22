@@ -60,6 +60,7 @@ closed-loop harness cannot see coordinated omission. It is legitimate and
 reproducible, and it is the flow every figure in the Results section and all
 optimization history are measured on.
 
+(Superseded workload — see the note under the RealisticFlowBenchmark results.)
 **`RealisticFlowBenchmark`** (500K events, realized 43.9% cancel / 46.2% new /
 7.9% IOC / 2.0% modify, mean resting depth 2,418 orders) models venue-shaped
 order flow with a sustaining resting book. No empty-book cancels (0 of
@@ -255,6 +256,13 @@ A previous revision of this table reported ~125 ns for Paths A and B. That
 figure did not reproduce and is not retained.
 
 #### `RealisticFlowBenchmark` — closed-loop, cancel-heavy, 500K events, seed=42
+
+> **Superseded workload.** Every `RealisticFlowBenchmark` figure in this file
+> was measured before the workload check (GTPERF-2): in that flow 79% of timed
+> cancels hit ids already filled, ~10% of new orders and IOCs were rejected by
+> the volatility breaker, and 38% of "passive" adds crossed. The benchmark now
+> fails rather than print numbers for such a run. Treat these figures as
+> unmeasured until rerun.
 
 Realized mix over 495,000 timed ops: **43.9% cancel (217,256) / 46.2% new
 (228,697) / 7.9% IOC (39,328, 41.3% of them filled) / 2.0% modify (9,719)**.

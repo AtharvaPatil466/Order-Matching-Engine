@@ -4,10 +4,10 @@
 // is no cancel traffic. Real venues are cancel-dominated churn. This benchmark
 // drives the core matching path with the venue-shaped event mix:
 //
-//   • 44% CANCEL   — cancel a randomly selected resting order (no-op if the book
-//                    pool is empty)
-//   • 46% NEW      — passive limit that rests, priced away from the mid so it is
-//                    never immediately aggressive
+//   • 44% CANCEL   — cancel a randomly selected LIVE resting order (skipped,
+//                    untimed, while the book is at its depth floor)
+//   • 46% NEW      — passive limit that rests: priced away from the mid and
+//                    never at or through the opposite best
 //   •  8% IOC      — aggressive immediate-or-cancel that crosses and may sweep
 //                    multiple levels; unfilled remainder is cancelled (does not rest)
 //   •  2% MODIFY   — cancel a resting order + resubmit at a new price
@@ -22,16 +22,14 @@
 // (P50/P90/P99/P99.9/P99.99/max). Only the engine operation is timed — RNG draws
 // and resting-pool bookkeeping happen outside the timed region.
 //
-// The mix is net-BUILDING (cancel < new) by construction. An earlier revision
-// used the venue tape's 65/25 directly; because you cannot cancel more orders
-// than you create, the book drained to empty within a few hundred events and
-// the run measured an empty book — mean depth 0.6, ~2 of 3 cancels no-op'ing,
-// realized mix collapsed to 42.6/42.6. Latencies gathered in that regime say
-// nothing about a venue: an empty book has no price levels to miss on and no
-// resting orders to look up. Cancel is now held just below new so depth builds
-// and the price map is actually exercised. Realized mix, no-op counts, IOC fill
-// rate and mean depth are all reported — if depth ever collapses toward 0 the
-// numbers below are meaningless and the mix is the first thing to check.
+// Every timed op must do its job, and the run fails (exit 1, before any
+// latency is printed) if one did not: a cancel or modify that hit a dead id, an
+// order the book rejected, a book that left Continuous (GTPERF-2). An earlier
+// revision timed 66-79% dead cancels, ~10% rejected new orders and IOCs, and
+// reported "0 no-op". Cancels now pick only live orders, and a cancel or
+// modify draw is skipped (untimed, counted) while the book is at its depth
+// floor, so the book holds a steady depth instead of draining. Realized mix,
+// skips, IOC fill rate and mean depth are all reported.
 //
 // instructions/order: NOT measurable on macOS/Apple Silicon (no perf, no HW
 // counters). Run the printed perf command on the x86 CI box for that metric.
@@ -42,11 +40,14 @@
 #include "OrderBook.h"
 #include "BenchLatencyRecorder.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <random>
+#include <variant>
 #include <vector>
 
 using namespace OrderMatcher;
@@ -63,12 +64,12 @@ namespace {
 // collapsed to 42.6/42.6, and mean depth sat at 0.6 orders. The run measured
 // an empty book wearing venue-shaped labels.
 //
-// So cancel is held just below new. IOC fills also retire resting orders
-// (~1 per IOC at these Pareto sizes); the balance is closed by cancels that
-// land on ids an IOC already consumed, which pop the tracking pool without
-// retiring a live order. Net: the book fills and keeps growing across the run.
-// Do NOT "restore" 65/25 — it re-empties the book. Check the reported mean
-// resting depth after any change here.
+// With every cancel retiring a live order, 44% cancel plus IOC consumption
+// out-runs 46% new and the book drains (measured: mean depth 4.7). It does
+// not drain below kDepthFloor: at the floor a cancel or modify draw becomes a
+// counted, untimed skip, so the realized cancel share is what holds depth at
+// the floor rather than the 44% drawn. Check the reported depth and skips
+// after any change here.
 constexpr double kCancelCum = 0.44;
 constexpr double kNewCum    = 0.90;  // 0.44..0.90 -> 46% new
 constexpr double kIocCum    = 0.98;  // 0.90..0.98 -> 8% IOC; remainder -> 2% modify
@@ -88,9 +89,8 @@ constexpr double kIocCum    = 0.98;  // 0.90..0.98 -> 8% IOC; remainder -> 2% mo
 // wearing venue-shaped labels. "Sparse" has to mean shallow-but-LIVE, not
 // empty: cancels must keep hitting real orders.
 //
-// So cancel stays just below new, exactly as the default mix does — the
-// shallowness comes from the two being nearly equal rather than from cancel
-// exceeding new. What actually creates sparsity is PRICE DISPERSION: passive
+// So the book holds a small depth floor (kSparseDepthFloor) rather than the
+// default's. What actually creates sparsity is PRICE DISPERSION: passive
 // orders are spread over a far wider band, so few slots are occupied across a
 // large price range. That is the FlatPriceMap stress, and it is independent of
 // depth.
@@ -104,12 +104,43 @@ constexpr double kSparseNewCum    = 0.97;  // 49% new — still above cancel
 constexpr double kSparseIocCum    = 0.99;  // 2% IOC; remainder 1% modify
 constexpr Price  kSparsePassiveMax = 400;  // vs 20 — this is what makes it sparse
 
+constexpr size_t kDepthFloor       = 2000;  // live resting orders
+constexpr size_t kSparseDepthFloor = 50;
+
 constexpr Price     kStartMid    = 100000;  // mid in ticks
 constexpr int       kWalkTicks   = 5;       // +/- ticks of random walk per event
-constexpr Price     kMidFloor    = 1000;    // keep the mid (and prices) positive
+// The mid walk is clamped to +/-4% of the start. The default 5% volatility
+// breaker anchors on the book's first order price; an unbounded walk drifted
+// past it (2.2 sigma at 500k events) and the book rejected ~10% of new orders
+// and IOCs, so the run timed reject paths (GTPERF-2). 4% leaves room for the
+// widest passive offset (400 ticks, --sparse) and the IOC aggression (60).
+constexpr Price     kMidBand     = kStartMid / 25;
 constexpr Quantity  kMaxQty      = 10000;   // power-law tail clamp
 constexpr double    kParetoAlpha = 1.5;     // size exponent (most small, some large)
 constexpr uint64_t  kParticipants = 8;      // so IOCs cross others, not self-trade
+
+// Marks orders the book has finished with (filled, cancelled, STP-cancelled,
+// rejected), so the cancel/modify picker only ever times a cancel of a live
+// order. Without it 66-79% of timed cancels hit ids an IOC had already
+// consumed and timed a hash miss (GTPERF-2). Inside the timed region this adds
+// one byte store per terminal update to the virtual dispatch the book makes
+// anyway; the liveness check itself reads only this vector, so it does not warm
+// the book's lookup structures before the timed cancel.
+class TerminalTracker : public EventListener {
+public:
+    explicit TerminalTracker(size_t maxId) : dead_(maxId + 1, 0) {}
+    void onOrderUpdate(const OrderUpdate& u) override {
+        // remainingQty == 0 as well: an order that traded and was then
+        // STP-cancelled leaves the book with a final PartiallyFilled, rem 0
+        // update and no terminal status (finalizeIfStpCancelled).
+        const bool gone = isTerminalStatus(u.status) || u.remainingQty == 0;
+        if (gone && u.orderId < dead_.size()) dead_[u.orderId] = 1;
+    }
+    bool live(OrderId id) const { return id < dead_.size() && !dead_[id]; }
+
+private:
+    std::vector<uint8_t> dead_;
+};
 
 }  // namespace
 
@@ -149,6 +180,7 @@ int main(int argc, char* argv[]) {
     const double cancelCum = sparse ? kSparseCancelCum : kCancelCum;
     const double newCum    = sparse ? kSparseNewCum    : kNewCum;
     const double iocCum    = sparse ? kSparseIocCum    : kIocCum;
+    const size_t depthFloor = sparse ? kSparseDepthFloor : kDepthFloor;
     std::uniform_int_distribution<Price>   passiveOff(1, sparse ? kSparsePassiveMax : 20);
     std::uniform_int_distribution<Price>   iocAggr(20, 60);     // cross deep enough to sweep
     std::uniform_int_distribution<uint64_t> pidPick(1, kParticipants);
@@ -163,27 +195,48 @@ int main(int argc, char* argv[]) {
 
     OrderBook book(0, MatchAlgorithm::PriceTime);
     book.setTradingState(TradingState::Continuous);
+    TerminalTracker tracker(events + 1);  // every event mints at most one id
+    book.setEventListener(&tracker);
 
-    // Approximate resting-order pool. IOC fills consume resting orders without us
-    // knowing which, so entries can go stale; cancelOrder() on a stale id is a
-    // safe no-op, and we drop it from the pool regardless. Superset of the true
-    // resting set — never causes a wrong cancel, only occasional no-op cancels.
+    // Ids we submitted as resting orders. Entries the book has since finished
+    // with stay here until the picker draws them, then are dropped untimed.
     std::vector<OrderId> resting;
     resting.reserve(events / 4);
+    auto pickLive = [&]() -> std::optional<size_t> {
+        while (!resting.empty()) {
+            const size_t idx = static_cast<size_t>(rng() % resting.size());
+            if (tracker.live(resting[idx])) return idx;
+            resting[idx] = resting.back();
+            resting.pop_back();
+        }
+        return std::nullopt;
+    };
 
     BenchLatencyRecorder recCancel, recNew, recIoc, recModify, recAll;
     uint64_t nCancel = 0, nNew = 0, nIoc = 0, nModify = 0;
     uint64_t noopCancel = 0, noopModify = 0, iocFilled = 0;
+    // Workload checks (GTPERF-2): a timed op that did not do its job. A cancel
+    // or modify whose target was already gone, an order the book rejected.
+    uint64_t deadCancel = 0, deadModify = 0, rejectedNew = 0, rejectedIoc = 0,
+             rejectedModify = 0;
+    auto rejected = [](const AddOrderResult& r) { return std::holds_alternative<RejectReason>(r); };
     uint64_t levelSum = 0;
     uint64_t depthSum = 0, poolSum = 0, depthSamples = 0;
 
     OrderId  nextId = 1;
     Price    mid = kStartMid;
+    // A NEW or a modify's resubmission must rest: priced off the walk mid but
+    // never at or through the opposite best. Priced off the mid alone, 38% of
+    // these "passive" adds crossed orders left behind by the walk (GTPERF-2).
+    auto passivePx = [&](Side side, Price off) -> Price {
+        if (side == Side::Buy)
+            return std::max<Price>(1, std::min(mid - off, book.getBestAsk() - 1));
+        return std::max({Price{1}, mid + off, book.getBestBid() + 1});
+    };
 
     for (size_t i = 0; i < events; ++i) {
         const bool warm = i >= warmup;
-        mid += walk(rng);
-        if (mid < kMidFloor) mid = kMidFloor;
+        mid = std::clamp<Price>(mid + walk(rng), kStartMid - kMidBand, kStartMid + kMidBand);
         // True live depth is the pool the book actually holds. `resting` is only
         // our tracking superset — it never shrinks when an IOC consumes an order,
         // so reporting its size would overstate depth. Both are printed below.
@@ -201,32 +254,38 @@ int main(int argc, char* argv[]) {
 
         if (r < cancelCum) {
             // ── 44% CANCEL a randomly selected resting order ──────────────────
-            if (resting.empty()) { if (warm) ++noopCancel; continue; }
-            const size_t idx = static_cast<size_t>(rng() % resting.size());
+            const auto pick = book.poolInUse() > depthFloor ? pickLive() : std::nullopt;
+            if (!pick) { if (warm) ++noopCancel; continue; }
+            const size_t idx = *pick;
             const OrderId id = resting[idx];
             resting[idx] = resting.back();
             resting.pop_back();
 
+            const size_t liveBefore = book.poolInUse();
             const uint64_t t0 = bench::nowNs();
             book.cancelOrder(id);
             const uint64_t t1 = bench::nowNs();
-            if (warm) { recCancel.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nCancel; }
+            if (warm) {
+                recCancel.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nCancel;
+                if (book.poolInUse() == liveBefore) ++deadCancel;
+            }
 
         } else if (r < newCum) {
             // ── 46% NEW passive limit that rests (never aggressive) ───────────
             const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
-            const Price off = passiveOff(rng);
-            Price px = (side == Side::Buy) ? mid - off : mid + off;
-            if (px < 1) px = 1;
+            const Price px = passivePx(side, passiveOff(rng));
             const OrderId id = nextId++;
             const Quantity q = drawQty();
             const ParticipantId pid = pidPick(rng);
 
             const uint64_t t0 = bench::nowNs();
-            book.addOrder(id, pid, side, px, q, OrderType::Limit);
+            const auto res = book.addOrder(id, pid, side, px, q, OrderType::Limit);
             const uint64_t t1 = bench::nowNs();
             resting.push_back(id);
-            if (warm) { recNew.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nNew; }
+            if (warm) {
+                recNew.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nNew;
+                rejectedNew += rejected(res);
+            }
 
         } else if (r < iocCum) {
             // ── 8% aggressive IOC that may sweep multiple levels ──────────────
@@ -240,35 +299,41 @@ int main(int argc, char* argv[]) {
             const uint64_t tradesBefore = book.getTradeCount();
 
             const uint64_t t0 = bench::nowNs();
-            book.addOrder(id, pid, side, px, q, OrderType::IOC);
+            const auto res = book.addOrder(id, pid, side, px, q, OrderType::IOC);
             const uint64_t t1 = bench::nowNs();
             // IOC never rests — nothing added to the pool.
             if (warm) {
                 recIoc.recordInterval(t0, t1);
                 recAll.recordInterval(t0, t1);
                 ++nIoc;
+                rejectedIoc += rejected(res);
                 if (book.getTradeCount() > tradesBefore) ++iocFilled;
             }
 
         } else {
             // ── 2% MODIFY = cancel a resting order + resubmit at a new price ──
-            if (resting.empty()) { if (warm) ++noopModify; continue; }
-            const size_t idx = static_cast<size_t>(rng() % resting.size());
+            const auto pick = book.poolInUse() > depthFloor ? pickLive() : std::nullopt;
+            if (!pick) { if (warm) ++noopModify; continue; }
+            const size_t idx = *pick;
             const OrderId oldId = resting[idx];
             const Side side = (u01(rng) < 0.5) ? Side::Buy : Side::Sell;
-            const Price off = passiveOff(rng);
-            Price px = (side == Side::Buy) ? mid - off : mid + off;
-            if (px < 1) px = 1;
+            const Price px = passivePx(side, passiveOff(rng));
             const OrderId newId = nextId++;
             const Quantity q = drawQty();
             const ParticipantId pid = pidPick(rng);
 
+            const size_t liveBefore = book.poolInUse();
             const uint64_t t0 = bench::nowNs();
             book.cancelOrder(oldId);
-            book.addOrder(newId, pid, side, px, q, OrderType::Limit);
+            const size_t liveAfterCancel = book.poolInUse();
+            const auto res = book.addOrder(newId, pid, side, px, q, OrderType::Limit);
             const uint64_t t1 = bench::nowNs();
             resting[idx] = newId;
-            if (warm) { recModify.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nModify; }
+            if (warm) {
+                recModify.recordInterval(t0, t1); recAll.recordInterval(t0, t1); ++nModify;
+                if (liveAfterCancel == liveBefore) ++deadModify;
+                rejectedModify += rejected(res);
+            }
         }
     }
 
@@ -281,9 +346,11 @@ int main(int argc, char* argv[]) {
     std::printf("Configuration:\n");
     std::printf("  Events:            %zu (warmup %zu, seed %llu)\n",
                 events, warmup, (unsigned long long)seed);
-    std::printf("  Target mix:        44%% cancel / 46%% new / 8%% IOC / 2%% modify\n");
-    std::printf("                     (cancel held below new so the book sustains;\n");
-    std::printf("                      a venue tape reads ~65/25 but cannot be replayed)\n");
+    std::printf("  Drawn mix:         %.0f%% cancel / %.0f%% new / %.0f%% IOC / %.0f%% modify\n",
+                100 * cancelCum, 100 * (newCum - cancelCum), 100 * (iocCum - newCum),
+                100 * (1 - iocCum));
+    std::printf("                     (cancel/modify skipped at a depth floor of %zu live\n"
+                "                      orders; the realized mix is below)\n", depthFloor);
     std::printf("  Order sizes:       Pareto(alpha=%.2f), clamp %llu\n",
                 kParetoAlpha, (unsigned long long)kMaxQty);
     std::printf("  Mid random walk:   +/-%d ticks/event from %lld\n",
@@ -292,13 +359,13 @@ int main(int argc, char* argv[]) {
 
     std::printf("\n── Realized workload (warm ops only) ──\n");
     std::printf("  Timed ops:         %llu\n", (unsigned long long)timed);
-    std::printf("  Cancel:  %8llu (%.1f%%)   [no-op empty-book: %llu]\n",
-                (unsigned long long)nCancel, pct(nCancel), (unsigned long long)noopCancel);
+    std::printf("  Cancel:  %8llu (%.1f%%)   [skipped at depth floor %zu: %llu]\n",
+                (unsigned long long)nCancel, pct(nCancel), depthFloor, (unsigned long long)noopCancel);
     std::printf("  New:     %8llu (%.1f%%)\n", (unsigned long long)nNew, pct(nNew));
     std::printf("  IOC:     %8llu (%.1f%%)   [filled: %llu (%.1f%%)]\n",
                 (unsigned long long)nIoc, pct(nIoc), (unsigned long long)iocFilled,
                 nIoc ? 100.0 * (double)iocFilled / (double)nIoc : 0.0);
-    std::printf("  Modify:  %8llu (%.1f%%)   [no-op empty-book: %llu]\n",
+    std::printf("  Modify:  %8llu (%.1f%%)   [skipped at depth floor: %llu]\n",
                 (unsigned long long)nModify, pct(nModify), (unsigned long long)noopModify);
     const double meanLevels = depthSamples ? (double)levelSum / (double)depthSamples : 0.0;
     const double meanDepth  = depthSamples ? (double)depthSum  / (double)depthSamples : 0.0;
@@ -319,6 +386,24 @@ int main(int argc, char* argv[]) {
     std::printf("  Mean resting depth: %.1f orders (tracked-id pool: %.1f)\n",
                 depthSamples ? (double)depthSum / (double)depthSamples : 0.0,
                 depthSamples ? (double)poolSum  / (double)depthSamples : 0.0);
+
+    // The numbers below describe the mix only if every timed op did its job.
+    // A dead cancel times a hash miss, a rejected order times the reject path,
+    // and a halted book times neither matching nor resting.
+    std::printf("\n── Workload check ──\n");
+    std::printf("  dead cancels %llu, dead modifies %llu, rejected new %llu, "
+                "rejected IOC %llu, rejected modify %llu, final state %s\n",
+                (unsigned long long)deadCancel, (unsigned long long)deadModify,
+                (unsigned long long)rejectedNew, (unsigned long long)rejectedIoc,
+                (unsigned long long)rejectedModify,
+                book.getTradingState() == TradingState::Continuous ? "Continuous" : "NOT Continuous");
+    if (deadCancel || deadModify || rejectedNew || rejectedIoc || rejectedModify ||
+        book.getTradingState() != TradingState::Continuous) {
+        std::fprintf(stderr, "WORKLOAD CHECK FAILED: the latencies above are not the "
+                             "advertised mix\n");
+        return 1;
+    }
+    std::printf("  OK: every timed op hit a live order or was accepted\n");
 
     std::printf("\n── Latency: CANCEL ──\n");   recCancel.printTable("cancel");
     std::printf("\n── Latency: NEW ──\n");      recNew.printTable("new");

@@ -678,6 +678,14 @@ enable_assertions(JournalCommitDelayTest)
 add_test(NAME JournalCommitDelayTest COMMAND JournalCommitDelayTest)
 set_tests_properties(JournalCommitDelayTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# D1 (JRN-1): sequence ids and trade ids never repeat across a checkpoint and a
+# kill -9 — each engine life in its own process, since the allocator is global.
+add_executable(JournalIdCountersTest JournalIdCountersTest.cpp)
+target_link_libraries(JournalIdCountersTest PRIVATE OrderMatcher)
+enable_assertions(JournalIdCountersTest)
+add_test(NAME JournalIdCountersTest COMMAND JournalIdCountersTest)
+set_tests_properties(JournalIdCountersTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # The order-entry port must journal what it acknowledges: GatewayServer had no
 # journal at all, so a restart lost every order it had accepted. Driven against
 # the real binary through the order port — acknowledge, restart, then cancel the

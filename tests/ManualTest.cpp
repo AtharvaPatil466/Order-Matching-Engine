@@ -1058,6 +1058,8 @@ void testJournalReplay() {
                 case JournalEntry::Type::Uncross:
                     applySessionRecord(book, e);
                     break;
+                case JournalEntry::Type::Counters:
+                    break;
             }
         }
 

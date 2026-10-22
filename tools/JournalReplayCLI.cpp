@@ -78,6 +78,7 @@ void printTail(const std::string& journalPath, size_t count) {
         case JournalEntry::Type::Snapshot:       typeName = "Snapshot"; break;
         case JournalEntry::Type::TradingStateChange: typeName = "TradingState"; break;
         case JournalEntry::Type::Uncross:        typeName = "Uncross"; break;
+        case JournalEntry::Type::Counters:       typeName = "Counters"; break;
         default: break;
         }
 

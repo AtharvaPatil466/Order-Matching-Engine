@@ -453,6 +453,8 @@ private:
         case JournalEntry::Type::Uncross:
             applySessionRecord(*book, e);
             break;
+        case JournalEntry::Type::Counters:
+            break;   // ids: a follower issues none
         case JournalEntry::Type::Snapshot:
             // Same shape as MatchingEngine::replayJournal and
             // applyReplicatedEntry, which apply this record type from disk and

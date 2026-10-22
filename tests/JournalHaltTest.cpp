@@ -84,9 +84,12 @@ bool limitFileSize(rlim_t bytes) {
     return setrlimit(RLIMIT_FSIZE, &rl) == 0;
 }
 
-// The limit lands halfway through record kWholeBeforeLimit+1.
+// The limit lands halfway through the fourth order's record, behind the
+// sequence-id lease the engine journals before its first id (D1).
 rlim_t midFourthRecord() {
-    return sizeof(JournalFileHeader) + kWholeBeforeLimit * sizeof(JournalEntry) +
+    constexpr int kLeaseRecords = 1;
+    return sizeof(JournalFileHeader) +
+           (kLeaseRecords + kWholeBeforeLimit) * sizeof(JournalEntry) +
            sizeof(JournalEntry) / 2;
 }
 

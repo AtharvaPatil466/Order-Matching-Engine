@@ -88,7 +88,7 @@ inline uint32_t computeCRC32(const void* data, size_t length) {
 // ever written here".
 //
 // LEGACY DISCRIMINATION. A pre-header file begins with a JournalEntry, whose
-// first byte is entryType — always 1..7. `magic` begins with 'O' (0x4F), which
+// first byte is entryType — always 1..8. `magic` begins with 'O' (0x4F), which
 // no entryType can be, so "starts with the magic" separates a headered file
 // from a pre-header one with certainty rather than by probability. Files
 // written before this header are still read, as bare records.
@@ -163,7 +163,13 @@ struct JournalEntry {
         // including the uncross that leaving an auction state runs.
         TradingStateChange = 6,
         // An explicit uncross that does not change the state.
-        Uncross = 7
+        Uncross = 7,
+        // Id counters (roadmap 1.4-D1): orderId = symbolId's next trade id (0:
+        // none), quantity = the engine sequence-id lease (0: none). Written by
+        // a checkpoint for every book and whenever the lease is extended.
+        // Safe to skip — an older reader restarts the counters, as it always
+        // did — so it needs no format bump.
+        Counters = 8
     };
 
     Type entryType;
@@ -423,6 +429,16 @@ public:
         entry.entryType = JournalEntry::Type::Uncross;
         entry.timestamp = now();
         entry.symbolId = symbolId;
+        appendEntry(entry);
+    }
+
+    void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Counters;
+        entry.timestamp = now();
+        entry.symbolId = symbolId;
+        entry.orderId = nextTradeId;
+        entry.quantity = sequenceLease;
         appendEntry(entry);
     }
 
@@ -1828,7 +1844,7 @@ private:
         const bool got = std::fread(&h, sizeof(h), 1, file_) == 1;
         if (!got || std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) != 0) {
             // Pre-header file: a bare array of records, still readable. Its
-            // first byte is an entryType (1..7) and the magic starts with 'O',
+            // first byte is an entryType (1..8) and the magic starts with 'O',
             // so this is a definite answer, not a guess.
             dataOffset_ = 0;
             // Older than the header itself, so certainly older than the build

@@ -233,6 +233,8 @@ private:
             case JournalEntry::Type::Uncross:
                 engine_.uncrossBatch({e.symbolId});
                 break;
+            case JournalEntry::Type::Counters:
+                break;   // ids: the harness's engine issues its own
         }
     }
 

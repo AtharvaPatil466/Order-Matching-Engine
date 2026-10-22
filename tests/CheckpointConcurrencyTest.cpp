@@ -174,7 +174,8 @@ void testOneCheckpointAtATimeAndShutdownWaits() {
 //
 // Async with one worker, as OrderEngine runs. Immediate, so each record is on
 // disk before the trigger looks at the size and the threshold is crossed by
-// exactly the last of kPlaced adds and their cancels. The sink parks that
+// exactly the last of kPlaced adds and their cancels (behind the sequence-id
+// lease record, D1). The sink parks that
 // checkpoint between building its replacement and swapping it in, and while it
 // is parked the worker must still match a new order. Worker 0 used to run the
 // checkpoint itself, so its symbols stopped for as long as the snapshot took to
@@ -187,7 +188,7 @@ void testOneCheckpointAtATimeAndShutdownWaits() {
 void testSizeCheckpointRunsOffTheMatchingThread() {
     std::cout << "Running testSizeCheckpointRunsOffTheMatchingThread..." << std::endl;
     constexpr OrderId kPlaced = 40, kKept = 4, kLate = kPlaced + 1;   // one tick below the rest
-    constexpr size_t kRecords = kPlaced + (kPlaced - kKept);
+    constexpr size_t kRecords = 1 + kPlaced + (kPlaced - kKept);   // lease + adds + cancels
     constexpr size_t kThreshold = sizeof(JournalFileHeader) + kRecords * sizeof(JournalEntry);
     const std::string path = uniqueTempPath("checkpoint_off_worker.journal");
     std::remove(path.c_str());

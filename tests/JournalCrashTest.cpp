@@ -17,6 +17,9 @@ using namespace OrderMatcher;
 
 static const std::string kJournalPath = uniqueTempPath("test_journal_crash.bin");
 static const char* JOURNAL_PATH = kJournalPath.c_str();
+// An engine journals a sequence-id lease before it hands out its first id, and
+// a checkpoint carries it (roadmap 1.4-D1).
+static constexpr size_t kLeaseRecords = 1;
 
 void cleanup() {
     std::remove(JOURNAL_PATH);
@@ -112,7 +115,7 @@ void testNormalReplay() {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        assert(replayed == 4); // 4 add orders
+        assert(replayed == 4 + kLeaseRecords); // 4 add orders
 
         auto* book = engine.getOrderBook(0);
         assert(book != nullptr);
@@ -302,7 +305,7 @@ void testCheckpointWithUnwritableTempKeepsTheJournal() {
     restarted.enableJournal(path);
     restarted.start();
     const size_t replayed = restarted.replayJournal();
-    assert(replayed == 3 &&
+    assert(replayed == 3 + kLeaseRecords &&
            "a checkpoint whose temp file wrote nothing replaced the journal (JRN-4)");
     assert(restarted.getOrderBook(0)->getBidLevelsCount() == 2);
     assert(restarted.getOrderBook(0)->getAskLevelsCount() == 1);
@@ -348,8 +351,8 @@ void testCheckpointReplay() {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        // Should have 3 snapshot entries (from checkpoint) + 2 new orders = 5
-        assert(replayed == 5);
+        // 3 snapshot entries and the lease (from checkpoint) + 2 new orders
+        assert(replayed == 5 + kLeaseRecords);
 
         auto* book = engine.getOrderBook(0);
         assert(book != nullptr);
@@ -428,7 +431,7 @@ void testJournalWithTrades() {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        assert(replayed == 2);
+        assert(replayed == 2 + kLeaseRecords);
 
         auto* book = engine.getOrderBook(0);
         const Order* o1 = book->getOrder(1);
@@ -920,7 +923,7 @@ void testEngineAppendsAfterTornTail() {
         if (!r.isAccepted())
             std::cout << "  rejected: " << static_cast<int>(r.rejectReason) << std::endl;
         assert(r.isAccepted());
-        assert(journalFileSize() == validEnd + sizeof(JournalEntry) &&
+        assert(journalFileSize() == validEnd + (1 + kLeaseRecords) * sizeof(JournalEntry) &&
                "the first append cuts the torn tail");
         engine.stop();
     }
@@ -928,7 +931,8 @@ void testEngineAppendsAfterTornTail() {
     restarted.addSymbol(0);
     assert(restarted.enableJournal(JOURNAL_PATH));
     restarted.start();
-    assert(restarted.replayJournal() == 4 && "the order accepted after the cut must replay");
+    assert(restarted.replayJournal() == 4 + kLeaseRecords &&
+           "the order accepted after the cut must replay");
     assert(restarted.getOrderBook(0)->getOrder(50) != nullptr);
     restarted.stop();
     cleanup();

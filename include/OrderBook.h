@@ -686,6 +686,18 @@ public:
         notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, reason);
     }
 
+    // Trade ids continue across a restart (roadmap 1.4-D1). A checkpoint keeps
+    // only resting orders, so it records the next id; replay restores it and
+    // never lowers it.
+    uint64_t nextTradeIdLocked() const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        return nextTradeId_;
+    }
+    void restoreNextTradeId(uint64_t next) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (next > nextTradeId_) nextTradeId_ = next;
+    }
+
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }
     bool isReplayMode() const { return replayMode_; }

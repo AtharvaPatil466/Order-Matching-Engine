@@ -53,13 +53,19 @@ std::atomic<uint64_t> g_seqBlockBase{0};
 thread_local uint64_t t_seqNext = 0;
 thread_local uint64_t t_seqEnd  = 0;
 
-inline uint64_t nextSequenceId() {
-    if (t_seqNext == t_seqEnd) [[unlikely]] {
-        const uint64_t base = g_seqBlockBase.fetch_add(kSeqBlock, std::memory_order_relaxed);
-        t_seqNext = base + 1;
-        t_seqEnd  = base + kSeqBlock + 1;
-    }
-    return t_seqNext++;
+// D1: ids restarted at 1 in every process, so a restarted engine handed its
+// clients ids it had already given them. They are leased from the journal now,
+// kSeqLease at a time (one record and one flush per lease), and replay resumes
+// the allocator above the last lease.
+// ponytail: one engine per process. A thread's block outlives the engine that
+// leased it, so a second engine in the same process may hand out ids its own
+// lease does not cover; per-engine blocks if that ever matters.
+constexpr uint64_t kSeqLease = uint64_t{1} << 20;
+
+void raiseSequenceBase(uint64_t floor) {
+    uint64_t cur = g_seqBlockBase.load(std::memory_order_relaxed);
+    while (cur < floor &&
+           !g_seqBlockBase.compare_exchange_weak(cur, floor, std::memory_order_relaxed)) {}
 }
 
 // waitForDrain's escalation ladder: spin, then yield, then sleep. See
@@ -845,6 +851,37 @@ void MatchingEngine::maybeTriggerAutoCheckpoint() {
     } else {
         checkpointInternal(true);
     }
+}
+
+uint64_t MatchingEngine::nextSequenceId() {
+    if (t_seqNext == t_seqEnd) [[unlikely]] {
+        const uint64_t base = g_seqBlockBase.fetch_add(kSeqBlock, std::memory_order_relaxed);
+        t_seqNext = base + 1;
+        t_seqEnd  = base + kSeqBlock + 1;
+        if (base + kSeqBlock > sequenceLease_.load(std::memory_order_acquire))
+            leaseSequenceIds(base + kSeqBlock);
+    }
+    return t_seqNext++;
+}
+
+void MatchingEngine::leaseSequenceIds(uint64_t through) {
+    if (!journal_) return;   // nothing durable to promise
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (through <= sequenceLease_.load(std::memory_order_relaxed)) return;
+    const uint64_t lease = through + kSeqLease;
+    journal_->logCounters(0, 0, lease);
+    journal_->flush();   // durable before any id it covers reaches a client
+    sequenceLease_.store(lease, std::memory_order_release);
+}
+
+void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
+    if (book && e.orderId != 0) book->restoreNextTradeId(e.orderId);
+    if (e.quantity == 0) return;
+    uint64_t cur = sequenceLease_.load(std::memory_order_relaxed);
+    while (cur < e.quantity &&
+           !sequenceLease_.compare_exchange_weak(cur, e.quantity, std::memory_order_acq_rel)) {}
+    raiseSequenceBase(e.quantity);   // every id from here on is above the lease
+    t_seqNext = t_seqEnd = 0;        // and this thread's block is not
 }
 
 void MatchingEngine::checkpointLoop() {
@@ -2473,6 +2510,18 @@ size_t MatchingEngine::replayJournal() {
             if (book) applySessionRecord(*book, entry);
             break;
         }
+        case JournalEntry::Type::Counters: {
+            auto* book = entry.orderId != 0 ? getOrderBook(entry.symbolId) : nullptr;
+            if (!book && entry.orderId != 0) {
+                addSymbol(entry.symbolId);
+                book = getOrderBook(entry.symbolId);
+                if (book) {
+                    book->setReplayMode(true);
+                }
+            }
+            restoreCounters(book, entry);
+            break;
+        }
         case JournalEntry::Type::Snapshot: {
             auto* book = getOrderBook(entry.symbolId);
             if (!book) {
@@ -2647,6 +2696,10 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
         applied = true;
         break;
     }
+    case JournalEntry::Type::Counters:
+        restoreCounters(entry.orderId != 0 ? ensureBook(entry.symbolId) : nullptr, entry);
+        applied = true;
+        break;
     case JournalEntry::Type::Snapshot: {
         auto* book = ensureBook(entry.symbolId);
         if (!book) return false;
@@ -2699,6 +2752,9 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
             break;
         case JournalEntry::Type::Uncross:
             journal_->logUncross(entry.symbolId);
+            break;
+        case JournalEntry::Type::Counters:
+            journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity);
             break;
         case JournalEntry::Type::Snapshot:
             journal_->logSnapshot(entry.orderId, entry.participantId,
@@ -2821,6 +2877,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // session that date (decision 7).
         struct SessionState { SymbolId symbolId; TradingState state; uint32_t date; };
         std::vector<SessionState> states;
+        // D1: the snapshot drops the trades and the lease records, so it
+        // carries the counters they would have restored.
+        std::vector<std::pair<SymbolId, uint64_t>> tradeIds;
+        uint64_t lease = 0;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
             if (cut) pauseWorkersForCut();
@@ -2831,12 +2891,15 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                     return;
                 }
                 appendsBefore = journal_->entriesAppended();
+                lease = sequenceLease_.load(std::memory_order_acquire);
             }
             for (SymbolId symbolId : symbolIds_) {
                 const OrderBook* book = getOrderBook(symbolId);
                 if (!book) {
                     continue;
                 }
+                if (const uint64_t next = book->nextTradeIdLocked(); next > 1)
+                    tradeIds.emplace_back(symbolId, next);   // D1: books that traded
                 if (book->getTradingState() != TradingState::Continuous || book->sessionDate() != 0)
                     states.push_back({symbolId, book->getTradingState(), book->sessionDate()});
                 book->forEachOrderLocked([&](const Order& order) {
@@ -2851,6 +2914,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 const TradingState replayed = date != 0 ? TradingState::PreOpen : TradingState::Continuous;
                 if (state != replayed) snapshotJournal.logTradingState(symbolId, state);
             }
+            if (lease != 0) snapshotJournal.logCounters(0, 0, lease);
+            for (const auto& [symbolId, nextTradeId] : tradeIds)
+                snapshotJournal.logCounters(symbolId, nextTradeId, 0);
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,

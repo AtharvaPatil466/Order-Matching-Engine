@@ -612,6 +612,14 @@ private:
     size_t transitionBatch(const std::vector<SymbolId>& symbols, TradingState state,
                            uint32_t tradingDate);
     void maybeTriggerAutoCheckpoint();
+    // D1: sequence ids come from a thread-local block allocator in the .cpp;
+    // no id is handed out before a durable Counters record covers it.
+    uint64_t nextSequenceId();
+    void leaseSequenceIds(uint64_t through);
+    std::atomic<uint64_t> sequenceLease_{0};   // highest id a record covers
+    // Apply a Counters record (replay, replication): `book` is its symbol's
+    // book, or null when the record names none.
+    void restoreCounters(OrderBook* book, const JournalEntry& e);
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);
     // waitIfBusy: false skips when another checkpoint is in flight (it is

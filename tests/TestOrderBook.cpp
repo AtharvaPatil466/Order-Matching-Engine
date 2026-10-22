@@ -2229,7 +2229,7 @@ TEST(JournalTest, ReplayRecovery) {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        EXPECT_EQ(replayed, 2);
+        EXPECT_EQ(replayed, 2 + 1);   // + the sequence-id lease before the first id (D1)
 
         auto* book = engine.getOrderBook(1);
         ASSERT_NE(book, nullptr);

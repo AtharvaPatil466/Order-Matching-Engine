@@ -941,7 +941,7 @@ requested state.
 | `Continuous` | `AuctionOpen` (intraday call auction), `AuctionClose`, `VolatilityAuction`, `PostClose` (no closing auction), `PreOpen` only before the book's first session |
 | `AuctionClose` | `PostClose` (closing cross) |
 | `VolatilityAuction` | `Continuous` (reopening cross), `AuctionClose`, `PostClose` |
-| `Halted` | `Continuous`, `PostClose` |
+| `Halted` | the state it was halted from (resume), `PostClose` (the session ends while halted) |
 | `PostClose` | `PreOpen` only for a later trading date |
 
 `PreOpen` begins a session. Books boot in `Continuous`, so the first `PreOpen` may come from
@@ -954,11 +954,22 @@ journaled with the `PreOpen` record and kept by a checkpoint, so a restarted eng
 refuses a second session on that date. Replay applies the journal without checking the table,
 because only applied transitions are journaled.
 
+A halt is a pause, not a route. `Halted` resumes only to the state the book was halted from,
+so a halted `AuctionClose` resumes as `AuctionClose`, a halted `PostClose` stays closed, and a
+halted opening or volatility auction resumes that auction and still ends in its uncross.
+`Halted -> Continuous` is legal only for a book halted from `Continuous`. The session may also
+end while halted (`Halted -> PostClose`, with no closing cross). Without this rule a halt was a
+detour around the table: `Continuous -> AuctionClose -> Halted -> Continuous` abandoned the
+closing auction and `PostClose -> Halted -> Continuous` reopened a closed market. The pre-halt
+state is rebuilt by journal replay, and a checkpoint writes it just before the `Halted` record.
+
 Off the table: `PostClose -> Continuous` reopened a closed market, `AuctionClose -> Continuous`
 abandoned a closing auction, and `PreOpen` / `AuctionOpen -> PostClose` would print a cross at
-the close of a session that never opened. `spec/Auction.tla`'s `LegalEdges` is a subset of
-this table; the `AuctionOpen` edges, the closes from `Continuous`, `Halted` and
-`VolatilityAuction`, and the next day's `PreOpen` are not modelled yet.
+the close of a session that never opened. `spec/Auction.tla`'s `LegalEdges` is this table,
+edge for edge, with its side conditions, and `NoReopenAfterClose` (in `Auction.cfg`) checks that
+once a session reaches its closing auction or close nothing trades or auctions until the next
+`PreOpen`; `AuctionBrokenHalt.cfg`, which lets a halt resume to `Continuous` from anywhere, must
+fail it.
 
 > `OrderBook::transitionAllowed` in `src/OrderBook.cpp`
 

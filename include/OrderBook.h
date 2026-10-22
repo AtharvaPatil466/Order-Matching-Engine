@@ -459,6 +459,7 @@ public:
         priceUpdates_ = 0;
         sessionBegun_ = false;
         sessionDate_ = 0;
+        preHaltState_ = TradingState::Continuous;
     }
 
     // Trading state machine (regulator/engine controls; participants observe).
@@ -474,7 +475,9 @@ public:
     // was, logs `trading_state_refused`, and the caller sees it in
     // getTradingState(). PreOpen begins a session: from Continuous only
     // before the book's first session (books boot Continuous), and from
-    // PostClose only through beginSession() with a later trading date.
+    // PostClose only through beginSession() with a later trading date. A
+    // halt is a pause: Halted resumes only to the state it was entered from,
+    // or ends the session (PostClose).
     // Replay applies what the journal holds without judging it: the engine
     // journals only transitions that were applied.
     void setTradingState(TradingState s);
@@ -487,6 +490,8 @@ public:
     // replication snapshot call it off the worker; tradingState_ itself is
     // the worker's plain copy for the hot path.
     TradingState getTradingState() const { return publishedState_.load(std::memory_order_acquire); }
+    // The state a halt resumes to (meaningful while Halted).
+    TradingState preHaltState() const { return preHaltState_; }
     // Convenience: legacy callers checking the binary halt flag still work.
     // True iff the book is currently in TradingState::Halted.
 
@@ -1140,6 +1145,7 @@ private:
     bool     sessionBegun_{false};  // decision 7: a PreOpen has happened
     uint32_t sessionDate_{0};       // its trading date; 0 = undated
     std::atomic<TradingState> publishedState_{TradingState::Continuous};  // see getTradingState
+    TradingState preHaltState_{TradingState::Continuous};  // what Halted resumes to
     size_t maxDepthPerSide_{0};  // 0 = unlimited
     double cbThreshold_{0.05};   // Circuit breaker threshold (default 5%)
     uint64_t volatilityDwellNs_;          // set in the ctor (config or 5 min)

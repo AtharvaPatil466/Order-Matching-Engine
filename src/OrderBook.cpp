@@ -1960,7 +1960,10 @@ void OrderBook::beginSession(uint32_t tradingDate) {
 // opening auction (PreOpen -> AuctionOpen -> Continuous), an intraday call
 // auction (Continuous <-> AuctionOpen, the BCS batch arm), a close with no
 // closing auction (Continuous -> PostClose), an auction or a halt running
-// into the close, and the next day's PreOpen. Precondition: bookLock_ held.
+// into the close, and the next day's PreOpen. A halt is a pause, not a
+// route: it resumes only to the state it was entered from, so it cannot
+// carry a closed or auctioning book into Continuous around the table
+// (Auction.tla NoReopenAfterClose). Precondition: bookLock_ held.
 bool OrderBook::transitionAllowed(TradingState to, uint32_t tradingDate) const {
     using T = TradingState;
     if (to == T::Halted) return true;  // any state may halt
@@ -1973,7 +1976,7 @@ bool OrderBook::transitionAllowed(TradingState to, uint32_t tradingDate) const {
     case T::AuctionClose: return to == T::PostClose;
     case T::VolatilityAuction:
         return to == T::Continuous || to == T::AuctionClose || to == T::PostClose;
-    case T::Halted:       return to == T::Continuous || to == T::PostClose;
+    case T::Halted:       return to == preHaltState_ || to == T::PostClose;
     case T::PostClose:  // the next session, on a later date
         return to == T::PreOpen && tradingDate != 0 &&
                (sessionDate_ == 0 || tradingDate > sessionDate_);
@@ -1996,6 +1999,7 @@ void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
         sessionBegun_ = true;
         if (tradingDate != 0) sessionDate_ = tradingDate;
     }
+    if (s == TradingState::Halted) preHaltState_ = tradingState_;  // replay too
     // H4 (AUCT-4, MATCH-12, TLA-3): leaving an accumulation state for one that
     // trades or closes IS the cross. The open used to be two calls — uncross,
     // then this, which only assigned the field — so an order that arrived in

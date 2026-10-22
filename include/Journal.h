@@ -508,6 +508,7 @@ public:
         // every read-only consumer destructive.
         std::remove(tmpPath.c_str());
         bool snapshotComplete = false;
+        uint64_t n = 0;
         {
             // GroupCommit, NOT Immediate-with-batch-1.
             //
@@ -564,7 +565,7 @@ public:
             // journal that was accepting them, whose writes and fsync all
             // succeeded — a real write error halts the temp journal (D4) and
             // its unsynced bytes must never be renamed over the live file.
-            const uint64_t n = temp.entriesAppended_;
+            n = temp.entriesAppended_;
             const uint64_t expectedBytes =
                 n == 0 ? 0 : sizeof(JournalFileHeader) + n * sizeof(JournalEntry);
             struct stat st{};
@@ -577,12 +578,21 @@ public:
             std::remove(tmpPath.c_str());
             return false;
         }
+        preparedRecords_ = n;
         return true;
     }
 
     // Swap a prepared <path>.tmp over the live journal. MUST be called with the
     // caller's append lock held: it closes and reopens the file handle.
-    bool commitRewrite() {
+    //
+    // `tail`: how many of the latest entries came AFTER the state the snapshot
+    // was taken from. They are copied onto the end of the replacement before
+    // the swap, so the caller can let appends run while the snapshot is built
+    // (THR-13) — provided the snapshot is exactly the journal minus those
+    // entries, which is the caller's to guarantee (MatchingEngine's cut). With
+    // the default 0, anything appended since prepareRewrite() is discarded by
+    // the rename.
+    bool commitRewrite(uint64_t tail = 0) {
         const std::string tmpPath = filePath_ + ".tmp";
         if (halted()) {
             std::remove(tmpPath.c_str());
@@ -592,10 +602,12 @@ public:
         // The rename discards the old file, torn tail and all; keep those bytes.
         cutTornTail();
 
-        // Commit whatever is still batched before the handle closes. Anything
-        // appended since prepareRewrite() is about to be discarded by the
-        // rename — that is the caller's invariant to enforce, not this one's.
+        // Commit whatever is still batched before the handle closes.
         flush();
+        if (tail > 0 && !appendTailTo(tmpPath, tail)) {
+            std::remove(tmpPath.c_str());
+            return false;   // the live journal is untouched and still open
+        }
         close();
 
         // Fault injection: simulate rename(2) failure (e.g., target on a
@@ -1528,6 +1540,42 @@ private:
         }
     }
 
+    JournalFileHeader makeHeader() const {
+        JournalFileHeader h{};
+        std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
+        h.formatVersion = JOURNAL_FORMAT_CURRENT;
+        h.recordSize    = static_cast<uint32_t>(sizeof(JournalEntry));
+        h.contentEpoch  = contentEpoch_;
+        return h;
+    }
+
+    // Copy this journal's last `k` records onto the end of the prepared
+    // replacement at `tmpPath`, renumbered after its preparedRecords_ and
+    // synced. Every entry must be on disk already (commitRewrite flushes
+    // first): appends commit strictly in order, so the last k appended are the
+    // last k records. False, touching nothing here, when they are not.
+    bool appendTailTo(const std::string& tmpPath, uint64_t k) {
+        if (!file_ || halted() || !batch_.empty() || k > sequence_) return false;
+        std::vector<JournalEntry> tail(static_cast<size_t>(k));
+        const size_t bytes = tail.size() * sizeof(JournalEntry);
+        const off_t from = static_cast<off_t>(dataOffset_ + (sequence_ - k) * sizeof(JournalEntry));
+        if (::pread(fileno(file_), tail.data(), bytes, from) != static_cast<ssize_t>(bytes))
+            return false;
+        for (size_t i = 0; i < tail.size(); ++i) {
+            tail[i].sequenceNumber = preparedRecords_ + i + 1;
+            tail[i].checksum = computeCRC32(&tail[i], offsetof(JournalEntry, checksum));
+        }
+        const int fd = ::open(tmpPath.c_str(), O_WRONLY | O_APPEND);
+        if (fd < 0) return false;
+        // An empty snapshot never wrote its header (it is deferred to the
+        // first record); the tail is that first record.
+        const JournalFileHeader h = makeHeader();
+        const bool ok = (preparedRecords_ > 0 || writeAll(fd, &h, sizeof(h))) &&
+                        writeAll(fd, tail.data(), bytes) && syncFd(fd);
+        ::close(fd);
+        return ok;
+    }
+
     // Put the header down before the first record. Called from both write
     // paths; a no-op after the first time, on pre-header files, and once halted.
     void writePendingHeader() {
@@ -1535,19 +1583,16 @@ private:
         cutTornTail();   // never write behind a torn record
         upgradeOldHeader();
         if (halted() || !pendingHeader_ || !file_) return;
-        JournalFileHeader h{};
-        std::memcpy(h.magic, JOURNAL_MAGIC, sizeof(h.magic));
-        h.formatVersion = JOURNAL_FORMAT_CURRENT;
-        h.recordSize    = static_cast<uint32_t>(sizeof(JournalEntry));
-        // This journal's own epoch: NO_SEEDING for a file this build created,
-        // since it seeds no synthetic orders. A checkpoint rewrite comes through
+        // makeHeader() stamps this journal's own epoch: NO_SEEDING for a file
+        // this build created, since it seeds no synthetic orders. A checkpoint
+        // rewrite comes through
         // here too — prepareRewrite builds a fresh Journal over the temp file —
         // and copies the SOURCE's epoch in first, so a clean lineage stays
         // clean and a legacy one stays legacy. An earlier version stamped the
         // constant here and justified it as "a checkpoint of a clean journal is
         // stamped clean"; it also stamped a checkpoint of a legacy journal
         // clean, which laundered it on the next restart.
-        h.contentEpoch  = contentEpoch_;
+        const JournalFileHeader h = makeHeader();
         // Straight to the descriptor, like the records (see writeBatch), and
         // so before io_uring may touch the same fd. A header that did not land
         // halts the journal as a record would: everything written after it
@@ -2063,6 +2108,8 @@ private:
     OnCommitFn onCommit_;
     std::function<void(size_t)> onDurable_;
     size_t maxSizeMb_{0};
+    // Records in the replacement the last prepareRewrite() built.
+    uint64_t preparedRecords_{0};
     // In steady_clock ticks, the unit of JournalEntry::timestamp. See
     // setMaxCommitDelay().
     uint64_t maxCommitDelay_{static_cast<uint64_t>(

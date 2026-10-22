@@ -15,9 +15,12 @@
 
 #if defined(__linux__)
 #include <pthread.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/thread_policy.h>
+#include <pthread/qos.h>
 #endif
 
 namespace OrderMatcher {
@@ -79,6 +82,18 @@ void pinCurrentThreadToCore(size_t threadIndex) {
                             reinterpret_cast<thread_policy_t>(&policy), 1);
 #else
     (void)threadIndex;
+#endif
+}
+
+// Best effort: the checkpoint thread yields the CPU to the workers. Per-thread
+// nice on Linux (nice is per task there); utility QoS on macOS.
+void lowerCurrentThreadPriority() {
+#if defined(__linux__)
+    const int rc = setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 10);
+    (void)rc;
+#elif defined(__APPLE__)
+    const int rc = pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    (void)rc;
 #endif
 }
 
@@ -398,6 +413,8 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
         requestQueues_.push_back(std::make_unique<MpscQueue<OrderRequest>>(queueSize));
         workerThreads_.emplace_back(&MatchingEngine::workerLoop, this, i);
     }
+    checkpointThreadStop_.store(false, std::memory_order_release);
+    checkpointThread_ = std::thread(&MatchingEngine::checkpointLoop, this);
 
     // Sync start() has always logged engine_start; the async path — the one
     // production actually runs — logged nothing at all, so an operator who
@@ -571,6 +588,15 @@ void MatchingEngine::stopAsync() {
 
     stopExpiryTimer();
 
+    // Before the workers: a checkpoint in progress takes its cut from them.
+    // One that is running finishes; a pending one is dropped (gracefulShutdown
+    // runs its own).
+    checkpointThreadStop_.store(true, std::memory_order_release);
+    checkpointPending_.store(true, std::memory_order_release);
+    checkpointPending_.notify_one();
+    if (checkpointThread_.joinable()) checkpointThread_.join();
+    checkpointPending_.store(false, std::memory_order_release);
+
     // LF-5: no producer may be inside a push when the queues are destroyed
     // below, and none may land an order behind the Shutdown message, where it
     // is acked and never applied. Turn new submissions away, close every
@@ -668,10 +694,6 @@ void MatchingEngine::waitForDrain() {
             ++spins;
         }
     }
-
-    if (checkpointPending_.exchange(false, std::memory_order_acq_rel)) {
-        checkpointInternal(true);
-    }
 }
 
 void MatchingEngine::workerLoop(size_t threadIndex) {
@@ -682,6 +704,9 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
     uint64_t observedWake = queueWakeups_[threadIndex].load(std::memory_order_relaxed);
 
     while (true) {
+        if (cutRequested_.load(std::memory_order_acquire)) [[unlikely]] {
+            holdForCut();   // a checkpoint is copying the books
+        }
         if (requestQueues_[threadIndex]->pop(req)) {
             idleSpins = 0;
             observedWake = queueWakeups_[threadIndex].load(std::memory_order_relaxed);
@@ -703,16 +728,6 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             }
 
             threadStats_[threadIndex].processed.fetch_add(1, std::memory_order_release);
-
-            // The two sums walk every thread's stats, so the pending flag is
-            // tested FIRST and short-circuits them away on every ordinary
-            // order. This is the only hot-path reader of the aggregates.
-            if (threadIndex == 0 &&
-                checkpointPending_.load(std::memory_order_acquire) &&
-                getProcessedCount() >= getSubmittedCount()) {
-                checkpointPending_.store(false, std::memory_order_release);
-                checkpointInternal(true);
-            }
             continue;
         }
 
@@ -822,10 +837,66 @@ void MatchingEngine::maybeTriggerAutoCheckpoint() {
     }
 
     if (async_) {
-        checkpointPending_.store(true, std::memory_order_release);
+        // THR-13: the checkpoint thread runs it. It used to be worker 0, at
+        // the next moment the engine was drained, and that worker's symbols
+        // stopped matching for as long as the snapshot took to write and sync.
+        if (!checkpointPending_.exchange(true, std::memory_order_acq_rel))
+            checkpointPending_.notify_one();
     } else {
         checkpointInternal(true);
     }
+}
+
+void MatchingEngine::checkpointLoop() {
+    lowerCurrentThreadPriority();
+    for (;;) {
+        checkpointPending_.wait(false, std::memory_order_acquire);
+        if (checkpointThreadStop_.load(std::memory_order_acquire)) return;
+        checkpointPending_.store(false, std::memory_order_release);
+        // Requests keep arriving while one runs; skip those it satisfied.
+        bool needed = false;
+        {
+            std::lock_guard<std::mutex> lock(journalMutex_);
+            needed = journal_ && journal_->needsCheckpoint(checkpointThresholdEntries_,
+                                                           checkpointThresholdBytes_);
+        }
+        if (needed) checkpointInternal(true);
+    }
+}
+
+// The cut. Workers never take bookMutex_, so a checkpoint holding it can wait
+// for them here; anything else holding bookMutex_ is waited out before this.
+void MatchingEngine::pauseWorkersForCut() {
+    std::unique_lock<std::mutex> lk(cutMutex_);
+    cutRequested_.store(true, std::memory_order_release);
+    for (size_t i = 0; i < numThreads_; ++i) {
+        queueWakeups_[i].fetch_add(1, std::memory_order_release);   // unpark idlers
+        queueWakeups_[i].notify_one();
+    }
+    // ponytail: polls so a worker that EXITED instead of arriving still counts.
+    const auto allHere = [this] {
+        size_t gone = 0;
+        for (size_t i = 0; i < numThreads_; ++i)
+            if (threadStats_[i].exited.load(std::memory_order_acquire)) ++gone;
+        return workersAtCut_ + gone >= numThreads_;
+    };
+    while (!cutCv_.wait_for(lk, std::chrono::milliseconds(1), allHere)) {}
+}
+
+void MatchingEngine::resumeWorkersAfterCut() {
+    {
+        std::lock_guard<std::mutex> lk(cutMutex_);
+        cutRequested_.store(false, std::memory_order_release);
+    }
+    cutCv_.notify_all();
+}
+
+void MatchingEngine::holdForCut() {
+    std::unique_lock<std::mutex> lk(cutMutex_);
+    ++workersAtCut_;
+    cutCv_.notify_all();
+    cutCv_.wait(lk, [this] { return !cutRequested_.load(std::memory_order_relaxed); });
+    --workersAtCut_;
 }
 
 void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req) {
@@ -1383,9 +1454,7 @@ MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown(bool cancelDayOr
     if (report.journalEnabled) {
         // Already drained (step 2) and cancelDayOrders() is synchronous, so no
         // fresh queue entries exist — snapshot the current state directly.
-        // Waits out a checkpoint worker 0 may still be running: waitForDrain()
-        // returns once it has bumped its processed count, which is before it
-        // starts one.
+        // Waits out a checkpoint the checkpoint thread may still be running.
         checkpointInternal(true, /*waitIfBusy=*/true);
     }
     report.ordersPersisted = report.gtdOrdersPersisted + report.otherOrdersPersisted;
@@ -2137,8 +2206,8 @@ void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
 // as a continuous one.
 //
 // In async mode the requests ride the workers' own queues and the caller
-// waits for the drain. bookMutex_ only covers the enqueue: waitForDrain() may
-// run a checkpoint, which takes it. A batch is therefore applied per book in
+// waits for the drain. bookMutex_ only covers the enqueue: a checkpoint takes
+// it and then waits for the workers (its cut). A batch is therefore applied per book in
 // that book's order flow, not as one instant across books.
 uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
     auto* book = getOrderBook(req.symbolId);
@@ -2667,15 +2736,12 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
     }
 
     // One checkpoint at a time (THR-6). The callers run on different threads —
-    // main's size-based rotation, worker 0 once checkpointPending_ is set,
-    // waitForDrain(), gracefulShutdown — and every one of them builds the same
+    // main's size-based rotation, the checkpoint thread, gracefulShutdown —
+    // and every one of them builds the same
     // <journal>.tmp outside journalMutex_. Overlapped, the second remove()d the
     // first's finished replacement and started its own, the first then renamed
     // the second's half-written file over the live journal, and the second kept
     // writing into it through a non-append handle.
-    //
-    // Taken AFTER the drain: waitForDrain() can run a pending checkpoint on this
-    // same thread, and try_lock on a mutex the thread already owns is undefined.
     //
     // Busy means another checkpoint is doing this job, so the periodic callers
     // skip. gracefulShutdown waits instead: its snapshot is the one taken after
@@ -2720,15 +2786,25 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
     // journal's size while a lost order is visible nowhere.
     constexpr int kMaxAttempts = 3;
 
+    // THR-13: on the async path the gather below is a CONSISTENT CUT. The
+    // workers stop between two requests (each journals what it changed before
+    // it returns), and bookMutex_ shuts out the off-worker sweeps, which hold
+    // it across their change and its record. So the copy is exactly the
+    // journal's first appendsBefore entries, and whatever is appended while
+    // the replacement is built is carried onto it (commitRewrite's tail)
+    // instead of forcing a retry. The workers wait only for the copy: the
+    // write and sync of the replacement happen after they resume. The sync
+    // path has no cut — a caller on another thread may have changed a book
+    // without having journaled it yet — so there an append still means retry.
+    const bool cut = async_;
+    struct CutGuard {
+        MatchingEngine& engine;
+        bool on;
+        ~CutGuard() { if (on) engine.resumeWorkersAfterCut(); }
+    };
+
     for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
         uint64_t appendsBefore = 0;
-        {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            if (!journal_) {
-                return;
-            }
-            appendsBefore = journal_->entriesAppended();
-        }
 
         // Phase 1: a point-in-time copy of every resting order, under each
         // book's own lock and never holding journalMutex_. The lock order is
@@ -2747,6 +2823,15 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         std::vector<SessionState> states;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
+            if (cut) pauseWorkersForCut();
+            const CutGuard resume{*this, cut};
+            {
+                std::lock_guard<std::mutex> lock(journalMutex_);
+                if (!journal_) {
+                    return;
+                }
+                appendsBefore = journal_->entriesAppended();
+            }
             for (SymbolId symbolId : symbolIds_) {
                 const OrderBook* book = getOrderBook(symbolId);
                 if (!book) {
@@ -2793,21 +2878,26 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                          .kv("attempt", (long long)attempt)
                          .kv("orders", (unsigned long long)resting.size()));
 
-        // Phase 3: swap, but only if nothing was appended since the counter
-        // read above.
+        // Phase 3: swap. With a cut, carry over what was appended since it;
+        // without one, only if nothing was.
         {
             std::lock_guard<std::mutex> lock(journalMutex_);
             if (!journal_) {
                 return;
             }
-            if (journal_->entriesAppended() == appendsBefore) {
-                if (!journal_->commitRewrite()) {
+            const uint64_t tail = journal_->entriesAppended() - appendsBefore;
+            if (cut || tail == 0) {
+                if (!journal_->commitRewrite(tail)) {
                     // Previously discarded. A failed rename leaves the old
                     // journal in place, which is safe — but it means the
                     // checkpoint silently did not happen, and the journal goes
                     // on growing with nobody aware of it.
                     obSink().log(obEvent("checkpoint_commit_failed", LogSeverity::Error)
                                      .kv("orders", (unsigned long long)resting.size()));
+                } else {
+                    obSink().log(obEvent("checkpoint_committed")
+                                     .kv("orders", (unsigned long long)resting.size())
+                                     .kv("tail", (unsigned long long)tail));
                 }
                 return;
             }

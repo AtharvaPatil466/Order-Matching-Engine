@@ -20,6 +20,7 @@
 #include "BatchRiskValidator.h"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -442,6 +443,14 @@ public:
     // Write full snapshot of all active orders to journal (checkpoint)
     void checkpoint();
 
+    // Auto-checkpoint thresholds: a checkpoint is requested once the journal
+    // holds this many committed entries, or this many bytes. Defaults 250,000
+    // and 64 MiB. Set before start()/startAsync(); workers read them unlocked.
+    void setCheckpointThresholds(size_t entries, size_t bytes) {
+        checkpointThresholdEntries_ = entries;
+        checkpointThresholdBytes_ = bytes;
+    }
+
     // Put what the journal has batched on disk now (roadmap 1.4-D3). The
     // thread that submits to a SYNC engine calls this before it idles, as
     // TcpGateway's event loop does: an append commits an aged batch, but only
@@ -608,6 +617,22 @@ private:
     // waitIfBusy: false skips when another checkpoint is in flight (it is
     // doing the same job); true waits for it and then runs. See the .cpp.
     void checkpointInternal(bool alreadyDrained, bool waitIfBusy = false);
+    // THR-13: async checkpoints run on this low-priority thread, not on a
+    // worker. Started by startAsync(), joined by stopAsync().
+    void checkpointLoop();
+    std::thread       checkpointThread_;
+    std::atomic<bool> checkpointThreadStop_{false};
+    // A checkpoint's consistent cut on the async path: every worker stopped
+    // between two requests while the books are copied, so the copy is exactly
+    // the journal's entries up to that moment. Workers test cutRequested_ once
+    // per loop and wait in holdForCut().
+    void pauseWorkersForCut();
+    void resumeWorkersAfterCut();
+    void holdForCut();
+    std::atomic<bool>       cutRequested_{false};
+    std::mutex              cutMutex_;
+    std::condition_variable cutCv_;
+    size_t                  workersAtCut_{0};   // guarded by cutMutex_
     void rebuildThreadSymbolIndex();
     // Point capacityMonitor_ at the engine's real resource counters. Called
     // from startAsync() once the queues exist and BEFORE the monitor thread

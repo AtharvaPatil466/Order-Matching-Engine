@@ -1060,7 +1060,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
 // The caller MUST have run finalizeIfStpCancelled() first: an order STP
 // stopped must report CancelledBySTP, not rest or report a fill.
 void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
-                                     OrderType type) {
+                                     OrderType type, Quantity cumBefore) {
     if (order->remainingQty > 0) [[likely]] {
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
             // Cancelled even after fills: the remainder is gone, so the status
@@ -1080,6 +1080,12 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             } else {
                 order->status = (order->cumQty > 0)
                                 ? OrderStatus::PartiallyFilled : OrderStatus::Accepted;
+                // It traded on the way in and rests: tell its owner, as a
+                // maker's fill would. Silent, an OCO leg that traded on a
+                // replace or a stop election never won its group (GTS-4).
+                if (order->cumQty > cumBefore)
+                    notifyOrderUpdate(orderId, OrderStatus::PartiallyFilled, order->cumQty,
+                                      order->remainingQty, lastTradePrice_);
                 if (!order->isHidden)
                     notifyMarketData(MarketDataUpdate::Action::Add, side, price);
             }
@@ -2386,6 +2392,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         order->price = newPrice;
         order->remainingQty = newLeaves;
         order->timestamp = nowNs();
+        const Quantity cumBefore = order->cumQty;
 
         // Check if new price crosses — if so, match first
         bool wouldCross = false;
@@ -2406,22 +2413,9 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         // A repriced order acts as an aggressor, so it can self-cross too.
         if (finalizeIfStpCancelled(order)) return true;
 
-        if (order->remainingQty > 0) {
-            // addToBook re-slices an iceberg against what the match left.
-            if (!addToBook(order)) {
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-            } else {
-                if (!order->isHidden)
-                    notifyMarketData(MarketDataUpdate::Action::Add, order->side, newPrice);
-            }
-        } else {
-            order->status = OrderStatus::Filled;
-            notifyOrderUpdate(orderId, OrderStatus::Filled, order->cumQty, 0, lastTradePrice_);
-            orderLookup_.erase(orderId);
-            orderPool_.deallocate(order);
-        }
+        // The same tail as addOrder; addToBook re-slices an iceberg against
+        // what the match left.
+        finalizeRemainingQty(order, orderId, order->side, newPrice, order->type, cumBefore);
     } else {
         // Same price
         const Quantity displayBefore = displayQuantity(*order);

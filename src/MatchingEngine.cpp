@@ -901,6 +901,12 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             }
             maybeTriggerAutoCheckpoint();
         }
+        // A repriced order matches as an aggressor: its OCO group and the
+        // trade-driven consumers see those fills like any other (GTS-4).
+        if (ocoActive_.load(std::memory_order_relaxed) ||
+            observersActive_.load(std::memory_order_relaxed)) {
+            driveOco(req.symbolId, book);
+        }
         break;
     }
     case OrderRequest::Type::KillSwitch: {

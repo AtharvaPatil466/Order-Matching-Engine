@@ -4,6 +4,7 @@
 // The rest-or-finish tail was hand-copied at each place an order leaves the
 // matcher, and the copies drifted. Each case below is one copy that broke.
 
+#include "MatchingEngine.h"
 #include "OrderBook.h"
 
 #include <cassert>
@@ -150,6 +151,46 @@ void cutShortOrdersEndTerminal() {
     std::puts("  IOC remainder / STP cut after fills: terminal status, fills reported");
 }
 
+// GTS-4: a replace that trades as an aggressor and rests the remainder sent
+// its owner no OrderUpdate for the execution, and the engine never ran its OCO
+// driver for a replace, so the sibling of a leg that traded stayed live.
+void replaceThatTradesReportsTheExecution() {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(1e9);
+    Capture cap;
+    book.setEventListener(&cap);
+    book.addOrder(1, 1, Side::Buy, PX, 5, OrderType::Limit);
+    book.addOrder(2, 2, Side::Sell, PX + 200, 10, OrderType::Limit);
+    cap.updates.clear();
+    assert(book.cancelReplace(2, PX, 10));   // trades 5 as aggressor, rests 5
+
+    const OrderUpdate* u = cap.lastFor(2);
+    if (!u) std::puts("  FAIL replace traded 5 and rested 5; its owner got no OrderUpdate");
+    assert(u && u->status == OrderStatus::PartiallyFilled && u->filledQty == 5 &&
+           u->remainingQty == 5 && "a replace that trades reports the execution");
+    std::puts("  replace that trades: PartiallyFilled update with fills and leaves");
+}
+
+void replaceThatTradesWinsItsOcoGroup() {
+    MatchingEngine engine;
+    engine.addSymbol(1);
+    engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
+    engine.startAsync(1, 1024);
+    engine.processOrder(1, 10, 1, Side::Sell, PX + 100, 10, OrderType::Limit);
+    engine.processOrder(1, 11, 1, Side::Sell, PX + 200, 10, OrderType::Limit);
+    engine.processOrder(1, 20, 2, Side::Buy, PX, 5, OrderType::Limit);
+    engine.waitForDrain();
+    engine.registerOco(1, 10, 11);
+
+    engine.cancelReplace(1, 11, PX, 10, 1);   // leg 11 trades 5
+    engine.waitForDrain();
+    const bool siblingLive = engine.getOrderBook(1)->getOrder(10) != nullptr;
+    engine.stopAsync();
+    if (siblingLive) std::puts("  FAIL OCO leg 11 traded on a replace; sibling 10 is still live");
+    assert(!siblingLive && "a leg that trades on a replace wins its OCO group");
+    std::puts("  replace that trades: OCO sibling cancelled");
+}
+
 }  // namespace
 
 int main() {
@@ -157,6 +198,8 @@ int main() {
     electedStopThatFillsIsReportedFilled();
     electedStopThatRestsIsPublished();
     cutShortOrdersEndTerminal();
+    replaceThatTradesReportsTheExecution();
+    replaceThatTradesWinsItsOcoGroup();
     std::puts("OrderLifecycleTest passed");
     return 0;
 }

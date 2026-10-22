@@ -897,8 +897,11 @@ private:
                                           Quantity qty, OrderType type);
     OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Side side, Price price,
                                         Quantity qty, OrderType type, Quantity minQty);
+    // Rest or finish an order after it matched. `cumBefore` is its cumQty
+    // before this match: an order that traded and rests is reported
+    // PartiallyFilled (GTS-4). New orders and elected stops pass 0.
     OB_ALWAYS_INLINE void finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
-                              OrderType type);
+                              OrderType type, Quantity cumBefore = 0);
     bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
 
     // C1: finalize an order that STP removed mid-match. True => deallocated,

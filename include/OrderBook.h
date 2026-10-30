@@ -612,6 +612,12 @@ public:
     // order that is not a parked stop.
     void restoreStopElection(OrderId orderId, Price stopPrice);
 
+    // Recovery only: put an un-elected trailing stop's trail back where the
+    // checkpoint found it (its trigger, and the extreme that trigger trails).
+    // Re-adding it re-derived both from the last trade, or from its own price.
+    // No-op for any other order.
+    void restoreTrailingStop(OrderId orderId, Price stopPrice);
+
     // Recovery only: give a snapshot-restored order back the quantity it had
     // executed. A snapshot re-adds the order at its leaves; without its fills
     // a later replace (newQty = new total) would be applied against zero.

@@ -3597,6 +3597,18 @@ void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
     o->stopPrice = stopPrice;
 }
 
+void OrderBook::restoreTrailingStop(OrderId orderId, Price stopPrice) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    Order** found = orderLookup_.find(orderId);
+    Order* o = found ? *found : nullptr;
+    if (!o || o->type != OrderType::TrailingStop || o->isStopTriggered) return;
+    o->stopPrice = stopPrice;
+    // The ratchet, inverted. A sell trigger floored at 0 says only that the
+    // high was at most the trail; taking the trail ratchets the same from here.
+    o->trailRefPrice = o->side == Side::Buy ? stopPrice - o->trailAmount
+                                            : stopPrice + o->trailAmount;
+}
+
 void OrderBook::restoreExecutedQty(OrderId orderId, Quantity cumQty) {
     std::unique_lock<std::mutex> lock(bookLock_);
     Order** found = orderLookup_.find(orderId);

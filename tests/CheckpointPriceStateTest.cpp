@@ -11,6 +11,11 @@
 // price (decision 6), cancelled them instead. A book that only quoted has a
 // reference too, and no trade id for the checkpoint to record it beside.
 //
+// A parked trailing stop's Snapshot record carries the trigger its trail had
+// ratcheted to, and re-adding the order threw it away: the trail restarted
+// from the order's own price, then ratcheted from the last trade, which is
+// below the high it had trailed.
+//
 // Each probe runs on the book as it is, on one restarted from the plain
 // journal, on one restarted from a checkpoint, and on a JournalFollower's
 // standby promoted over that checkpoint; all four must agree.
@@ -74,6 +79,22 @@ void quoted(MatchingEngine& e) {
     assert(!e.getOrderBook(kSym)->getOrder(1));
 }
 
+// A sell trailing 1.00 behind the trade at 100.00; a trade at 104.00 ratchets
+// its trigger to 103.00, and one at 103.50 leaves it there.
+constexpr Price kTrail = 100;
+void trade(MatchingEngine& e, OrderId id, Price px) {
+    assert(e.submitOrder(kSym, id, id, Side::Sell, px, 10, OrderType::Limit).isAccepted());
+    assert(e.submitOrder(kSym, id + 1, id + 1, Side::Buy, px, 10, OrderType::Limit).isAccepted());
+}
+void trailed(MatchingEngine& e) {
+    traded(e);
+    assert(e.submitOrder(kSym, 3, 3, Side::Sell, kPx, 10, OrderType::TrailingStop, 0, 0,
+                         TimeInForce::GTC, 0, 0, PegType::None, 0, kTrail).isAccepted());
+    trade(e, 10, kPx + 400);
+    trade(e, 12, kPx + 350);
+    assert(e.getOrderBook(kSym)->getOrder(3)->stopPrice == kPx + 300);
+}
+
 // `setup`, then `probe` on that book, or on one rebuilt from its journal (the
 // followed one after a checkpoint too).
 int after(Life life, const Setup& setup, const Probe& probe) {
@@ -124,6 +145,14 @@ int marketCrossProbe(OrderBook& b) {
     return trades.count;
 }
 
+// A print at 102.80 is under the ratcheted trigger, so the stop fires.
+int trailProbe(OrderBook& b) {
+    b.addOrder(20, 20, Side::Sell, kPx + 280, 1, OrderType::Limit);
+    b.addOrder(21, 21, Side::Buy, kPx + 280, 1, OrderType::Limit);
+    const Order* stop = b.getOrder(3);
+    return !(stop && stop->type == OrderType::TrailingStop);
+}
+
 int check(const char* what, const Setup& setup, const Probe& probe, int want) {
     int failures = 0;
     for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed, Life::Followed}) {
@@ -141,9 +170,9 @@ int main() {
     failures += check("traded: breaker tripped at 120.00", traded, breakerProbe, 1);
     failures += check("traded: trades from market vs market", traded, marketCrossProbe, 1);
     failures += check("quoted: breaker tripped at 120.00", quoted, breakerProbe, 1);
+    failures += check("trailed: stop fired at 102.80", trailed, trailProbe, 1);
     if (failures != 0) {
-        std::printf("CheckpointPriceStateTest FAILED: %d restarted book(s) lost the reference "
-                    "or last trade price\n", failures);
+        std::printf("CheckpointPriceStateTest FAILED: %d restarted book(s) lost price state\n", failures);
         return 1;
     }
     std::puts("CheckpointPriceStateTest passed");

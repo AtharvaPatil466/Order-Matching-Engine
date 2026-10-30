@@ -2543,6 +2543,8 @@ size_t MatchingEngine::replayJournal() {
                                entry.hidden);
                 if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                     book->restoreStopElection(entry.orderId, entry.stopPrice);
+                else
+                    book->restoreTrailingStop(entry.orderId, entry.stopPrice);
                 book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
             }
             break;
@@ -2715,6 +2717,8 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                            entry.hidden);
             if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                 book->restoreStopElection(entry.orderId, entry.stopPrice);
+            else
+                book->restoreTrailingStop(entry.orderId, entry.stopPrice);
             book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
         }
         applied = true;

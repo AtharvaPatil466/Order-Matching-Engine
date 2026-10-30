@@ -12,6 +12,7 @@
 // Plain journal replay is not the problem: it re-runs the print and latches
 // them again. Only the snapshot loses it, so the test checkpoints first.
 
+#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -37,10 +38,10 @@ void boot(MatchingEngine& engine, const std::string& path) {
 }
 
 // Stops still parked, and how many of those are latched.
-std::pair<size_t, size_t> parkedStops(const MatchingEngine& engine) {
+std::pair<size_t, size_t> parkedStops(const OrderBook& book) {
     size_t parked = 0, latched = 0;
     for (OrderId id = kFirstStop; id < kFirstStop + kStops; ++id) {
-        const Order* o = engine.getOrderBook(kSym)->getOrder(id);
+        const Order* o = book.getOrder(id);
         if (o && o->type == OrderType::Stop) {
             ++parked;
             latched += o->isStopTriggered;
@@ -64,7 +65,7 @@ int main() {
             engine.submitOrder(kSym, id, 3, Side::Buy, 9900, 1, OrderType::Stop, 10000);
         // The print at 100.00 elects all of them; the budget executes 64.
         engine.submitOrder(kSym, 2, 2, Side::Buy, 10000, 1, OrderType::Limit);
-        const auto [parked, latched] = parkedStops(engine);
+        const auto [parked, latched] = parkedStops(*engine.getOrderBook(kSym));
         assert(parked == 6 && latched == 6);
 
         // A joining backup is built from the same Snapshot records, streamed.
@@ -73,7 +74,7 @@ int main() {
         backup.start();
         backup.setReplayModeAllBooks(true);
         engine.streamSnapshot([&](const JournalEntry& e) { backup.applyReplicatedEntry(e); });
-        assert(parkedStops(backup).second == 6 && "a backup must receive the latch too");
+        assert(parkedStops(*backup.getOrderBook(kSym)).second == 6 && "a backup must receive the latch too");
         backup.stop();
 
         engine.checkpoint();
@@ -83,16 +84,25 @@ int main() {
     MatchingEngine restarted;
     boot(restarted, path);
     restarted.replayJournal();
-    assert(parkedStops(restarted).first == 6);
+    assert(parkedStops(*restarted.getOrderBook(kSym)).first == 6);
     // The price comes back: a print at 99.00, below the stops' trigger. Latched
     // stops fire on this sweep anyway; un-latched ones would not.
     restarted.submitOrder(kSym, 3, 4, Side::Sell, 9900, 1, OrderType::Limit);
-    const auto [parked, latched] = parkedStops(restarted);
+    const auto [parked, latched] = parkedStops(*restarted.getOrderBook(kSym));
     if (parked != 0)
         std::cout << "  " << parked << " elected stop(s) still parked after checkpoint + "
                   << "replay (" << latched << " latched)" << std::endl;
     assert(parked == 0 && "an elected stop must stay elected across checkpoint + replay");
     restarted.stop();
+
+    // A JournalFollower over the same journal — checkpoint, then that print —
+    // must end where the restarted engine did.
+    OrderBook standby(kSym);
+    standby.setCircuitBreakerThreshold(0.99);
+    JournalFollower follower(path, kSym, standby);
+    follower.poll();
+    assert(parkedStops(standby).first == 0 &&
+           "a follower must restore the latch from the checkpoint too");
 
     std::remove(path.c_str());
     std::cout << "StopLatchCheckpointTest PASSED" << std::endl;

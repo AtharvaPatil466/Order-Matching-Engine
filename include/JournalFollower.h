@@ -473,7 +473,10 @@ private:
                                  e.displayQty, e.timeInForce, e.expiryTime,
                                  e.stopLimitPrice, e.pegType, e.pegOffset,
                                  e.trailAmount, e.minQty, e.hidden);
-                book->restoreTrailingStop(e.orderId, e.stopPrice);
+                if (e.newQty & SNAPSHOT_STOP_ELECTED)
+                    book->restoreStopElection(e.orderId, e.stopPrice);
+                else
+                    book->restoreTrailingStop(e.orderId, e.stopPrice);
                 book->restoreExecutedQty(e.orderId, snapshotCumQty(e));
             }
             break;

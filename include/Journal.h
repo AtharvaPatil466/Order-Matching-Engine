@@ -167,6 +167,8 @@ struct JournalEntry {
         // Id counters (roadmap 1.4-D1): orderId = symbolId's next trade id (0:
         // none), quantity = the engine sequence-id lease (0: none). Written by
         // a checkpoint for every book and whenever the lease is extended.
+        // A book's record also carries the prices its dropped trades left:
+        // price = last trade, newPrice = the breaker's reference (0: none).
         // Safe to skip — an older reader restarts the counters, as it always
         // did — so it needs no format bump.
         Counters = 8
@@ -432,13 +434,16 @@ public:
         appendEntry(entry);
     }
 
-    void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease) {
+    void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease,
+                     Price lastTradePrice = 0, Price referencePrice = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Counters;
         entry.timestamp = now();
         entry.symbolId = symbolId;
         entry.orderId = nextTradeId;
         entry.quantity = sequenceLease;
+        entry.price = lastTradePrice;
+        entry.newPrice = referencePrice;
         appendEntry(entry);
     }
 

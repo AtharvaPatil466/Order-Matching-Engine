@@ -875,7 +875,10 @@ void MatchingEngine::leaseSequenceIds(uint64_t through) {
 }
 
 void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
-    if (book && e.orderId != 0) book->restoreNextTradeId(e.orderId);
+    if (book && e.orderId != 0) {
+        book->restoreNextTradeId(e.orderId);
+        book->restorePrices({e.price, e.newPrice});
+    }
     if (e.quantity == 0) return;
     uint64_t cur = sequenceLease_.load(std::memory_order_relaxed);
     while (cur < e.quantity &&
@@ -2754,7 +2757,8 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
             journal_->logUncross(entry.symbolId);
             break;
         case JournalEntry::Type::Counters:
-            journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity);
+            journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity,
+                                  entry.price, entry.newPrice);
             break;
         case JournalEntry::Type::Snapshot:
             journal_->logSnapshot(entry.orderId, entry.participantId,
@@ -2881,8 +2885,11 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         };
         std::vector<SessionState> states;
         // D1: the snapshot drops the trades and the lease records, so it
-        // carries the counters they would have restored.
-        std::vector<std::pair<SymbolId, uint64_t>> tradeIds;
+        // carries the counters they would have restored, and the prices.
+        struct BookCounters {
+            SymbolId symbolId; uint64_t nextTradeId; OrderBook::CheckpointPrices prices;
+        };
+        std::vector<BookCounters> counters;
         uint64_t lease = 0;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
@@ -2901,8 +2908,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (!book) {
                     continue;
                 }
-                if (const uint64_t next = book->nextTradeIdLocked(); next > 1)
-                    tradeIds.emplace_back(symbolId, next);   // D1: books that traded
+                const uint64_t next = book->nextTradeIdLocked();
+                const OrderBook::CheckpointPrices prices = book->checkpointPricesLocked();
+                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0)
+                    counters.push_back({symbolId, next, prices});   // books that traded or priced
                 if (book->getTradingState() != TradingState::Continuous || book->sessionDate() != 0)
                     states.push_back({symbolId, book->getTradingState(), book->sessionDate(),
                                       book->preHaltState()});
@@ -2927,8 +2936,6 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (state != replayed) snapshotJournal.logTradingState(symbolId, state);
             }
             if (lease != 0) snapshotJournal.logCounters(0, 0, lease);
-            for (const auto& [symbolId, nextTradeId] : tradeIds)
-                snapshotJournal.logCounters(symbolId, nextTradeId, 0);
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,
@@ -2939,6 +2946,11 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.minQty, order.isHidden,
                                             order.isStopTriggered, order.cumQty);
             }
+            // After the orders: each restored order's add sweeps stops at the
+            // last trade, which would fire them into a half-restored book.
+            for (const auto& [symbolId, nextTradeId, prices] : counters)
+                snapshotJournal.logCounters(symbolId, nextTradeId, 0,
+                                            prices.lastTrade, prices.reference);
         };
 
         // Phase 2: build the replacement OUTSIDE journalMutex_. Writing every

@@ -311,6 +311,14 @@ enable_assertions(StopLatchCheckpointTest)
 add_test(NAME StopLatchCheckpointTest COMMAND StopLatchCheckpointTest)
 set_tests_properties(StopLatchCheckpointTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A book's reference and last trade price survive a checkpoint: the breaker
+# and a market-vs-market auction cross behave as on the engine that traded.
+add_executable(CheckpointPriceStateTest CheckpointPriceStateTest.cpp)
+target_link_libraries(CheckpointPriceStateTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointPriceStateTest)
+add_test(NAME CheckpointPriceStateTest COMMAND CheckpointPriceStateTest)
+set_tests_properties(CheckpointPriceStateTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
 add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)

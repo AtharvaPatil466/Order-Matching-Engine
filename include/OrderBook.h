@@ -702,6 +702,19 @@ public:
         std::lock_guard<std::mutex> lock(bookLock_);
         if (next > nextTradeId_) nextTradeId_ = next;
     }
+    // So are the prices the dropped trades left: the last trade (a market-vs-
+    // market auction crosses at it) and the breaker's reference, which a book
+    // without one re-seeds from its next order. 0 restores nothing.
+    struct CheckpointPrices { Price lastTrade; Price reference; };
+    CheckpointPrices checkpointPricesLocked() const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        return {lastTradePrice_, referencePrice_};
+    }
+    void restorePrices(const CheckpointPrices& p) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (p.lastTrade != 0) lastTradePrice_ = p.lastTrade;
+        if (p.reference != 0) referencePrice_ = p.reference;
+    }
 
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }

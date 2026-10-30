@@ -351,8 +351,9 @@ void testCheckpointReplay() {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        // 3 snapshot entries and the lease (from checkpoint) + 2 new orders
-        assert(replayed == 5 + kLeaseRecords);
+        // 3 snapshot entries, the lease and the book's reference price (from
+        // checkpoint) + 2 new orders
+        assert(replayed == 6 + kLeaseRecords);
 
         auto* book = engine.getOrderBook(0);
         assert(book != nullptr);

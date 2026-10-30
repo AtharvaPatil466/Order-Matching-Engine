@@ -454,7 +454,10 @@ private:
             applySessionRecord(*book, e);
             break;
         case JournalEntry::Type::Counters:
-            break;   // ids: a follower issues none
+            // Ids: a follower issues none. A checkpoint's prices it keeps, for
+            // when it is promoted.
+            if (e.orderId != 0) book->restorePrices({e.price, e.newPrice});
+            break;
         case JournalEntry::Type::Snapshot:
             // Same shape as MatchingEngine::replayJournal and
             // applyReplicatedEntry, which apply this record type from disk and

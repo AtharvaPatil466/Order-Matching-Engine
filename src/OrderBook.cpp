@@ -1161,11 +1161,12 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // continuous matching; uncross() at the appropriate session boundary
     // produces all trades at the single discovered uncross price.
     const bool inAuction = inAuctionState();
+    Price firstPrint = 0;
     if (!inAuction) {
         if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-            matchProRata(order);
+            firstPrint = matchProRata(order);
         else
-            match(order);
+            firstPrint = match(order);
     }
 
     // C1: an order STP stopped must report CancelledBySTP (or the fills it
@@ -1178,7 +1179,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     // Not in an auction state (H4, MATCH-6): an elected stop matches on the
     // spot, so the sweep printed continuous trades during the call period,
     // elected by a stale last print. Elections resume with continuous trading.
-    if (!inAuction) runTriggerSweeps();
+    if (!inAuction) runTriggerSweeps(firstPrint);
     return orderId;
 }
 
@@ -1188,10 +1189,18 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 // incoming's own print matched a book without the incoming's remainder,
 // missed it, and rested; the remainder then rested through it, and nothing
 // matches two resting orders: a crossed book (MATCH-5).
-void OrderBook::runTriggerSweeps() {
+//
+// `firstPrint` is the sweep's first print, 0 if it printed nothing;
+// lastTradePrice_ is its last. A sweep prints monotonically, so the two bound
+// every price it traded, and an MIT or trailing stop touched mid-sweep is
+// elected though the last print left it behind (MATCH-17).
+void OrderBook::runTriggerSweeps(Price firstPrint) {
     if (lastTradePrice_ > 0) {
-        checkStopOrders(lastTradePrice_);
-        updateTrailingStops(lastTradePrice_);
+        const Price last = lastTradePrice_;
+        const Price first = firstPrint > 0 ? firstPrint : last;
+        checkStopOrders(std::min(first, last), std::max(first, last));
+        // lastTradePrice_ again: elected stops may have printed since, as before.
+        updateTrailingStops(first, lastTradePrice_);
     }
     if (!peggedOrders_.empty())
         updatePeggedOrders();
@@ -1276,7 +1285,7 @@ bool OrderBook::finalizeIfStpCancelled(Order* order) {
     return true;
 }
 
-void OrderBook::match(Order* incoming) {
+Price OrderBook::match(Order* incoming) {
     // P1-1 HOIST: incoming->side never changes across the whole match, so the
     // buy/sell flag and the opposite-side (resting) book are loop invariants.
     // Resolve them ONCE here instead of re-selecting them every iteration.
@@ -1344,6 +1353,7 @@ void OrderBook::match(Order* incoming) {
 
     std::array<FillEvent, kMaxFillsPerOrder> pendingFills;
     int fillCount = 0;
+    Price firstPrint = 0;  // the sweep's first print; lastTradePrice_ ends as its last
     std::array<OrderId, kMaxFillsPerOrder> toErase;
     int eraseCount = 0;
 
@@ -1519,6 +1529,7 @@ void OrderBook::match(Order* incoming) {
         bookOrder->cumQty += fillQty;
         if (bookOrder->type == OrderType::Iceberg) [[unlikely]] bookOrder->visibleQty -= fillQty;
 
+        if (firstPrint == 0) [[unlikely]] firstPrint = bestPrice;
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
@@ -1606,14 +1617,16 @@ void OrderBook::match(Order* incoming) {
     // order is executions-then-depth, and after the loop so each level is
     // published once at its final state rather than once per order consumed.
     publishTouchedLevels();
+    return firstPrint;
 }
 
 // ─── Match (Pro-Rata) ────────────────────────────────────────────────────────
 // Zero-allocation: uses stack-allocated arrays instead of std::vector.
 
-void OrderBook::matchProRata(Order* incoming) {
+Price OrderBook::matchProRata(Order* incoming) {
     struct Alloc { Order* order; Quantity qty; };
     static constexpr size_t MAX_LEVEL_ORDERS = 1024;
+    Price firstPrint = 0;  // as match(): the sweep's first print
 
     while (incoming->remainingQty > 0) {
         bool isBuy = (incoming->side == Side::Buy);
@@ -1667,11 +1680,11 @@ void OrderBook::matchProRata(Order* incoming) {
                     // Status only — remainingQty is left intact so the caller's
                     // finalizeIfStpCancelled() reports what really executed.
                     incoming->status = OrderStatus::CancelledBySTP;
-                    return;
+                    return firstPrint;
                 case STPResult::Action::CancelBoth:
                     incoming->status = OrderStatus::CancelledBySTP;
                     stpCancelRestingOrder(o, &level, opposite);
-                    return;
+                    return firstPrint;
                 case STPResult::Action::CancelResting:
                     stpCancelRestingOrder(o, &level, opposite);
                     levelChanged = true;
@@ -1682,7 +1695,7 @@ void OrderBook::matchProRata(Order* incoming) {
                         stpCancelRestingOrder(o, &level, opposite);
                     if (incoming->remainingQty == 0) {
                         incoming->status = OrderStatus::CancelledBySTP;
-                        return;
+                        return firstPrint;
                     }
                     levelChanged = true;
                     break;
@@ -1823,6 +1836,7 @@ void OrderBook::matchProRata(Order* incoming) {
             bookOrder->cumQty += fillQty;
             if (bookOrder->type == OrderType::Iceberg) bookOrder->visibleQty -= fillQty;
 
+            if (firstPrint == 0) firstPrint = bestPrice;
             lastTradePrice_ = bestPrice;
             lastTradeQty_ = fillQty;
 
@@ -1899,6 +1913,7 @@ void OrderBook::matchProRata(Order* incoming) {
         notifyMarketData(MarketDataUpdate::Action::Modify,
                          isBuy ? Side::Sell : Side::Buy, bestPrice);
     }
+    return firstPrint;
 }
 
 // ─── Cancel ──────────────────────────────────────────────────────────────────
@@ -2430,11 +2445,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 
         // In an auction state the repriced order rests, crossed or not, and
         // waits for the uncross like every other order (H4, MATCH-6).
+        Price firstPrint = 0;
         if (wouldCross && !inAuctionState()) {
             if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-                matchProRata(order);
+                firstPrint = matchProRata(order);
             else
-                match(order);
+                firstPrint = match(order);
         }
 
         // A repriced order acts as an aggressor, so it can self-cross too.
@@ -2445,7 +2461,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 
         // As addOrder, and for the same reason after the tail: a replace that
         // printed through a stop's trigger never elected it (MATCH-5).
-        if (!inAuctionState()) runTriggerSweeps();
+        if (!inAuctionState()) runTriggerSweeps(firstPrint);
     } else {
         // Same price
         const Quantity displayBefore = displayQuantity(*order);
@@ -2557,7 +2573,7 @@ void OrderBook::expireOrders(uint64_t currentTime,
 
 // ─── Stop Order Triggers ─────────────────────────────────────────────────────
 
-void OrderBook::checkStopOrders(Price lastTradePrice) {
+void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
     if (stopOrders_.empty()) [[unlikely]] return;
 
     // ponytail: the scan is O(all resting stops) on every sweep, ~1.8 ns each
@@ -2585,23 +2601,12 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
         bool triggered = order->isStopTriggered;
 
         if (!triggered) {
-            if (order->type == OrderType::MIT) {
-                // Market-if-Touched: favorable-direction mirror of a stop. A buy
-                // triggers when price falls to/through the level; a sell when it
-                // rises to/through it.
-                if (order->side == Side::Buy) {
-                    if (lastTradePrice <= order->stopPrice) triggered = true;
-                } else {
-                    if (lastTradePrice >= order->stopPrice) triggered = true;
-                }
-            } else {
-                // Stop / StopLimit: momentum trigger.
-                if (order->side == Side::Buy) {
-                    if (lastTradePrice >= order->stopPrice) triggered = true;
-                } else {
-                    if (lastTradePrice <= order->stopPrice) triggered = true;
-                }
-            }
+            // A sell stop and a buy MIT trigger at or below their level, so on
+            // the sweep's lowest print; a buy stop and a sell MIT at or above
+            // it, so on its highest.
+            const bool triggersBelow = (order->type == OrderType::MIT) == (order->side == Side::Buy);
+            triggered = triggersBelow ? lowPrint <= order->stopPrice
+                                      : highPrint >= order->stopPrice;
         }
 
         if (triggered) {
@@ -2649,7 +2654,7 @@ void OrderBook::checkStopOrders(Price lastTradePrice) {
 
 // ─── Trailing Stop Updates ───────────────────────────────────────────────────
 
-void OrderBook::updateTrailingStops(Price lastTradePrice) {
+void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
     if (trailingStopOrders_.empty()) [[unlikely]] return;
 
     // Same fan-out bound as checkStopOrders: one print can elect every trailing
@@ -2667,7 +2672,11 @@ void OrderBook::updateTrailingStops(Price lastTradePrice) {
         // would cancel it rather than defer it.
         bool triggered = order->isStopTriggered;
 
-        if (!triggered) {
+        // The first print, then the last: the sweep printed monotonically from
+        // one to the other, so this is the ratchet and the trigger in the
+        // order the prices traded.
+        for (const Price lastTradePrice : {firstPrint, lastPrint}) {
+            if (triggered) break;
             if (order->side == Side::Buy) {
                 if (lastTradePrice < order->trailRefPrice) {
                     order->trailRefPrice = lastTradePrice;

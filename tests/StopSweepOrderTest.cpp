@@ -8,6 +8,11 @@
 // through it, and nothing ever matched two resting orders: a crossed book in
 // Continuous, which validateIntegrity passed. cancelReplace ran no sweep at
 // all, so a replace that printed through a stop's trigger never elected it.
+//
+// And the sweeps looked only at the sweep's LAST print (MATCH-17). A sweep
+// prints monotonically, so an MIT, which triggers against the sweep's
+// direction, was missed when an earlier print touched it and the last did not;
+// a trailing stop likewise. They now see the sweep's first and last prints.
 
 #include "OrderBook.h"
 
@@ -106,12 +111,60 @@ void replacePrintElectsStop() {
     expect(valid(b), "replace: validateIntegrity agrees");
 }
 
+// The audit's W/match/h1.cpp S13: buy 10 @ 110 prints 100 then 110; the 100
+// print touched the buy MIT at 105.
+void buyMitTouchedMidSweep() {
+    OrderBook b(1);
+    b.setCircuitBreakerThreshold(1e9);
+    b.addOrder(1, 1, Side::Sell, 100, 5, OrderType::Limit);
+    b.addOrder(2, 1, Side::Sell, 110, 5, OrderType::Limit);
+    b.addOrder(3, 1, Side::Sell, 120, 50, OrderType::Limit);
+    b.addOrder(9, 3, Side::Buy, 0, 1, OrderType::MIT, /*stop=*/105);
+    b.addOrder(4, 2, Side::Buy, 110, 10, OrderType::Limit);
+    expect(b.getOrder(9) == nullptr, "MIT: a buy MIT touched by a mid-sweep print of 100 is elected");
+    expect(valid(b), "MIT: validateIntegrity agrees");
+}
+
+// The mirror: sell 10 @ 100 prints 110 then 100; the 110 print touched the
+// sell MIT at 105.
+void sellMitTouchedMidSweep() {
+    OrderBook b(1);
+    b.setCircuitBreakerThreshold(1e9);
+    b.addOrder(1, 1, Side::Buy, 110, 5, OrderType::Limit);
+    b.addOrder(2, 1, Side::Buy, 100, 5, OrderType::Limit);
+    b.addOrder(3, 1, Side::Buy, 90, 50, OrderType::Limit);
+    b.addOrder(9, 3, Side::Sell, 0, 1, OrderType::MIT, /*stop=*/105);
+    b.addOrder(4, 2, Side::Sell, 100, 10, OrderType::Limit);
+    expect(b.getOrder(9) == nullptr, "MIT: a sell MIT touched by a mid-sweep print of 110 is elected");
+}
+
+// Last trade 100, so a buy trailing stop 5 behind sits at 105. Sell 10 @ 90
+// prints 106 before 90: the 106 print elects it, before the 90 print ratchets
+// its reference down.
+void trailingStopTouchedMidSweep() {
+    OrderBook b(1);
+    b.setCircuitBreakerThreshold(1e9);
+    b.addOrder(1, 1, Side::Sell, 100, 1, OrderType::Limit);
+    b.addOrder(2, 2, Side::Buy, 100, 1, OrderType::Limit);          // last = 100
+    b.addOrder(9, 3, Side::Buy, 0, 1, OrderType::TrailingStop, 0, 0,
+               TimeInForce::GTC, 0, 0, PegType::None, 0, /*trailAmount=*/5);  // stop 105
+    b.addOrder(3, 1, Side::Sell, 120, 50, OrderType::Limit);
+    b.addOrder(4, 1, Side::Buy, 106, 5, OrderType::Limit);
+    b.addOrder(5, 1, Side::Buy, 90, 5, OrderType::Limit);
+    b.addOrder(6, 2, Side::Sell, 90, 10, OrderType::Limit);         // prints 106, 90
+    expect(b.getOrder(9) == nullptr || b.getOrder(9)->type != OrderType::TrailingStop,
+           "trailing: a buy trailing stop touched by a mid-sweep print of 106 is elected");
+}
+
 }  // namespace
 
 int main() {
     stopLimitElectedByIncomingPrint();
     trailingStopElectedByIncomingPrint();
     replacePrintElectsStop();
+    buyMitTouchedMidSweep();
+    sellMitTouchedMidSweep();
+    trailingStopTouchedMidSweep();
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

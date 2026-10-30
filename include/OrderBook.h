@@ -831,15 +831,16 @@ private:
     // no fill is ever truncated regardless of sweep depth.
     static constexpr int kMaxFillsPerOrder = 256;
 
-    void match(Order* order);
-    void matchProRata(Order* order);
+    // Both return the sweep's first print price, 0 if it printed nothing.
+    Price match(Order* order);
+    Price matchProRata(Order* order);
     bool checkSMP(const Order& incoming, const Order& resting) const;
     bool checkLiquidity(Side side, Price price, Quantity qty, OrderType type) const;
     bool checkMinQty(Side side, Price price, Quantity minQty) const;
 
-    void runTriggerSweeps();
-    void checkStopOrders(Price lastTradePrice);
-    void updateTrailingStops(Price lastTradePrice);
+    void runTriggerSweeps(Price firstPrint);
+    void checkStopOrders(Price lowPrint, Price highPrint);
+    void updateTrailingStops(Price firstPrint, Price lastPrint);
     void updatePeggedOrders();
     // Cancel any market orders parked during an auction without
     // executing them (no candidate price, no counterparties, etc.).

@@ -134,6 +134,13 @@ enable_assertions(GatewayFieldValidationTest)
 add_test(NAME GatewayFieldValidationTest COMMAND GatewayFieldValidationTest)
 set_tests_properties(GatewayFieldValidationTest PROPERTIES TIMEOUT 60 LABELS "project;protocol;security")
 
+# The same enum checks at the engine, so every ingress has them (1.6-F1).
+add_executable(EngineFieldValidationTest EngineFieldValidationTest.cpp)
+target_link_libraries(EngineFieldValidationTest PRIVATE OrderMatcher)
+enable_assertions(EngineFieldValidationTest)
+add_test(NAME EngineFieldValidationTest COMMAND EngineFieldValidationTest)
+set_tests_properties(EngineFieldValidationTest PROPERTIES TIMEOUT 60 LABELS "project;unit;security")
+
 # Who may cancel whose order (H7). The login frame proves identity; this is
 # the authorisation half it cannot reach.
 add_executable(OrderOwnershipTest OrderOwnershipTest.cpp)

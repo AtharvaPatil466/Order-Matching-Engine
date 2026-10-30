@@ -27,6 +27,19 @@ namespace OrderMatcher {
 
 namespace {
 
+// PROTO-1: every enum an order carries is range-checked here, where every
+// ingress meets — TcpGateway, admin, OUCH, SBE, FIX, in-process callers and
+// the async queue behind them. In the gateway alone (0.13) the rest handed a
+// side of 2 to the book, which rested it in the asks, and an orderType past
+// LOC rested as a limit. Bounded by the LAST enumerator of each type in
+// Types.h: appending one there moves the bound here.
+bool orderEnumsDefined(Side side, OrderType type, TimeInForce tif, PegType peg) {
+    return static_cast<uint8_t>(side) <= static_cast<uint8_t>(Side::Sell) &&
+           static_cast<uint8_t>(type) <= static_cast<uint8_t>(OrderType::LOC) &&
+           static_cast<uint8_t>(tif)  <= static_cast<uint8_t>(TimeInForce::DAY) &&
+           static_cast<uint8_t>(peg)  <= static_cast<uint8_t>(PegType::PrimaryPeg);
+}
+
 inline void cpuRelax() {
 #if defined(__x86_64__) || defined(__i386__)
     _mm_pause();
@@ -1788,6 +1801,9 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     // with no limits. Every ingress (gateway, admin, OUCH/DPDK, SBE, FIX) comes
     // through here; checked before the rate limiter so a junk id grows nothing.
     if (participantId >= MAX_PARTICIPANTS) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
+    }
+    if (!orderEnumsDefined(side, type, tif, pegType)) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidFieldValue);
     }
 

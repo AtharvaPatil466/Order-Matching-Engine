@@ -579,16 +579,9 @@ static std::string_view wireField(const char* p, size_t cap) {
 }
 
 // PROTO-1: decodeFrame memcpy's the OrderRequest off the wire, so its enum
-// fields hold whatever byte the client sent. Unchecked, side 2 was acked as
-// accepted and an orderType past LOC rested in the book. Bounded by the LAST
-// enumerator of each type in Types.h: appending one there moves the bound here.
-static bool orderEnumsDefined(const OrderRequest& r) {
-    return static_cast<uint8_t>(r.side)      <= static_cast<uint8_t>(Side::Sell) &&
-           static_cast<uint8_t>(r.orderType) <= static_cast<uint8_t>(OrderType::LOC) &&
-           static_cast<uint8_t>(r.tif)       <= static_cast<uint8_t>(TimeInForce::DAY) &&
-           static_cast<uint8_t>(r.pegType)   <= static_cast<uint8_t>(PegType::PrimaryPeg);
-}
-
+// fields hold whatever byte the client sent. MatchingEngine::submitOrder
+// range-checks those for every ingress; the bool cannot wait that long.
+//
 // A bool field laid over a raw wire byte. Loading it when the byte is not 0 or
 // 1 is UB — in practice clang truncated 2 to false and a hidden order showed
 // in the public book. Read the byte instead: any non-zero value means set.
@@ -696,10 +689,6 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
 
     switch (req.type) {
         case OrderRequest::Type::NewOrder:
-            if (!orderEnumsDefined(req)) {
-                result = SubmitResult::rejected(RejectReason::InvalidFieldValue);
-                break;
-            }
             result = engine_.submitOrder(req.symbolId, req.orderId, req.participantId,
                                          req.side, req.price, req.qty, req.orderType,
                                          req.stopPrice, req.displayQty, req.tif, req.expiryTime,

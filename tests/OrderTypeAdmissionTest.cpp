@@ -16,9 +16,9 @@
 //   1.6-F2 (Market+minQty behaves as IOC+minQty).
 //
 //   Pegged (STP-13). A peg rests at its computed price without matching, and
-//   reprices the same way. An offset through the touch leaves bid > ask at
-//   once; a PrimaryPeg counts itself as the best bid, so offset +1 ratchets it
-//   up a tick on every later order, straight through the ask. Fix in 1.6-F4.
+//   reprices the same way. An offset through the touch left bid > ask at once.
+//   1.6-F4 lifted the blanket reject: only a peg priced at or through the
+//   opposite touch is refused now (tests/PegOrderTest.cpp has the rest).
 //
 // WHAT IS PINNED. Each is rejected with a reason, and the book is left as it
 // was: no zero-priced rest, no resting market order, no crossed book. Positive
@@ -100,17 +100,18 @@ void peggedIsRejected() {
     const auto through = book.addOrder(3, 3, Side::Buy, 10000, 10, OrderType::Pegged,
                                        0, 0, TimeInForce::GTC, 0, 0,
                                        PegType::PrimaryPeg, 500);
-    assert(isReject(through, RejectReason::OrderTypeNotAllowedInState) &&
-           "a Pegged order was admitted; it rests through the touch without trading");
+    assert(isReject(through, RejectReason::InvalidPrice) &&
+           "a Pegged order priced through the touch was admitted");
 
-    // MidPeg, offset 0 — the benign-looking form — is refused too.
-    assert(isReject(book.addOrder(4, 3, Side::Buy, 10000, 10, OrderType::Pegged, 0, 0,
-                                  TimeInForce::GTC, 0, 0, PegType::MidPeg, 0),
-                    RejectReason::OrderTypeNotAllowedInState));
+    // Control: MidPeg, offset 0, rests at the mid.
+    assert(std::holds_alternative<OrderId>(
+        book.addOrder(4, 3, Side::Buy, 10000, 10, OrderType::Pegged, 0, 0,
+                      TimeInForce::GTC, 0, 0, PegType::MidPeg, 0)));
+    assert(book.getOrder(4) && book.getOrder(4)->price == 10100);
 
-    assert(book.getBestBid() == 10000 && book.getBestAsk() == 10200 &&
-           "the book must be exactly as it was, and not crossed");
-    std::puts("  Pegged: rejected (OrderTypeNotAllowedInState), book not crossed");
+    assert(book.getBestBid() == 10100 && book.getBestAsk() == 10200 &&
+           "the book must not be crossed");
+    std::puts("  Pegged: through the touch rejected (InvalidPrice), a MidPeg rests at the mid");
 }
 
 }  // namespace

@@ -933,6 +933,12 @@ private:
                                                    Side side, Price price, Quantity qty,
                                                    OrderType type, TimeInForce tif,
                                                    uint64_t expiryTime);
+    Price bestNonPegPrice(Side side) const;
+    Price pegPrice(Side side, Price fallback, PegType pegType, Price pegOffset) const;
+    Price behindOppositeTouch(Side side, Price price) const;
+    std::optional<RejectReason> admitPeg(OrderId orderId, ParticipantId participantId, Side side,
+                                         Price price, Quantity qty, PegType pegType,
+                                         Price pegOffset);
     void restPeggedOrder(Order* order, OrderId orderId, Side side, Price price, Quantity qty,
                          PegType pegType, Price pegOffset);
     OB_ALWAYS_INLINE std::optional<OrderId> parkNonMatchingOrder(Order* order, OrderId orderId, Side side,

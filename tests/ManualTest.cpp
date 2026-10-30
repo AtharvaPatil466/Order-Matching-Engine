@@ -790,10 +790,6 @@ void testTrailingStopBuy() {
 }
 
 // ─── Pegged Orders ──────────────────────────────────────────────────────────
-// Pegged is refused at admission (roadmap 0.12, STP-13): a peg rests and
-// reprices at its computed price without matching, so it can cross the book.
-// These used to assert the pegged price; they now assert the refusal and an
-// untouched book. Restore the price checks when 1.6-F4 lifts the reject.
 
 void testPeggedMidPrice() {
     std::cout << "Running testPeggedMidPrice..." << std::endl;
@@ -805,12 +801,13 @@ void testPeggedMidPrice() {
     book.addOrder(1, 1, Side::Buy, 990000, 100, OrderType::Limit);
     book.addOrder(2, 2, Side::Sell, 1010000, 100, OrderType::Limit);
 
-    // Mid-peg buy with 0 offset: refused.
-    auto r = book.addOrder(3, 3, Side::Buy, 1000000, 50, OrderType::Pegged, 0, 0,
-                           TimeInForce::GTC, 0, 0, PegType::MidPeg, 0);
-    assert(std::holds_alternative<RejectReason>(r));
-    assert(book.getOrder(3) == nullptr);
-    assert(book.getBestBid() == 990000 && book.getBestAsk() == 1010000);
+    // Mid-peg buy with 0 offset -> should peg at (99+101)/2 = 100
+    book.addOrder(3, 3, Side::Buy, 1000000, 50, OrderType::Pegged, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::MidPeg, 0);
+
+    const Order* peg = book.getOrder(3);
+    assert(peg != nullptr);
+    assert(peg->price == 1000000); // mid-price
 
     std::cout << "testPeggedMidPrice PASSED" << std::endl;
 }
@@ -825,12 +822,13 @@ void testPeggedPrimaryPeg() {
     book.addOrder(1, 1, Side::Buy, 990000, 100, OrderType::Limit);
     book.addOrder(2, 2, Side::Sell, 1010000, 100, OrderType::Limit);
 
-    // Primary-peg buy with +1000 offset: refused.
-    auto r = book.addOrder(3, 3, Side::Buy, 990000, 50, OrderType::Pegged, 0, 0,
-                           TimeInForce::GTC, 0, 0, PegType::PrimaryPeg, 1000);
-    assert(std::holds_alternative<RejectReason>(r));
-    assert(book.getOrder(3) == nullptr);
-    assert(book.getBestBid() == 990000 && book.getBestAsk() == 1010000);
+    // Primary-peg buy with +1000 offset -> pegs at best_bid + 0.10 = 99.10
+    book.addOrder(3, 3, Side::Buy, 990000, 50, OrderType::Pegged, 0, 0,
+                  TimeInForce::GTC, 0, 0, PegType::PrimaryPeg, 1000);
+
+    const Order* peg = book.getOrder(3);
+    assert(peg != nullptr);
+    assert(peg->price == 991000); // 99.00 + 0.10
 
     std::cout << "testPeggedPrimaryPeg PASSED" << std::endl;
 }

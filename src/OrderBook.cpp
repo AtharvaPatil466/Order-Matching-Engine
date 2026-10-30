@@ -610,13 +610,6 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
     if (type == OrderType::Market && minQty > 0) [[unlikely]]
         return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
 
-    // Pegged rests and reprices at a computed price without ever matching, so
-    // an offset through the touch, or a PrimaryPeg ratcheting off its own
-    // price, leaves a crossed book (STP-13). Refused until 1.6-F4.
-    if (type == OrderType::Pegged) [[unlikely]]
-        return rejectOrder(orderId, participantId, qty,
-                           RejectReason::OrderTypeNotAllowedInState);
-
     // --- Duplicate orderId check ---
     // FlatHashMap::insert silently overwrites on duplicate key, which
     // would orphan the prior order in its price-level list and pool.
@@ -902,28 +895,71 @@ std::optional<AddOrderResult> OrderBook::parkOnCloseOrder(OrderId orderId,
     return AddOrderResult{orderId};
 }
 
+// ─── Pegged orders (1.6-F4, STP-13) ── Precondition: bookLock_ held. ─────────
+// A peg rests at a computed price and never trades on placement or reprice.
+// Unchecked, that rested a PrimaryPeg buy +30000 above the ask; a PrimaryPeg
+// that saw itself as the best bid climbed one offset per later order; a MidPeg
+// that counted itself in the mid drifted. All three were crossed books.
+
+// The best price on `side` among orders that are not pegged, 0 if none: a
+// peg's reference, which no peg, itself included, can move.
+// ponytail: walks past the pegs resting at the touch, O(those pegs); a
+// best-non-peg tracker per side if pegs ever crowd the touch.
+Price OrderBook::bestNonPegPrice(Side side) const {
+    Price best = 0;
+    (side == Side::Buy ? bids_ : asks_).forEachLevelWhile([&](Price p, const OrderList& level) {
+        for (const Order* o = level.front(); o; o = o->next)
+            if (o->type != OrderType::Pegged) { best = p; return false; }
+        return true;
+    });
+    return best;
+}
+
+// Where the peg's instruction puts it: reference + offset, or `fallback` while
+// there is no reference. The mid rounds toward the peg's own side, so a sell
+// MidPeg on a one-unit spread lands on the ask, not on the bid.
+Price OrderBook::pegPrice(Side side, Price fallback, PegType pegType, Price pegOffset) const {
+    const Price bid = bestNonPegPrice(Side::Buy), ask = bestNonPegPrice(Side::Sell);
+    if (pegType == PegType::MidPeg) {
+        if (bid > 0 && ask > 0) return bid + (ask - bid + (side == Side::Sell ? 1 : 0)) / 2 + pegOffset;
+    } else if (pegType == PegType::PrimaryPeg) {
+        const Price ref = (side == Side::Buy) ? bid : ask;
+        if (ref > 0) return ref + pegOffset;
+    }
+    return fallback;
+}
+
+// `price`, or one unit behind the opposite touch if it reaches it. The
+// opposite side never holds this peg, so it is the touch the peg must not
+// cross.
+Price OrderBook::behindOppositeTouch(Side side, Price price) const {
+    if (side == Side::Buy)
+        return (!asks_.empty() && price >= asks_.bestPrice()) ? asks_.bestPrice() - 1 : price;
+    return (!bids_.empty() && price <= bids_.bestPrice()) ? bids_.bestPrice() + 1 : price;
+}
+
+// Admission: a peg that would enter at or through the opposite touch is
+// refused, not clamped — the client named a price the book will not give it.
+// The offset bound keeps reference + offset far from overflow.
+std::optional<RejectReason> OrderBook::admitPeg(OrderId orderId, ParticipantId participantId,
+                                                Side side, Price price, Quantity qty,
+                                                PegType pegType, Price pegOffset) {
+    constexpr Price kMaxPegOffset = std::numeric_limits<uint32_t>::max();
+    const Price at = (pegOffset > kMaxPegOffset || pegOffset < -kMaxPegOffset)
+                     ? 0 : pegPrice(side, price, pegType, pegOffset);
+    if (at <= 0 || behindOppositeTouch(side, at) != at)
+        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
+    return std::nullopt;
+}
+
 // --- Pegged: compute price from reference and rest ---
 // Both exits in the original returned orderId, so this returns void and the
 // caller does. A rest that cannot be placed (out of price range / depth) is torn
 // down here rather than left marked Accepted but dangling in orderLookup_ and
 // peggedOrders_ without resting.
-// Precondition: bookLock_ held.
 void OrderBook::restPeggedOrder(Order* order, OrderId orderId, Side side, Price price,
                                 Quantity qty, PegType pegType, Price pegOffset) {
-    Price pegPrice = price; // fallback
-    if (pegType == PegType::MidPeg) {
-        Price mid = getMidPrice();
-        if (mid > 0) pegPrice = mid + pegOffset;
-    } else if (pegType == PegType::PrimaryPeg) {
-        if (side == Side::Buy) {
-            Price bb = getBestBid();
-            if (bb > 0) pegPrice = bb + pegOffset;
-        } else {
-            Price ba = getBestAsk();
-            if (ba < std::numeric_limits<Price>::max()) pegPrice = ba + pegOffset;
-        }
-    }
-    order->price = pegPrice;
+    order->price = behindOppositeTouch(side, pegPrice(side, price, pegType, pegOffset));
     (void)peggedOrders_.push_back(order);  // slot checked by admitParkCapacity
     if (!addToBook(order)) {
         notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
@@ -1129,6 +1165,9 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     if (auto r = admitPriceBand(orderId, participantId, price, qty, type)) return *r;
     if (auto r = admitPostOnly(orderId, participantId, side, price, qty, type)) return *r;
+    if (type == OrderType::Pegged) [[unlikely]]
+        if (auto r = admitPeg(orderId, participantId, side, price, qty, pegType, pegOffset))
+            return *r;
 
     if (auto r = admitParkCapacity(orderId, participantId, qty, type)) return *r;
 
@@ -2731,19 +2770,10 @@ void OrderBook::updatePeggedOrders() {
             continue;
         }
 
-        Price newPrice = order->price;
-        if (order->pegType == PegType::MidPeg) {
-            Price mid = getMidPrice();
-            if (mid > 0) newPrice = mid + order->pegOffset;
-        } else if (order->pegType == PegType::PrimaryPeg) {
-            if (order->side == Side::Buy) {
-                Price bb = getBestBid();
-                if (bb > 0) newPrice = bb + order->pegOffset;
-            } else {
-                Price ba = getBestAsk();
-                if (ba < std::numeric_limits<Price>::max()) newPrice = ba + order->pegOffset;
-            }
-        }
+        // Clamped, not matched: a reprice that reaches the opposite touch stops
+        // one unit behind it (STP-13).
+        const Price newPrice = behindOppositeTouch(
+            order->side, pegPrice(order->side, order->price, order->pegType, order->pegOffset));
 
         if (newPrice != order->price && newPrice > 0) {
             // A peg moving is a depth change at two levels, and it happens

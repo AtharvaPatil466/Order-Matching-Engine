@@ -622,6 +622,14 @@ enable_assertions(StopSweepOrderTest)
 add_test(NAME StopSweepOrderTest COMMAND StopSweepOrderTest)
 set_tests_properties(StopSweepOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.6-F4 (STP-13): a peg never rests at or through the opposite touch
+# and does not count pegs, itself included, in its reference.
+add_executable(PegOrderTest PegOrderTest.cpp)
+target_link_libraries(PegOrderTest PRIVATE OrderMatcher)
+enable_assertions(PegOrderTest)
+add_test(NAME PegOrderTest COMMAND PegOrderTest)
+set_tests_properties(PegOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # Roadmap 1.5-E2 (MATCH-2): match() asserts before printing a zero-quantity
 # trade. The bad state is injected in a forked child, which must abort.
 add_executable(ZeroQuantityTradeTest ZeroQuantityTradeTest.cpp)

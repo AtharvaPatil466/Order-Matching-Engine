@@ -295,6 +295,13 @@ bool OrderBook::addToBook(Order* order) {
     if (order->type == OrderType::Iceberg) [[unlikely]]
         order->visibleQty = std::min(order->remainingQty, order->displayQty);
 
+    // Only a type that rests may be linked into a level. A Market order with
+    // minQty rested here as a bid at 0 and later printed at 0 (OTM-2).
+    assert((order->type == OrderType::Limit   || order->type == OrderType::PostOnly ||
+            order->type == OrderType::Iceberg || order->type == OrderType::Hidden   ||
+            order->type == OrderType::LOC     || order->type == OrderType::Pegged) &&
+           "addToBook(): a type that does not rest");
+
     if (!canAddToBook(order)) return false;
     ensurePriceRange(order->price);
     auto& book = (order->side == Side::Buy) ? bids_ : asks_;
@@ -595,7 +602,6 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
                                                             Price price, Quantity qty,
                                                             OrderType type,
                                                             Quantity& displayQty,
-                                                            Quantity minQty,
                                                             Price stopLimitPrice,
                                                             Price stopPrice,
                                                             Price trailAmount) {
@@ -644,11 +650,6 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
             return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
     }
 
-    // Market + minQty: screenMinQty reads the market order's price 0 as a limit,
-    // sees no liquidity, and RESTS the market order in the book (OTM-2).
-    // Stop-gap until 1.6-F2 gives it IOC+minQty semantics.
-    if (type == OrderType::Market && minQty > 0) [[unlikely]]
-        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
 
     // --- Duplicate orderId check ---
     // FlatHashMap::insert silently overwrites on duplicate key, which
@@ -1090,9 +1091,11 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
     // crossing order is how the auction accumulates, so a crossing minQty
     // order joins it rather than being cancelled for "locking" a book that is
     // allowed to cross (OTM-11). The uncross does not apply minQty.
+    // Market + minQty is IOC + minQty (OTM-2): sweepFillQty lets it reach
+    // every level, and it never rests.
     if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
         if (sweepFillQty(*order) < minQty) {
-            if (type == OrderType::IOC) {
+            if (type == OrderType::IOC || type == OrderType::Market) {
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
@@ -1189,7 +1192,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     std::unique_lock<std::mutex> lock(bookLock_);
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
-    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty, minQty,
+    if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty,
                                       stopLimitPrice, stopPrice, trailAmount)) return *r;
     // Pool pressure runs before EITHER allocation site (the MOC/LOC park and the
     // main path) so both are covered.

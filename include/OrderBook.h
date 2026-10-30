@@ -936,7 +936,7 @@ private:
                                                      Quantity qty, OrderType type);
     OB_ALWAYS_INLINE std::optional<RejectReason> validateOrderRequest(OrderId orderId, ParticipantId participantId,
                                                      Price price, Quantity qty, OrderType type,
-                                                     Quantity& displayQty, Quantity minQty,
+                                                     Quantity& displayQty,
                                                      Price stopLimitPrice, Price stopPrice,
                                                      Price trailAmount);
     RejectReason checkItchFieldWidths(Price price, Quantity qty, Price stopLimitPrice) const;

@@ -623,6 +623,13 @@ enable_assertions(StopMarketTest)
 add_test(NAME StopMarketTest COMMAND StopMarketTest)
 set_tests_properties(StopMarketTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Market+minQty behaves as IOC+minQty (1.6-F2, OTM-2).
+add_executable(MarketMinQtyTest MarketMinQtyTest.cpp)
+target_link_libraries(MarketMinQtyTest PRIVATE OrderMatcher)
+enable_assertions(MarketMinQtyTest)
+add_test(NAME MarketMinQtyTest COMMAND MarketMinQtyTest)
+set_tests_properties(MarketMinQtyTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # Roadmap 0.11 (MATCH-3): a repriced iceberg is re-sliced, so it never rests
 # showing more than it holds.
 add_executable(ReplaceIcebergSliceTest ReplaceIcebergSliceTest.cpp)

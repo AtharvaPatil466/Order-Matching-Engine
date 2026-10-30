@@ -319,6 +319,13 @@ enable_assertions(CheckpointPriceStateTest)
 add_test(NAME CheckpointPriceStateTest COMMAND CheckpointPriceStateTest)
 set_tests_properties(CheckpointPriceStateTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A price level keeps its time priority across a checkpoint.
+add_executable(CheckpointTimePriorityTest CheckpointTimePriorityTest.cpp)
+target_link_libraries(CheckpointTimePriorityTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointTimePriorityTest)
+add_test(NAME CheckpointTimePriorityTest COMMAND CheckpointTimePriorityTest)
+set_tests_properties(CheckpointTimePriorityTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
 add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)

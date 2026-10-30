@@ -570,11 +570,23 @@ public:
     // orderLookup_ cannot be mutated/rehashed mid-walk. The callback must not
     // re-enter a method that takes bookLock_ (no re-entrancy on the non-
     // recursive mutex).
+    //
+    // Resting orders come first, each level front to back (bids, then asks),
+    // then every order that is not resting. A checkpoint and a joining backup
+    // re-add the orders in this order, so it is the time priority they
+    // restore; the id map's order queued a level by order id.
+    // ponytail: parked orders (stops, auction market orders) still come in
+    // id order; walk their containers if their queue order has to survive.
     template<typename Fn>
     void forEachOrderLocked(Fn&& fn) const {
         std::lock_guard<std::mutex> lock(bookLock_);
+        const auto level = [&](Price, const OrderList& orders) {
+            for (const Order* o = orders.front(); o; o = o->next) fn(*o);
+        };
+        bids_.forEachLevel(level);
+        asks_.forEachLevel(level);
         orderLookup_.forEach([&](OrderId, Order* order) {
-            if (order) fn(*order);
+            if (order && !order->inBook) fn(*order);
         });
     }
 

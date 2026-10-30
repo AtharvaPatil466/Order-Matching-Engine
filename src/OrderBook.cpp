@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -266,17 +267,27 @@ bool OrderBook::canAddToBook(const Order* order) const {
     return book.contains(order->price) || book.size() < maxDepthPerSide_;
 }
 
+void OrderBook::setPriceRange(Price minPrice, Price maxPrice) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    if (!bids_.empty() || !asks_.empty())
+        throw std::logic_error("OrderBook::setPriceRange: the book has resting orders");
+    bids_.setRange(minPrice, maxPrice);
+    asks_.setRange(minPrice, maxPrice);
+    priceRangeConfigured_ = true;
+}
+
 void OrderBook::ensurePriceRange(Price price) {
     if (!bids_.rangeSet()) {
-        // Center the range around the first price seen. The range
-        // is FIXED after this — subsequent orders priced outside
-        // [minP, minP + capacity) are rejected with OutOfPriceRange.
-        // There is no automatic re-centering today; a symbol whose
-        // price moves into a new regime far from its first quote
-        // would need an explicit book rebuild. Documented as a
-        // known scaling limitation.
+        // No configured band (setPriceRange): center one on the first price
+        // seen. The range is FIXED after this — a rest priced outside
+        // [minP, minP + capacity) fails with OutOfPriceRange. There is no
+        // re-centering, so one participant's first order picks the band for
+        // the session (STP-8); OrderEngine configures it from engine.conf.
+        // Saturated: anchored near INT64_MAX, minP + capacity - 1 overflowed.
         Price halfRange = static_cast<Price>(bids_.capacity() / 2);
-        Price minP = price - halfRange;
+        const Price highestMin =
+            std::numeric_limits<Price>::max() - static_cast<Price>(bids_.capacity()) + 1;
+        Price minP = std::min(price - halfRange, highestMin);
         bids_.setRange(minP);
         asks_.setRange(minP);
     }
@@ -421,6 +432,11 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
         if (price < referencePrice_ - half || price > referencePrice_ + half)
             return RejectReason::OutsidePriceBand;
     }
+
+    // Outside the configured band the replace could never rest: it came off
+    // the book and was cancelled (STP-8).
+    if (priced && priceRangeConfigured_ && !bids_.inRange(price))
+        return RejectReason::OutOfPriceRange;
 
 #ifndef OB_LEAN_MODE
     // Circuit breaker, on the replace's LIMIT price: the 0.14 rule. A new
@@ -593,6 +609,14 @@ RejectReason OrderBook::checkItchFieldWidths(Price price, Quantity qty,
     return RejectReason::None;
 }
 
+// The types whose price (a StopLimit's stopLimitPrice) is the limit they trade
+// and rest at.
+static bool limitPriced(OrderType t) {
+    return t == OrderType::Limit   || t == OrderType::IOC      || t == OrderType::FOK    ||
+           t == OrderType::PostOnly || t == OrderType::Iceberg || t == OrderType::Hidden ||
+           t == OrderType::LOC     || t == OrderType::StopLimit;
+}
+
 // --- Input validation + duplicate orderId ---  Precondition: bookLock_ held.
 // `displayQty` is in/out: an Iceberg's display size is clamped here, at exactly
 // the point the original inline block clamped it, and the clamped value is what
@@ -650,6 +674,15 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
             return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
     }
 
+    // A limit outside the configured band is refused here, before the ack.
+    // Left to addToBook it was Accepted, matched, then Rejected and Cancelled
+    // (STP-8). A trailing stop's limit moves with its trigger, so addToBook
+    // stays the backstop for it, and for an anchored (unconfigured) band.
+    if (priceRangeConfigured_ && limitPriced(type)) [[unlikely]] {
+        const Price limit = type == OrderType::StopLimit ? stopLimitPrice : price;
+        if (!bids_.inRange(limit))
+            return rejectOrder(orderId, participantId, qty, RejectReason::OutOfPriceRange);
+    }
 
     // --- Duplicate orderId check ---
     // FlatHashMap::insert silently overwrites on duplicate key, which

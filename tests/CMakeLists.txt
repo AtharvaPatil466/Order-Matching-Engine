@@ -262,6 +262,16 @@ set_tests_properties(EngineSessionScheduleConfigTest PROPERTIES
     TIMEOUT 180
     LABELS "project;session;lifecycle")
 
+# Roadmap 1.6-F6 (STP-8): with --config, every symbol's price band comes from
+# instrument.<id>.min_price / max_price before any order; a missing one refuses
+# to boot. Admin port 29501.
+add_test(NAME EngineRequiresPriceBandTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_requires_price_band.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRequiresPriceBandTest PROPERTIES
+    TIMEOUT 120
+    LABELS "project;lifecycle")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)
@@ -629,6 +639,13 @@ target_link_libraries(MarketMinQtyTest PRIVATE OrderMatcher)
 enable_assertions(MarketMinQtyTest)
 add_test(NAME MarketMinQtyTest COMMAND MarketMinQtyTest)
 set_tests_properties(MarketMinQtyTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
+# The price band is configurable and enforced at admission (1.6-F6, STP-8).
+add_executable(PriceRangeTest PriceRangeTest.cpp)
+target_link_libraries(PriceRangeTest PRIVATE OrderMatcher)
+enable_assertions(PriceRangeTest)
+add_test(NAME PriceRangeTest COMMAND PriceRangeTest)
+set_tests_properties(PriceRangeTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
 # Roadmap 0.11 (MATCH-3): a repriced iceberg is re-sliced, so it never rests
 # showing more than it holds.

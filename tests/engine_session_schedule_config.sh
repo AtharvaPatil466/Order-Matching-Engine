@@ -36,7 +36,8 @@ run_case() {
     label="$1"; want="$2"
     conf="$TMP/engine.conf"
     log="$TMP/case.log"
-    printf 'log_sink = null\nsession_schedule = %s\n' "$3" > "$conf"
+    printf 'log_sink = null\ninstrument.0.min_price = 1\ninstrument.0.max_price = 200000\nsession_schedule = %s\n' \
+        "$3" > "$conf"
     "$ENGINE" --config "$conf" --admin-no-auth --symbols 1 --port "$ADMIN_PORT" > "$log" 2>&1 &
     PID=$!
     state="running"

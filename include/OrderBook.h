@@ -498,6 +498,14 @@ public:
 
     // Configurable circuit breaker
     void setCircuitBreakerThreshold(double threshold) { cbThreshold_ = threshold; }
+    // The instrument's price band, [minPrice, maxPrice] in ticks, from config
+    // (instrument.<id>.min_price / max_price). Once set, an order or replace
+    // priced outside it is refused at admission (STP-8). Before the first
+    // order: throws std::logic_error over resting orders, and
+    // std::invalid_argument for a band that is empty or wider than the price
+    // map. Unset, the band is anchored on the first resting price instead, and
+    // only addToBook enforces it.
+    void setPriceRange(Price minPrice, Price maxPrice);
     double getCircuitBreakerThreshold() const { return cbThreshold_; }
     void setReferencePrice(Price price) { referencePrice_ = price; }
 
@@ -1167,6 +1175,7 @@ private:
     uint64_t nextTradeId_{1};
     Price lastTradePrice_{0};
     Quantity lastTradeQty_{0};
+    bool priceRangeConfigured_{false};  // setPriceRange, not the first-rest anchor
     // Atomic so a future lock-free reader path cannot race with the
     // writer's increment. Today every caller
     // already serializes under unique_lock(bookLock_), so this is

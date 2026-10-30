@@ -192,6 +192,31 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "[Engine] Registered " << numSymbols << " symbols\n";
 
+    // STP-8: a symbol trades in the band its engine.conf entry names, set
+    // before replay so no first order can pick one (unset, a book centres its
+    // band on its first rest, and one participant's 1-tick bid made every real
+    // price unrestable). A config that leaves a symbol out refuses to boot.
+    // Without --config the books keep the anchor, for local runs and tests.
+    if (!configPath.empty()) {
+        for (size_t s = 0; s < numSymbols; ++s) {
+            const std::string key = "instrument." + std::to_string(s) + ".";
+            if (!cfg.has(key + "min_price") || !cfg.has(key + "max_price")) {
+                std::cerr << "[Config] FATAL: symbol " << s << " has no price band; set "
+                          << key << "min_price and " << key << "max_price\n";
+                return 1;
+            }
+            try {
+                engine.getOrderBook(static_cast<SymbolId>(s))
+                    ->setPriceRange(cfg.getInt64(key + "min_price"),
+                                    cfg.getInt64(key + "max_price"));
+            } catch (const std::exception& e) {
+                std::cerr << "[Config] FATAL: symbol " << s << " price band: " << e.what() << "\n";
+                return 1;
+            }
+        }
+        std::cout << "[Config] Price bands set for " << numSymbols << " symbols\n";
+    }
+
     // Optional journal — enables replication on the primary path because
     // the coordinator hooks the journal's onCommit callback. Without a
     // journal, the engine still runs but replication has no entries to

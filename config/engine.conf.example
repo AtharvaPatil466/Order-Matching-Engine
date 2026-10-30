@@ -7,9 +7,9 @@
 # MANY KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
 # changes nothing: no risk limit, rate limit, checkpoint threshold, port or
 # replication timing is taken from this file. What is read: log_sink, the
-# alert_* keys, session_schedule, order_pool_capacity / trade_history_capacity
-# and volatility_auction_dwell_ms, and, on SIGHUP only,
-# rate_limit.default_rate / rate_limit.default_burst. journal_path,
+# alert_* keys, session_schedule, order_pool_capacity / trade_history_capacity,
+# volatility_auction_dwell_ms, instrument.<id>.min_price / max_price, and, on
+# SIGHUP only, rate_limit.default_rate / rate_limit.default_burst. journal_path,
 # instruments and participants are validated at startup but not applied.
 
 # ── Core Engine ──────────────────────────────────────────────────────────────
@@ -17,6 +17,21 @@
 threads         = 4
 symbols         = 4
 lean_mode       = false
+
+# ── Price bands ──────────────────────────────────────────────────────────────
+# Each symbol's tradable band, in ticks (PRICE_PRECISION, 1e-4). With --config,
+# OrderEngine refuses to boot unless every symbol 0 .. --symbols-1 has both
+# keys, and an order or replace priced outside the band is rejected at
+# admission (OutOfPriceRange). The span must be under 200,001 ticks. Without
+# --config a book centres its band on its first resting order instead.
+instrument.0.min_price = 1
+instrument.0.max_price = 200000
+instrument.1.min_price = 1
+instrument.1.max_price = 200000
+instrument.2.min_price = 1
+instrument.2.max_price = 200000
+instrument.3.min_price = 1
+instrument.3.max_price = 200000
 
 # ── Per-symbol memory ────────────────────────────────────────────────────────
 # Both are allocated AND touched when a book is created, so they are resident

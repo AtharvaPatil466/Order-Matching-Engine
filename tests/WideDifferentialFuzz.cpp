@@ -12,9 +12,10 @@
 // step also compares ladders, FIFO queues, per-order leaves and cumQty, and
 // validateIntegrity.
 //
-// Exits 1 on any divergence. Known classes at the time of writing: FOK + STP
-// partial fills (GTDIFF-2, 1.6-F5; --fok-engine --no-fokpartial suppress them)
-// and the maker's Filled update dispatched before its trade (GTDIFF-7).
+// Exits 1 on any divergence. Known classes at the time of writing: the maker's
+// Filled update dispatched before its trade (GTDIFF-7). FOK + STP partial
+// fills (GTDIFF-2) are fixed by 1.6-F5; --fok-engine now models the engine
+// BEFORE that fix (an STP-blind FOK check), so it diverges by design.
 // Not built into ctest: CI runs it in its own continue-on-error job.
 #include "MatchingEngine.h"
 #include "OrderBook.h"
@@ -23,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <random>
@@ -55,14 +57,14 @@ struct Ref {
     return nullptr;
   }
   Price best(Side s) { auto& b = own(s); if (b.empty()) return 0; return s == Side::Buy ? std::prev(b.end())->first : b.begin()->first; }
-  // quantity an aggressor could take before liquidity ends or STP stops the sweep
-  Quantity reachable(Side side, Price lim, bool mkt, ParticipantId owner) {
-    auto& o = opp(side); Quantity t = 0;
-    std::vector<Price> ps; for (auto& [p, q] : o) ps.push_back(p);
-    if (side == Side::Sell) std::reverse(ps.begin(), ps.end());
-    for (Price p : ps) { if (!mkt && !crosses(side, lim, p)) break;
-      for (auto& r : o[p]) { if (r.owner == owner) return t; t += r.qty; } }
-    return t;
+  // quantity an aggressor could take before liquidity ends or STP stops the
+  // sweep: sweep() itself, run on a copy, so it makes the sweep's STP decisions
+  // (CancelResting sweeps past an own order) and refreshes icebergs the same
+  // way (a slice ahead of an own order, not the reserve). The hand count this
+  // replaced stopped at every own order and counted whole icebergs.
+  Quantity reachable(Side side, Price lim, Quantity qty, bool mkt, ParticipantId owner) {
+    Ref dry = *this; std::vector<Tr> out; bool stp;
+    return qty - dry.sweep(0, owner, side, lim, qty, mkt, out, stp);
   }
   // returns remaining; sets stp if the sweep stopped on self-trade
   Quantity sweep(OrderId id, ParticipantId owner, Side side, Price lim, Quantity qty, bool mkt, std::vector<Tr>& out, bool& stp) {
@@ -97,7 +99,7 @@ struct Ref {
       Price ob = best(op.side == Side::Buy ? Side::Sell : Side::Buy);
       if (ob != 0 && crosses(op.side, op.px, ob)) return 3;
     }
-    if (op.type == OrderType::FOK && reachable(op.side, op.px, false, cfg.fokEngine ? 0 : op.owner) < op.qty) return 1;
+    if (op.type == OrderType::FOK && reachable(op.side, op.px, op.qty, false, cfg.fokEngine ? 0 : op.owner) < op.qty) return 1;
     bool stp; Quantity rem = sweep(op.id, op.owner, op.side, op.px, op.qty, mkt, out, stp);
     if (rem > 0 && !stp && (op.type == OrderType::Limit || op.type == OrderType::PostOnly || op.type == OrderType::Iceberg))
       own(op.side)[op.px].push_back(mk(op.id, op.owner, rem, op.type, op.disp, op.qty - rem));
@@ -264,7 +266,7 @@ struct Gen {
     uint64_t t = pick(100);
     op.type = t < 75 ? OrderType::Limit : t < 80 ? OrderType::Market : t < 87 ? OrderType::IOC : t < 93 ? OrderType::FOK : (cfg.post ? OrderType::PostOnly : OrderType::Limit);
     op.px = price(r, op.side);
-    Quantity cross = r.reachable(op.side, op.px, op.type == OrderType::Market, 0);
+    Quantity cross = r.reachable(op.side, op.px, std::numeric_limits<Quantity>::max(), op.type == OrderType::Market, 0);
     uint64_t q = pick(100);
     if (cross && q < 30) { uint64_t e = pick(3); op.qty = e == 0 ? cross : e == 1 ? cross + 1 : (cross > 1 ? cross - 1 : 1); }
     else if (q < 92 || !cfg.huge) op.qty = 1 + pick(20);

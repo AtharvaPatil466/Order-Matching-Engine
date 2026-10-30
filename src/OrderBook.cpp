@@ -442,48 +442,70 @@ bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
     return incoming.participantId == resting.participantId;
 }
 
-bool OrderBook::checkLiquidity(Side side, Price price, Quantity qty, OrderType type) const {
-    Quantity remaining = qty;
+// What the sweep match() / matchProRata() would FILL for `in` against the book
+// as it stands: the quantity the FOK and minQty screens judge (GTDIFF-2). They
+// used to add up every crossing order, the participant's own included, but the
+// sweep never fills those; it stops at them, so a FOK filled part of its size
+// and an IOC filled below its minimum. At each own resting order this makes
+// the sweep's decision, from the same checkSMP and SelfTradeProtection::check:
+// the default, CancelIncoming and CancelBoth end the sweep there;
+// CancelResting removes the order and sweeps on; DecreaseAndCancel shrinks the
+// incoming by it, no fill. Price-time takes an iceberg's slice in queue order
+// and its reserve after the rest of the level, behind any own order there;
+// pro-rata's STP pre-pass settles a level's own orders before it allocates,
+// so one that ends the sweep ends it before that level fills anything.
+// ponytail: market protection's band is not modelled; it limits only Market
+// orders, which neither screen sees today.
+Quantity OrderBook::sweepFillQty(const Order& in) const {
+    const bool isBuy = (in.side == Side::Buy);
+    const bool proRata = (matchAlgorithm_ == MatchAlgorithm::ProRata);
+    const STPMode stpMode = getSTPMode(in.participantId);
+    Quantity need = in.remainingQty, fills = 0;
 
-    const auto& opposite = (side == Side::Buy) ? asks_ : bids_;
-    opposite.forEachLevelWhile([&](Price levelPrice, const OrderList& level) -> bool {
-        if (side == Side::Buy) {
-            if (type != OrderType::Market && levelPrice > price) return false;
+    // False: the sweep ends at this own order.
+    auto passOwn = [&](const Order& own) -> bool {
+        switch (SelfTradeProtection::check(in.participantId, own.participantId, stpMode, 0).action) {
+        case STPResult::Action::NoSelfTrade:
+        case STPResult::Action::CancelIncoming:
+        case STPResult::Action::CancelBoth:
+            return false;
+        case STPResult::Action::CancelResting:
+            return true;
+        case STPResult::Action::DecreaseResting:
+            need -= std::min(need, own.remainingQty);
+            return true;
+        }
+        return false;
+    };
+
+    (isBuy ? asks_ : bids_).forEachLevelWhile([&](Price levelPrice, const OrderList& level) -> bool {
+        if (in.type != OrderType::Market && (isBuy ? levelPrice > in.price : levelPrice < in.price))
+            return false;
+        Quantity reserve = 0;  // what the level fills after this pass
+        if (proRata) {
+            for (const Order* o = level.front(); o; o = o->next)
+                if (checkSMP(in, *o) && !passOwn(*o)) return false;
+            for (const Order* o = level.front(); o; o = o->next)
+                if (!checkSMP(in, *o)) reserve += o->remainingQty;
         } else {
-            if (type != OrderType::Market && levelPrice < price) return false;
+            for (const Order* o = level.front(); o && need > 0; o = o->next) {
+                if (checkSMP(in, *o)) {
+                    if (!passOwn(*o)) return false;
+                    continue;
+                }
+                const Quantity slice = (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
+                const Quantity take = std::min(need, slice);
+                fills += take;
+                need -= take;
+                reserve += o->remainingQty - slice;
+            }
         }
-        for (Order* o = level.front(); o; o = o->next) {
-            remaining -= std::min(remaining, o->remainingQty);
-            if (remaining == 0) return false;
-        }
-        return true;
+        const Quantity take = std::min(need, reserve);
+        fills += take;
+        need -= take;
+        return need > 0;
     });
-
-    return remaining == 0;
-}
-
-bool OrderBook::checkMinQty(Side side, Price price, Quantity minQty) const {
-    Quantity available = 0;
-
-    const auto& opposite = (side == Side::Buy) ? asks_ : bids_;
-    bool found = false;
-    opposite.forEachLevelWhile([&](Price levelPrice, const OrderList& level) -> bool {
-        if (side == Side::Buy) {
-            if (levelPrice > price) return false;
-        } else {
-            if (levelPrice < price) return false;
-        }
-        // The whole iceberg, as checkLiquidity counts it: the sweep refreshes
-        // slices and takes the reserve. Its slice alone refused an IOC the
-        // iceberg could fill (OTM-11).
-        for (Order* o = level.front(); o; o = o->next) {
-            available += o->remainingQty;
-            if (available >= minQty) { found = true; return false; }
-        }
-        return true;
-    });
-
-    return found;
+    return fills;
 }
 
 // ─── addOrder ────────────────────────────────────────────────────────────────
@@ -1030,10 +1052,10 @@ std::optional<OrderId> OrderBook::parkNonMatchingOrder(Order* order, OrderId ord
 }
 
 // --- FOK: require full liquidity ---  Precondition: bookLock_ held.
-std::optional<RejectReason> OrderBook::screenFOK(Order* order, OrderId orderId, Side side,
-                                                 Price price, Quantity qty, OrderType type) {
+std::optional<RejectReason> OrderBook::screenFOK(Order* order, OrderId orderId,
+                                                 Quantity qty, OrderType type) {
     if (type == OrderType::FOK) [[unlikely]] {
-        if (!checkLiquidity(side, price, qty, type)) {
+        if (sweepFillQty(*order) < qty) {
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
             notifyOrderUpdate(orderId, OrderStatus::Rejected, 0, qty, 0, RejectReason::FOKInsufficientLiquidity);
@@ -1054,7 +1076,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
     // order joins it rather than being cancelled for "locking" a book that is
     // allowed to cross (OTM-11). The uncross does not apply minQty.
     if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
-        if (!checkMinQty(side, price, minQty)) {
+        if (sweepFillQty(*order) < minQty) {
             if (type == OrderType::IOC) {
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
@@ -1063,7 +1085,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
             }
             // H3: a limit order may rest here ONLY if it does not cross.
             //
-            // checkMinQty counts liquidity at crossing prices only, so a false
+            // sweepFillQty counts liquidity at crossing prices only, so a false
             // return still permits some crossable size — just less than
             // minQty. Resting unconditionally therefore parked the order at a
             // price that crosses the opposite side, leaving bid >= ask: an
@@ -1190,7 +1212,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     if (auto id = parkNonMatchingOrder(order, orderId, side, price, qty, type,
                                        pegType, pegOffset, trailAmount)) return *id;
 
-    if (auto r = screenFOK(order, orderId, side, price, qty, type)) return *r;
+    if (auto r = screenFOK(order, orderId, qty, type)) return *r;
     if (auto id = screenMinQty(order, orderId, side, price, qty, type, minQty)) return *id;
 
 #ifndef OB_LEAN_MODE

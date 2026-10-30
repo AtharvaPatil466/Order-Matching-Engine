@@ -835,8 +835,7 @@ private:
     Price match(Order* order);
     Price matchProRata(Order* order);
     bool checkSMP(const Order& incoming, const Order& resting) const;
-    bool checkLiquidity(Side side, Price price, Quantity qty, OrderType type) const;
-    bool checkMinQty(Side side, Price price, Quantity minQty) const;
+    Quantity sweepFillQty(const Order& in) const;
 
     void runTriggerSweeps(Price firstPrint);
     void checkStopOrders(Price lowPrint, Price highPrint);
@@ -945,7 +944,7 @@ private:
                                                 Price price, Quantity qty, OrderType type,
                                                 PegType pegType, Price pegOffset,
                                                 Price trailAmount);
-    OB_ALWAYS_INLINE std::optional<RejectReason> screenFOK(Order* order, OrderId orderId, Side side, Price price,
+    OB_ALWAYS_INLINE std::optional<RejectReason> screenFOK(Order* order, OrderId orderId,
                                           Quantity qty, OrderType type);
     OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Side side, Price price,
                                         Quantity qty, OrderType type, Quantity minQty);

@@ -165,10 +165,12 @@ public:
                 while (ring_->pop(e)) serializeAndSend(e);
                 ring_.reset();
             }
-            async_.store(false, std::memory_order_release);
         });
         capture_ = nullptr;
         for (const std::string& f : frames) send_(f);
+        // Off only now: a producer that reads it off publishes inline at once,
+        // so it must not overtake these frames or race on capture_.
+        async_.store(false, std::memory_order_release);
         // A producer that arrived meanwhile publishes inline, after these.
         // Clear only the bit: a store(0) erased the count of a producer between
         // its two gate RMWs, and its decrement then wrapped into "closed".

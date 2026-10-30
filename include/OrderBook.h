@@ -485,6 +485,7 @@ public:
     // 0 = undated, which PostClose refuses). Same rules as above.
     void beginSession(uint32_t tradingDate);
     uint32_t sessionDate() const { return sessionDate_; }  // 0 = none/undated
+    bool sessionBegun() const { return sessionBegun_; }    // dated or not
     // Safe from any thread: reads publishedState_, the atomic copy the owner
     // stores after every change. Admin /auction, checkpoint and the
     // replication snapshot call it off the worker; tradingState_ itself is

@@ -2880,12 +2880,14 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // A book's trading state goes in before its orders: replay restores
         // them under it, and an accumulated auction book restored into a
         // Continuous one would trade on arrival (AUCT-1). Continuous is the
-        // default, so it needs no record. A session's trading date goes first,
-        // as a dated PreOpen, so a restored book still refuses a second
-        // session that date (decision 7); a halted book's pre-halt state goes
-        // just before its Halted, so the halt still resumes only to it.
+        // default, so it needs no record. A begun session goes first, as a
+        // PreOpen with its trading date, so a restored book still refuses a
+        // second session that date, or an undated one (decision 7); a halted
+        // book's pre-halt state goes just before its Halted, so the halt still
+        // resumes only to it.
         struct SessionState {
-            SymbolId symbolId; TradingState state; uint32_t date; TradingState preHalt;
+            SymbolId symbolId; TradingState state; bool begun; uint32_t date;
+            TradingState preHalt;
         };
         std::vector<SessionState> states;
         // D1: the snapshot drops the trades and the lease records, so it
@@ -2916,9 +2918,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 const OrderBook::CheckpointPrices prices = book->checkpointPricesLocked();
                 if (next > 1 || prices.lastTrade != 0 || prices.reference != 0)
                     counters.push_back({symbolId, next, prices});   // books that traded or priced
-                if (book->getTradingState() != TradingState::Continuous || book->sessionDate() != 0)
-                    states.push_back({symbolId, book->getTradingState(), book->sessionDate(),
-                                      book->preHaltState()});
+                if (book->getTradingState() != TradingState::Continuous || book->sessionBegun())
+                    states.push_back({symbolId, book->getTradingState(), book->sessionBegun(),
+                                      book->sessionDate(), book->preHaltState()});
                 book->forEachOrderLocked([&](const Order& order) {
                     resting.emplace_back(symbolId, order);
                 });
@@ -2926,10 +2928,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         }
 
         const auto writeSnapshot = [&](Journal& snapshotJournal) {
-            for (const auto& [symbolId, state, date, preHalt] : states) {
+            for (const auto& [symbolId, state, begun, date, preHalt] : states) {
                 // Replay applies these unjudged, on a book with no orders yet.
                 TradingState replayed = TradingState::Continuous;
-                if (date != 0) {
+                if (begun) {
                     snapshotJournal.logTradingState(symbolId, TradingState::PreOpen, date);
                     replayed = TradingState::PreOpen;
                 }

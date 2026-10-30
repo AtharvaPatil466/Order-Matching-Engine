@@ -8,7 +8,8 @@
 //
 // WHAT IS PINNED. A transition off the table (docs/MatchingRules.md Rule 7.7)
 // is refused and leaves the book where it was. PostClose -> PreOpen happens
-// only for a later trading date, and that date survives journal recovery.
+// only for a later trading date, and that date survives journal recovery, as
+// does the fact that an undated session began.
 // A halt is a pause: Halted resumes only to the state it was entered from
 // (or the session ends, PostClose), so a halt is no detour around the table
 // (Auction.tla NoReopenAfterClose); the pre-halt state survives recovery.
@@ -207,6 +208,39 @@ void theSessionDateSurvivesRecovery(bool viaCheckpoint) {
                 viaCheckpoint ? " through a checkpoint" : "");
 }
 
+// An undated session leaves no date to keep, but it has begun: a restarted
+// engine must still refuse a second PreOpen from Continuous.
+void anUndatedSessionSurvivesRecovery(bool viaCheckpoint) {
+    const fs::path path = uniqueTempPath(viaCheckpoint ? "session_undated_ckpt.bin"
+                                                       : "session_undated.bin");
+    fs::remove(path);
+    {
+        MatchingEngine e;
+        e.addSymbol(1);
+        expect(e.enableJournal(path.string()), "journal did not open");
+        e.start();
+        expect(e.setTradingStateBatch({1}, TradingState::PreOpen) == 1,
+               "the undated session did not begin");
+        e.setTradingStateBatch({1}, TradingState::Continuous);
+        expect(e.setTradingStateBatch({1}, TradingState::PreOpen) == 0,
+               "a second undated PreOpen began from Continuous");
+        if (viaCheckpoint) e.checkpoint();
+        e.stop();
+    }
+    MatchingEngine r;
+    r.addSymbol(1);
+    expect(r.enableJournal(path.string()), "journal did not reopen");
+    r.replayJournal();
+    r.start();
+    expect(r.setTradingStateBatch({1}, TradingState::PreOpen) == 0,
+           viaCheckpoint ? "after a checkpoint a second undated PreOpen began"
+                         : "after recovery a second undated PreOpen began");
+    r.stop();
+    fs::remove(path);
+    std::printf("  an undated session survives recovery%s\n",
+                viaCheckpoint ? " through a checkpoint" : "");
+}
+
 }  // namespace
 
 int main() {
@@ -215,6 +249,8 @@ int main() {
     sameDateResetDoesNotReopen();
     theSessionDateSurvivesRecovery(/*viaCheckpoint=*/false);
     theSessionDateSurvivesRecovery(/*viaCheckpoint=*/true);
+    anUndatedSessionSurvivesRecovery(/*viaCheckpoint=*/false);
+    anUndatedSessionSurvivesRecovery(/*viaCheckpoint=*/true);
     haltIsAPause();
     thePreHaltStateSurvivesRecovery(/*viaCheckpoint=*/false);
     thePreHaltStateSurvivesRecovery(/*viaCheckpoint=*/true);

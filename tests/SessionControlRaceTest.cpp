@@ -61,21 +61,27 @@ void produce(MatchingEngine& engine, int producer, const std::atomic<bool>& stop
 void driveSessions(MatchingEngine& engine) {
     const std::vector<SymbolId> universe(std::begin(kSymbols), std::end(kSymbols));
     std::atomic<uint64_t> now{0};
+    // Each session on the next weekday: a book closed on a date reopens only
+    // for a later one (decision 7), and weekends fire no phase. Day 4 since
+    // the epoch is Monday 1970-01-05.
+    std::atomic<uint32_t> date{4};
     SessionSchedule sched;
     SessionScheduler scheduler(engine, universe, sched);
     scheduler.setClock([&] { return now.load(std::memory_order_relaxed); });
+    scheduler.setTradingDateFn([&] { return date.load(std::memory_order_relaxed); });
 
-    const uint64_t phases[] = {sched.preOpenMs, sched.openMs,
-                               sched.closeAuctionMs, sched.closeMs};
+    auto at = [&](uint64_t t) {
+        now.store(t, std::memory_order_relaxed);
+        scheduler.tick();
+        std::this_thread::yield();
+    };
     for (int s = 0; s < kSessions; ++s) {
-        for (uint64_t t : phases) {
-            now.store(t, std::memory_order_relaxed);
-            scheduler.tick();
-            std::this_thread::yield();
-        }
-        // A volatility pause and its reopening, then a fresh day. The batch
-        // returns only once every book has made the flip, so the reopening
-        // must find all of them still paused.
+        at(sched.preOpenMs);
+        at(sched.openMs);
+        // A volatility pause and its reopening, in continuous trading — the
+        // only state a pause may start from. The batch returns only once
+        // every book has made the flip, so the reopening must find all of
+        // them still paused.
         engine.setTradingStateBatch(universe, TradingState::VolatilityAuction);
         const size_t reopened = engine.resumeVolatilityAuctions();
         if (reopened != universe.size()) {
@@ -84,7 +90,11 @@ void driveSessions(MatchingEngine& engine) {
             std::abort();
         }
         engine.uncrossBatch(universe);
-        scheduler.resetSession();
+        at(sched.closeAuctionMs);
+        at(sched.closeMs);
+        uint32_t next = date.load(std::memory_order_relaxed) + 1;
+        while ((next + 4) % 7 == 0 || (next + 4) % 7 == 6) ++next;   // skip Sat/Sun
+        date.store(next, std::memory_order_relaxed);
     }
 }
 

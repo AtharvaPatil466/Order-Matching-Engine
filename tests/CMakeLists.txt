@@ -233,6 +233,10 @@ add_test(NAME NoWallClockTimingTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_wall_clock_timing.sh ${CMAKE_SOURCE_DIR})
 set_tests_properties(NoWallClockTimingTest PROPERTIES TIMEOUT 30 LABELS "project;benchmark")
 
+add_test(NAME NoEphemeralTestPortsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_ephemeral_test_ports.sh ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(NoEphemeralTestPortsTest PROPERTIES TIMEOUT 30 LABELS "project")
+
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
                  $<TARGET_FILE:OrderEngine>)
@@ -695,7 +699,7 @@ set_tests_properties(JournalSubmitFailureTest PROPERTIES TIMEOUT 60 LABELS "proj
 # D3 (JRN-3): group commit is bounded in time. 40 acked orders, 200 ms quiet,
 # SIGKILL: all 40 restored — async (OrderEngine's GroupCommit(64)) via the
 # worker idle path, and a sync engine behind TcpGateway via its event loop.
-# Ports 49100-49109.
+# Ports 29100-29109.
 add_executable(JournalCommitDelayTest JournalCommitDelayTest.cpp)
 target_link_libraries(JournalCommitDelayTest PRIVATE OrderMatcher)
 enable_assertions(JournalCommitDelayTest)

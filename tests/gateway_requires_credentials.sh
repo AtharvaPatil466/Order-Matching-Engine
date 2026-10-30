@@ -63,7 +63,7 @@ chmod 600 "$TMP/empty.conf" "$TMP/comments.conf" "$TMP/valid.conf"
 # A real port, so a refusal is the credentials check talking and not argument
 # validation. The refusing cases never reach a bind; the starting cases below
 # pick their own free port.
-DEAD_PORT=47653
+DEAD_PORT=27653
 
 # Run the gateway with a deadline. Sets $rc to its exit status, or to the string
 # "running" if it was still alive at the deadline — which is what "it agreed to
@@ -132,7 +132,7 @@ must_refuse "unreadable file"           "cannot open credentials file" \
 # single hardcoded port makes a flaky test on a busy box.
 must_start() {
     label="$1"; shift
-    port=47700
+    port=27700
     tries=0
     while [ "$tries" -lt 8 ]; do
         log="$TMP/start.log"
@@ -162,7 +162,7 @@ must_start() {
         port=$((port + 1))
         tries=$((tries + 1))
     done
-    note_fail "$label: no free port found in 47700-47707"
+    note_fail "$label: no free port found in 27700-27707"
 }
 
 must_start "one valid credential" --participant-credentials "$TMP/valid.conf"

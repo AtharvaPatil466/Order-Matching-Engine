@@ -78,7 +78,7 @@ bool stillResting(Client& c, const Resting& o) {
 int main(int argc, char** argv) {
     assert(argc == 2 && "usage: GatewayExpiresGtdTest <path-to-GatewayServer>");
     const char* bin = argv[1];
-    uint16_t port = 48230;
+    uint16_t port = 28230;
     const std::string journal = tempJournalPath("ob_gateway_gtd");
     std::remove(journal.c_str());
 

@@ -184,7 +184,7 @@ void crashRound(const char* bin, uint16_t& port, uint32_t seed) {
 
 int main(int argc, char** argv) {
     assert(argc == 2 && "usage: CrashRecoveryE2ETest <path-to-GatewayServer>");
-    uint16_t port = 48500;
+    uint16_t port = 28500;
     for (uint32_t seed : {1u, 2u, 3u}) crashRound(argv[1], port, seed);
     std::puts("CrashRecoveryE2ETest passed");
     return 0;

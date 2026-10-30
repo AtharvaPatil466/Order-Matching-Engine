@@ -48,7 +48,7 @@ SIZE_BEFORE=$(size_of "$WAL")
 
 # --admin-no-auth so the admin port's own required-by-default check is not what
 # ends the process; the journal gate has to be the reason for the exit.
-OUT=$("$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 2>&1)
+OUT=$("$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 28650 2>&1)
 RC=$?
 if [ "$RC" -eq 0 ]; then
     echo "FAIL: engine started on an unreadable journal (exit 0)"; echo "$OUT"; exit 1
@@ -69,11 +69,11 @@ CHAOS_TOKEN="test-only-chaos-token-not-a-secret"
 # rest order $1 through /chaos/order. Leaves EPID set; output goes to $2.
 start_and_order() {
     OB_CHAOS_INJECT=1 OB_CHAOS_TOKEN="$CHAOS_TOKEN" \
-        "$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 > "$2" 2>&1 &
+        "$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 28650 > "$2" 2>&1 &
     EPID=$!
     python3 - "$CHAOS_TOKEN" "$1" <<'PY'
 import json, sys, time, urllib.request
-base = "http://127.0.0.1:48650"
+base = "http://127.0.0.1:28650"
 def get(path, headers=None):
     return json.loads(urllib.request.urlopen(
         urllib.request.Request(base + path, headers=headers or {}), timeout=5).read())
@@ -124,11 +124,11 @@ stop_engine
 # what the restarted book holds — orders 7 and 8, both resting at 100050 — not
 # by a record count: the journal also carries records that are not orders (the
 # sequence-id lease, e06fadd), and that count is not this test's business.
-"$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 > "$TMP/third.log" 2>&1 &
+"$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 28650 > "$TMP/third.log" 2>&1 &
 EPID=$!
 if ! python3 - <<'PY'
 import json, sys, time, urllib.request
-base = "http://127.0.0.1:48650"
+base = "http://127.0.0.1:28650"
 deadline = time.time() + 20
 while time.time() < deadline:
     try:

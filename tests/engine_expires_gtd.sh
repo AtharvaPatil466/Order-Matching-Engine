@@ -100,7 +100,7 @@ sys.exit(1 if failed else 0)
 PY
 }
 
-PORT=48250
+PORT=28250
 tries=0
 while [ "$tries" -lt 8 ]; do
     "$ENGINE" --admin-no-auth --symbols 1 --port "$PORT" > "$TMP/engine.log" 2>&1 &
@@ -116,7 +116,7 @@ while [ "$tries" -lt 8 ]; do
     PORT=$((PORT + 1))
     tries=$((tries + 1))
 done
-[ "$tries" -ge 8 ] && { echo "FAIL: no usable admin port in 48250-48257"; exit 1; }
+[ "$tries" -ge 8 ] && { echo "FAIL: no usable admin port in 28250-28257"; exit 1; }
 [ "$rc" -ne 0 ] && exit 1
 
 echo "PASS: a GTD order expired on time; a later GTD and a GTC stayed"

@@ -60,7 +60,7 @@ bool acked(Client& c, const OrderRequest& r) {
 
 int main(int argc, char** argv) {
     assert(argc == 2 && "usage: GatewayMarketDataThreadTest <path-to-GatewayServer>");
-    uint16_t port = 48810;
+    uint16_t port = 28810;
     const std::string journal = tempJournalPath("ob_gateway_md_thread");
     std::remove(journal.c_str());
 

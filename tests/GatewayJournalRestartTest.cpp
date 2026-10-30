@@ -128,7 +128,7 @@ void acknowledgeThenRestart(const char* bin, uint16_t& port, Stop stop, OrderId 
 int main(int argc, char** argv) {
     assert(argc == 2 && "usage: GatewayJournalRestartTest <path-to-GatewayServer>");
     const char* bin = argv[1];
-    uint16_t port = 48010;
+    uint16_t port = 28010;
 
     acknowledgeThenRestart(bin, port, Stop::Clean, 5001, "clean restart");
     acknowledgeThenRestart(bin, port, Stop::Kill9, 6001, "kill -9 after ack");

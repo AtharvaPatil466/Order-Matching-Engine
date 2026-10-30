@@ -14,7 +14,7 @@
 //     (asyncQuietPeriodThenKill — the audit's h5);
 //   - from the TCP gateway's event loop on a synchronous engine
 //     (syncGatewayQuietPeriodThenKill).
-// TCP ports come from 49100-49109.
+// TCP ports come from 29100-29109.
 
 #include "GatewayProcess.h"
 #include "Journal.h"
@@ -170,14 +170,14 @@ void syncGatewayQuietPeriodThenKill() {
             engine.enableJournal(path);
             static TcpGateway gateway(engine);
             uint16_t port = 0;
-            for (uint16_t p = 49100; p < 49110 && port == 0; ++p)
+            for (uint16_t p = 29100; p < 29110 && port == 0; ++p)
                 if (gateway.start(p)) port = p;
             (void)!write(report, &port, sizeof port);
         },
         [](int fromChild) {
             uint16_t port = 0;
             assert(read(fromChild, &port, sizeof port) == sizeof port);
-            assert(port != 0 && "no free port in 49100-49109");
+            assert(port != 0 && "no free port in 29100-29109");
             gwtest::Client c;
             assert(c.connect(port));
             for (OrderId id = 1; id <= kOrders; ++id) {

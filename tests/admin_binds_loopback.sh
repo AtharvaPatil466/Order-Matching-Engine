@@ -43,7 +43,7 @@ case "$HOST_IP" in
 esac
 echo "  probing from outside loopback via $HOST_IP"
 
-ADMIN_PORT=48210
+ADMIN_PORT=28210
 fails=0
 note_fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
 

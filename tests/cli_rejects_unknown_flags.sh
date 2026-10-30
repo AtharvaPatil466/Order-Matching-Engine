@@ -77,28 +77,28 @@ must_start() {
 # OrderEngine's stdout is block-buffered into a file, so its readiness is read
 # from /readyz, not the log. python3, not curl: CI's Ubuntu image has no curl.
 engine_ready() {
-    python3 -c "import urllib.request as u; assert b'ready' in u.urlopen('http://127.0.0.1:49332/readyz', timeout=1).read()" 2>/dev/null
+    python3 -c "import urllib.request as u; assert b'ready' in u.urlopen('http://127.0.0.1:29332/readyz', timeout=1).read()" 2>/dev/null
 }
 gateway_ready() { grep -qF "Order Gateway listening" "$LOG"; }
 
 must_refuse "OrderEngine --lean" "unknown argument '--lean'" \
-    "$ENGINE" --admin-no-auth --port 49330 --lean
+    "$ENGINE" --admin-no-auth --port 29330 --lean
 must_refuse "OrderEngine --replay-only" "unknown argument '--replay-only'" \
-    "$ENGINE" --admin-no-auth --port 49330 --replay-only
+    "$ENGINE" --admin-no-auth --port 29330 --replay-only
 must_refuse "OrderEngine stray positional" "unknown argument '8080'" \
     "$ENGINE" --admin-no-auth 8080
 must_refuse "OrderEngine --journal with no value" "--journal needs a value" \
-    "$ENGINE" --admin-no-auth --port 49330 --journal
+    "$ENGINE" --admin-no-auth --port 29330 --journal
 must_refuse "GatewayServer --bogus" "unknown argument '--bogus'" \
-    "$GATEWAY" 49331 --no-participant-auth --bogus
-must_refuse "GatewayServer PORT after a flag" "unknown argument '49331'" \
-    "$GATEWAY" --no-participant-auth 49331
+    "$GATEWAY" 29331 --no-participant-auth --bogus
+must_refuse "GatewayServer PORT after a flag" "unknown argument '29331'" \
+    "$GATEWAY" --no-participant-auth 29331
 
 # A check that refuses everything is not a fix: every documented flag still works.
 must_start "OrderEngine, known flags" engine_ready \
-    "$ENGINE" --threads 1 --symbols 1 --port 49332 --admin-bind 127.0.0.1 --admin-no-auth
+    "$ENGINE" --threads 1 --symbols 1 --port 29332 --admin-bind 127.0.0.1 --admin-no-auth
 must_start "GatewayServer, known flags" gateway_ready \
-    "$GATEWAY" 49333 --no-participant-auth
+    "$GATEWAY" 29333 --no-participant-auth
 run "$ENGINE" --help
 [ "$rc" = 0 ] && grep -qF -- "--journal PATH" "$LOG" && echo "  ok  OrderEngine --help" \
     || fail "OrderEngine --help: rc=$rc, or --journal missing from it"

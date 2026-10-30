@@ -37,7 +37,7 @@ PID=""
 cleanup() { [ -n "$PID" ] && kill -9 "$PID" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
-ADMIN_PORT=48170
+ADMIN_PORT=28170
 fails=0
 note_fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
 
@@ -84,7 +84,7 @@ except Exception: sys.exit(1)" 2>/dev/null; then
 
 run_case "--role primary"                 refuse "$ENGINE" --role primary
 run_case "OB_NODE_ROLE=backup"            refuse OB_NODE_ROLE=backup OB_PRIMARY_HOST=127.0.0.1 "$ENGINE"
-run_case "role + explicit opt-in"         start  OB_NODE_ROLE=primary OB_REPLICATION_PORT=48190 \
+run_case "role + explicit opt-in"         start  OB_NODE_ROLE=primary OB_REPLICATION_PORT=28190 \
                                                  "$ENGINE" --allow-unsafe-replication
 
 if [ "$fails" -ne 0 ]; then echo "FAIL: $fails case(s) failed"; exit 1; fi

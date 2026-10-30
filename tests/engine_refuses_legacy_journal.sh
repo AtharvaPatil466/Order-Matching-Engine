@@ -58,7 +58,7 @@ LEGACY="$TMP/legacy.wal"
 # Done through /chaos/order, which calls submitOrder, so the entries are the same
 # shape a client produces. This also doubles as the positive control: a journal
 # this build wrote must replay without complaint.
-PORT=47870
+PORT=27870
 tries=0
 while [ "$tries" -lt 8 ]; do
     OB_CHAOS_INJECT=1 OB_CHAOS_TOKEN="$CHAOS_TOKEN" \
@@ -93,7 +93,7 @@ PY
     [ "$rc" -eq 1 ] && { note_fail "seeding the journal failed"; cat "$TMP/seed.log"; exit 1; }
     PORT=$((PORT + 1)); tries=$((tries + 1))
 done
-[ -z "$EPID" ] && { echo "FAIL: no usable admin port in 47870-47877"; exit 1; }
+[ -z "$EPID" ] && { echo "FAIL: no usable admin port in 27870-27877"; exit 1; }
 
 kill -TERM "$EPID" 2>/dev/null
 waited=0
@@ -126,7 +126,7 @@ PY
 run_case() {
     label="$1"; want="$2"; wal="$3"; shift 3
     log="$TMP/case.log"
-    P=47880
+    P=27880
     "$ENGINE" --journal "$wal" --admin-no-auth --symbols 2 --port "$P" "$@" > "$log" 2>&1 &
     pid=$!
     # Stop as soon as the outcome is known, either way: the process exited
@@ -198,7 +198,7 @@ run_case "journal this build wrote"            start  "$MODERN"
 # the epoch survived the checkpoint AND that a flagless boot is still refused.
 LAUNDER="$TMP/launder.wal"
 cp "$LEGACY" "$LAUNDER"
-LP=47890
+LP=27890
 "$ENGINE" --journal "$LAUNDER" --admin-no-auth --symbols 2 --port "$LP" \
           --replay-legacy-journal > "$TMP/launder.log" 2>&1 &
 EPID=$!

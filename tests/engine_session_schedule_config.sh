@@ -27,7 +27,7 @@ PID=""
 cleanup() { [ -n "$PID" ] && kill -9 "$PID" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
-ADMIN_PORT=49431
+ADMIN_PORT=29431
 fails=0
 note_fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
 

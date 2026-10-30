@@ -128,7 +128,7 @@ PY
 }
 
 # Boot the engine, retrying the admin port if it is taken. Sets EPID and PORT.
-PORT=47830
+PORT=27830
 boot() {
     mode="$1"
     tries=0
@@ -151,7 +151,7 @@ boot() {
         PORT=$((PORT + 1))
         tries=$((tries + 1))
     done
-    echo "FAIL: no usable admin port in 47830-47837"
+    echo "FAIL: no usable admin port in 27830-27837"
     return 1
 }
 

@@ -104,7 +104,7 @@ PY
 }
 
 # A free admin port. A single hardcoded one makes a flaky test on a busy box.
-PORT=47810
+PORT=27810
 tries=0
 rc=2
 while [ "$tries" -lt 8 ]; do
@@ -128,7 +128,7 @@ while [ "$tries" -lt 8 ]; do
 done
 
 if [ "$rc" -eq 2 ]; then
-    echo "FAIL: no usable admin port in 47810-47817"
+    echo "FAIL: no usable admin port in 27810-27817"
     cat "$LOG"
     exit 1
 fi

@@ -136,21 +136,40 @@ public:
     // already inside a push, so none can push into the ring once it is
     // drained and freed. A producer that arrives meanwhile waits in dispatch()
     // until this returns, then publishes inline after the drained backlog.
+    //
+    // A producer publishes from inside the book's own operations, so it reaches
+    // dispatch() holding the book lock, and a resync (MD-9) takes that lock.
+    // The gate therefore closes only once this thread holds the book lock:
+    // closing it first left a producer waiting at the gate with the lock held
+    // while the worker's or this thread's resync waited for the lock
+    // (ItchStopResyncDeadlockTest). The worker is joined with the gate open, so
+    // nothing waits on the gate while it may be resyncing.
     void stopAsyncPublishing() {
         if (!async_.load(std::memory_order_acquire)) return;
-        ringGate_.fetch_or(kRingClosed, std::memory_order_acq_rel);
-        while (ringGate_.load(std::memory_order_acquire) != kRingClosed) {
-            std::this_thread::yield();
-        }
         running_.store(false, std::memory_order_release);
         if (worker_.joinable()) worker_.join();
-        if (ring_) {
-            if (resyncPending_.load(std::memory_order_acquire)) resync();
-            RawEvent e;
-            while (ring_->pop(e)) serializeAndSend(e);
-            ring_.reset();
-        }
-        async_.store(false, std::memory_order_release);
+
+        std::vector<std::string> frames;
+        capture_ = &frames;
+        book_.withBookLock([&] {
+            // Under the book lock no book-side producer is inside dispatch();
+            // the gate waits out the rest (control-thread events), which hold
+            // no lock.
+            ringGate_.fetch_or(kRingClosed, std::memory_order_acq_rel);
+            while (ringGate_.load(std::memory_order_acquire) != kRingClosed) {
+                std::this_thread::yield();
+            }
+            if (ring_) {
+                if (resyncPending_.load(std::memory_order_acquire)) resyncLocked();
+                RawEvent e;
+                while (ring_->pop(e)) serializeAndSend(e);
+                ring_.reset();
+            }
+            async_.store(false, std::memory_order_release);
+        });
+        capture_ = nullptr;
+        for (const std::string& f : frames) send_(f);
+        // A producer that arrived meanwhile publishes inline, after these.
         ringGate_.store(0, std::memory_order_release);
     }
 
@@ -433,24 +452,27 @@ private:
     void resync() {
         std::vector<std::string> frames;
         capture_ = &frames;
-        book_.withBookLock([&] {
-            // Cleared before the drain: a drop after this point marks again.
-            resyncPending_.store(false, std::memory_order_relaxed);
-            RawEvent e;
-            while (ring_->pop(e)) serializeAndSend(e);
-            const uint64_t ts = now();
-            uint8_t buf[ITCH_SIZE_SYSTEM_EVENT];
-            emit(buf, encodeSystemEvent(buf, locateOf(), nextTracking(), ts, ITCH_SE_RESYNC));
-            messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
-            resyncsEmitted_.fetch_add(1, std::memory_order_relaxed);
-            for (const auto& live : liveOrders_) emitOrderDelete(live.first, ts);
-            liveOrders_.clear();
-            book_.forEachDisplayedOrder([&](const Order& o) {
-                emitAdd(o.id, o.side, displayQuantity(o), o.price, ts);
-            });
-        });
+        book_.withBookLock([&] { resyncLocked(); });
         capture_ = nullptr;
         for (const std::string& f : frames) send_(f);
+    }
+
+    // The resync itself. Caller holds the book lock and has set capture_.
+    void resyncLocked() {
+        // Cleared before the drain: a drop after this point marks again.
+        resyncPending_.store(false, std::memory_order_relaxed);
+        RawEvent e;
+        while (ring_->pop(e)) serializeAndSend(e);
+        const uint64_t ts = now();
+        uint8_t buf[ITCH_SIZE_SYSTEM_EVENT];
+        emit(buf, encodeSystemEvent(buf, locateOf(), nextTracking(), ts, ITCH_SE_RESYNC));
+        messagesEmitted_.fetch_add(1, std::memory_order_relaxed);
+        resyncsEmitted_.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& live : liveOrders_) emitOrderDelete(live.first, ts);
+        liveOrders_.clear();
+        book_.forEachDisplayedOrder([&](const Order& o) {
+            emitAdd(o.id, o.side, displayQuantity(o), o.price, ts);
+        });
     }
 
     // The only place the live-order map / tracking counter / sink are

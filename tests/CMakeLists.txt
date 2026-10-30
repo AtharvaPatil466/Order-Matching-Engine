@@ -928,6 +928,16 @@ add_test(NAME ItchReconstructionTest COMMAND ItchReconstructionTest)
 set_tests_properties(ItchReconstructionTest PROPERTIES TIMEOUT 60
                      LABELS "project;protocol")
 
+# LF-5 x MD-9: stopAsyncPublishing() with a resync pending while a matching
+# thread publishes. The producer waits at the closed gate holding the book lock;
+# the stop thread's resync must not need that lock.
+add_executable(ItchStopResyncDeadlockTest ItchStopResyncDeadlockTest.cpp)
+target_link_libraries(ItchStopResyncDeadlockTest PRIVATE OrderMatcher)
+enable_assertions(ItchStopResyncDeadlockTest)
+add_test(NAME ItchStopResyncDeadlockTest COMMAND ItchStopResyncDeadlockTest)
+set_tests_properties(ItchStopResyncDeadlockTest PROPERTIES TIMEOUT 60
+                     LABELS "project;protocol;concurrency")
+
 # ITCH 5.0 exact wire byte-layout / field-offset tests (C / X / P)
 add_executable(ItchByteLayoutTest ItchByteLayoutTest.cpp)
 target_link_libraries(ItchByteLayoutTest PRIVATE OrderMatcher)

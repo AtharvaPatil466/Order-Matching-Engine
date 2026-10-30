@@ -54,7 +54,10 @@ bool runRound(int round) {
     stopped.store(true, std::memory_order_release);
     producer.join();
 
-    const uint64_t delivered = frames.load() + pub.droppedEvents();
+    // A drop is followed by a resync (MD-9): its marker is a frame no producer
+    // published. With no orders resting, a resync is that one frame. Events
+    // published while stop joins the worker can fill the ring and drop.
+    const uint64_t delivered = frames.load() - pub.resyncsEmitted() + pub.droppedEvents();
     if (delivered != published.load()) {
         std::fprintf(stderr, "round %d: published %llu, sent or dropped %llu\n", round,
                      static_cast<unsigned long long>(published.load()),

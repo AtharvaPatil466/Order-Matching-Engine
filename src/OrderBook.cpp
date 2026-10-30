@@ -473,8 +473,11 @@ bool OrderBook::checkMinQty(Side side, Price price, Quantity minQty) const {
         } else {
             if (levelPrice < price) return false;
         }
+        // The whole iceberg, as checkLiquidity counts it: the sweep refreshes
+        // slices and takes the reserve. Its slice alone refused an IOC the
+        // iceberg could fill (OTM-11).
         for (Order* o = level.front(); o; o = o->next) {
-            available += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
+            available += o->remainingQty;
             if (available >= minQty) { found = true; return false; }
         }
         return true;
@@ -1046,7 +1049,11 @@ std::optional<RejectReason> OrderBook::screenFOK(Order* order, OrderId orderId, 
 std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Side side,
                                                Price price, Quantity qty, OrderType type,
                                                Quantity minQty) {
-    if (minQty > 0 && type != OrderType::FOK) [[unlikely]] {
+    // Not in an auction state: nothing executes until the uncross, where a
+    // crossing order is how the auction accumulates, so a crossing minQty
+    // order joins it rather than being cancelled for "locking" a book that is
+    // allowed to cross (OTM-11). The uncross does not apply minQty.
+    if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
         if (!checkMinQty(side, price, minQty)) {
             if (type == OrderType::IOC) {
                 orderLookup_.erase(orderId);

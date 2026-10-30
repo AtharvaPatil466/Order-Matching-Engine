@@ -630,6 +630,14 @@ enable_assertions(PegOrderTest)
 add_test(NAME PegOrderTest COMMAND PegOrderTest)
 set_tests_properties(PegOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.6-F5 (GTDIFF-2, OTM-11): the FOK and minQty pre-checks make the
+# sweep's own STP decisions, count an iceberg's reserve, and skip auctions.
+add_executable(FokStpLiquidityTest FokStpLiquidityTest.cpp)
+target_link_libraries(FokStpLiquidityTest PRIVATE OrderMatcher)
+enable_assertions(FokStpLiquidityTest)
+add_test(NAME FokStpLiquidityTest COMMAND FokStpLiquidityTest)
+set_tests_properties(FokStpLiquidityTest PROPERTIES TIMEOUT 60 LABELS "project;unit;stp")
+
 # Roadmap 1.5-E2 (MATCH-2): match() asserts before printing a zero-quantity
 # trade. The bad state is injected in a forked child, which must abort.
 add_executable(ZeroQuantityTradeTest ZeroQuantityTradeTest.cpp)

@@ -11,11 +11,11 @@
 // WHAT IS PINNED. Each bad state is injected directly — the routes that used
 // to produce them are fixed, and a test that needs a live bug to fail stops
 // testing anything once the bug is gone. A healthy book, partially filled and
-// replaced orders included, still passes.
+// replaced orders included, still passes, and so does a crossed book in an
+// auction state, where crossing orders are how the auction accumulates.
 //
-// NOT YET: a crossed book in Continuous. That check exposes a live defect
-// (an elected trailing stop rests as a limit opposite an iceberg at the same
-// price, MATCH-5) that roadmap 1.6-F3 fixes; it lands with that fix.
+// A crossed or locked book in Continuous (MATCH-5) landed with roadmap 1.6-F3,
+// which fixed the stop sweeps that produced one.
 
 #include "OrderBook.h"
 
@@ -87,6 +87,26 @@ void fillsAndLeavesMustAddUp() {
     expect(!valid(parked), "a parked order whose accounting does not add up is refused");
 }
 
+// The auction is entered, the cross built, and the open's uncross starved of
+// quantity so it prints nothing; the quantities are then put back. What is
+// left is the crossed (or locked) book in Continuous no live route reaches.
+void crossedOrLockedInContinuous(Price bidPx, Price askPx, const char* what) {
+    OrderBook book(1);
+    book.setTradingState(TradingState::AuctionOpen);
+    book.addOrder(1, 1, Side::Buy, bidPx, 10, OrderType::Limit);
+    book.addOrder(2, 2, Side::Sell, askPx, 10, OrderType::Limit);
+    expect(valid(book), "a crossed or locked book in an auction state passes");
+    mutate(book, 1).remainingQty = 0;
+    mutate(book, 2).remainingQty = 0;
+    book.setTradingState(TradingState::Continuous);
+    mutate(book, 1).remainingQty = 10;
+    mutate(book, 2).remainingQty = 10;
+    expect(book.getTradingState() == TradingState::Continuous &&
+           book.getBestBid() == bidPx && book.getBestAsk() == askPx,
+           "the injected book is Continuous with the cross intact");
+    expect(!valid(book), what);
+}
+
 }  // namespace
 
 int main() {
@@ -94,6 +114,8 @@ int main() {
     zeroQuantityRestingOrder();
     icebergShowsMoreThanItHolds();
     fillsAndLeavesMustAddUp();
+    crossedOrLockedInContinuous(10100, 10000, "a crossed book in Continuous is refused");
+    crossedOrLockedInContinuous(10000, 10000, "a locked book (bid == ask) in Continuous is refused");
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -1168,27 +1168,33 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
             match(order);
     }
 
-    // --- Trigger stops / update pegs ---
-    // Not in an auction state (H4, MATCH-6): an elected stop matches on the
-    // spot, so the sweep printed continuous trades during the call period,
-    // elected by a stale last print. Elections resume with continuous trading.
-    if (!inAuction) {
-        if (lastTradePrice_ > 0) {
-            checkStopOrders(lastTradePrice_);
-            updateTrailingStops(lastTradePrice_);
-        }
-        if (!peggedOrders_.empty())
-            updatePeggedOrders();
-    }
-
     // C1: an order STP stopped must report CancelledBySTP (or the fills it
     // really made), never rest and never report Filled — the phantom fill that
     // won OCO groups and cancelled innocent siblings for an order that traded
     // nothing. So this test comes first.
-    if (finalizeIfStpCancelled(order)) return orderId;
+    if (!finalizeIfStpCancelled(order))
+        finalizeRemainingQty(order, orderId, side, price, type);
 
-    finalizeRemainingQty(order, orderId, side, price, type);
+    // Not in an auction state (H4, MATCH-6): an elected stop matches on the
+    // spot, so the sweep printed continuous trades during the call period,
+    // elected by a stale last print. Elections resume with continuous trading.
+    if (!inAuction) runTriggerSweeps();
     return orderId;
+}
+
+// --- Trigger stops / update pegs ---  Precondition: bookLock_ held.
+// Only once the incoming order is final — rested, filled or cancelled; `order`
+// may be freed by then and is not read. Run before, a stop elected by the
+// incoming's own print matched a book without the incoming's remainder,
+// missed it, and rested; the remainder then rested through it, and nothing
+// matches two resting orders: a crossed book (MATCH-5).
+void OrderBook::runTriggerSweeps() {
+    if (lastTradePrice_ > 0) {
+        checkStopOrders(lastTradePrice_);
+        updateTrailingStops(lastTradePrice_);
+    }
+    if (!peggedOrders_.empty())
+        updatePeggedOrders();
 }
 
 // ─── Match (Price-Time FIFO) ─────────────────────────────────────────────────
@@ -2120,10 +2126,13 @@ bool OrderBook::validateIntegrity(std::string* err) const {
     checkSide(bids_, Side::Buy, "bid");
     if (problem.empty()) checkSide(asks_, Side::Sell, "ask");
 
-    // TODO(1.6-F3): refuse a crossed or locked touch while Continuous. Held
-    // back because it fails today on a live defect (an elected trailing stop
-    // rests as a limit opposite an iceberg at the same price, MATCH-5), which
-    // 1.6-F3 fixes by running the stop sweeps after the remainder is final.
+    // Continuous matching never leaves the touch crossed or locked; the
+    // auction states are where crossing orders legitimately accumulate.
+    if (problem.empty() && tradingState_ == TradingState::Continuous &&
+        !bids_.empty() && !asks_.empty() && bids_.bestPrice() >= asks_.bestPrice()) {
+        problem = "book is crossed in Continuous: best bid " + std::to_string(bids_.bestPrice()) +
+                  " >= best ask " + std::to_string(asks_.bestPrice());
+    }
 
     // The other direction: anything orderLookup_ calls resting must be linked.
     // And on every live order, parked ones included, fills and leaves make up
@@ -2429,11 +2438,14 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         }
 
         // A repriced order acts as an aggressor, so it can self-cross too.
-        if (finalizeIfStpCancelled(order)) return true;
+        // Otherwise the same tail as addOrder; addToBook re-slices an iceberg
+        // against what the match left.
+        if (!finalizeIfStpCancelled(order))
+            finalizeRemainingQty(order, orderId, order->side, newPrice, order->type, cumBefore);
 
-        // The same tail as addOrder; addToBook re-slices an iceberg against
-        // what the match left.
-        finalizeRemainingQty(order, orderId, order->side, newPrice, order->type, cumBefore);
+        // As addOrder, and for the same reason after the tail: a replace that
+        // printed through a stop's trigger never elected it (MATCH-5).
+        if (!inAuctionState()) runTriggerSweeps();
     } else {
         // Same price
         const Quantity displayBefore = displayQuantity(*order);

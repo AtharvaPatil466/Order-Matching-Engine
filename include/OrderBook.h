@@ -837,6 +837,7 @@ private:
     bool checkLiquidity(Side side, Price price, Quantity qty, OrderType type) const;
     bool checkMinQty(Side side, Price price, Quantity minQty) const;
 
+    void runTriggerSweeps();
     void checkStopOrders(Price lastTradePrice);
     void updateTrailingStops(Price lastTradePrice);
     void updatePeggedOrders();

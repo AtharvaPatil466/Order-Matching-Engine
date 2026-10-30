@@ -614,6 +614,14 @@ enable_assertions(IntegrityOracleTest)
 add_test(NAME IntegrityOracleTest COMMAND IntegrityOracleTest)
 set_tests_properties(IntegrityOracleTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Roadmap 1.6-F3 (MATCH-5): the stop, trailing and peg sweeps run after the
+# incoming order is final, in addOrder and in cancelReplace.
+add_executable(StopSweepOrderTest StopSweepOrderTest.cpp)
+target_link_libraries(StopSweepOrderTest PRIVATE OrderMatcher)
+enable_assertions(StopSweepOrderTest)
+add_test(NAME StopSweepOrderTest COMMAND StopSweepOrderTest)
+set_tests_properties(StopSweepOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # Roadmap 1.5-E2 (MATCH-2): match() asserts before printing a zero-quantity
 # trade. The bad state is injected in a forked child, which must abort.
 add_executable(ZeroQuantityTradeTest ZeroQuantityTradeTest.cpp)

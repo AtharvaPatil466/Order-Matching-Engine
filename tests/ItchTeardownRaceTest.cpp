@@ -40,8 +40,11 @@ constexpr uint64_t kEventsBeforeStop = 100;
 constexpr uint64_t kEventsAfterStop = 100;
 
 bool runRound(int round) {
-    // On the heap: the book is too big for a secondary thread's stack.
-    const auto book = std::make_unique<OrderBook>(1);
+    // On the heap: the book is too big for a secondary thread's stack. A small
+    // pool, since no order rests: 22 default pools under ASan took 5.7 GB and
+    // over an hour.
+    const auto book = std::make_unique<OrderBook>(1, MatchAlgorithm::PriceTime,
+                                                  /*orderPoolCapacity=*/64);
     std::atomic<uint64_t> frames{0};
     ItchPublisher pub(*book, [&](std::string_view) {
         frames.fetch_add(1, std::memory_order_relaxed);

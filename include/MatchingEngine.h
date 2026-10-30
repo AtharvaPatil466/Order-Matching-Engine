@@ -351,6 +351,15 @@ public:
     // the number of DAY orders cancelled.
     size_t endTradingSession(const std::vector<SymbolId>& symbols);
 
+    // A DAY order with no expiryTime ends with the session, here. With no
+    // session end scheduled nothing would end it — it rested as GTC — so
+    // while this is false submitOrder refuses one (PRIOR-7). True by default,
+    // for an in-process owner that ends sessions itself; OrderEngine and
+    // GatewayServer set it false, and a SessionScheduler sets it true.
+    void setSessionEndScheduled(bool scheduled) {
+        sessionEndScheduled_.store(scheduled, std::memory_order_release);
+    }
+
     // Time management
     void expireOrders(uint64_t currentTime);
 
@@ -652,6 +661,7 @@ private:
     std::vector<SymbolId> symbolIds_;
     std::vector<std::vector<SymbolId>> symbolsByThread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> sessionEndScheduled_{true};  // see setSessionEndScheduled
     std::unique_ptr<Journal> journal_;
     DurabilityGate           durabilityGate_;
     // Atomic because Journal's io_uring path fires onDurable_ from its reaper

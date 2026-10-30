@@ -1806,6 +1806,15 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     if (!orderEnumsDefined(side, type, tif, pegType)) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidFieldValue);
     }
+    // PRIOR-7: expireOrders skips expiryTime 0, so a GTD order without one,
+    // or a DAY order without one where no session end is scheduled, rested as
+    // GTC while its owner believed it time-bounded.
+    if (expiryTime == 0 &&
+        (tif == TimeInForce::GTD ||
+         (tif == TimeInForce::DAY &&
+          !sessionEndScheduled_.load(std::memory_order_acquire)))) [[unlikely]] {
+        return rejectedAsync(RejectReason::MissingRequiredField);
+    }
 
     uint64_t sequenceId = nextSequenceId();
 

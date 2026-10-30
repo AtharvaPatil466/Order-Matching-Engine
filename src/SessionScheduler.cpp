@@ -25,7 +25,10 @@ SessionScheduler::SessionScheduler(MatchingEngine& engine,
       wallAnchorMs_(static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::system_clock::now().time_since_epoch()).count())),
-      steadyAnchor_(std::chrono::steady_clock::now()) {}
+      steadyAnchor_(std::chrono::steady_clock::now()) {
+    // This scheduler's close is the session end a DAY order waits for.
+    engine_.setSessionEndScheduled(true);
+}
 
 SessionScheduler::~SessionScheduler() {
     stop();

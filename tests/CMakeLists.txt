@@ -647,6 +647,13 @@ enable_assertions(PriceRangeTest)
 add_test(NAME PriceRangeTest COMMAND PriceRangeTest)
 set_tests_properties(PriceRangeTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# GTD, and DAY with no session end, must carry an expiry (1.6-F6, PRIOR-7).
+add_executable(ExpiryAdmissionTest ExpiryAdmissionTest.cpp)
+target_link_libraries(ExpiryAdmissionTest PRIVATE OrderMatcher)
+enable_assertions(ExpiryAdmissionTest)
+add_test(NAME ExpiryAdmissionTest COMMAND ExpiryAdmissionTest)
+set_tests_properties(ExpiryAdmissionTest PROPERTIES TIMEOUT 60 LABELS "project;unit;session")
+
 # Roadmap 0.11 (MATCH-3): a repriced iceberg is re-sliced, so it never rests
 # showing more than it holds.
 add_executable(ReplaceIcebergSliceTest ReplaceIcebergSliceTest.cpp)

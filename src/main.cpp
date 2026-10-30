@@ -190,6 +190,9 @@ int main(int argc, char* argv[]) {
     for (size_t s = 0; s < numSymbols; ++s) {
         engine.addSymbol(static_cast<SymbolId>(s));
     }
+    // No session end until a SessionScheduler (below) brings one, so a DAY
+    // order without an expiry is refused instead of resting as GTC (PRIOR-7).
+    engine.setSessionEndScheduled(false);
     std::cout << "[Engine] Registered " << numSymbols << " symbols\n";
 
     // STP-8: a symbol trades in the band its engine.conf entry names, set

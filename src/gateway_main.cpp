@@ -575,6 +575,9 @@ int main(int argc, char* argv[]) {
 
         // Create matching engine
         MatchingEngine engine;
+        // Nothing here ends a session, so a DAY order without an expiry would
+        // rest as GTC: refuse it (PRIOR-7).
+        engine.setSessionEndScheduled(false);
         engine.start();
         engine.addSymbol(0);
         engine.addSymbol(1);

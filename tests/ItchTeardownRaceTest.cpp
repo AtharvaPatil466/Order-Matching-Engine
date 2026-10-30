@@ -12,14 +12,24 @@
 //
 // Every event the producer publishes must reach the sink exactly once (or be
 // counted as dropped on a full ring). Run under ASan and TSan.
+//
+// Rounds run on several publishers at once so the CPUs are oversubscribed: the
+// races below need a thread preempted between two of the gate's atomics, which
+// an idle machine almost never does. A producer that read async mode on, then
+// slept through a whole teardown, pushed into the freed ring (SIGSEGV); one
+// that slept between its two gate RMWs while teardown reset the gate wrapped
+// the counter into "closed" and spun forever (CI timeout).
 
 #include "ItchPublisher.h"
 #include "OrderBook.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <thread>
+#include <vector>
 
 using namespace OrderMatcher;
 
@@ -30,9 +40,10 @@ constexpr uint64_t kEventsBeforeStop = 100;
 constexpr uint64_t kEventsAfterStop = 100;
 
 bool runRound(int round) {
-    OrderBook book(1);
+    // On the heap: the book is too big for a secondary thread's stack.
+    const auto book = std::make_unique<OrderBook>(1);
     std::atomic<uint64_t> frames{0};
-    ItchPublisher pub(book, [&](std::string_view) {
+    ItchPublisher pub(*book, [&](std::string_view) {
         frames.fetch_add(1, std::memory_order_relaxed);
     });
     pub.enableAsyncPublishing(1 << 10);
@@ -70,9 +81,19 @@ bool runRound(int round) {
 }  // namespace
 
 int main() {
-    for (int round = 0; round < kRounds; ++round) {
-        if (!runRound(round)) std::abort();
+    const int groups = static_cast<int>(std::max(4u, 2 * std::thread::hardware_concurrency()));
+    std::atomic<int> next{0};
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> runners;
+    for (int g = 0; g < groups; ++g) {
+        runners.emplace_back([&] {
+            for (int round = next++; round < kRounds; round = next++) {
+                if (!runRound(round)) failed = true;
+            }
+        });
     }
-    std::printf("ItchTeardownRaceTest passed (%d rounds)\n", kRounds);
+    for (std::thread& t : runners) t.join();
+    if (failed) std::abort();
+    std::printf("ItchTeardownRaceTest passed (%d rounds, %d at a time)\n", kRounds, groups);
     return 0;
 }

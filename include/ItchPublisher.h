@@ -170,7 +170,9 @@ public:
         capture_ = nullptr;
         for (const std::string& f : frames) send_(f);
         // A producer that arrived meanwhile publishes inline, after these.
-        ringGate_.store(0, std::memory_order_release);
+        // Clear only the bit: a store(0) erased the count of a producer between
+        // its two gate RMWs, and its decrement then wrapped into "closed".
+        ringGate_.fetch_and(~kRingClosed, std::memory_order_release);
     }
 
     bool     asyncEnabled()   const { return async_.load(std::memory_order_acquire); }
@@ -415,7 +417,10 @@ private:
     // runs async publishing today. Fold the gate into the ring if it matters.
     void dispatch(const RawEvent& e) {
         if (async_.load(std::memory_order_acquire)) {
-            if (!(ringGate_.fetch_add(1, std::memory_order_acquire) & kRingClosed)) {
+            // async_ is read again inside the gate: a producer that saw it on
+            // can reach the gate after a whole teardown has freed the ring.
+            if (!(ringGate_.fetch_add(1, std::memory_order_acquire) & kRingClosed) &&
+                async_.load(std::memory_order_acquire)) {
                 if (!ring_->push(e)) {
                     droppedEvents_.fetch_add(1, std::memory_order_relaxed);
                     resyncPending_.store(true, std::memory_order_release);
@@ -423,7 +428,7 @@ private:
                 ringGate_.fetch_sub(1, std::memory_order_release);
                 return;
             }
-            // Teardown in progress: wait for its drain, then publish inline.
+            // Teardown in progress (or done): wait for its drain, then publish inline.
             ringGate_.fetch_sub(1, std::memory_order_release);
             while (ringGate_.load(std::memory_order_acquire) & kRingClosed) {
                 std::this_thread::yield();

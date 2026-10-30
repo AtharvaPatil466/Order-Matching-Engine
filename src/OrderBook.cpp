@@ -596,7 +596,9 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
                                                             OrderType type,
                                                             Quantity& displayQty,
                                                             Quantity minQty,
-                                                            Price stopLimitPrice) {
+                                                            Price stopLimitPrice,
+                                                            Price stopPrice,
+                                                            Price trailAmount) {
     if (qty == 0) [[unlikely]]
         return rejectOrder(orderId, participantId, qty, RejectReason::InvalidQuantity);
 
@@ -621,13 +623,26 @@ std::optional<RejectReason> OrderBook::validateOrderRequest(OrderId orderId,
         if (displayQty > qty) displayQty = qty;
     }
 
-    // Stop is NOT exempt: an elected Stop becomes a Limit at `price`, so a Stop
-    // at price 0 swept the book to zero and rested its remainder at 0 (OTM-4).
-    // Stop-gap until 1.6-F2 makes Stop a stop-market.
+    // Stop and MIT elect a Market order and StopLimit a Limit at stopLimitPrice,
+    // so `price` is no limit for any trigger type (OTM-4: an elected Stop was a
+    // Limit at `price`, so a stop-market at 0 rested at 0). Their trigger
+    // fields are checked instead: a trigger <= 0 never fires or fires on any
+    // print, and a trail outside (0, reference) puts a trailing stop's trigger,
+    // which is also its elected limit, at or below 0.
     if (type != OrderType::Market && type != OrderType::MOC && price <= 0
-                 && type != OrderType::StopLimit
+                 && type != OrderType::Stop && type != OrderType::StopLimit
                  && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]]
         return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
+    if ((type == OrderType::Stop || type == OrderType::StopLimit || type == OrderType::MIT)
+        && stopPrice <= 0) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
+    if (type == OrderType::StopLimit && stopLimitPrice <= 0) [[unlikely]]
+        return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
+    if (type == OrderType::TrailingStop) [[unlikely]] {
+        const Price reference = lastTradePrice_ > 0 ? lastTradePrice_ : price;  // as parked
+        if (trailAmount <= 0 || trailAmount >= reference)
+            return rejectOrder(orderId, participantId, qty, RejectReason::InvalidPrice);
+    }
 
     // Market + minQty: screenMinQty reads the market order's price 0 as a limit,
     // sees no liquidity, and RESTS the market order in the book (OTM-2).
@@ -1175,7 +1190,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
     if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty, minQty,
-                                      stopLimitPrice)) return *r;
+                                      stopLimitPrice, stopPrice, trailAmount)) return *r;
     // Pool pressure runs before EITHER allocation site (the MOC/LOC park and the
     // main path) so both are covered.
     if (auto r = admitPoolPressure(orderId, participantId, qty)) return *r;
@@ -2694,10 +2709,8 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
             if (order->type == OrderType::StopLimit) {
                 order->type = OrderType::Limit;
                 order->price = order->stopLimitPrice;
-            } else if (order->type == OrderType::MIT) {
-                order->type = OrderType::Market;   // MIT fires a market order
             } else {
-                order->type = OrderType::Limit;
+                order->type = OrderType::Market;   // Stop and MIT fire a market order
             }
 
             stopOrders_.erase_swap(i);
@@ -2710,8 +2723,8 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
 
             // The same tail as addOrder (MATCH-8): this sweep's hand-copied one
             // freed a full fill with no Filled update and rested without the
-            // L2 Add. A triggered MIT is now a Market order, so its remainder
-            // is cancelled there rather than rested.
+            // L2 Add. A triggered Stop or MIT is now a Market order, so its
+            // remainder is cancelled there rather than rested.
             finalizeRemainingQty(order, order->id, order->side, order->price, order->type);
             // Don't increment i — erase_swap moved the last element here
         } else {

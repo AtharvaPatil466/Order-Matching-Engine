@@ -1,13 +1,9 @@
-// OrderTypeAdmissionTest — three order shapes that corrupt the book are refused
-// at admission (roadmap 0.12). Each is a stop-gap until the real semantics land.
+// OrderTypeAdmissionTest — order shapes that corrupt the book are refused at
+// admission (roadmap 0.12). Each is a stop-gap until the real semantics land.
+// (Stop with price <= 0, OTM-4, was the first: 1.6-F2 made Stop a stop-market,
+// pinned by StopMarketTest.)
 //
 // WHAT WAS WRONG.
-//
-//   Stop, price <= 0 (OTM-4). validateOrderRequest exempted Stop from the
-//   price > 0 check, but an elected Stop becomes a Limit at `price`. A sell
-//   Stop at price 0 swept every bid down to zero and rested its remainder as
-//   an ask at 0 — a price admission refuses for any Limit. Fix in 1.6-F2
-//   (Stop becomes stop-market); until then a Stop needs a positive limit.
 //
 //   Market with minQty > 0 (OTM-2). screenMinQty treats the market order's
 //   price (0) as a limit, so a buy sees no liquidity at any price, fails the
@@ -21,7 +17,7 @@
 //   opposite touch is refused now (tests/PegOrderTest.cpp has the rest).
 //
 // WHAT IS PINNED. Each is rejected with a reason, and the book is left as it
-// was: no zero-priced rest, no resting market order, no crossed book. Positive
+// was: no resting market order, no crossed book. Positive
 // controls confirm the ordinary forms still work.
 
 #include "OrderBook.h"
@@ -41,31 +37,6 @@ bool isReject(const AddOrderResult& r, RejectReason want) {
 OrderBook& relaxed(OrderBook& b) {
     b.setCircuitBreakerThreshold(1e9);  // orthogonal to what is under test
     return b;
-}
-
-void stopNeedsAPositivePrice() {
-    OrderBook book(1);
-    relaxed(book);
-    book.addOrder(1, 1, Side::Buy, 9900, 1, OrderType::Limit);
-    book.addOrder(2, 1, Side::Buy, 5000, 10, OrderType::Limit);
-
-    // Sell Stop, trigger 9900, price 0.
-    assert(isReject(book.addOrder(3, 2, Side::Sell, 0, 50, OrderType::Stop, 9900),
-                    RejectReason::InvalidPrice) &&
-           "a Stop with price 0 was admitted; elected, it rests as a Limit at 0");
-    assert(isReject(book.addOrder(4, 2, Side::Sell, -1, 50, OrderType::Stop, 9900),
-                    RejectReason::InvalidPrice));
-
-    // Print 9900. Had the stop been admitted it would now sell through the
-    // 5000 bid and rest 40 as an ask at 0.
-    book.addOrder(5, 3, Side::Sell, 9900, 1, OrderType::Limit);
-    assert(book.getBestBid() == 5000 && "the 5000 bid must be untouched");
-    assert(book.getBestAsk() > 0 && "an ask rests at price 0");
-
-    // Control: a Stop with a positive price is still admitted.
-    assert(std::holds_alternative<OrderId>(
-        book.addOrder(6, 2, Side::Sell, 4000, 5, OrderType::Stop, 4500)));
-    std::puts("  Stop: price <= 0 rejected (InvalidPrice), positive price admitted");
 }
 
 void marketMinQtyIsRejected() {
@@ -117,7 +88,6 @@ void peggedIsRejected() {
 }  // namespace
 
 int main() {
-    stopNeedsAPositivePrice();
     marketMinQtyIsRejected();
     peggedIsRejected();
     std::puts("OrderTypeAdmissionTest passed");

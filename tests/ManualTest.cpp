@@ -114,7 +114,8 @@ void testStopOrder() {
     TestListener listener;
     book.setEventListener(&listener);
 
-    book.addOrder(1, 1, Side::Buy, 1050000, 100, OrderType::Stop, 1050000);
+    book.addOrder(1, 1, Side::Buy, 1050000, 100, OrderType::StopLimit, 1050000, 0,
+                  TimeInForce::GTC, 0, /*stopLimitPrice=*/1050000);
 
     book.addOrder(2, 2, Side::Sell, 1040000, 50, OrderType::Limit);
     book.addOrder(3, 3, Side::Buy, 1040000, 50, OrderType::Limit);

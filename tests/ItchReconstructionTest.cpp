@@ -500,11 +500,12 @@ void test_TriggeredStopEntersFeedOnRest() {
         // Resting ask at 1005 to trade against.
         f.engine.submitOrder(1, 100, 1, Side::Sell, 1005, 100, OrderType::Limit);
 
-        // Buy stop: triggers at 1005, then becomes a limit at 990 — below the
-        // best ask, so it rests rather than filling. That rest is the moment
-        // it becomes displayed liquidity and must hit the feed.
-        f.engine.submitOrder(1, 101, 2, Side::Buy, 990, 50, OrderType::Stop,
-                             /*stopPrice=*/1005);
+        // Buy stop-limit: triggers at 1005, then becomes a limit at 990 — below
+        // the best ask, so it rests rather than filling. That rest is the
+        // moment it becomes displayed liquidity and must hit the feed.
+        f.engine.submitOrder(1, 101, 2, Side::Buy, 990, 50, OrderType::StopLimit,
+                             /*stopPrice=*/1005, /*displayQty=*/0, TimeInForce::GTC,
+                             /*expiryTime=*/0, /*stopLimitPrice=*/990);
         const uint64_t addsBeforeTrigger = f.pub->addsEmitted();
         CHECK(!f.reco.knows(101));
 
@@ -669,7 +670,7 @@ void test_RandomisedFlowStaysInSync() {
                 resting.push_back(id);
             } else if (action == 7) {
                 // Stop: invisible until the market trades through stopPrice,
-                // then rests as a limit (and shows up) or fills outright.
+                // then trades as a market order; its remainder is cancelled.
                 const auto stopPx = static_cast<Price>(pick(995, 1005));
                 f.engine.submitOrder(1, id, 4, side, price, qty, OrderType::Stop,
                                      /*stopPrice=*/stopPx);

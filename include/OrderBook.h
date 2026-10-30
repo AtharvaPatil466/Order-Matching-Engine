@@ -937,7 +937,8 @@ private:
     OB_ALWAYS_INLINE std::optional<RejectReason> validateOrderRequest(OrderId orderId, ParticipantId participantId,
                                                      Price price, Quantity qty, OrderType type,
                                                      Quantity& displayQty, Quantity minQty,
-                                                     Price stopLimitPrice);
+                                                     Price stopLimitPrice, Price stopPrice,
+                                                     Price trailAmount);
     RejectReason checkItchFieldWidths(Price price, Quantity qty, Price stopLimitPrice) const;
     std::optional<RejectReason> admitPoolPressure(OrderId orderId, ParticipantId participantId,
                                                   Quantity qty);

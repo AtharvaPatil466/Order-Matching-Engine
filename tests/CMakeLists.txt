@@ -616,6 +616,13 @@ enable_assertions(OrderTypeAdmissionTest)
 add_test(NAME OrderTypeAdmissionTest COMMAND OrderTypeAdmissionTest)
 set_tests_properties(OrderTypeAdmissionTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# Stop is stop-market; trigger fields are validated (1.6-F2, OTM-4).
+add_executable(StopMarketTest StopMarketTest.cpp)
+target_link_libraries(StopMarketTest PRIVATE OrderMatcher)
+enable_assertions(StopMarketTest)
+add_test(NAME StopMarketTest COMMAND StopMarketTest)
+set_tests_properties(StopMarketTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # Roadmap 0.11 (MATCH-3): a repriced iceberg is re-sliced, so it never rests
 # showing more than it holds.
 add_executable(ReplaceIcebergSliceTest ReplaceIcebergSliceTest.cpp)

@@ -110,21 +110,22 @@ TEST(CriticalFixes, CancellingMitOrderDoesNotDanglingFire) {
 //
 // stopPrice = trailRefPrice - trailAmount with trailAmount > trailRefPrice
 // produced a negative (nonsensical) trigger price; pathological inputs are
-// signed-overflow UB. Floor the stop at 0 at both the init (addOrder) and
-// ratchet (updateTrailingStops) sites. stopPrice is observable via getOrder().
+// signed-overflow UB. The stop was floored at 0, which parked an order that
+// could never trigger; admission now refuses a trail that is not inside
+// (0, reference) (1.6-F2, OTM-4).
 TEST(CriticalFixes, SellTrailingStopPriceDoesNotUnderflow) {
     OrderBook book(0);
     // sell trailing stop, no prior trade -> trailRefPrice = price = 100,
-    // trailAmount = 150 > 100. Buggy: stopPrice = 100-150 = -50. Fixed: 0.
+    // trailAmount = 150 > 100. Buggy: stopPrice = 100-150 = -50.
     // addOrder positional args: id,pid,side,price,qty,type,stopPrice,displayQty,
     //   tif,expiryTime,stopLimitPrice,pegType,pegOffset,trailAmount,...
-    book.addOrder(1, 1, Side::Sell, 100, 10, OrderType::TrailingStop,
-                  /*stopPrice=*/0, /*displayQty=*/0, TimeInForce::GTC,
-                  /*expiryTime=*/0, /*stopLimitPrice=*/0, PegType::None,
-                  /*pegOffset=*/0, /*trailAmount=*/150);
-    const Order* o = book.getOrder(1);
-    ASSERT_NE(o, nullptr);
-    EXPECT_GE(o->stopPrice, 0) << "trailing-stop price must not go negative";
+    const auto r = book.addOrder(1, 1, Side::Sell, 100, 10, OrderType::TrailingStop,
+                                 /*stopPrice=*/0, /*displayQty=*/0, TimeInForce::GTC,
+                                 /*expiryTime=*/0, /*stopLimitPrice=*/0, PegType::None,
+                                 /*pegOffset=*/0, /*trailAmount=*/150);
+    ASSERT_TRUE(std::holds_alternative<RejectReason>(r));
+    EXPECT_EQ(std::get<RejectReason>(r), RejectReason::InvalidPrice);
+    EXPECT_EQ(book.getOrder(1), nullptr) << "a trail wider than its reference must not park";
 }
 
 // ─── Perf #1: per-fill onTrade dispatch skipped when no listener ─────────────

@@ -42,7 +42,7 @@ std::pair<size_t, size_t> parkedStops(const OrderBook& book) {
     size_t parked = 0, latched = 0;
     for (OrderId id = kFirstStop; id < kFirstStop + kStops; ++id) {
         const Order* o = book.getOrder(id);
-        if (o && o->type == OrderType::Stop) {
+        if (o && o->type == OrderType::StopLimit) {
             ++parked;
             latched += o->isStopTriggered;
         }
@@ -62,7 +62,8 @@ int main() {
         engine.submitOrder(kSym, 1, 1, Side::Sell, 10000, 1, OrderType::Limit);
         // Buy stops triggering at 100.00, each becoming a buy at 99.00 that rests.
         for (OrderId id = kFirstStop; id < kFirstStop + kStops; ++id)
-            engine.submitOrder(kSym, id, 3, Side::Buy, 9900, 1, OrderType::Stop, 10000);
+            engine.submitOrder(kSym, id, 3, Side::Buy, 9900, 1, OrderType::StopLimit, 10000,
+                               0, TimeInForce::GTC, 0, /*stopLimitPrice=*/9900);
         // The print at 100.00 elects all of them; the budget executes 64.
         engine.submitOrder(kSym, 2, 2, Side::Buy, 10000, 1, OrderType::Limit);
         const auto [parked, latched] = parkedStops(*engine.getOrderBook(kSym));

@@ -96,7 +96,8 @@ void electedStopThatRestsIsPublished() {
     book.setEventListener(&cap);
 
     book.addOrder(1, 1, Side::Sell, PX, 2, OrderType::Limit);
-    book.addOrder(2, 2, Side::Buy, PX, 5, OrderType::Stop, /*stopPrice=*/PX);
+    book.addOrder(2, 2, Side::Buy, PX, 5, OrderType::StopLimit, /*stopPrice=*/PX, 0,
+                  TimeInForce::GTC, 0, /*stopLimitPrice=*/PX);
     cap.md.clear();
     book.addOrder(3, 3, Side::Buy, PX, 1, OrderType::Limit);   // prints PX: elects 2
     // Stop 2 takes the 1 left and rests 4 @ PX as a limit.

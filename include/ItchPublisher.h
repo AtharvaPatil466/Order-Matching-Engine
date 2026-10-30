@@ -468,8 +468,11 @@ private:
     void resyncLocked() {
         // Cleared before the drain: a drop after this point marks again.
         resyncPending_.store(false, std::memory_order_relaxed);
+        // Only what is queued now. Book events cannot arrive (their producers
+        // hold the book lock); a control thread can, and draining until empty
+        // let it keep the worker here forever while stop waited to join it.
         RawEvent e;
-        while (ring_->pop(e)) serializeAndSend(e);
+        for (size_t n = ring_->approxSize(); n > 0 && ring_->pop(e); --n) serializeAndSend(e);
         const uint64_t ts = now();
         uint8_t buf[ITCH_SIZE_SYSTEM_EVENT];
         emit(buf, encodeSystemEvent(buf, locateOf(), nextTracking(), ts, ITCH_SE_RESYNC));

@@ -120,16 +120,39 @@ if [ "$(cat "$WAL.torn" 2>/dev/null)" != "torn-final-write-30-bytes-xxxx" ]; the
 fi
 stop_engine
 
-# The order taken after the cut is on disk where replay reaches it.
+# The order taken after the cut is on disk where replay reaches it. Checked by
+# what the restarted book holds — orders 7 and 8, both resting at 100050 — not
+# by a record count: the journal also carries records that are not orders (the
+# sequence-id lease, e06fadd), and that count is not this test's business.
 "$ENGINE" --journal "$WAL" --admin-no-auth --symbols 1 --port 48650 > "$TMP/third.log" 2>&1 &
 EPID=$!
-waited=0
-while [ "$waited" -lt 60 ] && ! grep -q "Replayed" "$TMP/third.log"; do  # 60 x 0.25s = 15s
-    sleep 0.25; waited=$((waited + 1))
-done
+if ! python3 - <<'PY'
+import json, sys, time, urllib.request
+base = "http://127.0.0.1:48650"
+deadline = time.time() + 20
+while time.time() < deadline:
+    try:
+        if json.loads(urllib.request.urlopen(base + "/readyz", timeout=5).read()).get("status") == "ready":
+            break
+    except Exception:
+        pass
+    time.sleep(0.2)
+else:
+    sys.exit("the restarted engine never became ready")
+book = json.loads(urllib.request.urlopen(base + "/book?symbolId=0", timeout=5).read())
+level = [b for b in book.get("bids", []) if b.get("price") == 100050]
+if not level or level[0].get("orders") != 2 or level[0].get("qty") != 50:
+    sys.exit("expected orders 7 and 8 resting at 100050 (2 orders, 50 shares), got %r" % book.get("bids"))
+PY
+then
+    stop_engine
+    echo "FAIL: the order accepted after the cut did not come back after a restart:"
+    grep -E "Replayed|FATAL|REFUSING" "$TMP/third.log" || cat "$TMP/third.log"
+    exit 1
+fi
 stop_engine
-if ! grep -q "Replayed 2 of 2 " "$TMP/third.log"; then
-    echo "FAIL: the order accepted after the cut did not replay:"
+if ! grep -Eq "Replayed ([0-9]+) of \1 " "$TMP/third.log"; then
+    echo "FAIL: the restart did not replay every recoverable entry:"
     grep -E "Replayed|FATAL|REFUSING" "$TMP/third.log" || cat "$TMP/third.log"
     exit 1
 fi

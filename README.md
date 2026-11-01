@@ -66,11 +66,11 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy
 - **Volatility Circuit Breakers**: a fixed 5% threshold on the price an order's first fill would print at; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant
-- **Kill Switch**: Instant cancellation of all orders for a participant across all symbols
+- **Kill Switch**: Cancels every resting order of a participant on every symbol, each cancel journaled, before the call returns
 - **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first
 - **Pre-Trade Risk Limits**: Max order size, notional, and position limits per participant
-- **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst) to bound queue depth and tail latency
-- **Queue-Depth Backpressure**: Rejects orders when queue exceeds configurable threshold, hard ceiling on queuing delay
+- **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst), off by default
+- **Queue-Depth Backpressure** (library only: neither binary sets a threshold): `setBackpressureThreshold` makes ingress refuse an order with `QueueBackpressure` once its worker's queue is past that fraction of capacity. No test drives a queue past the threshold, so nothing here bounds queuing delay
 - **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (the admin port opens only after journal replay completes, so during replay both probes get connection refused; `/readyz` is 200 once the engine is up)
 
 ### Microstructure Research Infrastructure
@@ -83,13 +83,13 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Calibration & Backtesting**: `CalibrationPipeline` (Nelder-Mead minimization of spread decomposition residuals), `BacktestEngine` (replay historical tape against research models), `ResearchDashboard` and `ResearchSerializer` for result persistence
 
 ### Reliability & Observability
-- **CRC-32 Journaling**: a journal replayed on boot (a torn or corrupt tail is refused, not appended behind), atomic checkpoint, and deterministic replay via virtual clock. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `GatewayServer` holds acks, fills and order updates until the entry is synced; `OrderEngine` acks at enqueue and group-commits. A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
+- **CRC-32 Journaling**: a journal replayed on boot (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind), atomic checkpoint, and deterministic replay via virtual clock. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `GatewayServer` holds acks, fills and order updates until the entry is synced; `OrderEngine` acks at enqueue and group-commits. A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
 - **Primary-Backup Replication — disabled by default, known defects**: `ReplicationCoordinator` is wired into `src/main.cpp` behind `OB_NODE_ROLE`, but a role now refuses to boot unless `--allow-unsafe-replication` acknowledges it. The path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced, and a promoted backup can execute orders twice. The chaos suite still runs the 1+1 topology, opted in
 - **Lease Propagation (no fencing)**: Primary broadcasts `LeaseGrant` (durationMs) every heartbeat tick; backup's local lease state is refreshed via same-epoch-from-same-holder path; `BackupPromote` requires both heartbeat miss AND local lease expiry. That delays promotion; it does **not** prevent split brain: a primary never steps down (`ReplicationCoordinator` has no path out of `Primary`, and `isFenced()` has no caller), so a partition that outlasts the 5 s lease leaves two primaries
 - **TCP Auto-Reconnect**: `ReplicationTransport::receiveLoop` retries `connectTo()` against saved host/port after socket loss — backup re-establishes within milliseconds of primary recovery without external orchestration
 - **Snapshot Catchup on Join**: When a backup connects, primary streams all currently-resting orders via `streamSnapshot` → `JournalEntry::Snapshot` messages; idempotent on receiver — closes the rolling-restart gap
 - **Warm Standby (library only)**: `JournalFollower` — single-host tailing with a `promote()` API. No shipped binary constructs it
-- **Deterministic Sequencing**: Monotonic `sequenceNumber` on all `Trade`, `OrderUpdate`, and `MarketDataUpdate` events for gap detection
+- **Deterministic Sequencing**: a book's `MarketDataUpdate` events carry strictly increasing `sequenceNumber`s, and a subscriber that applies only them holds the book's depth. `Trade` and `OrderUpdate` carry one too; no test holds either to an order
 - **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically
 - **Structured Logging**: Pluggable `StructuredSink` API with `NullSink` (zero-cost default), `JsonStderrSink` (dev), and `CapturingSink` (tests)
 - **Prometheus Metrics**: `MetricsRegistry` with atomic Counters, Gauges, Histograms; `/prometheus` text-exposition endpoint exposes `journal_entries_committed_total`, `replication_entries_shipped_total`, `replication_bytes_sent_total`, `replication_snapshot_streams_total`, `replication_snapshot_entries_total`
@@ -104,7 +104,7 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Checks `NoCommittedLoss` as a count (after a `SIGKILL` of the primary process, the backup's journal head grew at least as much as the primary's), that no backup promotes while partitioned, lossy or clock-skewed — but every such check finishes inside the 5 s lease, before a backup could promote, so none tests split brain (the partition tests assert within ~2 s and heal) — snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-gated promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md).
 - **TSan**: `ReplicationProtocolTest` is TSan-clean (was previously excluded due to teardown races on non-atomic fds + non-atomic sendSeq_; closed by atomic fds + `shutdown(2)` wakeup + atomic sequence)
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison
-- **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; zero-cost in production (`OB_ENABLE_FAULT_INJECTION` off)
+- **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; compiled out unless built with `ENABLE_FAULT_INJECTION` (`OB_ENABLE_FAULT_INJECTION`)
 - **Coverage-Guided Fuzzing**: libFuzzer targets for the FIX parser, framer and round trip, and `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
 
 ## 📊 Performance Benchmarks
@@ -298,7 +298,7 @@ AUTH="Authorization: Bearer $OB_ADMIN_TOKEN"
 
 # Probes — always credential-free (k8s liveness/readiness)
 curl localhost:8080/health                # k8s liveness probe
-curl localhost:8080/readyz                # 503 until journal replay completes, then 200
+curl localhost:8080/readyz                # refused while the journal replays, 503 until the engine is up, then 200
 
 # Liveness / build / replication state
 curl -H "$AUTH" localhost:8080/version               # gitSha + buildTime + engineVersion

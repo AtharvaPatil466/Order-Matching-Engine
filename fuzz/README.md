@@ -8,6 +8,29 @@ Three fuzz targets covering the FIX wire-format surface:
 | `fuzz_fix_framer` | `fuzz_fix_framer.cpp` | `FixFramer` reassembly across arbitrary fragmented chunks; asserts every emitted frame is `isWellFormed` + checksum-valid |
 | `fuzz_fix_roundtrip` | `fuzz_fix_roundtrip.cpp` | `FixSerializer::buildExecutionReport` → `FixMessage::parse` round-trip; asserts field-level identity |
 
+And one on the engine itself:
+
+| Target | Source | Exercises |
+|---|---|---|
+| `fuzz_gateway_engine` | `fuzz_gateway_engine.cpp` | A client's byte stream through `TcpGateway`'s framer and `decodeFrame` into `MatchingEngine::submitOrder` (GatewayServer's shape: symbols 0 and 1, synchronous), then `OrderBook::validateIntegrity` on every book, before and after an expiry sweep. Engine asserts armed, UBSan halting. CI runs it for 10 minutes (`gateway-engine-fuzz`). |
+
+It is compiled together with the engine sources (not linked against
+`OrderMatcher`) so libFuzzer's coverage and the sanitizers reach the engine.
+Its seeds are binary frames, generated rather than committed:
+
+```bash
+python3 fuzz/gen_gateway_seeds.py /tmp/gw-corpus
+./fuzz/run_libfuzzer.sh gateway 60 /tmp/gw-corpus
+./build-fuzz/fuzz/fuzz_gateway_engine_replay /tmp/gw-corpus   # no libFuzzer needed
+```
+
+On macOS with Homebrew LLVM, run it with
+`ASAN_OPTIONS=detect_container_overflow=0`: Darwin's libFuzzer runtime shares
+the program's `std::vector` code, and the mix of annotated and unannotated
+instantiations trips ASan inside libFuzzer's own corpus bookkeeping on the
+first input. Linux's runtime carries a private libc++, so CI runs with full
+ASan.
+
 ## Two run modes
 
 ### Replay (always available)

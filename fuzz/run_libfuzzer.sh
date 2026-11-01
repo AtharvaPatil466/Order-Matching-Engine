@@ -26,8 +26,9 @@ case "$TARGET_SHORT" in
     parser)    TARGET=fuzz_fix_parser ;;
     framer)    TARGET=fuzz_fix_framer ;;
     roundtrip) TARGET=fuzz_fix_roundtrip ;;
+    gateway)   TARGET=fuzz_gateway_engine ;;  # corpus: fuzz/gen_gateway_seeds.py <dir>
     *)
-        echo "unknown target: $TARGET_SHORT (parser|framer|roundtrip)"
+        echo "unknown target: $TARGET_SHORT (parser|framer|roundtrip|gateway)"
         exit 2
         ;;
 esac

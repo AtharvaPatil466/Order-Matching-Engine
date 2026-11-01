@@ -165,6 +165,8 @@ public:
     void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
 
 private:
+    friend struct TcpGatewayFuzzAccess;  // fuzz/fuzz_gateway_engine.cpp drives feedBytes
+
     // Per-client state for partial read buffering and write queueing
     struct ClientState {
         std::vector<char> readBuf;

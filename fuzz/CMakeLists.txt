@@ -17,8 +17,11 @@ function(add_replay_target name harness_src)
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_features(${name} PRIVATE cxx_std_20)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        # -UNDEBUG: the harnesses' asserts are their oracle. A Release
+        # configure compiled them out — and with them the parse calls written
+        # inside assert() — which GCC's -Werror then refused as unused.
         target_compile_options(${name} PRIVATE
-            -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+            -fsanitize=address,undefined -fno-omit-frame-pointer -g -UNDEBUG)
         target_link_options(${name} PRIVATE
             -fsanitize=address,undefined)
     endif()
@@ -49,7 +52,7 @@ function(add_libfuzzer_target name harness_src)
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_features(${name} PRIVATE cxx_std_20)
     target_compile_options(${name} PRIVATE
-        ${_FUZZER_FLAG} -fno-omit-frame-pointer -g)
+        ${_FUZZER_FLAG} -fno-omit-frame-pointer -g -UNDEBUG)
     target_link_options(${name} PRIVATE ${_FUZZER_FLAG})
 endfunction()
 

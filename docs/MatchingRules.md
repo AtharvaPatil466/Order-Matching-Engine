@@ -128,9 +128,9 @@ prices in one fixed range of at most that width. The range is set once:
 With a configured range, an order priced outside it is rejected with `OutOfPriceRange` at
 admission, before the ack: `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg`, `Hidden` and `LOC` on
 their `price`, `StopLimit` on its `stopLimitPrice`. A replace of a `Limit`, `PostOnly`,
-`Iceberg` or `Hidden` order to a price outside it is refused the same way, and the order keeps
-resting. Everywhere else — a trailing stop's limit (it moves with its trigger), a peg's computed
-price, a replaced `LOC`, and every order on an anchored book — the backstop is the insert
+`Iceberg`, `Hidden` or released `LOC` order to a price outside it is refused the same way, and
+the order keeps resting. Everywhere else — a trailing stop's limit (it moves with its trigger), a
+peg's computed price, and every order on an anchored book — the backstop is the insert
 itself: a rest outside the range is reported `Rejected` (`OutOfPriceRange`) and then
 `Cancelled`, after the ack and after any fills.
 
@@ -1346,9 +1346,10 @@ If the dry run fills less than `minQty`: an `IOC` or `Market` order is cancelled
 **crossing** limit order is cancelled (resting it would leave bid ≥ ask, a locked book); a
 **non-crossing** limit order rests and waits.
 
-**A `Market` order with `minQty` is an IOC with `minQty`.** It is counted at every level; one
-that misses its minimum is cancelled untraded, and one that meets it trades and has its
-remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
+**A `Market` order with `minQty` is an IOC with `minQty`.** It is counted at every level it can
+reach — every level, or under price-time with market protection on, the levels inside the collar
+(`OrderBook::marketCollar`) where `match()` stops; one that misses its minimum is cancelled
+untraded, and one that meets it trades and has its remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
 liquidity and was **rested in the book as a bid at 0**, where it later printed at 0; roadmap
 0.12 rejected `Market` + `minQty` outright until 1.6-F2 (OTM-2).
 

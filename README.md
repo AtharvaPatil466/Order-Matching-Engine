@@ -3,9 +3,9 @@
 > [!WARNING]
 > **Single node. Not production-ready.** Replication is off unless you pass
 > `--allow-unsafe-replication`, and it has known CRITICAL defects: a deposed
-> primary is never fenced, and a promoted backup can execute orders twice.
+> primary is never fenced, and a promoted backup can execute orders twice. <!-- claim:repl-refuses-role -->
 > **Acks are durable only from `GatewayServer` started with `--journal`**, which
-> syncs each order to disk before acknowledging it. `OrderEngine` acknowledges
+> syncs each order to disk before acknowledging it. <!-- claim:gw-durable-ack --> `OrderEngine` acknowledges
 > at enqueue and group-commits its journal, so an acknowledged order can be
 > lost. FIX, SBE, ITCH and MoldUDP64 are library code that neither binary
 > serves, OUCH is served only by an `OrderEngine` built with `ENABLE_DPDK`
@@ -22,56 +22,56 @@
 [![TLA+](https://img.shields.io/badge/TLA%2B-11_specs-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocol_codecs_(library)-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire-protocol codecs (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) with TCP and UDP transports and MoldUDP64 gap recovery — library code with tests, served by no shipped binary (`GatewayServer` speaks only its native binary protocol), TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds; `Replication.tla` passes only vacuously — its backup can never promote), a live multi-container chaos suite (19 scenarios: failover detection, snapshot catchup, rolling restart, and a journal-count check of committed entries under `SIGKILL` — its no-split-brain checks all finish inside the 5 s lease, so they do not exercise split brain), primary-backup replication wired into `OrderEngine` but disabled by default because of known CRITICAL defects, a token-authenticated chaos injection endpoint, and an operational stack (config management, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **39.4K LOC (engine) / 73.5K with tests, 103 test executables, 525 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
+A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire-protocol codecs (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) with TCP and UDP transports and MoldUDP64 gap recovery — library code with tests, served by no shipped binary (`GatewayServer` speaks only its native binary protocol), TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->; `Replication.tla` passes only vacuously — its backup can never promote), a live multi-container chaos suite (19 scenarios: failover detection, snapshot catchup, rolling restart, and a journal-count check of committed entries under `SIGKILL` — its no-split-brain checks all finish inside the 5 s lease, so they do not exercise split brain), primary-backup replication wired into `OrderEngine` but disabled by default because of known CRITICAL defects, a token-authenticated chaos injection endpoint, and an operational stack (config management, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **39.4K LOC (engine) / 73.5K with tests, 103 test executables, 525 CTest targets, 19 chaos scenarios, 12 TLA+ specifications.**
 
 ## 🔬 Research
 
 This engine served as the experimental substrate for a published market microstructure paper testing the **Budish–Cramton–Shim (BCS) theory of the HFT arms race** — the argument that continuous limit-order-book markets structurally incentivize a socially-wasteful race for speed. Read it on SSRN: [**Experimental Evidence for the HFT Arms Race: Welfare Decomposition and Market Fragility on a Formally Verified Limit Order Book**](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6994722).
 
-The experiment code lives in [`bcs_research/`](./bcs_research/). The matching core's FIFO and conservation invariants are [model-checked](#formal-verification) at small bounds, and the engine passes 525 tests including property and shadow-mode divergence checks. That is **not** a proof that the experiments are artifact-free, and an earlier version of this line claimed it was: the verified configuration is `MaxOrders=4`, two participants, two prices, with no STP, icebergs, pro-rata, auctions, pegs or stops — while the experiments drive millions of orders through market-maker and HFT agents, latency models and batch auctions, essentially none of which is in the model. What supports the results is the test suite and the finding that every qualitative result survives recalibration, not the state count.
+The experiment code lives in [`bcs_research/`](./bcs_research/). The matching core's FIFO and conservation invariants are [model-checked](#formal-verification) at small bounds <!-- claim:tla-matching-engine -->, and the engine passes 525 tests including property and shadow-mode divergence checks. That is **not** a proof that the experiments are artifact-free, and an earlier version of this line claimed it was: the verified configuration is `MaxOrders=4`, two participants, two prices, with no STP, icebergs, pro-rata, auctions, pegs or stops — while the experiments drive millions of orders through market-maker and HFT agents, latency models and batch auctions, essentially none of which is in the model. What supports the results is the test suite and the finding that every qualitative result survives recalibration, not the state count.
 
 ## 🚀 Key Features
 
 ### Core Engine
-- **Professional Order Types**: Limit, Market, IOC, FOK, Stop (a stop-market), StopLimit, TrailingStop, Iceberg, Hidden, PostOnly, MIT, MOC, LOC, Pegged (MidPeg / PrimaryPeg, referenced to non-pegged orders and never resting at or through the opposite touch). See [docs/MatchingRules.md](./docs/MatchingRules.md) §5-6
+- **Professional Order Types**: Limit, Market, IOC, FOK, Stop (a stop-market), StopLimit, TrailingStop, Iceberg, Hidden, PostOnly, MIT, MOC, LOC, Pegged (MidPeg / PrimaryPeg, referenced to non-pegged orders and never resting at or through the opposite touch). <!-- claim:peg-never-crosses --> See [docs/MatchingRules.md](./docs/MatchingRules.md) §5-6
 - **O(1) Price Lookup**: `FlatPriceMap` — flat array indexed by price tick, replacing `std::map` red-black trees
 - **Intrusive Data Structures**: Zero-heap matching via `ObjectPool` + intrusive doubly-linked order lists
-- **Dual Match Algorithms**: Price-Time FIFO and Pro-Rata allocation with LMM/DMM floor guarantee (40% of available qty) and rounding-remainder priority
+- **Dual Match Algorithms**: Price-Time FIFO and Pro-Rata allocation with LMM/DMM floor guarantee (40% of available qty) and rounding-remainder priority <!-- claim:prorata-lmm-floor -->
 
 ### Concurrency & Networking
 - **Thread-Per-Symbol Partitioning**: N worker threads with independent lock-free `MpscQueue` ring buffers, routed by `hash(symbolId) % numThreads`
 - **TCP Gateway**: the native binary protocol (`GatewayProtocol.h`) with non-blocking I/O via `epoll`/`kqueue` — the only order-entry protocol a shipped binary serves. FIX 4.4 session management (version negotiation, numeric `OrdRejReason` mapping, `TransactTime` enforcement) lives in the library-only `FixSession`/`FixTcpGateway`
-- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer (GatewayServer publishes updates and its once-a-second L2 snapshots from the event thread); each slot is a seqlock, so a lapped reader never takes a torn entry. `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
-- **Binary Protocol Versioning**: `GatewayProtocol.h` — 16-byte fixed header with V1/V2 payload evolution, forward+backward compatibility, and `GatewayResponse` ack frames
+- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer (GatewayServer publishes updates and its once-a-second L2 snapshots from the event thread); each slot is a seqlock, so a lapped reader never takes a torn entry. <!-- claim:md-shm-no-torn-read --> `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). <!-- claim:md-shm-gap-reset --> The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
+- **Binary Protocol Versioning**: `GatewayProtocol.h` — 16-byte fixed header with V1/V2 payload evolution, forward+backward compatibility, and `GatewayResponse` ack frames <!-- claim:gw-proto-compat -->
 
 ### Multi-Protocol Order Entry
-**Library code.** The default build serves none of FIX, OUCH, SBE or SoupBinTCP; `GatewayServer` runs only `TcpGateway`, and only an `OrderEngine` built with `ENABLE_DPDK` (off by default) ingests OUCH. In the library and its tests, all four protocols dispatch into the same `MatchingEngine`, whose `submitOrder` range-checks side, order type, time in force and peg type for every one of them (`InvalidFieldValue`). Drop a different session class in front of the gateway loop, and you've changed the wire format without touching the engine.
+**Library code.** The default build serves none of FIX, OUCH, SBE or SoupBinTCP; `GatewayServer` runs only `TcpGateway`, and only an `OrderEngine` built with `ENABLE_DPDK` (off by default) ingests OUCH. In the library and its tests, all four protocols dispatch into the same `MatchingEngine`, whose `submitOrder` range-checks side, order type, time in force and peg type for every one of them (`InvalidFieldValue`). <!-- claim:submit-field-validation --> Drop a different session class in front of the gateway loop, and you've changed the wire format without touching the engine.
 
 - **FIX 4.2 / 4.4** (`FixSession.h`): ASCII text + checksum, full session-layer state machine (Logon/Logout/Heartbeat/TestRequest/ResendRequest with `SequenceReset-GapFill`), numeric `OrdRejReason` mapped from internal `RejectReason`, `TransactTime` validation on 4.4 inbound. Version negotiation per accepted `BeginString`. Known limitation: `StopPx` (99) is not parsed and `FixSession` submits every order with stop price 0, so `OrdType` 3 (Stop) and 4 (StopLimit) are rejected with `InvalidPrice`.
 - **OUCH 4.2** (`OuchSession.h`, `OuchProtocol.h`): NASDAQ binary order entry. Inbound `O`/`X`/`U` (Enter/Cancel/Replace) → outbound `A`/`J`/`C`/`E`/`U` (Accepted/Rejected/Canceled/Executed/Replaced). Token ↔ engine-orderId reverse-map preserves identity across `submitCancelReplace`. Big-endian fixed-width.
-- **SBE** (`SbeSession.h`, `SbeProtocol.h`): FIX-TG schema-driven binary (CME / ICE style). NewOrder v1/v2 + OrderAck. Forward-compatibility proven by test: **the first 24 bytes of any v2 block encoding match the v1 encoding byte-for-byte** — a v1 reader on a v2 message reads the original fields unchanged, no codec branch.
+- **SBE** (`SbeSession.h`, `SbeProtocol.h`): FIX-TG schema-driven binary (CME / ICE style). NewOrder v1/v2 + OrderAck. Forward-compatibility proven by test: **the first 24 bytes of any v2 block encoding match the v1 encoding byte-for-byte** — a v1 reader on a v2 message reads the original fields unchanged, no codec branch. <!-- claim:sbe-forward-compat -->
 - **SoupBinTCP** (`SoupBinTcpSession.h`): the Nasdaq TCP envelope that wraps OUCH on the wire. 3-byte length+type framing, login negotiation, configurable heartbeat / peer-idle (spec defaults 1s/15s), logout handshake. Tested end-to-end with OUCH payload through real TCP loopback (`OuchTcpGatewayTest`).
 
 ### Market Data Stack
 **Library code.** Neither binary publishes ITCH or MoldUDP64 or runs the retransmission service; `GatewayServer` publishes to shared memory (`MarketDataPublisher`), and `OrderEngine` publishes no market data.
-- **ITCH 5.0 publisher** (`ItchPublisher.h`): 10 message types — `S` SystemEvent, `R` Stock Directory, `H` Trading Action (engine `TradingState` → wire halt/resume), `A` AddOrder, `E`/`C` Executed, `X` Cancel, `D` Delete, `P` Trade, `Q` Cross Trade. An auction uncross goes out as non-printable `C` executions at the cross price plus one `Q` with the cross's price and volume, so its volume is counted once. A book with a publisher attached rejects at admission any price outside [0, 2^32) or quantity of 2^32 or more (`InvalidPrice` / `InvalidQuantity`), since ITCH carries both in 32 bits. In async mode an event that finds the publisher's ring full is dropped, and the feed then says so: an `S` with the non-standard code `R` (resync), a `D` for every order it had announced, and an `A` for every displayed order in priority order. Per-`OrderBook` `EventListener` that looks up resting orders via `book.getOrder()` to populate side/price fields the listener path doesn't carry.
-- **MoldUDP64 multicast** (`MoldUDP64.h`): batched publisher with MTU auto-flush (default bound 1472 bytes, so a full packet fits one Ethernet frame unfragmented) + gap-detecting subscriber. The subscriber delivers messages in arrival order: after a gap, later messages arrive before the retransmitted ones, so a consumer that needs sequence order (an order book) buffers by sequence number and applies up to `nextExpectedSequence()`. Heartbeat with `nextExpectedSeq` lets subscribers detect silent gaps even during quiet markets. Session-ID mismatch reported separately from gap.
+- **ITCH 5.0 publisher** (`ItchPublisher.h`): 10 message types — `S` SystemEvent, `R` Stock Directory, `H` Trading Action (engine `TradingState` → wire halt/resume), `A` AddOrder, `E`/`C` Executed, `X` Cancel, `D` Delete, `P` Trade, `Q` Cross Trade. An auction uncross goes out as non-printable `C` executions at the cross price plus one `Q` with the cross's price and volume, so its volume is counted once. A book with a publisher attached rejects at admission any price outside [0, 2^32) or quantity of 2^32 or more (`InvalidPrice` / `InvalidQuantity`), since ITCH carries both in 32 bits. <!-- claim:itch-32bit-admission --> In async mode an event that finds the publisher's ring full is dropped, and the feed then says so: an `S` with the non-standard code `R` (resync), a `D` for every order it had announced, and an `A` for every displayed order in priority order. <!-- claim:itch-ring-drop-resync --> Per-`OrderBook` `EventListener` that looks up resting orders via `book.getOrder()` to populate side/price fields the listener path doesn't carry.
+- **MoldUDP64 multicast** (`MoldUDP64.h`): batched publisher with MTU auto-flush (default bound 1472 bytes, so a full packet fits one Ethernet frame unfragmented) + gap-detecting subscriber. The subscriber delivers messages in arrival order: after a gap, later messages arrive before the retransmitted ones, so a consumer that needs sequence order (an order book) buffers by sequence number and applies up to `nextExpectedSequence()`. Heartbeat with `nextExpectedSeq` lets subscribers detect silent gaps even during quiet markets. Session-ID mismatch reported separately from gap. <!-- claim:mold-gap-detection -->
 - **Real UDP transport** (`ItchUdpTransport.h`): `ItchUdpPublisher` writes via `sendto`, `ItchUdpSubscriber` joins multicast group via `IP_ADD_MEMBERSHIP` and runs a recv thread feeding `MoldUDP64Subscriber`. Tested over real 127.0.0.1 sockets (`ItchUdpTransportTest`).
 - **Integrated publish pipeline** (`ItchMarketDataFeed.h`): engine event → ITCH frame → [UDP datagram + journal record]. One per-frame `flush()` so each event lands as its own datagram with a deterministic sequence number.
-- **Gap recovery** (`MoldPacketJournal.h` + `ItchRetransmissionService.h`): bounded ring of journaled MoldUDP64 messages backs a SoupBinTCP-over-TCP retransmission service. End-to-end test exercises: publisher records → subscriber gap → SoupBinTCP login + re-request → byte-exact replay.
+- **Gap recovery** (`MoldPacketJournal.h` + `ItchRetransmissionService.h`): bounded ring of journaled MoldUDP64 messages backs a SoupBinTCP-over-TCP retransmission service. End-to-end test exercises: publisher records → subscriber gap → SoupBinTCP login + re-request → byte-exact replay. <!-- claim:itch-gap-recovery -->
 - **Fan-out adapter** (`MultiplexListener.h`): `OrderBook` exposes a single `EventListener` slot; this composes N of them so OUCH + ITCH + structured-log can coexist on the same book.
 
 ### Regulatory & Risk
 In the shipped binaries, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
-- **Self-Match Prevention (SMP)**: Cancel-Taker strategy
-- **Volatility Circuit Breakers**: a fixed 5% threshold on the price an order's first fill would print at; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing
-- **OTR Monitoring**: Order-to-Trade ratio tracking per participant
-- **Kill Switch**: Cancels every resting order of a participant on every symbol, each cancel journaled, before the call returns
-- **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first
-- **Pre-Trade Risk Limits**: Max order size, notional, and position limits per participant
-- **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst), off by default
+- **Self-Match Prevention (SMP)**: Cancel-Taker strategy <!-- claim:stp-default-cancel-incoming -->
+- **Volatility Circuit Breakers**: a fixed 5% threshold on the price an order's first fill would print at; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing <!-- claim:circuit-breaker -->
+- **OTR Monitoring**: Order-to-Trade ratio tracking per participant <!-- claim:otr -->
+- **Kill Switch**: Cancels every resting order of a participant on every symbol, each cancel journaled, before the call returns <!-- claim:kill-participant -->
+- **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first <!-- claim:prorata-lmm-floor -->
+- **Pre-Trade Risk Limits**: Max order size, notional, and position limits per participant <!-- claim:risk-limits -->
+- **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst), off by default <!-- claim:rate-limit -->
 - **Queue-Depth Backpressure** (library only: neither binary sets a threshold): `setBackpressureThreshold` makes ingress refuse an order with `QueueBackpressure` once its worker's queue is past that fraction of capacity. No test drives a queue past the threshold, so nothing here bounds queuing delay
-- **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (the admin port opens only after journal replay completes, so during replay both probes get connection refused; `/readyz` is 200 once the engine is up)
+- **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (the admin port opens only after journal replay completes, so during replay both probes get connection refused; `/readyz` is 200 once the engine is up) <!-- claim:admin-readyz -->
 
 ### Microstructure Research Infrastructure
 - **Simulation Engine**: Multi-agent market simulator with `NoiseTrader`, `MarketMaker`, and `InformedTrader` agents; fully event-driven against the live `OrderBook`
@@ -83,14 +83,14 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Calibration & Backtesting**: `CalibrationPipeline` (Nelder-Mead minimization of spread decomposition residuals), `BacktestEngine` (replay historical tape against research models), `ResearchDashboard` and `ResearchSerializer` for result persistence
 
 ### Reliability & Observability
-- **CRC-32 Journaling**: a journal replayed on boot (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind), atomic checkpoint, and deterministic replay via virtual clock. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `GatewayServer` holds acks, fills and order updates until the entry is synced; `OrderEngine` acks at enqueue and group-commits. A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
-- **Primary-Backup Replication — disabled by default, known defects**: `ReplicationCoordinator` is wired into `src/main.cpp` behind `OB_NODE_ROLE`, but a role now refuses to boot unless `--allow-unsafe-replication` acknowledges it. The path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced, and a promoted backup can execute orders twice. The chaos suite still runs the 1+1 topology, opted in
-- **Lease Propagation (no fencing)**: Primary broadcasts `LeaseGrant` (durationMs) every heartbeat tick; backup's local lease state is refreshed via same-epoch-from-same-holder path; `BackupPromote` requires both heartbeat miss AND local lease expiry. That delays promotion; it does **not** prevent split brain: a primary never steps down (`ReplicationCoordinator` has no path out of `Primary`, and `isFenced()` has no caller), so a partition that outlasts the 5 s lease leaves two primaries
-- **TCP Auto-Reconnect**: `ReplicationTransport::receiveLoop` retries `connectTo()` against saved host/port after socket loss — backup re-establishes within milliseconds of primary recovery without external orchestration
-- **Snapshot Catchup on Join**: When a backup connects, primary streams all currently-resting orders via `streamSnapshot` → `JournalEntry::Snapshot` messages; idempotent on receiver — closes the rolling-restart gap
+- **CRC-32 Journaling**: a journal replayed on boot <!-- claim:journal-replay-on-boot --> (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind <!-- claim:journal-torn-tail -->), atomic checkpoint <!-- claim:checkpoint-atomic -->, and deterministic replay via virtual clock <!-- claim:gtd-replay -->. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `GatewayServer` holds acks, fills and order updates until the entry is synced <!-- claim:gw-durable-events -->; `OrderEngine` acks at enqueue and group-commits. A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
+- **Primary-Backup Replication — disabled by default, known defects**: `ReplicationCoordinator` is wired into `src/main.cpp` behind `OB_NODE_ROLE`, but a role now refuses to boot unless `--allow-unsafe-replication` acknowledges it. <!-- claim:repl-refuses-role --> The path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced, and a promoted backup can execute orders twice. The chaos suite still runs the 1+1 topology, opted in
+- **Lease Propagation (no fencing)**: Primary broadcasts `LeaseGrant` (durationMs) every heartbeat tick; backup's local lease state is refreshed via same-epoch-from-same-holder path; `BackupPromote` requires both heartbeat miss AND local lease expiry. <!-- claim:repl-lease-promotion --> That delays promotion; it does **not** prevent split brain: a primary never steps down (`ReplicationCoordinator` has no path out of `Primary`, and `isFenced()` has no caller), so a partition that outlasts the 5 s lease leaves two primaries
+- **TCP Auto-Reconnect**: `ReplicationTransport::receiveLoop` retries `connectTo()` against saved host/port after socket loss — backup re-establishes within milliseconds of primary recovery without external orchestration <!-- claim:repl-chaos -->
+- **Snapshot Catchup on Join**: When a backup connects, primary streams all currently-resting orders via `streamSnapshot` → `JournalEntry::Snapshot` messages; idempotent on receiver — closes the rolling-restart gap <!-- claim:repl-chaos -->
 - **Warm Standby (library only)**: `JournalFollower` — single-host tailing with a `promote()` API. No shipped binary constructs it
-- **Deterministic Sequencing**: a book's `MarketDataUpdate` events carry strictly increasing `sequenceNumber`s, and a subscriber that applies only them holds the book's depth. `Trade` and `OrderUpdate` carry one too; no test holds either to an order
-- **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically
+- **Deterministic Sequencing**: a book's `MarketDataUpdate` events carry strictly increasing `sequenceNumber`s, and a subscriber that applies only them holds the book's depth <!-- claim:md-l2-sequence -->. `Trade` and `OrderUpdate` carry one too; no test holds either to an order
+- **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically <!-- claim:gtd-replay -->
 - **Structured Logging**: Pluggable `StructuredSink` API with `NullSink` (zero-cost default), `JsonStderrSink` (dev), and `CapturingSink` (tests)
 - **Prometheus Metrics**: `MetricsRegistry` with atomic Counters, Gauges, Histograms; `/prometheus` text-exposition endpoint exposes `journal_entries_committed_total`, `replication_entries_shipped_total`, `replication_bytes_sent_total`, `replication_snapshot_streams_total`, `replication_snapshot_entries_total`
 - **Webhook Alerting**: `AlertDispatcher` — background thread delivery to Slack, PagerDuty, or generic HTTP webhooks with configurable severity filtering
@@ -100,10 +100,10 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes; `.dockerignore` excludes host build artifacts; entrypoint shim conditionally LD_PRELOADs `libfaketime` for chaos clock-skew scenarios
 
 ### Formal Verification & Chaos Engineering
-- **TLA+ Specifications**: 11 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) passes at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`, but only vacuously: the backup can never promote. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `EpochDurability`, `FixSession`, `Oco`, `Risk`.
-- **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Checks `NoCommittedLoss` as a count (after a `SIGKILL` of the primary process, the backup's journal head grew at least as much as the primary's), that no backup promotes while partitioned, lossy or clock-skewed — but every such check finishes inside the 5 s lease, before a backup could promote, so none tests split brain (the partition tests assert within ~2 s and heal) — snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-gated promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md).
-- **TSan**: `ReplicationProtocolTest` is TSan-clean (was previously excluded due to teardown races on non-atomic fds + non-atomic sendSeq_; closed by atomic fds + `shutdown(2)` wakeup + atomic sequence)
-- **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison
+- **TLA+ Specifications**: 11 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) passes at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`, but only vacuously: the backup can never promote. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `EpochDurability`, `FixSession`, `Oco`, `Risk`.
+- **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Checks `NoCommittedLoss` as a count (after a `SIGKILL` of the primary process, the backup's journal head grew at least as much as the primary's), that no backup promotes while partitioned, lossy or clock-skewed — but every such check finishes inside the 5 s lease, before a backup could promote, so none tests split brain (the partition tests assert within ~2 s and heal) — snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-gated promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md). <!-- claim:repl-chaos -->
+- **TSan**: `ReplicationProtocolTest` is TSan-clean (was previously excluded due to teardown races on non-atomic fds + non-atomic sendSeq_; closed by atomic fds + `shutdown(2)` wakeup + atomic sequence) <!-- claim:tsan-replication-transport -->
+- **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison <!-- claim:shadow-mode -->
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; compiled out unless built with `ENABLE_FAULT_INJECTION` (`OB_ENABLE_FAULT_INJECTION`)
 - **Coverage-Guided Fuzzing**: libFuzzer targets for the FIX parser, framer and round trip, and `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
 
@@ -285,13 +285,13 @@ The GitHub Actions workflow runs release tests and sanitizer tests on every push
 
 When `OB_ADMIN_TOKEN` (or `--admin-token`) is set, every endpoint except the
 k8s probes (`/health`, `/readyz`) requires `Authorization: Bearer <token>`
-(constant-time compare, 401 otherwise). The production compose fails closed
+(constant-time compare, 401 otherwise). <!-- claim:admin-auth --> The production compose fails closed
 if the token is unset.
 
 The port listens on `127.0.0.1` unless `--admin-bind` / `OB_ADMIN_BIND` widens
 it. The Docker image sets `OB_ADMIN_BIND=0.0.0.0`, because a published port or
 a k8s probe arrives on the container's interface, not its loopback. Running the
-binary directly on a host that others need to reach? Pass `--admin-bind`.
+binary directly on a host that others need to reach? Pass `--admin-bind`. <!-- claim:admin-loopback -->
 
 ```bash
 AUTH="Authorization: Bearer $OB_ADMIN_TOKEN"
@@ -334,7 +334,7 @@ GatewayServer 9876 --participant-credentials /etc/orderbook/participants.conf \
 With a journal, **acks are durable**: every order is synced to the journal before
 it is acknowledged, so an order the client was told it has survives `kill -9`
 sent the moment the ack arrives — the scenario `GatewayJournalRestartTest` runs
-against the real binary. Fills and order updates are held until durable too.
+against the real binary. <!-- claim:gw-durable-ack --> Fills and order updates are held until durable too. <!-- claim:gw-durable-events -->
 
 The cost is one fsync per order, serialised on the gateway's single event
 thread, so order-entry throughput is bounded by your disk's fsync latency.
@@ -345,7 +345,7 @@ throughput figures do not apply to this configuration.
 
 `GatewayServer` refuses to start unless participant credentials are configured
 or authentication is explicitly turned off — the same bar the admin port has
-held for a while, applied to the port that moves money.
+held for a while, applied to the port that moves money. <!-- claim:gw-auth-required -->
 
 ```bash
 # One credential per line: user:secret:participantId[,participantId...]
@@ -365,7 +365,7 @@ GatewayServer 9876 --no-participant-auth
 
 A malformed line fails the whole load rather than being skipped: a typo that
 silently dropped a firm's credential would surface as that firm being unable to
-trade, at the worst possible moment.
+trade, at the worst possible moment. <!-- claim:gw-credentials-malformed -->
 
 Clients authenticate per connection. On the binary protocol that is a login
 frame — the V2 header's `flags` word with `GATEWAY_FLAG_LOGIN` set, carrying
@@ -373,7 +373,7 @@ frame — the V2 header's `flags` word with `GATEWAY_FLAG_LOGIN` set, carrying
 sessions check credentials at Logon, tags 553/554, and at SoupBinTCP Login, but
 no shipped binary serves either protocol.) A session may then only submit as a
 participant its credential covers, which includes the kill switch. A failed
-login closes the connection.
+login closes the connection. <!-- claim:gw-login -->
 
 The forwarding proxy (`OB_ENGINE_HOST`/`OB_ENGINE_PORT`) relays frames it does
 not interpret, over **one** upstream connection shared by all of its clients.
@@ -382,7 +382,7 @@ client, so treat the proxy as unauthenticated. (`OrderEngine` has no order
 port, so the only thing it can forward to is another `GatewayServer`.)
 
 ### Replication (live binary)
-**Disabled unless explicitly acknowledged.** Setting `OB_NODE_ROLE` / `--role` alone makes `OrderEngine` refuse to boot, because the path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced; a promoted backup keeps applying the old primary's stream, so orders execute twice; a replication send blocks the journal commit path with no timeout, freezing acks; entries lost in a disconnect are never re-sent. The default `docker-compose.yml` is a single node. To run it anyway, also pass `--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`).
+**Disabled unless explicitly acknowledged.** Setting `OB_NODE_ROLE` / `--role` alone makes `OrderEngine` refuse to boot, because the path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced; a promoted backup keeps applying the old primary's stream, so orders execute twice; a replication send blocks the journal commit path with no timeout, freezing acks; entries lost in a disconnect are never re-sent. The default `docker-compose.yml` is a single node. To run it anyway, also pass `--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`). <!-- claim:repl-refuses-role -->
 
 With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE` is set. Primary listens on `OB_REPLICATION_PORT` (default 9002); backup connects to `OB_PRIMARY_HOST`:`OB_PRIMARY_REPLICATION_PORT` and runs in replay mode until promotion. Set `OB_JOURNAL_PATH` to enable journal commit → backup shipping. The chaos suite (`docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build`) provides a fully-wired 1+1 topology, opted in.
 
@@ -412,20 +412,20 @@ With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordi
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
-| `MatchingEngine.tla` | **2,726,157 distinct, 0 violations** (`MatchingEngine.cfg`: 3 orders, 1 replace, 2 participants, 2 prices, qty 1-3; checked in CI) | PricePriority, FIFOExecution, ExecPriceIsPassive, NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation, MatchingConservation, NoNegativeQuantity. Limit orders, default STP, modify and replace only; each of seven broken cfgs must fail. See [docs/Verification.md](./docs/Verification.md) |
+| `MatchingEngine.tla` | **2,726,157 distinct, 0 violations** (`MatchingEngine.cfg`: 3 orders, 1 replace, 2 participants, 2 prices, qty 1-3; checked in CI) | PricePriority, FIFOExecution, ExecPriceIsPassive, NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation, MatchingConservation, NoNegativeQuantity. Limit orders, default STP, modify and replace only; each of seven broken cfgs must fail. See [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-matching-engine --> |
 | `Replication.tla` (lease-propagation model) | 1373 → 4192 states at MaxEntries=6 / 10, 0 violations — **vacuous** | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain hold only because the backup can never promote: `TickDegraded` stops the timers at `HeartbeatTimeout+1`, below the `LeaseTimeout` that `BackupPromote` needs. The lease-stripped variant, the only config where promotion happens, splits the brain in 188 states. See [docs/Verification.md](./docs/Verification.md). |
-| `MpscQueue.tla` | 3,672 distinct | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) |
-| `EngineConsumer.tla` | 252 distinct | Worker loop: no item invented or duplicated, every item eventually consumed |
-| `Snapshot.tla` / `SnapshotLocked.tla` | 515,380 / 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) |
-| `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail, and one that never reopens a volatility auction; see [docs/Verification.md](./docs/Verification.md) |
-| `EpochDurability.tla` | 8 distinct | Epoch-store durability invariant under crash |
-| `FixSession.tla` | 4 distinct | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) |
-| `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity |
-| `Risk.tla` | 8 distinct | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. |
+| `MpscQueue.tla` | 3,672 distinct | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) <!-- claim:tla-concurrency-specs --> |
+| `EngineConsumer.tla` | 252 distinct | Worker loop: no item invented or duplicated, every item eventually consumed <!-- claim:tla-concurrency-specs --> |
+| `Snapshot.tla` / `SnapshotLocked.tla` | 515,380 / 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) <!-- claim:tla-concurrency-specs --> |
+| `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail, and one that never reopens a volatility auction; see [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-auction --> |
+| `EpochDurability.tla` | 8 distinct | Epoch-store durability invariant under crash <!-- claim:tla-small-specs --> |
+| `FixSession.tla` | 4 distinct | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) <!-- claim:tla-small-specs --> |
+| `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity <!-- claim:tla-small-specs --> |
+| `Risk.tla` | 8 distinct | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. <!-- claim:tla-small-specs --> |
 
 ### <a name="chaos-suite"></a>Live Chaos Suite
 
-**19 scenarios** in `deploy/chaos/` run against the actual `OrderEngine` binary inside Docker Compose. They exercise the replication path of the real binary; `Replication.tla` proves nothing they could confirm, because it passes only vacuously. See [deploy/chaos/README.md](./deploy/chaos/README.md) for the full table and how to run them.
+**19 scenarios** in `deploy/chaos/` run against the actual `OrderEngine` binary inside Docker Compose. They exercise the replication path of the real binary; `Replication.tla` proves nothing they could confirm, because it passes only vacuously. <!-- claim:repl-chaos --> See [deploy/chaos/README.md](./deploy/chaos/README.md) for the full table and how to run them.
 
 | # | Scenario | Measured behavior |
 |---|---|---|
@@ -451,7 +451,7 @@ promote. Past the lease the primary never steps down (REPL-1..6).
 ### Shadow Mode Validation
 - Dual `OrderBook` instances fed identical order streams
 - Deliberately broken FIFO detected via trade-level comparison
-- 200-order clean run verified zero false positives
+- 200-order clean run verified zero false positives <!-- claim:shadow-mode -->
 
 ## 📚 Documentation
 
@@ -482,8 +482,8 @@ The wire-protocol codecs (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retra
 | DPDK kernel bypass | **Written, never executed** — no run, no measurement, no demonstrated benefit. Not hardware-blocked: it targets commodity AWS ENA | Linux + a secondary ENI + hugepages + the DPDK/F-Stack toolchain |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
-| Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified | Volume-maximization algorithm: max-qty uncross implemented |
-| Schema-driven SBE codegen | Hand-coded v1/v2 + forward-compat proven | XML schema → codec generator (tooling) |
+| Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified <!-- claim:auction-uncross --> | Volume-maximization algorithm: max-qty uncross implemented |
+| Schema-driven SBE codegen | Hand-coded v1/v2 + forward-compat proven <!-- claim:sbe-forward-compat --> | XML schema → codec generator (tooling) |
 | Cross-host failure-drill validation | 19-scenario live chaos suite in `deploy/chaos/` covers failover detection, snapshot catchup and rolling restart; its partition, loss and skew checks end inside the 5 s lease, and NoCommittedLoss is a journal-count comparison | Scenarios that hold a partition past the lease; true cross-physical-host still needs hardware |
 | TSan coverage | `ReplicationProtocolTest` now TSan-clean (closed atomic-fd + sendSeq_ races); CI runs it under TSan. 24h+ soak still pending | Clock time |
 | Real FIX path through chaos topology | `GatewayServer` runs its own engine with a journal but no replication, and serves no FIX. `/chaos/order` exercises `OrderEngine`, and `FixTcpGatewayTest` exercises library code; neither says anything about `GatewayServer` | Architectural refactor of gateway/engine binary split |

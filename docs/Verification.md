@@ -1,11 +1,11 @@
 # TLA+ Verification Report
 
-> **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,796,145 states generated, 2,726,157 distinct, depth 14, complete · each of the seven `MatchingEngineBroken*.cfg` variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`)
+> **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,796,145 states generated, 2,726,157 distinct, depth 14, complete · each of the seven `MatchingEngineBroken*.cfg` variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`) <!-- claim:tla-matching-engine -->
 > **Replication.tla** (lease-propagation model): **VACUOUS** — zero violations at both cfgs, but in both the backup can never promote, so `NoSplitBrain` and `NoCommittedLoss` hold trivially. `TickDegraded` stops advancing the timers once `heartbeatTimer` reaches `HeartbeatTimeout + 1`, the two timers are always equal, and `BackupPromote` needs `leaseTimer > LeaseTimeout`, which is larger (2 vs 5; 3 vs 7). The bug-injected variant (lease check stripped) is the only configuration in which promotion is reachable, and there it splits the brain — the spec has no primary step-down. No `ReplicationBroken` cfg is committed, and CI does not run this spec.
 
-> **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22
+> **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22 <!-- claim:tla-auction -->
 
-> **New specs (2026-05-28)**: EpochDurability.tla · FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states)
+> **New specs (2026-05-28)**: EpochDurability.tla · FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
 
 ## MatchingEngine.tla
 
@@ -246,7 +246,7 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 
 ## New Specs (2026-05-28)
 
-Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. (`Replication.tla` has no such cfg and its pass is vacuous; see the header.) The bounds are small: the correct cfgs reach 4 (FixSession), 8 (EpochDurability, Risk) and 198 (Oco) distinct states.
+Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. (`Replication.tla` has no such cfg and its pass is vacuous; see the header.) The bounds are small: the correct cfgs reach 4 (FixSession), 8 (EpochDurability, Risk) and 198 (Oco) distinct states. <!-- claim:tla-small-specs -->
 
 | Spec | Property Verified | Broken Variant |
 |------|------------------|----------------|

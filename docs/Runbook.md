@@ -354,10 +354,21 @@ client can see (acks, fills, market data) until the entry behind it is on disk.
 
 ### Checkpoints
 
-A checkpoint **replaces the journal** with one snapshot record per resting
-order, plus the trading state of any symbol not in continuous trading; the
-fills and cancels before it are gone. Copy the file first if you
-need that history. Checkpoints run:
+A checkpoint **replaces the journal** with what it takes to rebuild the books;
+the fills and cancels before it are gone. Copy the file first if you need that
+history. What it keeps:
+
+- one snapshot record per live order: the resting orders level by level, front
+  to back, so a restored level keeps its time priority, then the parked ones
+  (stops, trailing stops, on-close and auction market orders). A stop keeps its
+  election latch and a trailing stop the trigger its trail had ratcheted to;
+- each book's session: a begun session's `PreOpen` with its trading date (0 when
+  undated), a halted book's pre-halt state, and any state but `Continuous`;
+- per book, the trade-id counter, the last trade price and the reference price
+  (the circuit breaker's), so a restored book trips and crosses as the one that
+  wrote it would have.
+
+Checkpoints run:
 
 - automatically at 250,000 entries or 64 MiB, in both binaries (compiled in;
   no key changes it);

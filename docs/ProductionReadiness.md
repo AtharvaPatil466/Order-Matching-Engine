@@ -34,7 +34,7 @@ This project is a low-latency matching-engine implementation for research and po
 ## Validation Already Covered In This Repo
 
 - CRC-validated journal replay stops at truncated or corrupted records.
-- Checkpoint replay restores active orders after journal rewrite.
+- Checkpoint replay restores active orders after journal rewrite, with each level's time priority, every book's last trade and reference price, a trailing stop's ratcheted trigger, a stop's election latch (replay, backup and `JournalFollower` alike) and an undated session's start (`CheckpointTimePriorityTest`, `CheckpointPriceStateTest`, `StopLatchCheckpointTest`, `SessionTransitionTest`).
 - Randomized command streams are replayed and compared against the original final book state.
 - Ingress submit APIs return explicit reject reasons for stopped engines, unknown symbols, bad orders, rate limits, and queue backpressure.
 - Gateway requests surface ingress rejects as error responses instead of unconditional ACKs.

@@ -857,7 +857,7 @@ Every trading-state change and every explicit uncross is journaled (`TradingStat
 older file current before appending), and
 replay applies them in journal order, so recovery re-runs each auction exactly. Through
 `MatchingEngine` they are applied and journaled by the book's owning worker, in order with that
-book's orders; a checkpoint writes each non-`Continuous` book's state before its orders. Before
+book's orders; a checkpoint writes each book's session state (Rule 7.7) before its orders. Before
 this, replay ran every order accumulated in an auction as a continuous one (roadmap 1.8-H1,
 AUCT-1; pinned by `tests/AuctionJournalReplayTest.cpp`). Leaving `VolatilityAuction` for
 `Continuous` re-anchors the breaker reference to the reopening print, however it is reached.
@@ -1003,9 +1003,16 @@ to the reopening print. `resumeVolatilityAuction()` reopens at once.
 
 **A trip is journaled.** The engine writes a `TradingStateChange(VolatilityAuction)` record
 ahead of the order that tripped the breaker, and replay never evaluates the breaker itself, so
-recovery reproduces the trip even with another threshold, or with the reference a checkpoint
-does not carry. The dwell clock is not journaled: after a restart into a volatility auction the
-dwell starts again.
+recovery reproduces the trip even with another threshold. The dwell clock is not journaled:
+after a restart into a volatility auction the dwell starts again.
+
+**A checkpoint carries the reference and the last trade price** (the per-book `Counters`
+record: `price` is the last trade, `newPrice` the reference, 0 for none). A book restarted
+from one used to have neither, so the breaker re-seeded its reference from the next order (a
+20% print traded instead of tripping) and an auction holding only market orders cancelled them
+instead of crossing at the last trade price (Rule 7.2). Pinned by
+`tests/CheckpointPriceStateTest.cpp`, which also restarts a `JournalFollower` from the
+checkpoint.
 
 ### Rule 7.5 — What this engine calls LULD is a single fixed percentage band, not US-equities LULD
 
@@ -1069,8 +1076,10 @@ there. After that, a book reaches `PreOpen` only from `PostClose`, through `begi
 the date of the session it closed. An undated `PreOpen` (`setTradingState(PreOpen)`) never
 reopens a closed book. `SessionScheduler`'s pre-open passes its trading date, so a same-date
 `resetSession()` re-runs the scheduler's phases while the books stay in `PostClose`. The date is
-journaled with the `PreOpen` record and kept by a checkpoint, so a restarted engine still
-refuses a second session on that date. Replay applies the journal without checking the table,
+journaled with the `PreOpen` record and kept by a checkpoint, which records every begun
+session as a `PreOpen` with its date (0 when undated), so a restarted engine still refuses a
+second session on that date, or a second undated `PreOpen` from `Continuous`. A checkpoint used
+to record only a dated session, and the restored book took an undated one for a fresh boot. Replay applies the journal without checking the table,
 because only applied transitions are journaled.
 
 A halt is a pause, not a route. `Halted` resumes only to the state the book was halted from,

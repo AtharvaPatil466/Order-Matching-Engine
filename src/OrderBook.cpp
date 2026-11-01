@@ -434,8 +434,9 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     }
 
     // Outside the configured band the replace could never rest: it came off
-    // the book and was cancelled (STP-8).
-    if (priced && priceRangeConfigured_ && !bids_.inRange(price))
+    // the book and was cancelled (STP-8). A LOC released by the closing auction
+    // rests like a limit.
+    if ((priced || type == OrderType::LOC) && priceRangeConfigured_ && !bids_.inRange(price))
         return RejectReason::OutOfPriceRange;
 
 #ifndef OB_LEAN_MODE

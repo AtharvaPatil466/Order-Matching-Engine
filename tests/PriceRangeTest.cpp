@@ -116,6 +116,28 @@ void configuredBand() {
               "and replace outside it refused");
 }
 
+// A LOC released into the book by the closing auction is replaced like any
+// resting limit, so a replace outside the band is refused the same way. The
+// replace path's own type list left LOC out: the replace came off the book and
+// was cancelled by addToBook.
+void releasedLocReplace() {
+    OrderBook book(1);
+    relaxed(book);
+    book.setPriceRange(9'000, 11'000);
+    book.setTradingState(TradingState::AuctionClose);
+    assert(std::holds_alternative<OrderId>(book.addOrder(1, 1, Side::Buy, 9'500, 10,
+                                                         OrderType::LOC)));
+    assert(book.getOrder(1) != nullptr && book.getBestBid() == 9'500);
+    RejectReason reason = RejectReason::None;
+    const bool replaced = book.cancelReplace(1, 8'000, 10, reason);
+    if (replaced || reason != RejectReason::OutOfPriceRange || book.getOrder(1) == nullptr) {
+        std::fprintf(stderr, "released LOC replaced to 8000: replaced=%d reason=%d inBook=%d\n",
+                     replaced, (int)reason, book.getOrder(1) != nullptr);
+        assert(false && "a released LOC replaced outside the band must be refused and keep resting");
+    }
+    std::puts("  released LOC: a replace outside the band is refused");
+}
+
 // Audit T8: a first order at INT64_MAX overflowed minPrice + capacity - 1.
 void anchorSaturates() {
     OrderBook book(1);
@@ -135,6 +157,7 @@ void anchorSaturates() {
 
 int main() {
     configuredBand();
+    releasedLocReplace();
     anchorSaturates();
     std::puts("PriceRangeTest passed");
     return 0;

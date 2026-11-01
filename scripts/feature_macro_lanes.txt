@@ -1,0 +1,21 @@
+# Every OB_* macro a CMakeLists.txt defines, and the ci.yml job that builds it
+# (roadmap 2.9). Checked by scripts/check_feature_macro_lanes.sh.
+#
+#   <MACRO> lane <ci.yml job id> <text that job must contain: the configure
+#                                 flag, or configure-log check, that turns it on>
+#   <MACRO> none <why no lane builds it>      the allowlist; a reason is required
+#   <MACRO> always <why>                      defined in every configuration
+#
+# A macro may have several lane lines; all must hold.
+
+OB_HAVE_LIBURING             lane io-uring        io_uring journal path enabled
+OB_ENABLE_FAULT_INJECTION    lane fault-injection -DENABLE_FAULT_INJECTION=ON
+OB_LEAN_MODE                 lane lean-mode       -DUSE_LEAN_MODE=ON
+OB_ENFORCE_LATENCY_THRESHOLD lane latency-gate    -DCMAKE_BUILD_TYPE=Release
+OB_ENFORCE_LATENCY_THRESHOLD lane latency-gate    -DENABLE_FAULT_INJECTION=OFF
+
+OB_HAVE_DPDK      none needs libdpdk and F-Stack (scripts/dpdk_aws.sh builds them on an AWS host with a bound NIC); no hosted runner has either
+OB_MATCH_PREFETCH none perf experiment measured as no benefit and kept OFF (see CMakeLists.txt and BENCHMARKS.md); no lane builds it
+
+OB_GIT_SHA    always build metadata for /version, defined unconditionally
+OB_BUILD_TIME always build metadata for /version, defined unconditionally

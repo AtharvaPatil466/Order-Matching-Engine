@@ -326,3 +326,15 @@ jobs:
         with:
           name: gateway-engine-fuzz-artifacts
           path: fuzz-artifacts/
+
+  feature-macro-lanes:
+    name: Every CMake feature macro has a lane
+    # Roadmap 2.9: every #ifdef'd production path has a CI lane that builds it,
+    # or an explicit reason in scripts/feature_macro_lanes.txt why none does.
+    # A new OB_* compile definition with neither fails here. No build needed.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every OB_* macro against ci.yml
+        run: sh scripts/check_feature_macro_lanes.sh

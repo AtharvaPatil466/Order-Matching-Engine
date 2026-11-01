@@ -647,7 +647,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 **The count is not the claim, and it should not be read as one.** There are no line- or branch-coverage figures here and no mutation testing, so the number measures how many test binaries exist, not how much behaviour they pin. This project has repeated evidence that the two diverge: every journal test was single-symbol, which is precisely how the cancel-routing defect survived; a follower comparator checked 6 of 16 order fields, so a fix that dropped ten of them would have gone green; the checkpoint soak ran 90 rewrites that all *grew* the file, never once producing the shape a real checkpoint makes; and eight test functions were defined and never called. All four are fixed, and all four were inside that count while it was being quoted. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
-- **Coverage-Guided Fuzzing**: libFuzzer harness for protocol parsing and order flow.
+- **Coverage-Guided Fuzzing**: libFuzzer targets for the FIX parser, framer and round trip, and one (`fuzz_gateway_engine`) that drives client bytes through `TcpGateway` into `MatchingEngine::submitOrder` and checks `validateIntegrity` on every book; CI fuzzes it for 10 minutes on every push and PR.
 - **Sanitizers**: ASan, UBSan, and TSan checks integrated into CI/CD.
 - **Multi-symbol journal coverage**: replay equivalence is swept over 20 seeds × 250 ops across three symbols. Every journal test was previously single-symbol — the one shape in which cross-book routing cannot be wrong — which is how the cancel-routing defect above survived.
 - **Journal contention measurement**: `JournalContentionBenchmark` reports append throughput against worker count with journaling on and off, and against batch size so the durability barrier can be amortised away and the lock itself becomes visible. Run on x86 via the `Journal Contention (H6)` workflow, which records CPU, filesystem and measured `fdatasync` latency first, because every number is relative to those.
@@ -671,7 +671,7 @@ include/              93 header files — core logic and networking
 src/                  14 source files — thin compilation units
 tests/                103 test files, 524 CTest targets
 benchmarks/           11 benchmark binaries
-fuzz/                 3 libFuzzer harnesses + standalone driver
+fuzz/                 4 libFuzzer harnesses + standalone driver
 spec/                 TLA+ formal specifications (11 specs)
 tools/                CLI tools and data utilities
 config/               Example configuration files

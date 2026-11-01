@@ -68,9 +68,9 @@ static void finding2() {
     ob.addOrder(11, 1, Side::Sell, 105, 10, OrderType::Limit);
     ob.addOrder(12, 1, Side::Sell, 110, 10, OrderType::Limit);
 
-    // Buy STOP A: stopPrice 101 -> fires when lastTradePrice >= 101, becomes limit @ buy.
-    // We give it a limit-after-trigger price high enough to lift to 105.
-    // Stop type becomes a plain Limit at order->price (the original price arg).
+    // Buy STOP A: stopPrice 101 -> fires when a print reaches 101 and elects a
+    // Market buy, which lifts 105. A Stop is a stop-market: its price argument
+    // (106 here) is not a limit and is ignored; StopLimit is the priced form.
     ob.addOrder(20, 2, Side::Buy, 106, 10, OrderType::Stop, /*stopPrice=*/101);
     // Buy STOP B: stopPrice 105 -> should only fire AFTER stop A lifts price to 105.
     ob.addOrder(21, 3, Side::Buy, 111, 10, OrderType::Stop, /*stopPrice=*/105);

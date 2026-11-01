@@ -230,11 +230,11 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 | `spec/MatchingEngineBroken*.cfg` | Seven non-vacuity variants, one injected bug each; CI requires each to fail on its property |
 | `spec/Replication.tla` | Primary-backup replication spec with lease propagation (passes vacuously — promotion unreachable) |
 | `spec/Replication.cfg` | TLC configuration for Replication |
-| `spec/MpscQueue.tla` | Lock-free ring buffer linearizability |
-| `spec/EngineConsumer.tla` | Worker loop shutdown safety |
+| `spec/MpscQueue.tla` | MPSC ring: no item invented or duplicated, per-producer FIFO, every item eventually consumed |
+| `spec/EngineConsumer.tla` | Worker loop: no item invented or duplicated, every item eventually consumed |
 | `spec/Snapshot.tla` / `spec/SnapshotLocked.tla` | Torn-snapshot prevention |
 | `spec/Auction.tla` | Session state machine through the enforced transition table, order admission per state, uncross (section above) |
-| `spec/Auction.cfg`, `spec/AuctionBroken*.cfg` | The bounds CI checks; three broken variants CI requires to fail |
+| `spec/Auction.cfg`, `spec/AuctionBroken*.cfg` | The bounds CI checks; four broken variants CI requires to fail |
 | `spec/EpochDurability.tla` | Epoch-store durability under crash |
 | `spec/EpochDurability.cfg` / `spec/EpochDurabilityBroken.cfg` | Config + broken variant |
 | `spec/FixSession.tla` | FIX inbound sequence recovery: messages delivered strictly in order (no logon or heartbeat is modelled) |
@@ -246,7 +246,7 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 
 ## New Specs (2026-05-28)
 
-Each new spec follows the same pattern as `Replication.tla`: a correct spec is verified to have zero violations, and a corresponding broken-variant spec (with a specific safety property removed) is verified to reproduce a violation within a bounded number of states — confirming the verification is genuine, not vacuous.
+Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. (`Replication.tla` has no such cfg and its pass is vacuous; see the header.) The bounds are small: the correct cfgs reach 4 (FixSession), 8 (EpochDurability, Risk) and 198 (Oco) distinct states.
 
 | Spec | Property Verified | Broken Variant |
 |------|------------------|----------------|

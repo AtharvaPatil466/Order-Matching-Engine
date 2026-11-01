@@ -414,18 +414,18 @@ With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordi
 |--------------|--------|------------|
 | `MatchingEngine.tla` | **2,726,157 distinct, 0 violations** (`MatchingEngine.cfg`: 3 orders, 1 replace, 2 participants, 2 prices, qty 1-3; checked in CI) | PricePriority, FIFOExecution, ExecPriceIsPassive, NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation, MatchingConservation, NoNegativeQuantity. Limit orders, default STP, modify and replace only; each of seven broken cfgs must fail. See [docs/Verification.md](./docs/Verification.md) |
 | `Replication.tla` (lease-propagation model) | 1373 → 4192 states at MaxEntries=6 / 10, 0 violations — **vacuous** | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain hold only because the backup can never promote: `TickDegraded` stops the timers at `HeartbeatTimeout+1`, below the `LeaseTimeout` that `BackupPromote` needs. The lease-stripped variant, the only config where promotion happens, splits the brain in 188 states. See [docs/Verification.md](./docs/Verification.md). |
-| `MpscQueue.tla` | ~250K | Lock-free ring buffer linearizability |
-| `EngineConsumer.tla` | ~200K | Worker loop shutdown safety |
-| `Snapshot.tla` / `SnapshotLocked.tla` | ~300K | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) |
-| `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail; see [docs/Verification.md](./docs/Verification.md) |
-| `EpochDurability.tla` | verified | Epoch-store durability invariant under crash |
-| `FixSession.tla` | verified | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) |
-| `Oco.tla` | verified | OCO one-cancels-other atomicity |
-| `Risk.tla` | verified | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. |
+| `MpscQueue.tla` | 3,672 distinct | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) |
+| `EngineConsumer.tla` | 252 distinct | Worker loop: no item invented or duplicated, every item eventually consumed |
+| `Snapshot.tla` / `SnapshotLocked.tla` | 515,380 / 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) |
+| `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail, and one that never reopens a volatility auction; see [docs/Verification.md](./docs/Verification.md) |
+| `EpochDurability.tla` | 8 distinct | Epoch-store durability invariant under crash |
+| `FixSession.tla` | 4 distinct | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) |
+| `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity |
+| `Risk.tla` | 8 distinct | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. |
 
 ### <a name="chaos-suite"></a>Live Chaos Suite
 
-**19 scenarios** in `deploy/chaos/` run against the actual `OrderEngine` binary inside Docker Compose. They empirically verify properties the spec proves, plus operational properties the spec doesn't model. See [deploy/chaos/README.md](./deploy/chaos/README.md) for the full table and how to run them.
+**19 scenarios** in `deploy/chaos/` run against the actual `OrderEngine` binary inside Docker Compose. They exercise the replication path of the real binary; `Replication.tla` proves nothing they could confirm, because it passes only vacuously. See [deploy/chaos/README.md](./deploy/chaos/README.md) for the full table and how to run them.
 
 | # | Scenario | Measured behavior |
 |---|---|---|

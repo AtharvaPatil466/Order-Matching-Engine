@@ -90,15 +90,15 @@ All endpoints are on OrderEngine's admin port (`src/main.cpp:473`); GatewayServe
 
 | Component | Spec File | Invariants Verified |
 |-----------|-----------|-------------------|
-| MPSC Queue | `spec/MpscQueue.tla` | Linearizability, No data loss |
-| Engine Consumer Loop | `spec/EngineConsumer.tla` | Shutdown completeness |
-| Snapshot Consistency | `spec/Snapshot.tla` | No torn reads |
+| MPSC Queue | `spec/MpscQueue.tla` | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) |
+| Engine Consumer Loop | `spec/EngineConsumer.tla` | No item invented or duplicated, every item eventually consumed |
+| Snapshot Consistency | `spec/SnapshotLocked.tla` | No torn reads: with `bookLock_` held, a snapshot is one point in time. `spec/Snapshot.tla`, without the lock, checks only that each entry was really in the book |
 | Matching Engine | `spec/MatchingEngine.tla` | Price priority, time priority, execution at the passive price, no crossed book, no self-trade (default STP), no empty resting order, FIFO queues, quantity conservation — Limit orders, modify and replace, at `MatchingEngine.cfg` bounds; each property but conservation and non-negativity has a broken cfg that CI requires to fail |
 | Replication Protocol | `spec/Replication.tla` | No committed loss, No duplicate execution, No split-brain — **vacuously**: under the shipped configs the backup can never promote. See [Verification.md](Verification.md). |
-| Auction Protocol | `spec/Auction.tla` | Uncross price validity, admission rules |
+| Auction Protocol | `spec/Auction.tla` | Session transitions only through the enforced table, no trade outside Continuous but the uncross, one clearing price per uncross, a volatility auction always reopens |
 | OCO Atomicity | `spec/Oco.tla` | No double-fill on OCO pairs |
-| Risk Hierarchy | `spec/Risk.tla` | Hierarchical limit enforcement |
-| FIX Session | `spec/FixSession.tla` | Session sequence safety |
+| Risk Hierarchy | `spec/Risk.tla` | Limit enforcement, two tiers (Firm over Traders) |
+| FIX Session | `spec/FixSession.tla` | Inbound messages delivered in sequence order across gaps |
 | Epoch Durability | `spec/EpochDurability.tla` | Epoch entry durability |
 
 ## Audit Contact

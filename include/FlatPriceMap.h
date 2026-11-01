@@ -86,7 +86,9 @@ public:
     // call-site that centres the band on the first order seen.
     void setRange(Price minPrice) {
         minPrice_ = minPrice;
-        maxPrice_ = minPrice + static_cast<Price>(capacity_) - 1;
+        // capacity - 1 first: an anchor saturated at INT64_MAX - (capacity - 1)
+        // overflowed in minPrice + capacity before the - 1.
+        maxPrice_ = minPrice + (static_cast<Price>(capacity_) - 1);
         rangeSet_ = true;
     }
 

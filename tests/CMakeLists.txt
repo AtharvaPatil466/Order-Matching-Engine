@@ -336,6 +336,14 @@ enable_assertions(CheckpointPriceStateTest)
 add_test(NAME CheckpointPriceStateTest COMMAND CheckpointPriceStateTest)
 set_tests_properties(CheckpointPriceStateTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A participant's position and order-to-trade counters survive a checkpoint:
+# maxPositionSize and /otr see what the engine that traded saw.
+add_executable(CheckpointPositionTest CheckpointPositionTest.cpp)
+target_link_libraries(CheckpointPositionTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointPositionTest)
+add_test(NAME CheckpointPositionTest COMMAND CheckpointPositionTest)
+set_tests_properties(CheckpointPositionTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A price level keeps its time priority across a checkpoint.
 add_executable(CheckpointTimePriorityTest CheckpointTimePriorityTest.cpp)
 target_link_libraries(CheckpointTimePriorityTest PRIVATE OrderMatcher)

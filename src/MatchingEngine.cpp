@@ -2550,6 +2550,18 @@ size_t MatchingEngine::replayJournal() {
             restoreCounters(book, entry);
             break;
         }
+        case JournalEntry::Type::Position: {
+            auto* book = getOrderBook(entry.symbolId);
+            if (!book) {
+                addSymbol(entry.symbolId);
+                book = getOrderBook(entry.symbolId);
+                if (book) {
+                    book->setReplayMode(true);
+                }
+            }
+            if (book) applyPositionRecord(*book, entry);
+            break;
+        }
         case JournalEntry::Type::Snapshot: {
             auto* book = getOrderBook(entry.symbolId);
             if (!book) {
@@ -2730,6 +2742,13 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
         restoreCounters(entry.orderId != 0 ? ensureBook(entry.symbolId) : nullptr, entry);
         applied = true;
         break;
+    case JournalEntry::Type::Position: {
+        auto* book = ensureBook(entry.symbolId);
+        if (!book) return false;
+        applyPositionRecord(*book, entry);
+        applied = true;
+        break;
+    }
     case JournalEntry::Type::Snapshot: {
         auto* book = ensureBook(entry.symbolId);
         if (!book) return false;
@@ -2788,6 +2807,10 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
         case JournalEntry::Type::Counters:
             journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity,
                                   entry.price, entry.newPrice);
+            break;
+        case JournalEntry::Type::Position:
+            journal_->logPosition(entry.symbolId, entry.participantId, entry.price,
+                                  entry.quantity, entry.newQty);
             break;
         case JournalEntry::Type::Snapshot:
             journal_->logSnapshot(entry.orderId, entry.participantId,
@@ -2921,6 +2944,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
             SymbolId symbolId; uint64_t nextTradeId; OrderBook::CheckpointPrices prices;
         };
         std::vector<BookCounters> counters;
+        std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
         uint64_t lease = 0;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
@@ -2948,6 +2972,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                       book->sessionDate(), book->preHaltState()});
                 book->forEachOrderLocked([&](const Order& order) {
                     resting.emplace_back(symbolId, order);
+                });
+                book->forEachPositionLocked([&](const OrderBook::ParticipantPosition& p) {
+                    positions.emplace_back(symbolId, p);
                 });
             }
         }
@@ -2982,6 +3009,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
             for (const auto& [symbolId, nextTradeId, prices] : counters)
                 snapshotJournal.logCounters(symbolId, nextTradeId, 0,
                                             prices.lastTrade, prices.reference);
+            // After the orders too: their re-adds count as submissions again.
+            for (const auto& [symbolId, p] : positions)
+                snapshotJournal.logPosition(symbolId, p.participant, p.netPosition,
+                                            p.ordersSubmitted, p.tradesExecuted);
         };
 
         // Phase 2: build the replacement OUTSIDE journalMutex_. Writing every

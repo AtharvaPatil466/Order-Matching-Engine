@@ -742,6 +742,29 @@ public:
         if (p.lastTrade != 0) lastTradePrice_ = p.lastTrade;
         if (p.reference != 0) referencePrice_ = p.reference;
     }
+    // And each participant's position and order-to-trade counters here: the
+    // maxPositionSize check and /otr read them. Restoring sets them, because
+    // the Snapshot records before them counted the resting orders again.
+    struct ParticipantPosition {
+        ParticipantId participant; int64_t netPosition;
+        uint64_t ordersSubmitted; uint64_t tradesExecuted;
+    };
+    template <typename Fn>
+    void forEachPositionLocked(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        participantRisk_.forEach([&](const OTRKey& key, const ParticipantRiskState& s) {
+            if (s.currentExposure != 0 || s.ordersSubmitted != 0 || s.tradesExecuted != 0)
+                fn(ParticipantPosition{key.value >> 32, s.currentExposure,
+                                       s.ordersSubmitted, s.tradesExecuted});
+        });
+    }
+    void restorePosition(const ParticipantPosition& p) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        auto& s = participantRisk_[OTRKey(p.participant, symbolId_)];
+        s.currentExposure = p.netPosition;
+        s.ordersSubmitted = p.ordersSubmitted;
+        s.tradesExecuted = p.tradesExecuted;
+    }
 
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }

@@ -88,7 +88,7 @@ inline uint32_t computeCRC32(const void* data, size_t length) {
 // ever written here".
 //
 // LEGACY DISCRIMINATION. A pre-header file begins with a JournalEntry, whose
-// first byte is entryType — always 1..8. `magic` begins with 'O' (0x4F), which
+// first byte is entryType — always 1..9. `magic` begins with 'O' (0x4F), which
 // no entryType can be, so "starts with the magic" separates a headered file
 // from a pre-header one with certainty rather than by probability. Files
 // written before this header are still read, as bare records.
@@ -171,7 +171,14 @@ struct JournalEntry {
         // price = last trade, newPrice = the breaker's reference (0: none).
         // Safe to skip — an older reader restarts the counters, as it always
         // did — so it needs no format bump.
-        Counters = 8
+        Counters = 8,
+        // A participant's position and order-to-trade counters on symbolId's
+        // book, which only the trades a checkpoint drops would rebuild:
+        // price = net position (buys - sells), quantity = orders submitted,
+        // newQty = trades executed. Written by a checkpoint after the orders,
+        // whose re-adds count again, so replay sets rather than adds. Safe to
+        // skip like Counters: an older reader restarts them at 0, as it did.
+        Position = 9
     };
 
     Type entryType;
@@ -239,6 +246,12 @@ void applySessionRecord(Book& book, const JournalEntry& e) {
     }
     else if (e.entryType == JournalEntry::Type::Uncross)
         book.uncross();
+}
+
+// Replays a Position record onto its book, the same way for every reader.
+template <typename Book>
+void applyPositionRecord(Book& book, const JournalEntry& e) {
+    book.restorePosition({e.participantId, e.price, e.quantity, e.newQty});
 }
 
 class Journal {
@@ -444,6 +457,19 @@ public:
         entry.quantity = sequenceLease;
         entry.price = lastTradePrice;
         entry.newPrice = referencePrice;
+        appendEntry(entry);
+    }
+
+    void logPosition(SymbolId symbolId, ParticipantId participantId, int64_t netPosition,
+                     uint64_t ordersSubmitted, uint64_t tradesExecuted) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Position;
+        entry.timestamp = now();
+        entry.symbolId = symbolId;
+        entry.participantId = participantId;
+        entry.price = netPosition;
+        entry.quantity = ordersSubmitted;
+        entry.newQty = tradesExecuted;
         appendEntry(entry);
     }
 
@@ -1849,7 +1875,7 @@ private:
         const bool got = std::fread(&h, sizeof(h), 1, file_) == 1;
         if (!got || std::memcmp(h.magic, JOURNAL_MAGIC, sizeof(h.magic)) != 0) {
             // Pre-header file: a bare array of records, still readable. Its
-            // first byte is an entryType (1..8) and the magic starts with 'O',
+            // first byte is an entryType (1..9) and the magic starts with 'O',
             // so this is a definite answer, not a guess.
             dataOffset_ = 0;
             // Older than the header itself, so certainly older than the build

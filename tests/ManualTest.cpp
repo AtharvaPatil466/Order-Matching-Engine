@@ -1058,6 +1058,7 @@ void testJournalReplay() {
                     applySessionRecord(book, e);
                     break;
                 case JournalEntry::Type::Counters:
+                case JournalEntry::Type::Position:
                     break;
             }
         }

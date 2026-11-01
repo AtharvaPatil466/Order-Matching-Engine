@@ -234,7 +234,8 @@ private:
                 engine_.uncrossBatch({e.symbolId});
                 break;
             case JournalEntry::Type::Counters:
-                break;   // ids: the harness's engine issues its own
+            case JournalEntry::Type::Position:
+                break;   // ids and positions: the harness's engine makes its own
         }
     }
 

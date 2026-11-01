@@ -458,6 +458,9 @@ private:
             // when it is promoted.
             if (e.orderId != 0) book->restorePrices({e.price, e.newPrice});
             break;
+        case JournalEntry::Type::Position:
+            applyPositionRecord(*book, e);
+            break;
         case JournalEntry::Type::Snapshot:
             // Same shape as MatchingEngine::replayJournal and
             // applyReplicatedEntry, which apply this record type from disk and

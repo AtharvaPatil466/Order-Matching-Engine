@@ -56,8 +56,10 @@ jobs:
       - name: Test under ThreadSanitizer
         # Exclusions documented:
         #   BenchmarkRegressionTest.* — perf-only, no thread-safety surface
-        #   PropertyTest               — heavy fuzzer; TSan x ASan x property
-        #                                fuzzing is impractically slow in CI
+        #                                (excluded from every lane but the gate)
+        # PropertyTest is INCLUDED (roadmap 1.7): it takes 35-45s under TSan in
+        # the ubuntu:24.04 arm64 container, which is slower than this runner,
+        # against its 180s TIMEOUT. It was excluded as "impractically slow".
         # AdminServerEndpointsTest is INCLUDED: its accept/recv teardown race
         # was fixed (atomic serverSocket_), and it now scrapes /audit and
         # /metrics under live async order flow — the admin readers of
@@ -70,7 +72,7 @@ jobs:
         # non-atomic sendSeq_; both fixed (atomic fds + shutdown(2) wakeup +
         # atomic sequence). Keep TSan green going forward.
         if: matrix.thread_sanitizer == 'ON'
-        run: ctest --test-dir build --output-on-failure -L project -E '^(PropertyTest|BenchmarkRegressionTest\..*)$'
+        run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
 
       - name: Benchmark smoke
         if: matrix.os == 'ubuntu-24.04' && matrix.thread_sanitizer != 'ON'

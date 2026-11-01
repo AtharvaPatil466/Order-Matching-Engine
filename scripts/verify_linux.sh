@@ -34,12 +34,9 @@ LANE="${1:-sanitizers}"
 
 # Test exclusions must MATCH ci.yml exactly, or this script reports a failure
 # the real lane would never see — which is worse than not running it, because
-# it teaches you to ignore the output. The TSan lane's extra exclusions are
-# documented in ci.yml: PropertyTest is a heavy fuzzer and TSan x property
-# fuzzing is impractically slow (it times out at 180s here, which looks like a
-# hang rather than a skip).
+# it teaches you to ignore the output. The TSan lane has no extra exclusions:
+# PropertyTest runs there too (35-45s under TSan in this container, TIMEOUT 180).
 EXCLUDE_DEFAULT='BenchmarkRegressionTest'
-EXCLUDE_TSAN='BenchmarkRegressionTest|PropertyTest'
 
 case "$LANE" in
   sanitizers)
@@ -57,7 +54,7 @@ case "$LANE" in
     JOBS=2 ;;
   tsan)
     CM_ARGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=OFF -DENABLE_THREAD_SANITIZER=ON -DBUILD_BENCHMARKS=OFF"
-    EXCLUDE="$EXCLUDE_TSAN"
+    EXCLUDE="$EXCLUDE_DEFAULT"
     JOBS=2 ;;
   release)
     CM_ARGS="-DCMAKE_BUILD_TYPE=Release -DENABLE_SANITIZERS=OFF -DBUILD_BENCHMARKS=ON"

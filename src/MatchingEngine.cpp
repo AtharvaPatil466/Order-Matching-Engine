@@ -890,7 +890,7 @@ void MatchingEngine::leaseSequenceIds(uint64_t through) {
 void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
     if (book && e.orderId != 0) {
         book->restoreNextTradeId(e.orderId);
-        book->restorePrices({e.price, e.newPrice});
+        book->restorePrices({e.price, e.newPrice, e.newQty});
     }
     if (e.quantity == 0) return;
     uint64_t cur = sequenceLease_.load(std::memory_order_relaxed);
@@ -2808,7 +2808,7 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
             break;
         case JournalEntry::Type::Counters:
             journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity,
-                                  entry.price, entry.newPrice);
+                                  entry.price, entry.newPrice, entry.newQty);
             break;
         case JournalEntry::Type::Position:
             journal_->logPosition(entry.symbolId, entry.participantId, entry.price,
@@ -3012,7 +3012,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
             // last trade, which would fire them into a half-restored book.
             for (const auto& [symbolId, nextTradeId, prices] : counters)
                 snapshotJournal.logCounters(symbolId, nextTradeId, 0,
-                                            prices.lastTrade, prices.reference);
+                                            prices.lastTrade, prices.reference,
+                                            prices.lastTradeQty);
             // After the orders too: their re-adds count as submissions again.
             for (const auto& [symbolId, p] : positions)
                 snapshotJournal.logPosition(symbolId, p.participant, p.netPosition,

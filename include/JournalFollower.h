@@ -456,7 +456,7 @@ private:
         case JournalEntry::Type::Counters:
             // Ids: a follower issues none. A checkpoint's prices it keeps, for
             // when it is promoted.
-            if (e.orderId != 0) book->restorePrices({e.price, e.newPrice});
+            if (e.orderId != 0) book->restorePrices({e.price, e.newPrice, e.newQty});
             break;
         case JournalEntry::Type::Position:
             applyPositionRecord(*book, e);

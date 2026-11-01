@@ -11,6 +11,9 @@
 // price (decision 6), cancelled them instead. A book that only quoted has a
 // reference too, and no trade id for the checkpoint to record it beside.
 //
+// The last trade's quantity, which a market-data snapshot and the admin /book
+// and /depth endpoints show beside its price, came back as 0.
+//
 // A parked trailing stop's Snapshot record carries the trigger its trail had
 // ratcheted to, and re-adding the order threw it away: the trail restarted
 // from the order's own price, then ratcheted from the last trade, which is
@@ -153,6 +156,11 @@ int trailProbe(OrderBook& b) {
     return !(stop && stop->type == OrderType::TrailingStop);
 }
 
+// The snapshot shows the last trade, 10 at 100.00.
+int lastQtyProbe(OrderBook& b) {
+    return static_cast<int>(b.getSnapshot(1).lastTradeQty);
+}
+
 int check(const char* what, const Setup& setup, const Probe& probe, int want) {
     int failures = 0;
     for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed, Life::Followed}) {
@@ -169,6 +177,7 @@ int main() {
     int failures = 0;
     failures += check("traded: breaker tripped at 120.00", traded, breakerProbe, 1);
     failures += check("traded: trades from market vs market", traded, marketCrossProbe, 1);
+    failures += check("traded: last trade quantity shown", traded, lastQtyProbe, 10);
     failures += check("quoted: breaker tripped at 120.00", quoted, breakerProbe, 1);
     failures += check("trailed: stop fired at 102.80", trailed, trailProbe, 1);
     if (failures != 0) {

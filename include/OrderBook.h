@@ -749,16 +749,18 @@ public:
     }
     // So are the prices the dropped trades left: the last trade (a market-vs-
     // market auction crosses at it) and the breaker's reference, which a book
-    // without one re-seeds from its next order. 0 restores nothing.
-    struct CheckpointPrices { Price lastTrade; Price reference; };
+    // without one re-seeds from its next order; and the last trade's quantity,
+    // which market data shows beside its price. 0 restores nothing.
+    struct CheckpointPrices { Price lastTrade; Price reference; Quantity lastTradeQty = 0; };
     CheckpointPrices checkpointPricesLocked() const {
         std::lock_guard<std::mutex> lock(bookLock_);
-        return {lastTradePrice_, referencePrice_};
+        return {lastTradePrice_, referencePrice_, lastTradeQty_};
     }
     void restorePrices(const CheckpointPrices& p) {
         std::lock_guard<std::mutex> lock(bookLock_);
         if (p.lastTrade != 0) lastTradePrice_ = p.lastTrade;
         if (p.reference != 0) referencePrice_ = p.reference;
+        if (p.lastTradeQty != 0) lastTradeQty_ = p.lastTradeQty;
     }
     // And each participant's position and order-to-trade counters here: the
     // maxPositionSize check and /otr read them. Restoring sets them, because

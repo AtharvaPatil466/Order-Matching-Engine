@@ -31,8 +31,17 @@ add_replay_target(fuzz_fix_framer_replay     fuzz_fix_framer.cpp)
 # ---- libFuzzer binary (optional) ------------------------------------------
 
 set(_FUZZER_FLAG "-fsanitize=fuzzer,address,undefined")
+# Probe with an entry point. check_cxx_compiler_flag links its own int main(),
+# which clashes with libFuzzer's: GNU ld refuses the two mains, so on Linux the
+# probe failed with a working libFuzzer and no libFuzzer target ever built
+# there (macOS ld64 let it through).
+include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_FLAGS "${_FUZZER_FLAG}")
-check_cxx_compiler_flag("${_FUZZER_FLAG}" HAVE_LIBFUZZER)
+check_cxx_source_compiles("
+#include <cstddef>
+#include <cstdint>
+extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t*, size_t) { return 0; }
+" HAVE_LIBFUZZER)
 unset(CMAKE_REQUIRED_FLAGS)
 
 function(add_libfuzzer_target name harness_src)

@@ -1474,6 +1474,13 @@ add_test(NAME NoResearchInEngineTest
                  $<TARGET_FILE:GatewayServer>)
 set_tests_properties(NoResearchInEngineTest PROPERTIES TIMEOUT 60 LABELS "project")
 
+# Roadmap 2.4: every guarantee marked in README, Compliance, Verification and
+# ProductionReadiness has a docs/CLAIMS.md row whose tests exist (ctest -N).
+add_test(NAME ClaimsCheckTest
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/check_claims.py
+                 ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR} ${CMAKE_CTEST_COMMAND})
+set_tests_properties(ClaimsCheckTest PROPERTIES TIMEOUT 60 LABELS "project")
+
 # Research replay harness: journal-driven replay with trade/book-update callbacks
 add_executable(TestResearchHarness TestResearchHarness.cpp)
 target_link_libraries(TestResearchHarness PRIVATE OrderMatcher gtest_main)

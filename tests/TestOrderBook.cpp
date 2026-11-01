@@ -2243,6 +2243,37 @@ TEST(JournalTest, ReplayRecovery) {
     std::remove(journalPath.c_str());
 }
 
+// A thread's sequence-id block outlives its engine. The next engine on that
+// thread used to keep handing out ids from it, so its journal never leased them
+// (D1) — and ReplayRecovery failed whenever an earlier test in the same process
+// had submitted from this thread.
+TEST(JournalTest, NextEngineOnThreadLeasesItsOwnIds) {
+    {
+        MatchingEngine earlier;
+        earlier.addSymbol(1);
+        earlier.start();
+        earlier.processOrder(1, 7, 1, Side::Buy, 1000000, 10, OrderType::Limit);
+        earlier.stop();
+    }
+    const std::string journalPath = uniqueTempPath("next_engine_lease.bin");
+    std::remove(journalPath.c_str());
+    {
+        MatchingEngine engine;
+        engine.addSymbol(1);
+        engine.enableJournal(journalPath);
+        engine.start();
+        engine.processOrder(1, 100, 1, Side::Buy, 1000000, 50, OrderType::Limit);
+        engine.stop();
+    }
+    MatchingEngine recovered;
+    recovered.addSymbol(1);
+    recovered.enableJournal(journalPath);
+    recovered.start();
+    EXPECT_EQ(recovered.replayJournal(), 1u + 1u);   // the order and its id's lease
+    recovered.stop();
+    std::remove(journalPath.c_str());
+}
+
 // ─── Latency Tracker Tests ──────────────────────────────────────────────────
 
 TEST(LatencyTrackerTest, BasicRecording) {

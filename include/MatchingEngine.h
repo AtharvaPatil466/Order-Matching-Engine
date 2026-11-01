@@ -626,6 +626,10 @@ private:
     uint64_t nextSequenceId();
     void leaseSequenceIds(uint64_t through);
     std::atomic<uint64_t> sequenceLease_{0};   // highest id a record covers
+    // Tags this engine's id blocks: a thread's block is only used by the
+    // engine whose lease covers it, never by the next engine on that thread.
+    inline static std::atomic<uint64_t> seqOwnerTags_{0};
+    const uint64_t seqOwnerTag_ = seqOwnerTags_.fetch_add(1, std::memory_order_relaxed) + 1;
     // Apply a Counters record (replay, replication): `book` is its symbol's
     // book, or null when the record names none.
     void restoreCounters(OrderBook* book, const JournalEntry& e);

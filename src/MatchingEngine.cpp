@@ -65,14 +65,16 @@ constexpr uint64_t kSeqBlock = 1024;
 std::atomic<uint64_t> g_seqBlockBase{0};
 thread_local uint64_t t_seqNext = 0;
 thread_local uint64_t t_seqEnd  = 0;
+thread_local uint64_t t_seqOwner = 0;   // seqOwnerTag_ of the engine that leased the block
 
 // D1: ids restarted at 1 in every process, so a restarted engine handed its
 // clients ids it had already given them. They are leased from the journal now,
 // kSeqLease at a time (one record and one flush per lease), and replay resumes
 // the allocator above the last lease.
-// ponytail: one engine per process. A thread's block outlives the engine that
-// leased it, so a second engine in the same process may hand out ids its own
-// lease does not cover; per-engine blocks if that ever matters.
+// A thread's block outlives the engine that leased it, so each block is tagged
+// with its engine: a second engine on the same thread (every test binary, the
+// Python bridge) takes a fresh block and leases it in its own journal, instead
+// of handing out ids from the first engine's block that its journal never saw.
 constexpr uint64_t kSeqLease = uint64_t{1} << 20;
 
 void raiseSequenceBase(uint64_t floor) {
@@ -867,8 +869,9 @@ void MatchingEngine::maybeTriggerAutoCheckpoint() {
 }
 
 uint64_t MatchingEngine::nextSequenceId() {
-    if (t_seqNext == t_seqEnd) [[unlikely]] {
+    if (t_seqNext == t_seqEnd || t_seqOwner != seqOwnerTag_) [[unlikely]] {
         const uint64_t base = g_seqBlockBase.fetch_add(kSeqBlock, std::memory_order_relaxed);
+        t_seqOwner = seqOwnerTag_;
         t_seqNext = base + 1;
         t_seqEnd  = base + kSeqBlock + 1;
         if (base + kSeqBlock > sequenceLease_.load(std::memory_order_acquire))

@@ -1,0 +1,74 @@
+# Bench x86 — every benchmark the docs quote, at one commit, raw output kept.
+#
+# WHY THIS EXISTS
+#
+# Every performance number in README.md, BENCHMARKS.md, the whitepaper,
+# Project_Overview.md and docs/CapacityPlanning.md traces to no raw artifact
+# (docs/PERF_SOURCES.md): the x86 figures are one AWS session at d2e688c with
+# no log, the rest are Apple Silicon dev-box runs. This workflow produces the
+# artifact they should cite (roadmap 1.11-K5, 2.11), and the 0.4 measurement
+# decision 1.4-D7 waits on: HonestBenchmark Path C (group commit, ack before
+# durability) against Path D (SyncPolicy::Immediate, submit to durable ack, one
+# fsync per order), with the journal's filesystem and an fsync probe recorded.
+#
+# scripts/bench_x86.sh does the work, so the same steps run in a container;
+# it writes raw logs only. Builds: prod (the Dockerfile's clang-18,
+# x86-64-v3, no io_uring — the headline), native (-march=native + io_uring,
+# what the published figures used) and PGO, reported separately.
+#
+# It is workflow_dispatch only, on purpose — the same reasoning as
+# journal-contention.yml and scaling.yml: it is a measurement, not a gate, it
+# asserts no threshold, and it runs for the better part of an hour. A hosted
+# runner is a shared VM, not a venue host: the numbers are labelled with it.
+#
+# Run:   gh workflow run bench-x86.yml --ref <branch> [-f reps=5]
+# Land:  scripts/import_bench_results.sh <run-id>   (gh run list --workflow bench-x86.yml)
+
+name: Bench x86
+
+on:
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: "HonestBenchmark repetitions per build"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Ubuntu x86 Release — every benchmark the docs quote
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # clang-18 and Ninja are what the Dockerfile builds with; llvm-18 has the
+      # llvm-profdata PGO needs; liburing is for the native build only (prod
+      # passes -DENABLE_IO_URING=OFF, matching the image, which has none).
+      # perf is best effort: a hosted VM usually exposes no PMU.
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 ninja-build liburing-dev
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" \
+            || echo "perf is not packaged for $(uname -r)"
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+
+      - name: Build and run
+        env:
+          REPS: ${{ inputs.reps }}
+        run: scripts/bench_x86.sh bench-out
+
+      - name: Upload raw output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-x86-${{ github.sha }}
+          path: bench-out/
+          if-no-files-found: error
+          retention-days: 90

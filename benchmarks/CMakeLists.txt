@@ -14,6 +14,10 @@ target_link_libraries(SustainedLoadTest PRIVATE OrderMatcher)
 add_executable(HonestBenchmark HonestBenchmark.cpp)
 target_link_libraries(HonestBenchmark PRIVATE OrderMatcher)
 
+# Struct sizes and per-symbol resident memory behind docs/CapacityPlanning.md
+add_executable(MemoryProbe MemoryProbe.cpp)
+target_link_libraries(MemoryProbe PRIVATE OrderMatcher)
+
 # Binary-codec microbenchmark — comparing OUCH / ITCH / SBE encode rates
 add_executable(BinaryCodecBenchmark BinaryCodecBenchmark.cpp)
 target_link_libraries(BinaryCodecBenchmark PRIVATE OrderMatcher)

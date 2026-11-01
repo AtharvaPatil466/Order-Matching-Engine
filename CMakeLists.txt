@@ -317,7 +317,8 @@ if(ENABLE_FAULT_INJECTION)
 endif()
 
 # Research and simulation code (roadmap 2.6): built on the engine, never part
-# of it.
+# of it. NoResearchInEngineTest fails if its symbols reach libOrderMatcher or a
+# shipped binary.
 add_library(OrderMatcherResearch src/SimulationDriver.cpp)
 target_link_libraries(OrderMatcherResearch PUBLIC OrderMatcher)
 

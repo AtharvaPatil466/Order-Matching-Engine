@@ -1466,6 +1466,14 @@ gtest_discover_tests(SimulationTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;simulation")
 
+# Roadmap 2.6: no research or simulation symbol in the engine library or a
+# shipped binary. Labelled project so every lane checks its own build.
+add_test(NAME NoResearchInEngineTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_research_in_engine.sh
+                 $<TARGET_FILE:OrderMatcher> $<TARGET_FILE:OrderEngine>
+                 $<TARGET_FILE:GatewayServer>)
+set_tests_properties(NoResearchInEngineTest PROPERTIES TIMEOUT 60 LABELS "project")
+
 # Research replay harness: journal-driven replay with trade/book-update callbacks
 add_executable(TestResearchHarness TestResearchHarness.cpp)
 target_link_libraries(TestResearchHarness PRIVATE OrderMatcher gtest_main)

@@ -88,11 +88,11 @@ graph TD
 
 **Order entry**:
 1. **Wire framing**: bytes arrive on TCP. The connection's session class (`FixSession` for FIX 4.2/4.4 text, `OuchSession` for NASDAQ OUCH binary, `SbeSession` for FIX-TG SBE) handles framing. OUCH is additionally wrapped in `SoupBinTcpSession` (3-byte length+type envelope, login/heartbeat/logout).
-2. **Pre-Trade Risk**: the order passes through `RateLimiter` and `BatchRiskValidator` (notional, fat-finger, kill-switch).
+2. **Ingress checks**: `MatchingEngine::submitOrder`, which every protocol calls, refuses a participant id or an enum field (side, order type, time in force, peg type) outside its range (`InvalidFieldValue`) and a GTD order, or a DAY order where no session end is scheduled, without an `expiryTime` (`MissingRequiredField`). Then the `RateLimiter` (off by default) and the pre-trade risk gate (fat-finger, position, order-to-trade; skipped entirely while none is configured).
 3. **Routing**: `MatchingEngine` hashes `SymbolId` and pushes the order into the appropriate thread's `MpscQueue`.
-4. **Dequeue & Validate**: the worker thread pops the order. `LULDManager` (Limit Up-Limit Down) bands verify the instrument isn't halted.
-5. **Matching**: `OrderBook` matches against resting liquidity. `WashTradeDetector` applies Self-Trade Prevention.
-6. **Persistence**: trades and book updates are appended to the `Journal` (Write-Ahead Log).
+4. **Dequeue & admit**: the worker thread pops the order and `OrderBook::addOrder` admits it: trading state, price, quantity and trigger fields, the configured price range, pool pressure, risk limits, the percentage price band, PostOnly, peg placement and parked-list capacity. `LULDManager` is not called ([docs/MatchingRules.md](docs/MatchingRules.md) Rule 7.6).
+5. **Matching**: `OrderBook` matches against resting liquidity, applying self-trade prevention (`SelfTradeProtection`) as the sweep reaches each of the participant's own orders. `WashTradeDetector` is not called.
+6. **Persistence**: the order is appended to the `Journal` after the book has applied it, so the journal is not write-ahead (see the README).
 
 **Market data egress** (parallel to order entry):
 7. **Fan-out**: every engine event reaches `MultiplexListener`, which dispatches to all registered `EventListener`s simultaneously.
@@ -122,7 +122,7 @@ The `AdminServer` exposes a lightweight HTTP interface for ops tooling and conta
 ### 3.1 OrderBook & Data Structures
 The core of the engine is purely single-threaded and deterministic.
 - **`Order`**: A 192-byte `alignas(64)` struct containing ID, price, quantity, participant ID, and intrusive pointers (`sizeof(Order) == 192`).
-- **`FlatPriceMap`**: A fixed-size array covering the valid tick range of an instrument. If BTC trades from \$0 to \$100,000 at \$0.01 increments, the map has 10,000,000 slots. Memory is cheap; cache misses are expensive.
+- **`FlatPriceMap`**: A fixed-size array of 200,001 one-tick slots per side, covering one price range per book: `instrument.<s>.min_price` / `max_price` in `OrderEngine` started with a config file, otherwise a range centred on the book's first resting order. An order priced outside it cannot rest; with a configured range it is refused at admission ([docs/MatchingRules.md](docs/MatchingRules.md) Rule 1.4). Memory is cheap; cache misses are expensive.
 - **`FlatHashMap`**: Used for O(1) order cancellation by `OrderId`. It uses Robin-Hood open-addressing to maintain cache density.
 
 ### 3.2 ShardedOrderBook & Horizontal Scaling

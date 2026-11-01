@@ -536,7 +536,7 @@ with 10,000 co-located stops took **2.13 ms** against a 237 ns median.
 
 The engine executes at most `kMaxStopExecutionsPerSweep = 64` elected stops inline per sweep.
 `checkStopOrders` and `updateTrailingStops` each get their own budget of 64, so one incoming
-order can execute up to 128 elections in total.
+order, or one repriced replace, can execute up to 128 elections in total.
 
 > `include/OrderBook.h:645` — the constant, with the full measurement table at
 > `include/OrderBook.h:612-644`

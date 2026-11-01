@@ -1460,7 +1460,7 @@ gtest_discover_tests(ImpactModelTest
 
 # Agent-based market simulation: NoiseTrader, MarketMaker, InformedTrader, SimulationDriver
 add_executable(SimulationTest TestSimulation.cpp)
-target_link_libraries(SimulationTest PRIVATE OrderMatcher gtest_main)
+target_link_libraries(SimulationTest PRIVATE OrderMatcherResearch gtest_main)
 gtest_discover_tests(SimulationTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
@@ -1506,7 +1506,7 @@ gtest_discover_tests(OrderFlowAnalyticsTest
     PROPERTIES LABELS "project\;quant\;microstructure")
 
 add_executable(ResearchSerializerTest TestResearchSerializer.cpp)
-target_link_libraries(ResearchSerializerTest PRIVATE OrderMatcher gtest_main)
+target_link_libraries(ResearchSerializerTest PRIVATE OrderMatcherResearch gtest_main)
 gtest_discover_tests(ResearchSerializerTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results

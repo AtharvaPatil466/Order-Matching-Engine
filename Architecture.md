@@ -235,6 +235,8 @@ Designing for low latency means knowing exactly how the system behaves when unde
 
 A self-contained quantitative research layer embedded in the codebase, enabling empirical microstructure analysis and strategy development directly against the live `OrderBook`.
 
+It is not part of the engine: `SimulationDriver` builds as the `OrderMatcherResearch` library, which links `OrderMatcher`, and the rest of the layer is header-only and compiled only into the tests that include it.
+
 ### Architecture
 
 The research layer consumes engine events via the `EventListener` interface — the same interface used by production ITCH publisher and SHM publisher. This means research code runs against the real matching logic, not a simulation approximation.

@@ -228,7 +228,6 @@ add_library(OrderMatcher
     src/EpochStore.cpp
     src/TcpGateway.cpp
     src/FaultInjector.cpp
-    src/SimulationDriver.cpp
     src/DpdkGateway.cpp
 )
 target_link_libraries(OrderMatcher PUBLIC Threads::Threads)
@@ -316,6 +315,11 @@ if(ENABLE_FAULT_INJECTION)
     target_compile_definitions(OrderMatcher PUBLIC OB_ENABLE_FAULT_INJECTION=1)
     message(STATUS "Fault-injection points enabled (OB_ENABLE_FAULT_INJECTION)")
 endif()
+
+# Research and simulation code (roadmap 2.6): built on the engine, never part
+# of it.
+add_library(OrderMatcherResearch src/SimulationDriver.cpp)
+target_link_libraries(OrderMatcherResearch PUBLIC OrderMatcher)
 
 # Main Executable
 add_executable(OrderEngine src/main.cpp)

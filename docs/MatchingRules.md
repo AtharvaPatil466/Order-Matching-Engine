@@ -32,7 +32,7 @@ guessing.
 | 1 | Iceberg under pro-rata | Allocation weight is the **displayed slice**; the refreshed slice **keeps** its list position | Deliberate — commented and pinned ([§3](#3-iceberg-orders)) |
 | 2 | STP during allocation | Resolved in a **pre-pass before** allocation; any removal **restarts** the level and re-derives every ratio | Deliberate — commented and pinned ([§4](#4-self-trade-prevention)) |
 | 3 | Stop cascades | No second-level election in one sweep; fan-out capped at 64, the rest **latched and deferred** | Deliberate — commented and pinned ([§5](#5-stop-stop-limit-and-market-if-touched)) |
-| 4 | Trailing stops / pegs | Full linear rescan of **every** trailing stop and **every** peg on **every** order submission; a repegged order **loses** time priority | Undocumented — no test pins the complexity or the priority loss ([§6](#6-trailing-stops-and-pegged-orders)) |
+| 4 | Trailing stops / pegs | Full linear rescan of **every** trailing stop and **every** peg on **every** order submission and repriced replace; a repegged order **loses** time priority | Undocumented — no test pins the complexity or the priority loss ([§6](#6-trailing-stops-and-pegged-orders)) |
 | 5 | Auction uncross | max volume → min imbalance → nearest reference price → market pressure | Deliberate — commented, thinly pinned ([§7](#7-auctions-and-the-volatility-uncross)) |
 | 6 | GTD expiry | **Full linear scan** of the order table, on a **1 Hz background thread**, under the book lock | Undocumented — no test pins the mechanism or its cost ([§8](#8-time-in-force-and-expiry)) |
 | 7 | Price type | `int64_t` integer ticks, 4 implied decimals | Deliberate — commented and pinned ([§1](#1-prices-quantities-and-arithmetic)) |
@@ -423,43 +423,60 @@ orders, on-close orders, trailing stops). It used to be acked and then dropped b
 `FixedVector::push_back`, leaving an order in no list (roadmap 1.8-H6, AUCT-6). `push_back` is
 now `[[nodiscard]]`. Pinned by `tests/AuctionCapacityTest.cpp`.
 
-A `Stop` must carry a positive `price`, or it is rejected with `InvalidPrice`. An elected
-`Stop` becomes a `Limit` at that price, so a `Stop` at price 0 used to sweep the book to zero
-and rest its remainder as an ask at 0 (roadmap 0.12, OTM-4). This is a stop-gap: 1.6-F2 makes
-`Stop` a stop-market. Pinned by `tests/OrderTypeAdmissionTest.cpp`.
+Admission checks the trigger fields, not `price`. A `Stop`, `StopLimit` or `MIT` with
+`stopPrice <= 0`, and a `StopLimit` with `stopLimitPrice <= 0`, is rejected with
+`InvalidPrice` before it is acked. `price` is not a limit for any of the three (Rule 5.2), so
+it is not checked. A sell stop at 0 could never fire, a buy stop at 0 fired on the next print,
+and a `StopLimit` at `stopLimitPrice` 0 rested at 0 once elected. `Stop` used to elect a
+`Limit` at its `price`, so a stop-market sent with price 0 swept the book to zero and rested
+its remainder as an ask at 0; roadmap 0.12 refused price 0 instead, and 1.6-F2 (OTM-4) made
+`Stop` a stop-market. Pinned by `tests/StopMarketTest.cpp`.
+
+> `validateOrderRequest()` in `src/OrderBook.cpp`
 
 ### Rule 5.2 — Election tests
 
-Evaluated against the last trade price, at or through the level:
+Evaluated, at or through the level, against the lowest and highest price the triggering
+order printed. A sweep prints monotonically in the aggressor's direction, so its first and
+last prints bound every price it traded: `low = min(first, last)`, `high = max(first, last)`.
+An order that printed nothing leaves both at the last trade price.
 
 | Type | Buy elects when | Sell elects when |
 |---|---|---|
-| `Stop`, `StopLimit` | `last ≥ stopPrice` | `last ≤ stopPrice` |
-| `MIT` | `last ≤ stopPrice` | `last ≥ stopPrice` |
+| `Stop`, `StopLimit` | `high ≥ stopPrice` | `low ≤ stopPrice` |
+| `MIT` | `low ≤ stopPrice` | `high ≥ stopPrice` |
 
 `MIT` is the favourable-direction mirror of a stop and carries its trigger in the same field.
+Only the last print used to be tested. That is harmless for a stop, whose trigger lies in the
+sweep's direction, but an `MIT` triggers against it: a buy sweeping 100 then 110 never elected
+the buy `MIT` at 105 that its 100 print touched (roadmap 1.6-F3, MATCH-17; pinned by
+`tests/StopSweepOrderTest.cpp`).
 
-> `src/OrderBook.cpp:2232-2251`
+> `runTriggerSweeps()` and `checkStopOrders()` in `src/OrderBook.cpp`; `match()` and
+> `matchProRata()` return the sweep's first print
 
 On election the order's type is rewritten in place:
 
 | Armed as | Becomes | At price |
 |---|---|---|
-| `Stop` | `Limit` | its original `price` |
+| `Stop` | `Market` | — unfilled remainder is cancelled, never rested |
 | `StopLimit` | `Limit` | `stopLimitPrice` |
 | `MIT` | `Market` | — unfilled remainder is cancelled, never rested |
 
-> `src/OrderBook.cpp:2266-2275`, `src/OrderBook.cpp:2285-2293`
+`Stop` is a stop-market; `StopLimit` is the priced form.
+
+> `checkStopOrders()` in `src/OrderBook.cpp`
 
 ### Rule 5.3 — A triggered stop's own fill CANNOT elect another stop in the same sweep
 
-`checkStopOrders(Price)` takes the last trade price **by value** and has exactly one call
-site. A stop that fires inside the sweep updates `lastTradePrice_`, but the sweep continues to
-evaluate every remaining stop against the price it was called with. A second-level election
-therefore defers to the next arriving order.
+`checkStopOrders(low, high)` takes the triggering order's low and high print **by value**
+(Rule 5.2) and is called once per sweep, from `runTriggerSweeps()`. A stop that fires inside
+the sweep updates `lastTradePrice_`, but the sweep continues to evaluate every remaining stop
+against the prices it was called with. A second-level election therefore defers to the next
+arriving order (or repriced replace, Rule 5.8).
 
-> `src/OrderBook.cpp:2205` — the signature
-> `src/OrderBook.cpp:1021-1023` — the only call site
+> `checkStopOrders()` in `src/OrderBook.cpp` — the signature
+> `runTriggerSweeps()` — its only call site, reached from `addOrder` and `cancelReplace`
 
 A laddered book in which each stop's own fill would trip the next advances **exactly one
 rung per incoming order**, however deep the ladder.
@@ -537,8 +554,11 @@ This is the part a participant needs to know and the part the engine does not te
   (`src/OrderBook.cpp:1879` → `src/OrderBook.cpp:1843-1846`). The owner is never told their
   stop had already been elected.
 - **Deferral is measured in arriving orders, not in time.** The sweep runs only from
-  `addOrder` (`src/OrderBook.cpp:1021-1023`). Cancels, modifies, expiry sweeps and uncrosses
-  do **not** drain the backlog. If order flow stops, a latched stop sits latched indefinitely.
+  `addOrder`, for an order that reaches matching, and from a `cancelReplace` that changes
+  price, both in `Continuous` (Rule 5.8). A newly parked stop or peg, a FOK rejected for
+  liquidity, an order the `minQty` screen finalized, cancels, modifies, same-price replaces,
+  expiry sweeps and uncrosses do **not** drain the backlog. If order flow stops, a latched
+  stop sits latched indefinitely.
 
 So from the outside, a deferred stop is indistinguishable from an un-elected one. A
 participant cannot tell whether their stop is armed or already committed.
@@ -579,26 +599,49 @@ properties were acceptable. A venue publishing this rulebook would have to eithe
 time-ordered deferral or state plainly that deferral order is unspecified. Right now the code
 does the latter without saying so.
 
+### Rule 5.8 — Elections run after the triggering order is final
+
+The stop, trailing-stop and peg sweeps (`runTriggerSweeps()`) run only once the order that
+printed is finished: rested, filled, cancelled, or ended by self-trade prevention. `addOrder`
+runs them after its finalize step, and so does a `cancelReplace` that changes price — the
+repriced order is an aggressor and its prints elect stops like any other. Neither runs them in
+`PreOpen` or an auction state (Rule 7.1).
+
+So the aggressor's own report comes first: its rest or `Filled` update precedes the executions
+of any stop it elected. The sweeps used to run between `match()` and the finalize step. A stop
+elected by the incoming order's own print then matched a book that did not yet hold that
+order's remainder, missed it, and rested; the remainder then rested through it, and nothing
+matches two resting orders, so the book stayed crossed in `Continuous`. `cancelReplace` ran no
+sweep at all, so a replace that printed through a trigger never elected it (roadmap 1.6-F3,
+MATCH-5).
+
+`OrderBook::validateIntegrity()` now refuses a crossed or locked book (best bid ≥ best ask) in
+`Continuous`; the accumulation states, where crossing orders legitimately wait for the
+uncross, pass.
+
+> `runTriggerSweeps()`, its two call sites in `addOrder` and `cancelReplace`, and
+> `validateIntegrity()` in `src/OrderBook.cpp`
+
+**Status: Deliberate — commented and pinned.** `tests/StopSweepOrderTest.cpp` (incoming-print
+and replace elections), `tests/IntegrityOracleTest.cpp` (crossed and locked books).
+
 ---
 
 ## 6. Trailing stops and pegged orders
-
-> **`Pegged` is currently refused at admission** (`OrderTypeNotAllowedInState`, roadmap 0.12,
-> STP-13) because of [defect B4](#b4--pegged-orders-can-rest-at-a-crossing-price). The peg
-> rules below describe code that no order can currently reach. 1.6-F4 lifts the reject.
 
 ### Rule 6.1 — Every trailing stop is rescanned on every order submission, unconditionally
 
 **This is the answer to "does the engine rescan every trailing order when the reference price
 moves?" — it rescans them whether or not the reference moved.**
 
-`updateTrailingStops` is called from `addOrder` whenever the book has ever traded
+`updateTrailingStops` is called from `runTriggerSweeps()` (Rule 5.8), after every order that
+reaches matching and every repriced replace, whenever the book has ever traded
 (`lastTradePrice_ > 0`) — not when a trade occurs, not when the price changes. An order that
-rests without matching, or that is rejected after allocation, still pays for a full linear
-walk of `trailingStopOrders_`.
+rests without matching, or that is cancelled because it could not rest, still pays for a full
+linear walk of `trailingStopOrders_`.
 
-> `src/OrderBook.cpp:1021-1023` — the guard is `if (lastTradePrice_ > 0)`, nothing more
-> `src/OrderBook.cpp:2308-2378` — the sweep
+> `runTriggerSweeps()` in `src/OrderBook.cpp` — the guard is `if (lastTradePrice_ > 0)`, nothing more
+> `updateTrailingStops()` — the sweep
 
 **Complexity per submitted order: O(T)** where T is the number of armed trailing stops, up to
 the 16,384 array cap. The same is true of `checkStopOrders`: **O(S)** per submitted order,
@@ -618,15 +661,27 @@ notice either becoming quadratic.
 
 ### Rule 6.2 — The trailing ratchet is one-way and is skipped once latched
 
+A trailing stop parks with a reference: the last trade price, or its own `price` if the book
+has not traded. Its `trailAmount` must lie inside `(0, reference)`, or it is rejected with
+`InvalidPrice` at admission: a trail at or beyond the reference put the trigger, which is also
+the elected limit, at or below zero, and a negative trail elected a buy at once at a negative
+limit (roadmap 1.6-F2, OTM-4; pinned by `tests/StopMarketTest.cpp`).
+
 For a sell trailing stop: each time the price makes a new high, `trailRefPrice` advances and
-`stopPrice` becomes `trailRefPrice − trailAmount`, floored at zero. The stop elects when the
-price falls to or through `stopPrice`. A buy trailing stop is the mirror, ratcheting down.
+`stopPrice` becomes `trailRefPrice − trailAmount` (floored at zero, which the admission bound
+keeps out of reach). The stop elects when the price falls to or through `stopPrice`. A buy
+trailing stop is the mirror, ratcheting down. On election it becomes a `Limit` at `stopPrice`.
 
-> `src/OrderBook.cpp:2326-2341`
+Each sweep tests the triggering order's first print and then the last, in the order they
+traded, ratcheting and testing at each. A sell sweep printing 106 then 90 used to ratchet a
+buy trailing stop's reference straight down to 90 without testing the 106 print against its
+105 trigger (MATCH-17; pinned by `tests/StopSweepOrderTest.cpp`).
 
-Once an election is latched, **the ratchet is skipped along with the trigger test**
-(`src/OrderBook.cpp:2320-2326`). This is deliberate: a deferred election whose trail kept
-following the price could stop qualifying, which would cancel it rather than defer it.
+> `validateOrderRequest()`, `parkNonMatchingOrder()` and `updateTrailingStops()` in `src/OrderBook.cpp`
+
+Once an election is latched, **the ratchet is skipped along with the trigger test**. This is
+deliberate: a deferred election whose trail kept following the price could stop qualifying,
+which would cancel it rather than defer it.
 
 ### Rule 6.3 — Stop elections feed trailing-stop elections within one submission, but not the reverse
 
@@ -634,18 +689,21 @@ An asymmetry worth stating because it is not obvious from either function:
 
 ```cpp
 if (lastTradePrice_ > 0) {
-    checkStopOrders(lastTradePrice_);     // argument read here
-    updateTrailingStops(lastTradePrice_); // argument read AGAIN, after the above ran
+    const Price last = lastTradePrice_;
+    const Price first = firstPrint > 0 ? firstPrint : last;
+    checkStopOrders(std::min(first, last), std::max(first, last));
+    updateTrailingStops(first, lastTradePrice_);  // read AGAIN, after the above ran
 }
 ```
 
-> `src/OrderBook.cpp:1021-1023`
+> `runTriggerSweeps()` in `src/OrderBook.cpp`
 
 `lastTradePrice_` is a member. `checkStopOrders` runs `match()` on each election, which
-updates it. So **trailing stops are evaluated against the price after the stop cascade, while
-ordinary stops were evaluated against the price before it.** Trailing stops therefore see one
-extra level of price propagation that ordinary stops do not, and there is no reverse path —
-a trailing stop's fill cannot elect an ordinary stop until the next submission.
+updates it. So **a trailing stop's second test is against the price after the stop cascade,
+while ordinary stops were evaluated against the triggering order's prints only.** Trailing
+stops therefore see one extra level of price propagation that ordinary stops do not, and there
+is no reverse path — a trailing stop's fill cannot elect an ordinary stop until the next
+submission.
 
 **Status: Undocumented — no test pins this, may be incidental.** Nothing comments on the
 re-read, and it is equally consistent with a deliberate one-way propagation and with nobody
@@ -653,26 +711,45 @@ having noticed that the second argument is evaluated later.
 
 ### Rule 6.4 — Every pegged order is repriced on every order submission, and a repeg loses time priority
 
-`updatePeggedOrders` runs from `addOrder` whenever any pegged order exists, recomputing every
-peg's target from the current book:
+`updatePeggedOrders` runs from `runTriggerSweeps()` (Rule 5.8) whenever any pegged order
+exists, recomputing every peg's target from the current book:
 
 | Peg type | Target |
 |---|---|
-| `MidPeg` | `mid + pegOffset`, where `mid = bb + (ba − bb)/2` |
+| `MidPeg` | `mid + pegOffset`, where `mid = bb + (ba − bb)/2`, rounded toward the peg's own side (down for a buy, up for a sell) |
 | `PrimaryPeg` | same-side touch `+ pegOffset` |
 
-> `src/OrderBook.cpp:1025-1026` (call site), `src/OrderBook.cpp:2380-2425` (the sweep)
-> `src/OrderBook.cpp:2991-2999` (`getMidPrice`, overflow-safe)
+`bb` and `ba` are the best bid and ask **among orders that are not pegged**, so no peg,
+itself included, moves its own reference. A peg with no reference (a `MidPeg` needs both
+sides, a `PrimaryPeg` its own) keeps its price; at entry that is the order's `price`. The mid
+rounds toward the peg's side so that a sell `MidPeg` on a one-tick spread lands on the ask,
+not on the bid.
 
-**Complexity per submitted order: O(P)**, P = number of resting pegs, cap 16,384. Each peg's
-target is O(1) to compute, so the sweep is a linear walk with a handful of integer ops per
-entry.
+**A peg never trades on placement or reprice, only as a resting order.** At entry, a peg whose
+target is at or through the opposite touch, or not above zero, is rejected with
+`InvalidPrice`, as is a `pegOffset` beyond ±(2^32 − 1), which keeps `reference + offset` clear
+of overflow. A reprice that reaches the opposite touch is clamped one tick behind it instead
+of matching; one that would land at or below zero is skipped. (The opposite touch here is the
+real best price on that side, pegs included.)
+
+These rules are roadmap 1.6-F4 (STP-13). Before them, a `PrimaryPeg` buy +30000 on a
+990000/1010000 market rested at 1020000, above the ask; a `PrimaryPeg` that counted itself as
+the touch climbed one offset per later order; a `MidPeg` that counted itself in the mid
+drifted; all three were crossed books ([B4](#b4--pegged-orders-can-rest-at-a-crossing-price-fixed)).
+Roadmap 0.12 refused `Pegged` at admission until then.
+
+> `bestNonPegPrice()`, `pegPrice()`, `behindOppositeTouch()`, `admitPeg()`,
+> `restPeggedOrder()` and `updatePeggedOrders()` in `src/OrderBook.cpp`
+
+**Complexity per sweep: O(P)**, P = number of resting pegs, cap 16,384, plus, for each peg, a
+walk past any pegs resting at the touch to find the first non-pegged order (the code's
+ponytail note names a per-side best-non-peg tracker as the upgrade path).
 
 When a peg's target differs from its current price, the order is **removed from the book,
 repriced, given a fresh timestamp, and re-inserted** — and insertion appends to the tail of
 the destination level.
 
-> `src/OrderBook.cpp:2411-2415` — `removeFromBook` → `order->price = newPrice` →
+> `updatePeggedOrders()` — `removeFromBook` → `order->price = newPrice` →
 > `order->timestamp = nowNs()` → `addToBook`
 > `include/FlatPriceMap.h:146,151` — insertion is `push_back`
 
@@ -680,11 +757,14 @@ the destination level.
 moving touch is perpetually at the back of its queue.
 
 The depth change is published as a `Delete` at the old price and an `Add` at the new one, so
-incremental subscribers can follow it (`src/OrderBook.cpp:2416-2420`).
+incremental subscribers can follow it.
 
-**Status: Undocumented — no test pins this, may be incidental.** The comment at
-`src/OrderBook.cpp:2407-2410` explains why the *market-data events* are published; nothing
-explains or pins the *priority* consequence, and no test asserts it.
+**Status: the pricing is deliberate — commented and pinned** (`tests/PegOrderTest.cpp`:
+through-the-touch reject, no ratchet, no mid drift, the clamp, the rounding;
+`tests/OrderTypeAdmissionTest.cpp`). The offset bound is commented, not pinned. **The priority
+loss is undocumented — no test pins it, may be incidental.** The comment in
+`updatePeggedOrders()` explains why the *market-data events* are published; nothing explains
+or pins the *priority* consequence.
 
 **How venues specify it.** Losing priority on a reprice is the common treatment — a repeg is
 a new price, and price-time priority is defined per price level, so there is nowhere for the
@@ -692,24 +772,27 @@ old priority to live. I do not know of a venue that publishes a "sticky priority
 repegs" rule, and this engine's behaviour is unsurprising. What is unusual is the *trigger*:
 see Rule 6.5.
 
-### Rule 6.5 — Pegs only follow the market when a new order arrives
+### Rule 6.5 — Pegs only follow the market when an order arrives or is repriced
 
-`updatePeggedOrders` has exactly one call site, in `addOrder`. It is **not** called from
-`cancelOrder`, `cancelReplace`, `expireOrders`, `uncross` or the kill switch.
+`updatePeggedOrders` is called only from `runTriggerSweeps()`, which runs after an order that
+reaches matching in `addOrder` and after a `cancelReplace` that changes price, in `Continuous`
+(Rule 5.8). It is **not** called from `cancelOrder`, `modifyOrder`, a same-price
+`cancelReplace`, `expireOrders`, `uncross` or the kill switch, nor when the arriving order is
+itself a peg or a parked stop.
 
-> `src/OrderBook.cpp:1025-1026` — the sole call site
+> `runTriggerSweeps()` in `src/OrderBook.cpp` — the sole call site
 
 So a cancel that removes the best bid moves the touch, and every primary-pegged buy is now
-pegged to a price that no longer exists — until some unrelated order is submitted. In a quiet
-book that can be an arbitrarily long time.
+pegged to a price that no longer exists — until some unrelated order is submitted or
+repriced. In a quiet book that can be an arbitrarily long time. A cancel only widens the
+spread, so the stale peg is left behind the market, not through it.
 
 > `tests/MarketDataL2ReconstructionTest.cpp:219` acknowledges this in passing:
 > *"updatePeggedOrders runs on the NEXT submission"*.
 
 **Status: Undocumented — no test pins this, may be incidental.** One test comment notices the
 behaviour while testing something else. Nothing asserts it, and nothing explains it. This is
-the rule most likely to surprise a participant, and it interacts badly with
-[defect B4](#b4--pegged-orders-can-rest-at-a-crossing-price).
+the rule most likely to surprise a participant.
 
 ---
 
@@ -1184,22 +1267,49 @@ back "not yours", and you have mapped a competitor's resting book.
 
 ### Rule 9.5 — `minQty` is a minimum on the FIRST execution only
 
-`minQty` is checked once at admission against crossable liquidity and the stored field is
-never read again. Matching enforces no per-fill minimum.
+`minQty` is checked once at admission and the stored field is never read again. Matching
+enforces no per-fill minimum.
 
-If insufficient crossable liquidity exists: an `IOC` is cancelled; a **crossing** limit order
-is cancelled (resting it would leave bid ≥ ask, a locked book); a **non-crossing** limit order
-rests and waits.
+It is checked against what the sweep would actually **fill**, not against everything at a
+crossing price. `sweepFillQty()` dry-runs the sweep over the opposite book, at crossing prices
+only, and at each of the participant's own resting orders makes the sweep's own self-trade
+decision, through the same `checkSMP` and `SelfTradeProtection::check` calls `match()` makes:
+the default mode, `CancelIncoming` and `CancelBoth` end the count there; `CancelResting` steps
+past the order; `DecreaseAndCancel` shrinks the incoming order by it with no fill. It follows
+the sweep's order: price-time takes an iceberg's slice in queue order and its reserve only
+after the rest of the level, so an own order that ends the sweep stops the reserve too;
+pro-rata settles a level's own orders before allocating, so one that ends the sweep ends it
+before that level fills. An iceberg's whole reserve counts. The screen used to add up every
+crossing order, the participant's own included, so an IOC with `minQty` 20 behind 5 of other
+liquidity and its own order filled 5 (roadmap 1.6-F5, GTDIFF-2); and it counted only an
+iceberg's displayed slice, so an IOC 50 `minQty` 10 against an iceberg of 100 showing 5 was
+cancelled unfilled (OTM-11).
 
-> `src/OrderBook.cpp:872-915`, with the locked-book reasoning at `src/OrderBook.cpp:885-897`
+If the dry run fills less than `minQty`: an `IOC` or `Market` order is cancelled untraded; a
+**crossing** limit order is cancelled (resting it would leave bid ≥ ask, a locked book); a
+**non-crossing** limit order rests and waits.
 
-**Status: Deliberate — commented and pinned.** The comment states the semantic explicitly and
-explains why the crossing case cannot simply rest.
+**A `Market` order with `minQty` is an IOC with `minQty`.** It is counted at every level; one
+that misses its minimum is cancelled untraded, and one that meets it trades and has its
+remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
+liquidity and was **rested in the book as a bid at 0**, where it later printed at 0; roadmap
+0.12 rejected `Market` + `minQty` outright until 1.6-F2 (OTM-2).
 
-A `Market` order with `minQty > 0` is rejected with `InvalidQuantity`. The screen read the
-market order's price (0) as a limit, so a buy saw no liquidity at any price and was **rested in
-the book as a bid at 0** (roadmap 0.12, OTM-2). This is a stop-gap: 1.6-F2 gives it IOC+minQty
-semantics.
+**Not in an auction state.** In `PreOpen` and the auction states the screen does not run: the
+order rests and takes part in the uncross, **which does not apply `minQty`**. A crossing
+`minQty` limit used to be cancelled there, as if it would lock a book that is allowed to cross
+(OTM-11).
+
+**FOK uses the same dry run.** A FOK is rejected with `FOKInsufficientLiquidity` unless
+`sweepFillQty()` fills its whole size, so a FOK whose own resting order would end the sweep,
+or that would lose quantity to a `DecreaseAndCancel` decrement, is rejected rather than filling
+part of its size (GTDIFF-2).
+
+> `sweepFillQty()`, `screenFOK()` and `screenMinQty()` in `src/OrderBook.cpp`, with the
+> locked-book reasoning in `screenMinQty()`
+
+**Status: Deliberate — commented and pinned.** `tests/FokStpLiquidityTest.cpp` (each STP mode,
+the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`.
 
 ---
 
@@ -1251,36 +1361,22 @@ Discovery used to count them and STP removed them only in the execution loop, so
 participant's buy and sell of 1000 at 99 moved an honest 105 cross to 99 and published 1100
 paired instead of 100.
 
-### B4 — Pegged orders can rest at a crossing price
+### B4 — Pegged orders can rest at a crossing price (fixed)
 
-Neither `restPeggedOrder` (initial placement) nor `updatePeggedOrders` (repeg) checks whether
-the computed peg price crosses the opposite side, and neither calls `match()`. The order is
-handed straight to `addToBook`.
+Fixed by roadmap 1.6-F4 (STP-13); the rules are now [Rule 6.4](#rule-64--every-pegged-order-is-repriced-on-every-order-submission-and-a-repeg-loses-time-priority).
+Neither `restPeggedOrder` (placement) nor `updatePeggedOrders` (repeg) checked whether the
+computed price crossed the opposite side, and neither calls `match()`, and `pegOffset` was
+unvalidated. A buy `MidPeg` with an offset larger than half the spread, or a buy `PrimaryPeg`
+with one larger than the spread, rested above the best ask without matching: a locked or
+crossed book with no trade. A `PrimaryPeg` that counted its own price as the touch ratcheted
+one offset per later submission and walked through the ask, and a `MidPeg` that counted itself
+in the mid drifted. Roadmap 0.12 refused `Pegged` at admission in the meantime.
 
-> `src/OrderBook.cpp:788-798`, `src/OrderBook.cpp:2411-2415`
-
-`pegOffset` is client-supplied and **unvalidated** — `validateOrderRequest` bounds quantity,
-iceberg display size, price sign and duplicate ids, and says nothing about `pegOffset`
-(`src/OrderBook.cpp:517-552`). A buy `MidPeg` with an offset larger than half the spread, or a
-buy `PrimaryPeg` with an offset larger than the spread, computes a price above the best ask
-and **rests there without matching**: bid ≥ ask, a locked or crossed book with no trade.
-
-This is the identical defect class that `screenMinQty` was explicitly fixed for. Its comment
-even names the symptom: *"Resting unconditionally therefore parked the order at a price that
-crosses the opposite side, leaving bid >= ask: an invalid book"*
-(`src/OrderBook.cpp:885-893`). The fix was applied to the `minQty` path and not to the pegged
-path.
-
-Rule 6.5 makes it worse: because pegs are only recomputed on the next `addOrder`, a crossed
-peg can sit crossed indefinitely.
-
-**Severity: high.** A crossed book is visible to every market-data subscriber and breaks any
-consumer that assumes `bestBid < bestAsk`.
-
-**Stop-gap (roadmap 0.12):** `Pegged` is refused at admission, so no peg can rest. A second
-route was found while verifying this: a `PrimaryPeg` counts its own price as the touch, so
-offset +1 ratchets it up one tick on every later submission and walks it through the ask.
-The real fix is 1.6-F4.
+Now the reference ignores pegged orders, a peg at or through the opposite touch at entry (or
+with an offset beyond ±(2^32 − 1)) is rejected with `InvalidPrice`, and a reprice that reaches
+the opposite touch is clamped one tick behind it. `Pegged` is admitted again. Pinned by
+`tests/PegOrderTest.cpp`; `validateIntegrity()` now refuses a crossed book in `Continuous`
+(Rule 5.8).
 
 ### B5 — Triggered stops and pegs bypass the price band and the circuit breaker
 
@@ -1293,13 +1389,13 @@ A `Stop` is admitted without either check, because at admission it carries a tri
 than a tradeable price — reasonable. But when it elects, `checkStopOrders` rewrites its type
 to `Limit`/`Market` and calls `match()` **directly**, never re-entering `addOrder`.
 
-> `src/OrderBook.cpp:2266-2278`
+> `checkStopOrders()` in `src/OrderBook.cpp`
 
 So a triggered stop executes with **no band check and no breaker check, ever**. A stop
 cascade can therefore print straight through a LULD band that would have rejected the same
 order submitted directly — which is the exact scenario price bands exist to contain. The same
-holds for `TrailingStop` (`src/OrderBook.cpp:2353-2356`) and for `Pegged`, which is excluded
-from the band list and rests without any check at all.
+holds for `TrailingStop` (`updateTrailingStops()`) and for `Pegged`, which is excluded from the
+band list; a peg's only price check is the opposite touch (Rule 6.4).
 
 **Severity: high for anything claiming LULD-style controls.** No comment considers the
 re-check, and no test covers a stop firing outside the band. It is genuinely ambiguous whether

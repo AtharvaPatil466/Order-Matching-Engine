@@ -33,7 +33,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ## 🚀 Key Features
 
 ### Core Engine
-- **Professional Order Types**: Limit, Market, IOC, FOK, Stop, StopLimit, TrailingStop, Iceberg, Hidden, PostOnly, MIT, MOC, LOC (Pegged is rejected at admission: it rested through the opposite side)
+- **Professional Order Types**: Limit, Market, IOC, FOK, Stop (a stop-market), StopLimit, TrailingStop, Iceberg, Hidden, PostOnly, MIT, MOC, LOC, Pegged (MidPeg / PrimaryPeg, referenced to non-pegged orders and never resting at or through the opposite touch). See [docs/MatchingRules.md](./docs/MatchingRules.md) §5-6
 - **O(1) Price Lookup**: `FlatPriceMap` — flat array indexed by price tick, replacing `std::map` red-black trees
 - **Intrusive Data Structures**: Zero-heap matching via `ObjectPool` + intrusive doubly-linked order lists
 - **Dual Match Algorithms**: Price-Time FIFO and Pro-Rata allocation with LMM/DMM floor guarantee (40% of available qty) and rounding-remainder priority

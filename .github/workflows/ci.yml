@@ -277,3 +277,50 @@ jobs:
 
       - name: Fuzz, every class
         run: ./build/tests/WideDifferentialFuzz --seeds 60 --ops 2000 --report 4 --ice --stp-modes --kill
+
+  gateway-engine-fuzz:
+    name: Ubuntu libFuzzer gateway -> engine (10 min)
+    # Roadmap 1.6 "Done": a single legal or illegal message cannot corrupt the
+    # book. fuzz_gateway_engine feeds client bytes through TcpGateway's framer
+    # and decodeFrame into MatchingEngine::submitOrder, then requires
+    # OrderBook::validateIntegrity on every book, for 10 minutes under ASan and
+    # halting UBSan with the engine's asserts armed. A crash, sanitizer report
+    # or integrity failure fails the job and uploads the reproducer, which
+    # fuzz_gateway_engine_replay runs on any compiler.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and the libFuzzer runtime
+        # libclang-rt-dev carries libclang_rt.fuzzer; clang alone does not, and
+        # without it HAVE_LIBFUZZER is false and the Build step finds no target.
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-rt-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-fuzz
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_FUZZERS=ON
+          -DBUILD_TESTS=OFF
+          -DBUILD_BENCHMARKS=OFF
+          -DBUILD_TOOLS=OFF
+
+      - name: Build
+        run: cmake --build build-fuzz --parallel 4 --target fuzz_gateway_engine
+
+      - name: Fuzz for 10 minutes
+        run: |
+          python3 fuzz/gen_gateway_seeds.py fuzz-corpus
+          mkdir -p fuzz-artifacts
+          ./build-fuzz/fuzz/fuzz_gateway_engine -max_total_time=600 -timeout=10 \
+            -rss_limit_mb=4096 -print_final_stats=1 \
+            -artifact_prefix=fuzz-artifacts/ fuzz-corpus
+
+      - name: Upload reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-engine-fuzz-artifacts
+          path: fuzz-artifacts/

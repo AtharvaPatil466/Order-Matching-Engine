@@ -133,6 +133,21 @@ int main() {
         std::puts("/metrics (no auth): 401 Unauthorized");
     }
 
+    // ── 4b. Every other endpoint too ─────────────────────────────────────
+    // The README promises the token on every endpoint but the two probes, and
+    // case 4 alone would pass with any other route served ahead of the check.
+    for (const char* path : {"/prometheus", "/otr?participantId=1", "/book?symbolId=0",
+                             "/auction", "/fees", "/risk", "/cat", "/audit?symbolId=0",
+                             "/role", "/replication", "/journal/head", "/version",
+                             "/chaos/order"}) {
+        auto r = httpGet(port, path);
+        if (r.find("HTTP/1.1 401") == std::string::npos) {
+            std::fprintf(stderr, "%s without token did not return 401:\n%s\n", path, r.c_str());
+            assert(false && "every non-probe endpoint must require the token");
+        }
+    }
+    std::puts("every non-probe endpoint (no auth): 401 Unauthorized");
+
     // ── 5. Protected endpoint with wrong token → 401 ────────────────────
     {
         auto r = httpGet(port, "/metrics", "Bearer wrongtoken");

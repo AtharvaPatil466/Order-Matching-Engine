@@ -478,11 +478,15 @@ bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
 // and its reserve after the rest of the level, behind any own order there;
 // pro-rata's STP pre-pass settles a level's own orders before it allocates,
 // so one that ends the sweep ends it before that level fills anything.
-// ponytail: market protection's band is not modelled; it limits only Market
-// orders, which neither screen sees today.
+// A Market order (Market+minQty) stops at market protection's collar, as in
+// match(); matchProRata applies no collar, so neither does its dry run.
 Quantity OrderBook::sweepFillQty(const Order& in) const {
     const bool isBuy = (in.side == Side::Buy);
     const bool proRata = (matchAlgorithm_ == MatchAlgorithm::ProRata);
+    const FlatPriceMap& opposite = isBuy ? asks_ : bids_;
+    const bool collared = !proRata && in.type == OrderType::Market &&
+                          marketProtectionPct_ > 0.0 && !opposite.empty();
+    const Price collar = collared ? marketCollar(opposite, isBuy) : 0;
     const STPMode stpMode = getSTPMode(in.participantId);
     Quantity need = in.remainingQty, fills = 0;
 
@@ -502,9 +506,10 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
         return false;
     };
 
-    (isBuy ? asks_ : bids_).forEachLevelWhile([&](Price levelPrice, const OrderList& level) -> bool {
+    opposite.forEachLevelWhile([&](Price levelPrice, const OrderList& level) -> bool {
         if (in.type != OrderType::Market && (isBuy ? levelPrice > in.price : levelPrice < in.price))
             return false;
+        if (collared && (isBuy ? levelPrice > collar : levelPrice < collar)) return false;
         Quantity reserve = 0;  // what the level fills after this pass
         if (proRata) {
             for (const Order* o = level.front(); o; o = o->next)
@@ -1423,15 +1428,8 @@ Price OrderBook::match(Order* incoming) {
     // is cancelled by addOrder's post-match handler (Market orders don't rest).
     const bool useMktProt =
         (incoming->type == OrderType::Market && marketProtectionPct_ > 0.0);
-    Price mktProtBound = 0;
-    if (useMktProt) {
-        if (!opposite.empty()) {
-            const Price touch = opposite.bestPrice();
-            const Price band =
-                static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
-            mktProtBound = isBuy ? touch + band : touch - band;
-        }
-    }
+    const Price mktProtBound =
+        useMktProt && !opposite.empty() ? marketCollar(opposite, isBuy) : 0;
 
     // P1-2 checkSMP OFF THE HOT PATH: a self-trade is purely a same-participant
     // test, so the incoming order can only ever self-trade against its OWN

@@ -876,6 +876,14 @@ private:
     Price matchProRata(Order* order);
     bool checkSMP(const Order& incoming, const Order& resting) const;
     Quantity sweepFillQty(const Order& in) const;
+    // Market protection's collar: the farthest price match() lets a Market
+    // order reach from the opposite touch. Callers check it is on and the side
+    // is not empty.
+    Price marketCollar(const FlatPriceMap& opposite, bool isBuy) const {
+        const Price touch = opposite.bestPrice();
+        const Price band = static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
+        return isBuy ? touch + band : touch - band;
+    }
 
     void runTriggerSweeps(Price firstPrint);
     void checkStopOrders(Price lowPrint, Price highPrint);

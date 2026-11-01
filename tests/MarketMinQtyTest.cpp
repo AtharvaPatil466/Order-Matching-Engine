@@ -116,12 +116,32 @@ void minimumNotMetIsCancelledUntraded(Side side) {
                 side == Side::Buy ? "buy" : "sell");
 }
 
+// With market protection on, match() stops at the collar (touch +/- pct), so
+// the minimum must be judged on what lies inside it. Ask 4 @ 5000 and 4 @ 6000,
+// collar 10%: a market buy reaches 5000..5500 only, 4 shares.
+void minimumCountsOnlyInsideTheCollar() {
+    OrderBook book(1);
+    book.setCircuitBreakerThreshold(1e9);
+    book.setMarketProtectionPct(0.10);
+    Recorder rec;
+    book.setEventListener(&rec);
+    book.addOrder(1, 1, Side::Sell, 5000, 4, OrderType::Limit);
+    book.addOrder(2, 1, Side::Sell, 6000, 4, OrderType::Limit);
+
+    assert(std::holds_alternative<OrderId>(market(book, 3, Side::Buy, 20, 8)));
+    check(rec.filled(3) == 0 && book.getOrder(3) == nullptr && book.getAskLevelsCount() == 2,
+          "collar: a minimum of 8 with 4 inside the collar is cancelled untraded",
+          book, rec, 3);
+    std::puts("  market protection: the minimum counts only what the collar lets it reach");
+}
+
 }  // namespace
 
 int main() {
     auditSequence();
     minimumNotMetIsCancelledUntraded(Side::Buy);
     minimumNotMetIsCancelledUntraded(Side::Sell);
+    minimumCountsOnlyInsideTheCollar();
     std::puts("MarketMinQtyTest passed");
     return 0;
 }

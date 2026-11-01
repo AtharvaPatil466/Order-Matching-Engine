@@ -13,7 +13,10 @@ aws-benchmark-*.log
 # benchmark-gate.yml A/B run output — root only, not bcs_research/results/
 # (head-*.json / base-*.json). The leading slash is load-bearing: unanchored
 # `results/` matches at any depth and silently swallows the BCS research tree.
-/results/
+# Only those two names: results/<sha>/ is where scripts/import_bench_results.sh
+# lands a bench-x86 run, and the docs cite it, so it is committed.
+/results/head-*.json
+/results/base-*.json
 
 .DS_Store
 *.o

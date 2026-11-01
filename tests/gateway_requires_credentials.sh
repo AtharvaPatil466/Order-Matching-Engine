@@ -136,6 +136,11 @@ must_start() {
     tries=0
     while [ "$tries" -lt 8 ]; do
         log="$TMP/start.log"
+        # Empty it HERE, before the fork. The `>` below truncates in the child,
+        # and on a loaded box the poll can run first and read the previous
+        # case's "listening" line — then this case's own kill -9 below killed
+        # a gateway still starting up, and reported an empty log.
+        : > "$log"
         "$GW" "$port" "$@" > "$log" 2>&1 &
         pid=$!
         waited=0
@@ -153,9 +158,12 @@ must_start() {
         fi
         kill -9 "$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
+        st=$?
         # Only a taken port is worth retrying; anything else is a real failure.
         if ! grep -q "Failed to start gateway on port" "$log" 2>/dev/null; then
-            note_fail "$label: did not reach the listening state"
+            # The status says how it ended: a process that died on its own
+            # before the 8 s deadline reports its own exit code or 128+signal.
+            note_fail "$label: did not reach the listening state (wait status $st after $waited x 0.2s)"
             cat "$log"
             return
         fi

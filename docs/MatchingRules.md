@@ -111,6 +111,42 @@ not reachable; the engine does not check it.
 the share is computed in floating point rather than as `avail * toFill / totalLevelQty` in
 `__int128`, which would be exact and is the form used elsewhere in the file for notional.
 
+### Rule 1.4 — Each book rests orders only inside one fixed price range
+
+Each side of a book is a `FlatPriceMap`, an array of 200,001 one-tick slots, so a book can hold
+prices in one fixed range of at most that width. The range is set once:
+
+- **Configured.** `OrderBook::setPriceRange(min, max)` sets it before the first order rests
+  (`std::logic_error` over resting orders, `std::invalid_argument` for a range the map cannot
+  hold). `OrderEngine` started with `--config` sets every symbol's range from
+  `instrument.<id>.min_price` / `max_price` before it replays the journal, and refuses to boot
+  when a symbol has no range.
+- **Anchored.** A book with no configured range centres one on the first price that rests, and
+  never moves it. This is what a book gets in `OrderEngine` without `--config`, in
+  `GatewayServer`, and in the library unless the owner calls `setPriceRange`.
+
+With a configured range, an order priced outside it is rejected with `OutOfPriceRange` at
+admission, before the ack: `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg`, `Hidden` and `LOC` on
+their `price`, `StopLimit` on its `stopLimitPrice`. A replace of a `Limit`, `PostOnly`,
+`Iceberg` or `Hidden` order to a price outside it is refused the same way, and the order keeps
+resting. Everywhere else — a trailing stop's limit (it moves with its trigger), a peg's computed
+price, a replaced `LOC`, and every order on an anchored book — the backstop is the insert
+itself: a rest outside the range is reported `Rejected` (`OutOfPriceRange`) and then
+`Cancelled`, after the ack and after any fills.
+
+The anchored range used to be the only one. One participant's 1-tick bid picked the range for
+the session, after which an order at a real price was `Accepted`, matched, `Rejected` and
+`Cancelled`; an elected stop-limit outside it traded first; a replace outside it came off the
+book and was cancelled; and a first order near `INT64_MAX` overflowed the range's upper end, so
+the book refused that very order. The anchor now saturates instead (roadmap 1.6-F6, STP-8).
+
+> `setPriceRange()`, `ensurePriceRange()`, `validateOrderRequest()` and `checkAdmission()` in
+> `src/OrderBook.cpp`; the `instrument.<s>` loop in `src/main.cpp`
+
+**Status: Deliberate — commented and pinned.** `tests/PriceRangeTest.cpp`;
+`EngineRequiresPriceBandTest` (`tests/engine_requires_price_band.sh`) runs the real
+`OrderEngine`. This range is not the percentage price band of Rule 7.5.
+
 ---
 
 ## 2. The two matching algorithms
@@ -1130,10 +1166,21 @@ orders takes two sweeps, i.e. an extra second, to clear.
 ### Rule 8.5 — DAY is treated exactly as GTD, plus a separate session-end sweep
 
 `expireOrders` makes no distinction between `GTD` and `DAY`: both require a non-zero
-client-supplied `expiryTime`, and a `DAY` order submitted without one **never expires by
-timer**.
+client-supplied `expiryTime`, and an order without one **never expires by timer**
+(`expiryTime == 0` means no timed expiry).
 
-> `src/OrderBook.cpp:2191-2192`
+> `expireOrders()` in `src/OrderBook.cpp`
+
+So admission refuses the two cases where nothing else would end the order (roadmap 1.6-F6,
+PRIOR-7): `MatchingEngine::submitOrder` rejects, with `MissingRequiredField`, a `GTD` order
+with `expiryTime == 0`, and a `DAY` order with `expiryTime == 0` while no session end is
+scheduled. Both used to be accepted and rest as `GTC` while the client believed them
+time-bounded. `MatchingEngine::setSessionEndScheduled` says whether a session end is
+scheduled: `OrderEngine` and `GatewayServer` set it false at startup, a `SessionScheduler`
+sets it true, and the library default is true, for an in-process owner that ends its sessions
+itself. The check is in `submitOrder`, so it covers every ingress; journal replay and
+`JournalFollower` call the book directly and do not apply it. Pinned by
+`tests/ExpiryAdmissionTest.cpp`.
 
 There is a separate session-end sweep, `cancelDayOrders()`, which cancels every `DAY` order
 regardless of `expiryTime`. It runs only from `gracefulShutdown(/*cancelDayOrders=*/true)` —
@@ -1154,10 +1201,10 @@ every `DAY` order on them, and only them. `SessionScheduler`'s close calls it (r
 1.4-D9; pinned by `tests/SessionEndTest.cpp`). `OrderEngine` runs the scheduler only when
 started with `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` (HH:MM UTC, or
 `OB_SESSION_SCHEDULE`, or `session_schedule` in the `--config` file), and runs it Monday to
-Friday by UTC date; without it, which is the default, nothing ends a session and a `DAY`
-order with `expiryTime == 0` behaves exactly like `GTC`, as before. `GatewayServer` never
-runs one. Both binaries run the expiry sweep (Rule 8.1), so a `DAY` order that carries an
-`expiryTime` expires like `GTD` either way.
+Friday by UTC date; without it, which is the default, nothing ends a session, so a `DAY`
+order must carry an `expiryTime` or it is refused (above). `GatewayServer` never runs one, so
+the same holds there. Both binaries run the expiry sweep (Rule 8.1), so a `DAY` order that
+carries an `expiryTime` expires like `GTD` either way.
 
 **How venues specify it.** Every venue publishes DAY as "cancelled at the end of the trading
 session", and deriving the session-end timestamp from the session calendar is how I would
@@ -1247,7 +1294,8 @@ aggressor's fill wrapped `remainingQty` to ~2^64 (roadmap 0.11, MATCH-3). Pinned
 ### Rule 9.3 — A replace is a fresh admission decision
 
 `cancelReplace` re-runs the full admission chain — trading-state gate, risk limits, price
-band, circuit breaker, and the `PostOnly` would-cross test. A rejected replace leaves the
+band, the configured price range (Rule 1.4), circuit breaker, and the `PostOnly` would-cross
+test. A rejected replace leaves the
 original order untouched and resting, and returns the *specific* reason rather than
 "not found".
 

@@ -10,10 +10,13 @@ This project is a low-latency matching-engine implementation for research and po
 - Self-match prevention policy variants: cancel taker, cancel maker, decrement-and-cancel, and participant hierarchy rules.
 - Cancel/replace priority rules for every amendment type, including hidden and iceberg orders.
 - Market order protection, price collars, auction states, halt/resume transitions. What the binaries run:
-  a per-order circuit breaker at 5% (`include/OrderBook.h:992`, checked at `src/OrderBook.cpp:1069`;
-  `BreakerNoAuctionTest`) and, only in OrderEngine with `--session-schedule`, the scheduled auction states
-  (`src/main.cpp:297-301`; `SessionSchedulerTest`). Library only, not enabled: the market-order collar
-  (`marketProtectionPct_` defaults to 0, `include/OrderBook.h:994`, and no binary sets it), price bands,
+  a 5% circuit breaker on an arriving order's first fill that puts the symbol into a timed volatility
+  auction (`tripBreakerOnFirstFill` in `src/OrderBook.cpp`; `VolatilityBreakerTest`), in OrderEngine with
+  a config file each symbol's static price range (`instrument.<s>.min_price` / `max_price`, enforced at
+  admission; `PriceRangeTest`, `EngineRequiresPriceBandTest`), and, only in OrderEngine with
+  `--session-schedule`, the scheduled auction states (`SessionSchedulerTest`). Library only, not
+  enabled: the market-order collar (`marketProtectionPct_` defaults to 0 and no binary sets it), the
+  percentage price band,
   `LULDManager`, and any halt or resume (no binary or admin endpoint sets `TradingState::Halted`).
   See [Compliance.md](Compliance.md).
 - Iceberg refresh priority and hidden-order allocation rules for the exact venue model.

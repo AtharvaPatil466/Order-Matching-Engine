@@ -105,6 +105,29 @@ Once replayed, synthetic and real orders cannot be told apart, and the journal
 stays epoch 0 through every checkpoint, so that node needs the flag on every
 boot from then on.
 
+### Upgrading across a change in the order rules
+
+Replay re-runs each journaled order through this build's book rules, not the
+rules of the build that admitted it. An order this build refuses is refused
+again at replay (the replay count, §7, still counts it). Since roadmap 1.6-F2
+and 1.6-F6 that is:
+
+- a `Stop`, `StopLimit` or `MIT` with `stopPrice` 0, and a `StopLimit` with
+  `stopLimitPrice` 0;
+- a `TrailingStop` whose trail is not inside (0, reference);
+- with a config file, an order priced outside its symbol's price band (§6),
+  which older builds never applied.
+
+A history with stops, MITs, trailing stops or pegs in it can also replay to
+different trades: a `Stop` now elects a market order, elections test the
+sweep's low and high print, and they run after the triggering order is final
+([MatchingRules.md](MatchingRules.md) §5-6). To carry the book across rather
+than re-run its history, stop the old `OrderEngine` with `SIGTERM`, which
+checkpoints (§5), so the new build restores the resting orders instead of
+replaying the trades (`GatewayServer` does not checkpoint at shutdown). A
+resting order the new rules refuse is still dropped by that restore: cancel or
+replace it before the upgrade.
+
 ---
 
 ## 3. Starting OrderEngine
@@ -135,7 +158,7 @@ grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
 | `--admin-bind ADDR` | `OB_ADMIN_BIND` | 127.0.0.1 | Admin listen address (IPv4). The Docker image sets 0.0.0.0. |
 | `--admin-token TOKEN` | `OB_ADMIN_TOKEN` | — | Bearer token for every endpoint except `/health` and `/readyz` |
 | `--admin-no-auth` | `OB_ADMIN_NO_AUTH=1` | off | Run the admin port without a token, on purpose |
-| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6) |
+| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6). With one, every symbol needs a price band |
 | `--journal PATH` | `OB_JOURNAL_PATH` | — | Journal file; replayed at boot (§7) |
 | `--journal-max-mb MB` | `OB_JOURNAL_MAX_SIZE_MB` | off | Checkpoint once the journal reaches MB megabytes |
 | `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | off | Replay an epoch-0 journal (§2) |
@@ -156,25 +179,33 @@ and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
 
 1. Arguments are checked; an unknown one is fatal.
 2. The config file is loaded, if one is named. A file that cannot be read is a
-   `[Config] WARNING`, and the engine starts without it.
+   `[Config] WARNING`, and the engine goes on without it — and then stops at
+   step 4, which finds no price bands (unless the environment supplies them,
+   §6).
 3. Startup validation: the `instrument.*` and `participant.*` keys, the journal
    path's parent directory, and a replication role without
    `--allow-unsafe-replication`. Any failure prints
    `[Config] FATAL: startup configuration is invalid` with one line per
    problem and exits 1.
-4. The journal is opened, a torn final write is cut, and the journal is
+4. With a config file, each symbol's price band is set from
+   `instrument.<s>.min_price` / `max_price` (§6), before any order exists.
+   A symbol with no band prints `[Config] FATAL: symbol <s> has no price band`
+   and exits 1; a band the book cannot hold is fatal too. On success:
+   `[Config] Price bands set for <S> symbols`. Without a config file every
+   book centres its band on its first resting order instead.
+5. The journal is opened, a torn final write is cut, and the journal is
    replayed (§7). The legacy-epoch and unreadable-journal refusals happen here.
-5. The alert webhook is set up if `alert_webhook_url` is set (§6). An
+6. The alert webhook is set up if `alert_webhook_url` is set (§6). An
    `https://` URL is refused: the dispatcher has no TLS client, so point it at
    a local TLS terminator on `http://127.0.0.1`.
-6. Worker threads, the GTD/DAY expiry timer and, with `--session-schedule`,
+7. Worker threads, the GTD/DAY expiry timer and, with `--session-schedule`,
    the session scheduler start.
-7. Replication starts, if a role was allowed.
-8. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
+8. Replication starts, if a role was allowed.
+9. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
    is a failed bind.
-9. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
+10. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
 
-Because the admin port opens only at step 8, a probe during replay gets
+Because the admin port opens only at step 9, a probe during replay gets
 connection refused rather than 503. Give a liveness probe enough initial delay
 for your replay time.
 
@@ -253,11 +284,16 @@ grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
 ```
 
 A restart on the same journal replays it before the admin port opens. This one
-also names a config file, used in §6:
+also names a config file, used in §6. A config file must give every symbol a
+price band, or the engine refuses to start:
 
 ```bash
 cat > /etc/orderengine/engine.conf <<'EOF'
 log_sink = stderr
+instrument.0.min_price = 1
+instrument.0.max_price = 200000
+instrument.1.min_price = 1
+instrument.1.max_price = 200000
 rate_limit.default_rate = 1000
 rate_limit.default_burst = 100
 EOF
@@ -282,7 +318,8 @@ file. Keys `OrderEngine` reads:
 |---|---|---|
 | `log_sink` | startup | `stderr` sends structured JSON logs to stderr; `null` (default) discards them |
 | `alert_webhook_url`, `alert_webhook_format` (`generic`/`slack`/`pagerduty`), `alert_min_level` (`info`/`warning`/`critical`/`fatal`), `alert_routing_key` | startup | Webhook alerts; an unknown format or level, or an `https://` URL, is fatal |
-| `instruments`, `instrument.<id>.{min_price,max_price,tick_size,lot_size}` | startup | Validated only |
+| `instrument.<s>.min_price`, `instrument.<s>.max_price` | startup | Required for every symbol 0..S-1 whenever a config file is named. The symbol's price band in ticks, at most 200,000 wide, set before replay. An order or replace priced outside it is rejected with `OutOfPriceRange` before it is acked ([MatchingRules.md](MatchingRules.md) Rule 1.4) |
+| `instruments`, `instrument.<id>.{tick_size,lot_size}` | startup | Validated only (with `min_price` / `max_price`, for each id listed in `instruments`) |
 | `participants`, `participant.<id>.{position_limit,otr_limit}` | startup | Validated only |
 | `journal_path` | startup | Validated only; the journal is `--journal` / `OB_JOURNAL_PATH` |
 | `rate_limit.default_rate`, `rate_limit.default_burst` | `SIGHUP` only | Default rate limit for every participant, applied when the rate is above 0 |

@@ -244,6 +244,11 @@ add_test(NAME NoEphemeralTestPortsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_ephemeral_test_ports.sh ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(NoEphemeralTestPortsTest PROPERTIES TIMEOUT 30 LABELS "project")
 
+# Every performance number in the docs has a source row (roadmap 1.11-K5, 2.11).
+add_test(NAME DocPerfNumbersSourced
+         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/doc_perf_numbers_sourced.py ${CMAKE_SOURCE_DIR})
+set_tests_properties(DocPerfNumbersSourced PROPERTIES TIMEOUT 30 LABELS "project;benchmark")
+
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
                  $<TARGET_FILE:OrderEngine>)

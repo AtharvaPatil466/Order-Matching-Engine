@@ -36,15 +36,15 @@ This project is a low-latency matching-engine implementation for research and po
 - CRC-validated journal replay stops at truncated or corrupted records.
 - Checkpoint replay restores active orders after journal rewrite, with each level's time priority, every book's last trade and reference price, a trailing stop's ratcheted trigger, a stop's election latch (replay, backup and `JournalFollower` alike) and an undated session's start (`CheckpointTimePriorityTest`, `CheckpointPriceStateTest`, `StopLatchCheckpointTest`, `SessionTransitionTest`).
 - Randomized command streams are replayed and compared against the original final book state.
-- Ingress submit APIs return explicit reject reasons for stopped engines, unknown symbols, bad orders, rate limits, and queue backpressure.
+- Ingress submit APIs return explicit reject reasons for stopped engines, unknown symbols, bad orders and rate limits (`SubmitResultTest`). No test drives a queue past its backpressure threshold.
 - Gateway requests surface ingress rejects as error responses instead of unconditional ACKs.
 - CI runs project tests under Release, ASan/UBSan, and ThreadSanitizer configurations; Ubuntu sanitizer builds also run an E2E benchmark smoke check.
 - `ReplicationProtocolTest` is now TSan-clean and runs under the TSan job. Previously excluded due to atomic-fd and `sendSeq_` races during teardown — closed by atomic fds + `shutdown(2)` before `close()` + atomic `sendSeq_`.
 - `Journal::now()` uses `steady_clock`, so journal timestamps survive NTP step adjustments.
 - `Journal` constructor unlinks any stale `<path>.tmp` from a crashed `rewriteAtomically()`.
-- MOC/LOC on-close orders: `cancelLocOrders()` correctly triggered on both the `!hasCross` early-return path and normal uncross completion. Price validation exclusion for MOC (price=0 is valid). Verified by `TestMocLocOrders` (11 cases).
-- LMM/DMM ProRata floor guarantee: 40% floor allocation with correct redistribution (does not inflate `allocated` counter, preventing unsigned underflow). Verified by `TestLmmDmmAllocation` (7 cases).
-- Config SIGHUP hot-reload: Async-signal-safe pattern verified by `TestPaperTrader` integration path and manual test.
+- MOC/LOC on-close orders: `cancelLocOrders()` correctly triggered on both the `!hasCross` early-return path and normal uncross completion. Price validation exclusion for MOC (price=0 is valid). Verified by `MocLocTest` and `OnCloseSessionEndTest`.
+- LMM/DMM ProRata floor guarantee: 40% floor allocation with correct redistribution (does not inflate `allocated` counter, preventing unsigned underflow). Verified by the `LmmDmm` cases in `TestLmmDmmAllocation.cpp`.
+- Config SIGHUP hot-reload: `RateLimiterReconfigureTest` covers the `reconfigure()` a reload calls. No ctest sends SIGHUP to the binary; Runbook §6 under `scripts/runbook_smoke.sh` does.
 
 ## Live Multi-Container Chaos Suite (`deploy/chaos/`)
 
@@ -52,14 +52,14 @@ This project is a low-latency matching-engine implementation for research and po
 
 Empirically verified:
 
-- **NoCommittedLoss under SIGKILL**: 200 orders → 192 primary-committed → 192 on backup. Same property the TLA+ spec proves, now measured live.
-- **No split brain** under: bidirectional partition, asymmetric partition, 30% packet loss, +30s clock skew on backup (via `libfaketime`).
+- **NoCommittedLoss under SIGKILL**: 200 orders → 192 primary-committed → 192 on backup, a journal-count comparison: the backup's journal grew at least as much as the primary's. `Replication.tla` cannot back it, because its `NoCommittedLoss` holds only vacuously.
+- **No promotion inside the 5 s lease** under: bidirectional partition, asymmetric partition, 30% packet loss, +30s clock skew on backup (via `libfaketime`). Every scenario ends before the lease could expire, so none tests split brain; past the lease the primary never steps down (REPL-1..6).
 - **Snapshot catchup on backup join**: primary streams all currently-resting orders via `MatchingEngine::streamSnapshot` when a backup connects. Closes the rolling-restart gap where pre-restart entries would otherwise never reach a late-joining backup.
-- **Transport auto-reconnect**: backup re-runs `connectTo()` from its receive loop after socket loss — bilateral recovery in ~3 ms after primary recovery, no external orchestration needed. Reconnect now uses exponential backoff (500ms → 30s cap), resetting to base delay on each successful connect. `ReconnectBackoffTest` covers progression and reset.
+- **Transport auto-reconnect**: backup re-runs `connectTo()` from its receive loop after socket loss — bilateral recovery in ~3 ms after primary recovery, no external orchestration needed. Reconnect now uses exponential backoff (500ms → 30s cap), resetting to base delay on each successful connect. `ReconnectBackoffTest` runs the reconnect loop but asserts nothing about the delays.
 - **Lease propagation under partial failure**: backup's local lease is refreshed by every primary heartbeat-tick `LeaseGrant`; `BackupPromote` is gated on local lease expiry, not just heartbeat miss.
 - **Auth gating on `/chaos/order`**: rejects missing / wrong token, accepts matching `X-Chaos-Token` header when `OB_CHAOS_TOKEN` is set.
 - **Observability**: Prometheus counters (`replication_entries_shipped_total`, `_bytes_sent_total`, `_snapshot_streams_total`, `_snapshot_entries_total`) advance under load and on backup rejoin.
-- **`/readyz` k8s readiness probe**: HTTP 503 until `admin.setReady(true)` is called, which is after journal replay has finished, then 200. Auth-exempt (same as `/health`). `AdminAuthTest` covers 7 scenarios including readyz pre/post-ready transitions.
+- **`/readyz` k8s readiness probe**: HTTP 503 until `admin.setReady(true)` is called, which is after journal replay has finished, then 200. Auth-exempt (same as `/health`). `AdminAuthTest` covers both probes, including `/readyz` before and after ready.
 - **Build-metadata endpoint**: `/version` returns `gitSha` + `buildTime` for ops.
 
 See [deploy/chaos/README.md](../deploy/chaos/README.md) for the full scenario catalog, RTO/RPO measurements, and instructions to run the suite locally.
@@ -86,6 +86,6 @@ README latency tables should be updated only from saved artifacts, preferably us
 
 ## Architectural Gaps Worth Documenting
 
-- **`GatewayServer` runs its own embedded `MatchingEngine`**, not the replicated `OrderEngine`. Wiring FIX through the replication topology would require merging the two binaries or building an order-forwarding RPC between them. The same safety properties are verified via `/chaos/order` (calls `engine.submitOrder` directly, the same path FIX converges on after parsing) plus the existing in-tree `FixTcpGatewayTest`.
+- **`GatewayServer` runs its own embedded `MatchingEngine`**, not the replicated `OrderEngine`. Wiring FIX through the replication topology would require merging the two binaries or building an order-forwarding RPC between them. `/chaos/order` calls `engine.submitOrder` directly on `OrderEngine`, and `FixTcpGatewayTest` exercises the library's FIX gateway; neither says anything about `GatewayServer`.
 - **Snapshot stream concurrency: fixed.** The wire protocol brackets every snapshot with `SnapshotStart`/`SnapshotEnd`. The backup engages buffering the moment it connects, drops entries that raced ahead of `SnapshotStart` (their effects are already inside the snapshot cut), and replays the buffered window in arrival order at `SnapshotEnd`. Arrival order is safe because `streamSnapshot` ships each captured order while still holding the book lock — a Cancel for a captured order can only be applied (and therefore shipped) after its Snapshot entry is on the wire, so Cancel-before-Insert phantoms cannot occur. `TEST(SnapshotOrdering)` in `ReplicationProtocolTest` pins the drop-and-replay semantics; `src/main.cpp` registers both the commit hook and the snapshot-on-join hook before `startAsPrimary()` so no backup can connect before the bracket is armed. Residual (documented, availability not correctness): a backup that promotes mid-snapshot — primary dies between `SnapshotStart` and `SnapshotEnd` — leaves its buffered window unapplied and promotes from its own journal state.
 - **TOCTOU on `peerFd_` during stop()**: after the atomic-fd / `shutdown(2)` fix, all TSan races are gone. A theoretical residual: between a thread loading `peerFd_` and using it in a syscall, `stop()` could close the fd and the kernel could reuse the number. Not observable in practice (stop is teardown-only), would need fd refcounting for a complete fix.

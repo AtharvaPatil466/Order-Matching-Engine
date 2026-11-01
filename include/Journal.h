@@ -145,6 +145,11 @@ inline constexpr uint32_t JOURNAL_FORMAT_CURRENT = JOURNAL_FORMAT_V3;
 // STOP_ELECTED: a stop already elected and waiting for execution budget; it
 // must fire on the next sweep wherever the price is (PRIOR-9).
 inline constexpr Quantity SNAPSHOT_STOP_ELECTED = 1;
+// ICEBERG_SLICE: stopLimitPrice, which an iceberg does not use, carries what
+// is left of its displayed slice; re-adding the order sliced it afresh. The
+// flag, not the field, says so: an older record's stopLimitPrice holds
+// whatever the client sent, and older readers test only the bit above.
+inline constexpr Quantity SNAPSHOT_ICEBERG_SLICE = 2;
 
 inline constexpr uint64_t JOURNAL_EPOCH_LEGACY     = 0;  // may hold seeded orders
 inline constexpr uint64_t JOURNAL_EPOCH_NO_SEEDING = 1;  // writer seeded nothing
@@ -214,6 +219,11 @@ struct JournalEntry {
 // unfilled (1.5-E1). Older files carry 0 here: restored as unfilled, as before.
 inline Quantity snapshotCumQty(const JournalEntry& e) {
     return static_cast<Quantity>(e.newPrice);
+}
+
+// An iceberg Snapshot's remaining slice; 0 restores nothing (see ICEBERG_SLICE).
+inline Quantity snapshotIcebergSlice(const JournalEntry& e) {
+    return (e.newQty & SNAPSHOT_ICEBERG_SLICE) ? static_cast<Quantity>(e.stopLimitPrice) : 0;
 }
 
 // CancelReplace records reuse quantity, unused by them, as flags. A record
@@ -401,10 +411,11 @@ public:
                      Quantity displayQty = 0, PegType pegType = PegType::None,
                      Price pegOffset = 0, Price trailAmount = 0, Quantity minQty = 0,
                      bool hidden = false, bool stopElected = false,
-                     Quantity cumQty = 0) {
+                     Quantity cumQty = 0, Quantity icebergSlice = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Snapshot;
-        entry.newQty = stopElected ? SNAPSHOT_STOP_ELECTED : 0;
+        entry.newQty = (stopElected ? SNAPSHOT_STOP_ELECTED : 0) |
+                       (icebergSlice != 0 ? SNAPSHOT_ICEBERG_SLICE : 0);
         entry.newPrice = static_cast<Price>(cumQty);  // see snapshotCumQty
         entry.timestamp = now();
         entry.orderId = id;
@@ -417,7 +428,8 @@ public:
         entry.timeInForce = tif;
         entry.expiryTime = expiry;
         entry.stopPrice = stopPrice;
-        entry.stopLimitPrice = stopLimitPrice;
+        entry.stopLimitPrice = icebergSlice != 0 ? static_cast<Price>(icebergSlice)
+                                                 : stopLimitPrice;
         entry.displayQty = displayQty;
         entry.pegType = pegType;
         entry.pegOffset = pegOffset;

@@ -644,6 +644,10 @@ public:
     // a later replace (newQty = new total) would be applied against zero.
     void restoreExecutedQty(OrderId orderId, Quantity cumQty);
 
+    // Recovery only: put back what was left of a resting iceberg's displayed
+    // slice; the re-add showed a fresh one. 0, or any other order: no-op.
+    void restoreIcebergSlice(OrderId orderId, Quantity visibleQty);
+
     // Position-relevant fields of an order, returned BY VALUE so no pointer
     // escapes the lock. `found` false means the order was already gone.
     struct OrderExposure {

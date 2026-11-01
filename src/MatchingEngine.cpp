@@ -2583,6 +2583,7 @@ size_t MatchingEngine::replayJournal() {
                 else
                     book->restoreTrailingStop(entry.orderId, entry.stopPrice);
                 book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
+                book->restoreIcebergSlice(entry.orderId, snapshotIcebergSlice(entry));
             }
             break;
         }
@@ -2764,6 +2765,7 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
             else
                 book->restoreTrailingStop(entry.orderId, entry.stopPrice);
             book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
+            book->restoreIcebergSlice(entry.orderId, snapshotIcebergSlice(entry));
         }
         applied = true;
         break;
@@ -2822,7 +2824,7 @@ bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
                                   entry.pegOffset, entry.trailAmount,
                                   entry.minQty, entry.hidden,
                                   (entry.newQty & SNAPSHOT_STOP_ELECTED) != 0,
-                                  snapshotCumQty(entry));
+                                  snapshotCumQty(entry), snapshotIcebergSlice(entry));
             break;
         }
     }
@@ -3002,7 +3004,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.displayQty, order.pegType,
                                             order.pegOffset, order.trailAmount,
                                             order.minQty, order.isHidden,
-                                            order.isStopTriggered, order.cumQty);
+                                            order.isStopTriggered, order.cumQty,
+                                            order.type == OrderType::Iceberg
+                                                ? order.visibleQty : 0);
             }
             // After the orders: each restored order's add sweeps stops at the
             // last trade, which would fire them into a half-restored book.

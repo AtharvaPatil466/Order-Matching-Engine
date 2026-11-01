@@ -3667,6 +3667,14 @@ void OrderBook::restoreExecutedQty(OrderId orderId, Quantity cumQty) {
     o->status = OrderStatus::PartiallyFilled;
 }
 
+void OrderBook::restoreIcebergSlice(OrderId orderId, Quantity visibleQty) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    Order** found = orderLookup_.find(orderId);
+    Order* o = found ? *found : nullptr;
+    if (!o || o->type != OrderType::Iceberg || !o->inBook || visibleQty == 0) return;
+    o->visibleQty = std::min(visibleQty, o->remainingQty);
+}
+
 size_t OrderBook::getBidLevelsCount() const { return bids_.size(); }
 size_t OrderBook::getAskLevelsCount() const { return asks_.size(); }
 

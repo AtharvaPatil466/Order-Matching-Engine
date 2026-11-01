@@ -481,6 +481,7 @@ private:
                 else
                     book->restoreTrailingStop(e.orderId, e.stopPrice);
                 book->restoreExecutedQty(e.orderId, snapshotCumQty(e));
+                book->restoreIcebergSlice(e.orderId, snapshotIcebergSlice(e));
             }
             break;
         }

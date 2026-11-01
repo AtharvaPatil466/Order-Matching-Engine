@@ -344,6 +344,14 @@ enable_assertions(CheckpointPositionTest)
 add_test(NAME CheckpointPositionTest COMMAND CheckpointPositionTest)
 set_tests_properties(CheckpointPositionTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# An iceberg's partly consumed slice survives a checkpoint: depth and the
+# next aggressor see the remainder, not a fresh slice.
+add_executable(CheckpointIcebergSliceTest CheckpointIcebergSliceTest.cpp)
+target_link_libraries(CheckpointIcebergSliceTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointIcebergSliceTest)
+add_test(NAME CheckpointIcebergSliceTest COMMAND CheckpointIcebergSliceTest)
+set_tests_properties(CheckpointIcebergSliceTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A price level keeps its time priority across a checkpoint.
 add_executable(CheckpointTimePriorityTest CheckpointTimePriorityTest.cpp)
 target_link_libraries(CheckpointTimePriorityTest PRIVATE OrderMatcher)

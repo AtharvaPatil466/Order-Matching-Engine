@@ -241,7 +241,7 @@ void test_MissingCredentialFileIsAnError() {
     TEST(MissingCredentialFileIsAnError);
     ParticipantAuth auth;
     std::string err;
-    assert(auth.loadFromFile("/tmp/ob_creds_does_not_exist_12345", &err) == -1);
+    assert(auth.loadFromFile(uniqueTempPath("creds_does_not_exist"), &err) == -1);
     assert(!err.empty());
     assert(!auth.enabled());
     PASS();

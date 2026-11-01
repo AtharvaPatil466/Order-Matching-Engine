@@ -253,6 +253,10 @@ add_test(NAME ImportBenchResultsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/import_bench_results_test.sh ${CMAKE_SOURCE_DIR})
 set_tests_properties(ImportBenchResultsTest PROPERTIES TIMEOUT 30 LABELS "project;benchmark")
 
+add_test(NAME NoFixedTmpPathsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_fixed_tmp_paths.sh ${CMAKE_SOURCE_DIR})
+set_tests_properties(NoFixedTmpPathsTest PROPERTIES TIMEOUT 30 LABELS "project")
+
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
                  $<TARGET_FILE:OrderEngine>)

@@ -133,7 +133,7 @@ void test_nonexistent_file() {
     TEST(NonexistentFile);
 
     Config cfg;
-    assert(!cfg.loadFile("/tmp/this_file_does_not_exist_12345.conf"));
+    assert(!cfg.loadFile(uniqueTempPath("does_not_exist.conf")));
 
     PASS();
 }

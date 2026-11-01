@@ -7,6 +7,7 @@
 
 #include "Config.h"
 #include "ConfigValidator.h"
+#include "TempPath.h"
 
 #include <cassert>
 #include <iostream>
@@ -36,7 +37,7 @@ static void fillValidConfig(Config& cfg) {
         {"participants", "10"},
         {"participant.10.position_limit", "5000000"},
         {"participant.10.otr_limit", "100"},
-        {"journal_path", "/tmp/ob_cfgval_ok.wal"},
+        {"journal_path", uniqueTempPath("cfgval_ok.wal")},
     });
 }
 
@@ -162,9 +163,9 @@ void test_journal_path_unwritable() {
     assert(!r.ok);
     assert(hasError(r, "journal_path"));
 
-    // A writable path (/tmp exists and is writable) passes.
+    // A writable path (the temp directory exists and is writable) passes.
     Config ok;
-    ok.loadMap({{"journal_path", "/tmp/ob_cfgval_journal.wal"}});
+    ok.loadMap({{"journal_path", uniqueTempPath("cfgval_journal.wal")}});
     auto r2 = validateStartupConfig(ok);
     assert(r2.ok);
     PASS();

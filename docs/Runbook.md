@@ -360,13 +360,23 @@ history. What it keeps:
 
 - one snapshot record per live order: the resting orders level by level, front
   to back, so a restored level keeps its time priority, then the parked ones
-  (stops, trailing stops, on-close and auction market orders). A stop keeps its
-  election latch and a trailing stop the trigger its trail had ratcheted to;
+  (stops, trailing stops, auction market and on-close orders), each list in its
+  queue order, which decides which elected stops fire first and which market
+  orders an uncross fills first. A stop keeps its election latch, a trailing
+  stop the trigger its trail had ratcheted to, and an iceberg what is left of
+  its displayed slice;
 - each book's session: a begun session's `PreOpen` with its trading date (0 when
   undated), a halted book's pre-halt state, and any state but `Continuous`;
-- per book, the trade-id counter, the last trade price and the reference price
-  (the circuit breaker's), so a restored book trips and crosses as the one that
-  wrote it would have.
+- per book, the trade-id counter, the last trade's price and quantity and the
+  reference price (the circuit breaker's), so a restored book trips and crosses
+  as the one that wrote it would have;
+- per participant per book, the net position and the orders submitted and
+  trades executed (`Position` records), which `maxPositionSize` and `/otr` read.
+
+It does not keep a book's VWAP or trade count (read only by the research
+bindings) or rejected-order counts. Full replay does not rebuild those either,
+nor the engine-wide position limit's positions or the order-to-trade throttle's
+window: those start at zero after any restart.
 
 Checkpoints run:
 

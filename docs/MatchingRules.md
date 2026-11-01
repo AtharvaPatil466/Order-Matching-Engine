@@ -277,6 +277,11 @@ before the refresh, now fills ahead of it.
 `tests/TestOrderBook.cpp:853` (`IcebergPriority_PriceTime_LosesPriorityOnRefresh`) fails if
 the two lines above are removed.
 
+A checkpoint keeps what is left of the slice on show (a Snapshot record flagged
+`SNAPSHOT_ICEBERG_SLICE` carries it in `stopLimitPrice`); re-adding the order used to show a
+fresh slice, so the next aggressor took more from the iceberg before reaching the orders queued
+behind it (`tests/CheckpointIcebergSliceTest.cpp`).
+
 **How venues specify it.** Back-of-queue on refresh is the near-universal convention for
 price-time books — NYSE, Nasdaq reserve orders, LSE and Eurex iceberg all treat a refreshed
 slice as a new order for time priority. This engine matches that.
@@ -625,7 +630,9 @@ Consequences:
   the slot the scan is currently reading.
 
 This is not a race and it is fully deterministic given an identical input sequence — journal
-replay reproduces it — but it is **not derivable from the order book's public state**. Two
+replay reproduces it, and a checkpoint re-adds the parked orders in array order, so a restart
+from one does too (`tests/CheckpointParkedOrderTest.cpp`) — but it is **not derivable from the
+order book's public state**. Two
 participants whose stops sit at the same trigger level have no way to reason about which of
 them is executed and which is deferred, and it is not the one who armed first.
 
@@ -1007,7 +1014,8 @@ recovery reproduces the trip even with another threshold. The dwell clock is not
 after a restart into a volatility auction the dwell starts again.
 
 **A checkpoint carries the reference and the last trade price** (the per-book `Counters`
-record: `price` is the last trade, `newPrice` the reference, 0 for none). A book restarted
+record: `price` is the last trade, `newPrice` the reference, `newQty` the last trade's
+quantity, 0 for none). A book restarted
 from one used to have neither, so the breaker re-seeded its reference from the next order (a
 20% print traded instead of tripping) and an auction holding only market orders cancelled them
 instead of crossing at the last trade price (Rule 7.2). Pinned by

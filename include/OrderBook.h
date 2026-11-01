@@ -314,6 +314,12 @@ private:
     // later sweep will dereference and free again. Type-gated, so the common
     // Limit case costs a couple of predictable branches and no list scan.
     void untrackOrder(Order* order);
+    // The types an order off the book can only be parked as, each in its list.
+    static bool parkedInAList(OrderType t) {
+        return t == OrderType::Stop || t == OrderType::StopLimit || t == OrderType::MIT ||
+               t == OrderType::TrailingStop || t == OrderType::Market ||
+               t == OrderType::MOC || t == OrderType::LOC;
+    }
 
 public:
     // Debug-only structural invariant check over the whole book.
@@ -580,11 +586,12 @@ public:
     // recursive mutex).
     //
     // Resting orders come first, each level front to back (bids, then asks),
-    // then every order that is not resting. A checkpoint and a joining backup
-    // re-add the orders in this order, so it is the time priority they
-    // restore; the id map's order queued a level by order id.
-    // ponytail: parked orders (stops, auction market orders) still come in
-    // id order; walk their containers if their queue order has to survive.
+    // then the parked ones, each list front to back: stops, trailing stops,
+    // auction market orders, on-close orders. A checkpoint and a joining
+    // backup re-add the orders in this order, so it is the time priority and
+    // the queue order they restore; the id map's order queued a level, and
+    // then each list, by order id. The list order decides which elected stops
+    // run first and which market orders an uncross fills first.
     template<typename Fn>
     void forEachOrderLocked(Fn&& fn) const {
         std::lock_guard<std::mutex> lock(bookLock_);
@@ -593,8 +600,15 @@ public:
         };
         bids_.forEachLevel(level);
         asks_.forEachLevel(level);
+        for (const auto* list : {&stopOrders_, &trailingStopOrders_, &auctionMarketOrders_,
+                                 &onCloseOrders_})
+            for (const Order* o : *list)
+                if (o) fn(*o);
+        // An order off the book is in the list its type names (untrackOrder
+        // relies on the same rule); anything else off it, none today, still
+        // goes, in id order, rather than out of the checkpoint.
         orderLookup_.forEach([&](OrderId, Order* order) {
-            if (order && !order->inBook) fn(*order);
+            if (order && !order->inBook && !parkedInAList(order->type)) fn(*order);
         });
     }
 

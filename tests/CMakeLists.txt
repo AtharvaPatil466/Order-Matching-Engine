@@ -352,6 +352,14 @@ enable_assertions(CheckpointIcebergSliceTest)
 add_test(NAME CheckpointIcebergSliceTest COMMAND CheckpointIcebergSliceTest)
 set_tests_properties(CheckpointIcebergSliceTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# Parked orders (stops, trailing stops, auction market and on-close orders)
+# keep their queue order across a checkpoint.
+add_executable(CheckpointParkedOrderTest CheckpointParkedOrderTest.cpp)
+target_link_libraries(CheckpointParkedOrderTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointParkedOrderTest)
+add_test(NAME CheckpointParkedOrderTest COMMAND CheckpointParkedOrderTest)
+set_tests_properties(CheckpointParkedOrderTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A price level keeps its time priority across a checkpoint.
 add_executable(CheckpointTimePriorityTest CheckpointTimePriorityTest.cpp)
 target_link_libraries(CheckpointTimePriorityTest PRIVATE OrderMatcher)

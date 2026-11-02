@@ -754,6 +754,13 @@ public:
         }
     }
 
+    // The append rule (commit once the oldest entry has waited the commit
+    // delay) for a writer that is idling and so has no append to apply it.
+    void commitIfDue() {
+        if (!batch_.empty() && now() - batch_.front().timestamp >= maxCommitDelay_)
+            commitPending();
+    }
+
     // Cut a torn final write found at open (JRN-2, roadmap D2): fewer bytes
     // than one record after the last replayable one. That is what a crash
     // partway through a write leaves, and it cannot hold a record, so cutting

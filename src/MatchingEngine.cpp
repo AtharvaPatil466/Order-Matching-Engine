@@ -775,6 +775,11 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             continue;
         }
         if (idleSpins < 256) {
+            // D3 while idle: on a core another thread wants, each yield cedes
+            // a whole timeslice — 128 of them took ~360 ms against one busy
+            // thread — so committing only after them left acked orders in
+            // memory for that long. Apply the commit delay between yields.
+            if (journal_) commitJournalIfDue();
             std::this_thread::yield();
             continue;
         }
@@ -782,8 +787,6 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
         // D3: about to park, so nothing more joins the journal's batch until
         // the next order arrives — which on a quiet book may be never. Commit
         // it now rather than leave acked orders in memory for kill -9.
-        // ponytail: the spin/yield above is the bound's ceiling while idle
-        // (tens of µs, longer on an overloaded box); appends enforce 200 µs.
         if (journal_) commitJournal();
 
         queueWakeups_[threadIndex].wait(observedWake, std::memory_order_relaxed);
@@ -2430,6 +2433,11 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
 void MatchingEngine::commitJournal() {
     std::lock_guard<std::mutex> lock(journalMutex_);
     if (journal_) journal_->commitPending();
+}
+
+void MatchingEngine::commitJournalIfDue() {
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (journal_) journal_->commitIfDue();
 }
 
 bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy policy) {

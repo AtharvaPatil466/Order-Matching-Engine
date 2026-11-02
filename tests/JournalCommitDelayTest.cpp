@@ -11,7 +11,8 @@
 // commit delay (default 200 µs):
 //   - on the next append, under load (journalCommitsOnAgeUnderLoad);
 //   - from the async worker's idle path when the orders stop
-//     (asyncQuietPeriodThenKill — the audit's h5);
+//     (asyncQuietPeriodThenKill — the audit's h5; again with busy threads on
+//     the worker's core, which is what ctest -j8 does to it);
 //   - from the TCP gateway's event loop on a synchronous engine
 //     (syncGatewayQuietPeriodThenKill).
 // TCP ports come from 29100-29109.
@@ -30,6 +31,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <pthread.h>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
@@ -117,8 +119,28 @@ void journalCommitsOnAgeUnderLoad() {
     std::filesystem::remove(path);
 }
 
+// Busy threads on worker 0's core (pinCurrentThreadToCore(0)), as other async
+// engines' workers are under ctest -j8. Linux pins; elsewhere they just spin.
+void shareWorkerCore(int threads) {
+    for (int i = 0; i < threads; ++i) {
+        std::thread([] {
+#if defined(__linux__)
+            cpu_set_t one;
+            CPU_ZERO(&one);
+            CPU_SET(0, &one);
+            pthread_setaffinity_np(pthread_self(), sizeof one, &one);
+#endif
+            std::atomic<unsigned> spin{0};   // a loop with no side effect is UB
+            for (;;) spin.fetch_add(1, std::memory_order_relaxed);
+        }).detach();
+    }
+}
+
 // The audit's h5: OrderEngine's configuration — async, GroupCommit(64).
-void asyncQuietPeriodThenKill() {
+// With burners, the worker shares its core: each sched_yield on the idle path
+// then cedes a whole timeslice, and 128 of them took ~360 ms against one
+// burner, so a commit made only after the yields missed the 200 ms kill.
+void asyncQuietPeriodThenKill(int burners = 0) {
     struct Acks : EventListener {
         std::atomic<int> news{0};
         void onTrade(const Trade&) override {}
@@ -134,6 +156,7 @@ void asyncQuietPeriodThenKill() {
         [&](int report) {
             static MatchingEngine engine;
             static Acks acks;
+            shareWorkerCore(burners);
             engine.addSymbol(kSym);
             engine.getOrderBook(kSym)->setEventListener(&acks);
             engine.enableJournal(path);   // GroupCommit(64), as OrderEngine
@@ -152,8 +175,10 @@ void asyncQuietPeriodThenKill() {
             char done = 0;
             assert(read(fromChild, &done, 1) == 1 && "the child never acked its orders");
         });
-    std::printf("  async: %zu of %d acked orders restored after %lld ms quiet + SIGKILL\n",
-                restored, kOrders, static_cast<long long>(kQuiet.count()));
+    std::printf("  async, %d on the worker's core: %zu of %d acked orders restored after "
+                "%lld ms quiet + SIGKILL\n",
+                burners, restored, kOrders, static_cast<long long>(kQuiet.count()));
+    std::fflush(stdout);   // the assert below would discard it
     assert(restored == static_cast<size_t>(kOrders) &&
            "acked orders sat in the user-space batch through the quiet period");
 }
@@ -197,6 +222,7 @@ void syncGatewayQuietPeriodThenKill() {
 int main() {
     journalCommitsOnAgeUnderLoad();
     asyncQuietPeriodThenKill();
+    asyncQuietPeriodThenKill(2);
     syncGatewayQuietPeriodThenKill();
     std::puts("JournalCommitDelayTest passed");
     return 0;

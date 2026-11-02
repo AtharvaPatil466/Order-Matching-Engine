@@ -606,6 +606,8 @@ private:
     // this form to avoid re-locking the non-recursive mutex.
     void addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo = MatchAlgorithm::PriceTime);
     void workerLoop(size_t threadIndex);
+    // commitJournal() once the batch's oldest entry is past the commit delay.
+    void commitJournalIfDue();
     void processRequest(size_t threadIndex, const OrderRequest& req);
     // Session control: apply a TradingState / Uncross request to its book,
     // journal it, and run OCO on the cross's fills. Returns the journal append

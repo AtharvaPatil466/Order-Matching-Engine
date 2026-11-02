@@ -366,13 +366,10 @@ void MatchingEngine::ensureDefaultSymbol() {
     // Mutates books_/symbolIds_; guard with bookMutex_ for the same discipline
     // as addSymbol. Called from the constructor (no contention), but uniform
     // locking keeps every books_/symbolIds_ mutation guarded.
+    // Through addSymbolLocked, like every other book, so it gets the engine
+    // listener: inserted bare, its fills never reached onTrade.
     std::lock_guard<std::mutex> lock(bookMutex_);
-    if (books_.contains(0)) {
-        return;
-    }
-
-    books_.insert(0, std::make_unique<OrderBook>(0));
-    symbolIds_.push_back(0);
+    addSymbolLocked(0);
 }
 
 void MatchingEngine::start() {

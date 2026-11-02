@@ -132,6 +132,22 @@ TEST_F(RiskFixture, PositionCancelReleasesExposure) {
     EXPECT_EQ(engine.getPosition(1), 30);
 }
 
+// Symbol 0 is the one the constructor creates, and the one the engine binary
+// registers first. Its book was built without the engine listener, so its
+// fills never reached onTrade: a taker bought there without its position
+// moving (nor OCO, fees, CAT or the fat-finger reference seeing the fill).
+TEST(RiskSymbolZero, TakerFillAccruesOnTheDefaultSymbol) {
+    MatchingEngine engine;
+    engine.addSymbol(0);
+    engine.start();
+    engine.setPositionLimit(1, 100);
+    ASSERT_TRUE(engine.submitOrder(0, 1, 2, Side::Sell, kRef, 80, OrderType::Limit).isAccepted());
+    ASSERT_TRUE(engine.submitOrder(0, 2, 1, Side::Buy, kRef, 80, OrderType::Limit).isAccepted());
+    EXPECT_EQ(engine.getPosition(1), 80);
+    EXPECT_EQ(engine.submitOrder(0, 3, 1, Side::Buy, kRef - 1, 30, OrderType::Limit).rejectReason,
+              RejectReason::PositionLimitExceeded);
+}
+
 // ─── P2-10 FAT-FINGER ───────────────────────────────────────────────────────
 
 TEST_F(RiskFixture, FatFingerRejectsExcessiveQuantity) {

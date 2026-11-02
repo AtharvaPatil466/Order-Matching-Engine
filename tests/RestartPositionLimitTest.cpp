@@ -26,7 +26,7 @@ using namespace OrderMatcher;
 
 namespace {
 
-constexpr SymbolId kSym = 1;   // not 0: the constructor's default book has no engine listener
+constexpr SymbolId kSym = 1;
 constexpr Price kPx = 10000;
 constexpr ParticipantId kBuyer = 7;
 constexpr ParticipantId kSeller = 8;

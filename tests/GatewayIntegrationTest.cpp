@@ -10,6 +10,17 @@
 
 using namespace OrderMatcher;
 
+// The gateway accepts on its own thread. Wait for it with a deadline: a fixed
+// 10 ms sleep was exceeded under ctest -j8 (clientCount() still 0).
+bool clientsReach(const TcpGateway& gateway, size_t n) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (gateway.clientCount() != n) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
 // ─── Test 1: Connect, send orders, receive ACKs, verify trade ───────────────
 
 void testBasicOrderFlow() {
@@ -41,9 +52,7 @@ void testBasicOrderFlow() {
     TestClient client;
     assert(client.connect(port));
 
-    // Give kqueue time to register the new connection
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    assert(gateway.clientCount() == 1);
+    assert(clientsReach(gateway, 1));
 
     // Send a resting sell order
     OrderRequest req1{};
@@ -276,8 +285,7 @@ void testIPWhitelist() {
 
     TestClient client2;
     assert(client2.connect(gateway2.port()));
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    assert(gateway2.clientCount() == 1);
+    assert(clientsReach(gateway2, 1));
 
     client2.disconnect();
     gateway2.stop();
@@ -485,8 +493,7 @@ void testSlowReaderIsDroppedNotBufferedForever() {
 
     TestClient client;
     assert(client.connect(port, /*rcvBuf=*/2048));
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    assert(gateway.clientCount() == 1);
+    assert(clientsReach(gateway, 1));
 
     // Pump orders and never read a single response. Each one produces an ack
     // far larger than the request, so the outbound queue grows much faster

@@ -2603,12 +2603,7 @@ size_t MatchingEngine::replayJournal() {
         ++replayed;
     }
 
-    for (SymbolId symbolId : symbolIds_) {
-        if (auto* book = getOrderBook(symbolId)) {
-            book->setReplayMode(false);
-        }
-    }
-
+    setReplayModeAllBooks(false);
     return replayed;
 }
 
@@ -2620,6 +2615,34 @@ void MatchingEngine::setReplayModeAllBooks(bool replay) {
         if (auto* book = getOrderBook(symbolId)) {
             book->setReplayMode(replay);
         }
+    }
+    if (!replay) rebuildPositionsLocked();
+}
+
+void MatchingEngine::rebuildPositionsLocked() {
+    // P2-9 position = filled net + signed remaining qty of every working
+    // order, parked ones included: admission reserves the remainder, a fill
+    // accrues to the taker (the maker's reservation turns into its fill), a
+    // cancel releases what was left. Each book's per-participant net position
+    // is the filled part — every fill moves it, replay included, and a
+    // checkpoint's Position record restores it. Unconditional, so a limit set
+    // after the restart also sees what is held.
+    // ponytail: not atomic against a concurrent admission — an order a worker
+    // admits between the zeroing and the walk of its book counts twice.
+    // replayJournal runs before the workers start; on promotion the window is
+    // this walk.
+    // Post it to the workers as a control message if that window matters.
+    for (auto& p : positions_) p.store(0, std::memory_order_relaxed);
+    for (SymbolId symbolId : symbolIds_) {
+        const OrderBook* book = getOrderBook(symbolId);
+        if (!book) continue;
+        book->forEachPositionLocked([this](const OrderBook::ParticipantPosition& p) {
+            if (p.participant < MAX_PARTICIPANTS)
+                positions_[p.participant].fetch_add(p.netPosition, std::memory_order_relaxed);
+        });
+        book->forEachOrderLocked([this](const Order& o) {
+            reservePosition(o.participantId, o.side, o.remainingQty);
+        });
     }
 }
 

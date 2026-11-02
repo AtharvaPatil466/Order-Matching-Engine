@@ -418,7 +418,9 @@ public:
     // Toggle replay mode across every registered book. Backups run
     // permanently in replay mode so that applying primary-shipped
     // journal entries does not re-emit market data or order updates
-    // to local clients (the primary is the canonical source).
+    // to local clients (the primary is the canonical source). Leaving
+    // replay mode (promotion; the end of replayJournal) rebuilds every
+    // participant's position-limit exposure from the restored books.
     void setReplayModeAllBooks(bool replay);
 
     // Apply a single deserialized JournalEntry to the engine. Used by
@@ -935,6 +937,10 @@ private:
     // OrderBook::cancelOrderReleasing(), so no Order* is dereferenced outside
     // the lock. Prefer this at every cancel/sweep site.
     void releasePosition(const OrderBook::OrderExposure& e);
+    // Recompute every position from the books after they were restored from
+    // journal state, which drives them directly: neither the reservations above
+    // nor the fill accrual below ran. Caller holds bookMutex_.
+    void rebuildPositionsLocked();
     // Per-fill accrual: last-trade price, taker position, OTR trade counts.
     void onRiskFill(const Trade& t);
     // Cancel every resting order of `pid` across all books, or every resting

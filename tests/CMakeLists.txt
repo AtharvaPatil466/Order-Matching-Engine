@@ -357,6 +357,14 @@ enable_assertions(CheckpointPositionTest)
 add_test(NAME CheckpointPositionTest COMMAND CheckpointPositionTest)
 set_tests_properties(CheckpointPositionTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# The engine-wide position limit sees the same position after a restart —
+# replay, checkpoint or a promoted backup — as the engine that traded.
+add_executable(RestartPositionLimitTest RestartPositionLimitTest.cpp)
+target_link_libraries(RestartPositionLimitTest PRIVATE OrderMatcher)
+enable_assertions(RestartPositionLimitTest)
+add_test(NAME RestartPositionLimitTest COMMAND RestartPositionLimitTest)
+set_tests_properties(RestartPositionLimitTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # An iceberg's partly consumed slice survives a checkpoint: depth and the
 # next aggressor see the remainder, not a fresh slice.
 add_executable(CheckpointIcebergSliceTest CheckpointIcebergSliceTest.cpp)

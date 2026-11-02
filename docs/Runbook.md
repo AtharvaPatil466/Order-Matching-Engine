@@ -373,10 +373,19 @@ history. What it keeps:
 - per participant per book, the net position and the orders submitted and
   trades executed (`Position` records), which `maxPositionSize` and `/otr` read.
 
+The engine-wide position limit's positions (`setPositionLimit`) are not
+recorded: when the books leave replay mode — the end of any replay, checkpoint
+or not, and a backup's promotion — each is rebuilt as the participant's net
+position summed over the books plus the signed remaining quantity of its
+working orders, parked ones included.
+
 It does not keep a book's VWAP or trade count (read only by the research
 bindings) or rejected-order counts. Full replay does not rebuild those either,
-nor the engine-wide position limit's positions or the order-to-trade throttle's
-window: those start at zero after any restart.
+nor the order-to-trade throttle's window, which starts at zero after any
+restart (it spans a second by default, less than a restart takes), nor the
+hierarchical risk manager's tier positions. A backup that joined late got only
+the resting orders (`streamSnapshot` sends no `Position` records), so its
+rebuilt positions miss what was filled before it joined.
 
 Checkpoints run:
 

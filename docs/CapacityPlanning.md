@@ -78,8 +78,8 @@ Cores = num_worker_threads + 3 (gateway + admin + journal)
 
 ### CPU Affinity Best Practices
 ```bash
-# Isolate cores 2-5 for matching threads (Linux)
-echo "2-5" > /sys/devices/system/cpu/cpufreq/policy*/affected_cpus
+# Keep other work off cores 2-5 (Linux): boot with isolcpus=2-5 nohz_full=2-5, or
+# move other tasks off them with a cpuset (OSTuning.md)
 
 # Pin the engine with taskset: worker i pins itself to the i-th CPU in it
 taskset -c 2-5 ./bin/OrderEngine --threads 4   # or worker_cores = 2,3,4,5 (Runbook §6)

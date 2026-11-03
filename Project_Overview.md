@@ -1,6 +1,6 @@
 # High-Performance Order Matching Engine — Project Overview
 
-> **C++20 Order Matching Engine** | 93 headers | 14 source files | 103 test files | 524 CTest targets
+> **C++20 Order Matching Engine**
 >
 > A C++20 low-latency matching engine drawing on exchange design principles — **237 ns P50 core-matching latency (Clang PGO) validated on x86 Xeon bare metal** (≈125 ns on Apple Silicon). Thread-per-symbol partitioning is designed for horizontal scaling; **no scaling curve has been measured**, so treat that as an architectural property rather than a demonstrated one.
 
@@ -17,7 +17,7 @@ This is a C++20 low-latency order matching engine drawing on exchange design pri
 | Header files (`include/`) | 93 |
 | Source files (`src/`) | 14 |
 | Test files | 102 |
-| Individual test cases | 524 CTest targets |
+| Individual test cases | listed by `ctest -N` |
 | TLA+ specifications | 11 (`MatchingEngine.tla`: 2.7M distinct states at MaxOrders=3, checked in CI) |
 | Documentation files | 8 in `docs/` (plus architecture/benchmark docs) |
 
@@ -640,9 +640,9 @@ outperforming another.
 
 ## 9. Verification & Testing
 
-### Test Suite — 102 Executables, 524 CTest Targets
+### Test Suite
 
-The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories across 102 test executables and 524 CTest targets.
+The testing infrastructure includes Unit, Functional, Integration, Chaos, Property, Shadow, and Benchmark testing categories; `ctest -N` lists every target.
 
 **The count is not the claim, and it should not be read as one.** There are no line- or branch-coverage figures here and no mutation testing, so the number measures how many test binaries exist, not how much behaviour they pin. This project has repeated evidence that the two diverge: every journal test was single-symbol, which is precisely how the cancel-routing defect survived; a follower comparator checked 6 of 16 order fields, so a fix that dropped ten of them would have gone green; the checkpoint soak ran 90 rewrites that all *grew* the file, never once producing the shape a real checkpoint makes; and eight test functions were defined and never called. All four are fixed, and all four were inside that count while it was being quoted. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
@@ -669,7 +669,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 ```
 include/              93 header files — core logic and networking
 src/                  14 source files — thin compilation units
-tests/                103 test files, 524 CTest targets
+tests/                test sources and their CTest registrations
 benchmarks/           11 benchmark binaries
 fuzz/                 4 libFuzzer harnesses + standalone driver
 spec/                 TLA+ formal specifications (11 specs)
@@ -715,4 +715,4 @@ audit of the codebase and are tracked as code work.
 ---
 
 *Developed for professional quantitative trading systems.*
-*C++20 · 102 test executables · 524 CTest targets · 19 multi-container chaos scenarios · MatchingEngine.tla checked in CI · 11 TLA+ specifications*
+*C++20 · 19 multi-container chaos scenarios · MatchingEngine.tla checked in CI · 11 TLA+ specifications*

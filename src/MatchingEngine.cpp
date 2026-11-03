@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <system_error>
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -114,12 +115,22 @@ void pinCurrentThreadToCore([[maybe_unused]] int cpu, [[maybe_unused]] size_t th
 #endif
 }
 
-// Worker i runs on the i-th CPU the process may use — CPU i when every CPU is
-// allowed — and a worker past the last one stays on the mask it inherited. It
-// used to be CPU i whatever the mask said, so `taskset -c 2-5` put the workers
-// on 0-3 and a cpuset or a second engine shared their cores.
-std::vector<int> defaultWorkerCpus(size_t workers) {
+// The CPU worker i pins itself to, -1 for none. A configured list
+// (setWorkerCores, the worker_cores key) is used in order once
+// Utils::workerCoresError passes it. Otherwise worker i runs on the i-th CPU
+// the process may use — CPU i when every CPU is allowed — and a worker past the
+// last one keeps the mask it inherited. It used to be CPU i whatever the mask
+// said, so `taskset -c 2-5` put the workers on 0-3 and a cpuset or a second
+// engine shared their cores.
+std::vector<int> workerCpusFor(size_t workers, const std::vector<int>& configured) {
     const std::vector<int> allowed = Utils::allowedCpus();
+    if (!configured.empty()) {
+        if (const std::string err = Utils::workerCoresError(configured, workers, allowed);
+            !err.empty()) {
+            throw std::invalid_argument("worker_cores: " + err);
+        }
+        return {configured.begin(), configured.begin() + static_cast<std::ptrdiff_t>(workers)};
+    }
     std::vector<int> cpus(workers, -1);
     for (size_t i = 0; i < workers && i < allowed.size(); ++i) cpus[i] = allowed[i];
     return cpus;
@@ -429,14 +440,17 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     if (async_) {
         return;
     }
+    // First, so a bad worker_cores list throws before anything is started.
+    const size_t workers = numThreads > 0 ? numThreads : 1;
+    std::vector<int> workerCpus = workerCpusFor(workers, workerCores_);
 
     // Calibrate the TSC once here, while still single-threaded, so the ~5 ms
     // sample never lands on a worker's hot path. Used by the per-order e2e
     // latency measurement (Utils::rdtsc / tscTicksToNs).
     Utils::calibrateTsc();
 
-    numThreads_ = numThreads > 0 ? numThreads : 1;
-    workerCpus_ = defaultWorkerCpus(numThreads_);
+    numThreads_ = workers;
+    workerCpus_ = std::move(workerCpus);
     rebuildThreadSymbolIndex();
 
     // Fresh ThreadStats zero the submitted/processed counters, which is what

@@ -81,8 +81,8 @@ Cores = num_worker_threads + 3 (gateway + admin + journal)
 # Isolate cores 2-5 for matching threads (Linux)
 echo "2-5" > /sys/devices/system/cpu/cpufreq/policy*/affected_cpus
 
-# Pin the engine with taskset
-taskset -c 2-5 ./bin/OrderEngine --threads 4
+# Pin the engine with taskset: worker i pins itself to the i-th CPU in it
+taskset -c 2-5 ./bin/OrderEngine --threads 4   # or worker_cores = 2,3,4,5 (Runbook §6)
 
 # On macOS, use thread affinity hints (less granular)
 # The engine sets THREAD_AFFINITY_POLICY internally

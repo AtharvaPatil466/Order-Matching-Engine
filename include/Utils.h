@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <chrono>
+#include <string>
 #include <thread>
 #include <vector>
 #include <iostream>
@@ -54,6 +56,45 @@ inline std::vector<int> allowedCpus() {
     }
 #endif
     return cpus;
+}
+
+// Ascending CPUs as `taskset -c` writes them: {0,1,2,3,8} -> "0-3,8".
+inline std::string cpuRanges(const std::vector<int>& cpus) {
+    std::string out;
+    for (size_t i = 0; i < cpus.size();) {
+        size_t j = i;
+        while (j + 1 < cpus.size() && cpus[j + 1] == cpus[j] + 1) ++j;
+        if (!out.empty()) out += ',';
+        out += std::to_string(cpus[i]);
+        if (j > i) out += '-' + std::to_string(cpus[j]);
+        i = j + 1;
+    }
+    return out;
+}
+
+// What is wrong with pinning `workers` threads to `cores`, one each in order,
+// when the process may run on `allowed` (allowedCpus()); "" when nothing is.
+// Entries past the workers are unused but must be valid too.
+inline std::string workerCoresError(const std::vector<int>& cores, size_t workers,
+                                    const std::vector<int>& allowed) {
+    if (allowed.empty()) {
+        return "this process has no CPU affinity mask to pin to (macOS has none)";
+    }
+    if (cores.size() < workers) {
+        return "names " + std::to_string(cores.size()) + " CPU(s) for " +
+               std::to_string(workers) + " worker threads";
+    }
+    for (size_t i = 0; i < cores.size(); ++i) {
+        const std::string cpu = "CPU " + std::to_string(cores[i]);
+        if (!std::binary_search(allowed.begin(), allowed.end(), cores[i])) {
+            return cpu + " is not one this process may run on (" + cpuRanges(allowed) + ")";
+        }
+        if (std::find(cores.begin(), cores.begin() + static_cast<std::ptrdiff_t>(i), cores[i]) !=
+            cores.begin() + static_cast<std::ptrdiff_t>(i)) {
+            return cpu + " is named twice";
+        }
+    }
+    return {};
 }
 
 // Low-overhead timestamp using RDTSC (x86) or portable fallback

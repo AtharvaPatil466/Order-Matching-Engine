@@ -275,6 +275,15 @@ set_tests_properties(EngineSessionScheduleConfigTest PROPERTIES
     TIMEOUT 180
     LABELS "project;session;lifecycle")
 
+# Roadmap 2.12: `worker_cores` pins the async workers to the CPUs it names, and
+# a list the engine cannot honour refuses to boot. Admin port 31201.
+add_test(NAME EngineWorkerCoresConfigTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_worker_cores_config.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineWorkerCoresConfigTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;lifecycle")
+
 # Roadmap 1.6-F6 (STP-8): with --config, every symbol's price band comes from
 # instrument.<id>.min_price / max_price before any order; a missing one refuses
 # to boot. Admin port 29501.

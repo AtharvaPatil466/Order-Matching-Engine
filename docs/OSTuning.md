@@ -303,7 +303,9 @@ Every engine start (before launching `OrderEngine` / the F-Stack receiver):
 - [ ] §3 — `sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>`
 - [ ] §5 — `sudo scripts/set_cpu_perf.sh`
 - [ ] Start the engine pinned to the isolated cores (`taskset -c <matching_core> ...` /
-      F-Stack `lcore_mask`), per [Runbook.md](./Runbook.md) §1.
+      F-Stack `lcore_mask`), per [Runbook.md](./Runbook.md) §1. Worker i pins itself to
+      the i-th CPU of that mask; `worker_cores` in engine.conf names them explicitly
+      ([Runbook.md](./Runbook.md) §6). The `engine_start` log line shows where they went.
 
 Then confirm the spikes are gone: run the benchmark and check that P99.9 no longer
 shows the 50–200 µs outliers described in §1.

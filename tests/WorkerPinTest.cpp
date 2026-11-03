@@ -13,7 +13,9 @@
 //     allows every CPU, as before;
 //   * restricted to the last two allowed CPUs, as `taskset -c` does: the
 //     workers are on those two, and no thread the engine started may run
-//     anywhere else.
+//     anywhere else;
+//   * setWorkerCores (the worker_cores key) puts them where it says, and a
+//     CPU outside the mask makes startAsync throw, starting nothing.
 // Linux only: macOS has no CPU affinity mask (exit 77, skipped).
 
 #include "MatchingEngine.h"
@@ -28,6 +30,7 @@
 #include <dirent.h>
 #include <sched.h>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <sys/types.h>
 #include <thread>
@@ -84,10 +87,11 @@ std::string str(const std::vector<int>& cpus) {
 
 // The mask of every thread a 2-worker engine starts on the calling thread's
 // current mask, once both workers have pinned (or after 10 s, as they are).
-std::vector<std::vector<int>> engineThreadMasks() {
+std::vector<std::vector<int>> engineThreadMasks(const std::vector<int>& workerCores) {
     const std::set<pid_t> before = threadIds();
     MatchingEngine engine;
     engine.addSymbol(1);
+    engine.setWorkerCores(workerCores);
     engine.startAsync(2);
     std::vector<std::vector<int>> masks;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -108,8 +112,9 @@ std::vector<std::vector<int>> engineThreadMasks() {
 
 // Exactly the two workers sit on one CPU each, on `first` and `second`, and no
 // engine thread may run outside `allowed` (sorted).
-void expectWorkersOn(const char* label, const std::vector<int>& allowed, int first, int second) {
-    const std::vector<std::vector<int>> masks = engineThreadMasks();
+void expectWorkersOn(const char* label, const std::vector<int>& allowed, int first, int second,
+                     const std::vector<int>& workerCores = {}) {
+    const std::vector<std::vector<int>> masks = engineThreadMasks(workerCores);
     std::vector<int> pinnedTo;
     bool inside = true;
     std::string seen;
@@ -141,6 +146,22 @@ int main() {
     restrictTo(lastTwo);
     expectWorkersOn("taskset to the last two CPUs", lastTwo, lastTwo[0], lastTwo[1]);
     restrictTo(all);
+
+    expectWorkersOn("worker_cores", all, all[1], all.back(), {all.back(), all[1]});
+
+    MatchingEngine engine;
+    engine.addSymbol(1);
+    engine.setWorkerCores({all.back() + 1, all[0]});
+    const std::set<pid_t> before = threadIds();
+    bool threw = false;
+    try {
+        engine.startAsync(2);
+    } catch (const std::invalid_argument& e) {
+        threw = true;
+        std::printf("worker_cores outside the mask: %s\n", e.what());
+    }
+    check(threw && threadIds() == before,
+          "worker_cores outside the mask: startAsync throws and starts no thread");
 
     if (failures) {
         std::printf("FAIL: %d check(s) failed\n", failures);

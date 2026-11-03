@@ -150,8 +150,16 @@ public:
     void stop();
 
     // Async mode: spawns a pool of worker threads. Orders are routed by hashing the SymbolId.
+    // Worker i pins itself to the i-th CPU the process may run on, or to
+    // setWorkerCores()[i]; startAsync throws std::invalid_argument, starting
+    // nothing, when that list fails Utils::workerCoresError.
     void startAsync(size_t numThreads = 1, size_t queueSize = 8192);
     void stopAsync();
+
+    // The CPU each async worker pins itself to, in worker order (the
+    // worker_cores key). Empty, the default, means the i-th allowed CPU. Set
+    // before startAsync().
+    void setWorkerCores(std::vector<int> cores) { workerCores_ = std::move(cores); }
 
     // How long stopAsync() waits for the workers before it starts reporting
     // which ones have not exited, and how often it repeats. It never gives up
@@ -709,6 +717,7 @@ private:
     // The CPU worker i pins itself to, -1 for none. Written by startAsync()
     // before it starts the workers, read once by each.
     std::vector<int> workerCpus_;
+    std::vector<int> workerCores_;   // setWorkerCores(); empty = the allowed mask
     std::vector<std::unique_ptr<MpscQueue<OrderRequest>>> requestQueues_;
     std::vector<std::thread> workerThreads_;
     std::unique_ptr<std::atomic<uint64_t>[]> queueWakeups_;

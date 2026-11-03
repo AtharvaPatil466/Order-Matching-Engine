@@ -21,6 +21,8 @@
 //
 //   journal_path = /var/lib/orderengine/journal.wal   # parent dir must be writable
 //
+//   worker_cores = 2,3,4,5                   # validateWorkerCores(), below
+//
 // Validated invariants:
 //   * per instrument: min_price < max_price, tick_size > 0, lot_size > 0,
 //     and (max_price - min_price) < FlatPriceMap capacity (band fits the map).
@@ -30,7 +32,9 @@
 #include "Config.h"
 #include "FlatPriceMap.h"
 #include "Types.h"
+#include "Utils.h"
 
+#include <charconv>
 #include <cstdint>
 #include <string>
 #include <unistd.h>   // access(), W_OK
@@ -170,6 +174,35 @@ inline ConfigValidationResult validateStartupConfig(
     }
 
     return result;
+}
+
+// worker_cores = 2,3,4,5 (OB_WORKER_CORES): the CPU each async worker pins
+// itself to, in worker order, numbered as `taskset -c` numbers them. Without it
+// worker i takes the i-th CPU the process may run on. Never ignored: unless
+// every entry is a CPU number in `allowed` (Utils::allowedCpus(); empty where
+// there is no affinity mask, so any list fails there), none repeats, and there
+// is one per worker, it is a startup error. Returns the list; empty when the
+// key is unset or wrong.
+inline std::vector<int> validateWorkerCores(const Config& cfg, size_t workers,
+                                            const std::vector<int>& allowed,
+                                            ConfigValidationResult& result) {
+    if (!cfg.has("worker_cores")) return {};
+    const std::string spec = cfg.getString("worker_cores");
+    std::vector<int> cores;
+    for (const std::string& tok : detail::splitCsv(spec)) {
+        int cpu = -1;
+        const auto [end, ec] = std::from_chars(tok.data(), tok.data() + tok.size(), cpu);
+        if (ec != std::errc() || end != tok.data() + tok.size() || cpu < 0) {
+            result.fail("worker_cores '" + spec + "': '" + tok + "' is not a CPU number");
+            return {};
+        }
+        cores.push_back(cpu);
+    }
+    if (const std::string err = Utils::workerCoresError(cores, workers, allowed); !err.empty()) {
+        result.fail("worker_cores '" + spec + "': " + err);
+        return {};
+    }
+    return cores;
 }
 
 }  // namespace OrderMatcher

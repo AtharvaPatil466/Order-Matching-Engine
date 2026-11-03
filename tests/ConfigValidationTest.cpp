@@ -12,6 +12,7 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using namespace OrderMatcher;
 
@@ -188,6 +189,49 @@ void test_multiple_errors_accumulate() {
     PASS();
 }
 
+// worker_cores is checked against an explicit allowed set, so every case runs
+// on every platform; {} stands for one with no affinity mask (macOS).
+// `needle` nullptr: must pass and return `want`.
+static void checkWorkerCores(const char* spec, size_t workers, const std::vector<int>& allowed,
+                             const char* needle, const std::vector<int>& want = {}) {
+    Config cfg;
+    cfg.set("worker_cores", spec);
+    ConfigValidationResult r;
+    const std::vector<int> cores = validateWorkerCores(cfg, workers, allowed, r);
+    if (needle == nullptr) {
+        if (!r.ok) for (auto& e : r.errors) std::cout << "\n    unexpected: " << e;
+        assert(r.ok && cores == want);
+        return;
+    }
+    if (r.ok || !hasError(r, needle)) {
+        std::cout << "\n    '" << spec << "' wanted an error with: " << needle;
+        for (auto& e : r.errors) std::cout << "\n    got: " << e;
+        assert(false);
+    }
+    assert(cores.empty());
+}
+
+void test_worker_cores() {
+    SECTION("worker_cores: a bad list is rejected, never ignored");
+    const std::vector<int> allowed = {2, 3, 4, 5};
+    checkWorkerCores("2,3,4,5", 4, allowed, nullptr, {2, 3, 4, 5});
+    checkWorkerCores(" 5 , 4 ", 2, allowed, nullptr, {5, 4});
+    checkWorkerCores("2,3,4", 2, allowed, nullptr, {2, 3, 4});  // extras unused
+    checkWorkerCores("2,3", 4, allowed, "names 2 CPU(s) for 4 worker threads");
+    checkWorkerCores("", 1, allowed, "names 0 CPU(s) for 1 worker threads");
+    checkWorkerCores("0,2", 2, allowed, "CPU 0 is not one this process may run on (2-5)");
+    checkWorkerCores("2,3,9", 2, allowed, "CPU 9 is not one this process may run on");
+    checkWorkerCores("2,2", 2, allowed, "CPU 2 is named twice");
+    checkWorkerCores("2-5", 4, allowed, "'2-5' is not a CPU number");
+    checkWorkerCores("2,x", 2, allowed, "'x' is not a CPU number");
+    checkWorkerCores("-1", 1, allowed, "'-1' is not a CPU number");
+    checkWorkerCores("2", 1, {}, "no CPU affinity mask");
+    Config unset;
+    ConfigValidationResult r;
+    assert(validateWorkerCores(unset, 4, allowed, r).empty() && r.ok);
+    PASS();
+}
+
 int main() {
     std::cout << "\n═══ Config Validation (P3-7) Tests ═══\n\n";
 
@@ -202,6 +246,7 @@ int main() {
     test_participant_nonpositive_limit();
     test_journal_path_unwritable();
     test_multiple_errors_accumulate();
+    test_worker_cores();
 
     std::cout << "\n─── Results: " << passed << " passed ───\n";
     std::cout << "\nAll config validation tests passed.\n\n";

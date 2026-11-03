@@ -7,16 +7,24 @@
 # MANY KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
 # changes nothing: no risk limit, rate limit, checkpoint threshold, port or
 # replication timing is taken from this file. What is read: log_sink, the
-# alert_* keys, session_schedule, order_pool_capacity / trade_history_capacity,
-# volatility_auction_dwell_ms, instrument.<id>.min_price / max_price, and, on
-# SIGHUP only, rate_limit.default_rate / rate_limit.default_burst. journal_path,
-# instruments and participants are validated at startup but not applied.
+# alert_* keys, session_schedule, worker_cores, order_pool_capacity /
+# trade_history_capacity, volatility_auction_dwell_ms, instrument.<id>.min_price
+# / max_price, and, on SIGHUP only, rate_limit.default_rate /
+# rate_limit.default_burst. journal_path, instruments and participants are
+# validated at startup but not applied.
 
 # ── Core Engine ──────────────────────────────────────────────────────────────
 # not read: use --threads / --symbols; lean mode is a build option (./build.sh --lean)
 threads         = 4
 symbols         = 4
 lean_mode       = false
+
+# The CPU each async worker pins itself to, in worker order, numbered as
+# `taskset -c` numbers them. Unset: worker i takes the i-th CPU the process may
+# run on (its taskset / CPUAffinity= / cpuset mask). Startup refuses a CPU
+# outside that mask, a repeat, or fewer entries than --threads; macOS has no
+# mask, so any list refuses there.
+# worker_cores = 2,3,4,5
 
 # ── Price bands ──────────────────────────────────────────────────────────────
 # Each symbol's tradable band, in ticks (PRICE_PRECISION, 1e-4). With --config,

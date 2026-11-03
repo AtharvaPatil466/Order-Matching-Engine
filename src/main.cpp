@@ -142,6 +142,7 @@ int main(int argc, char* argv[]) {
     // Validate every declared instrument / participant and the journal path
     // BEFORE constructing the engine. On ANY problem, print each one and
     // exit(1) — the engine never starts in a silently-degraded state.
+    std::vector<int> workerCores;   // worker_cores, applied at startAsync
     {
         ConfigValidationResult vr = validateStartupConfig(cfg);
 
@@ -175,6 +176,9 @@ int main(int argc, char* argv[]) {
                     "--allow-unsafe-replication (OB_ALLOW_UNSAFE_REPLICATION=1) to run "
                     "it anyway");
         }
+
+        workerCores = validateWorkerCores(cfg, numThreads > 0 ? numThreads : 1,
+                                          Utils::allowedCpus(), vr);
 
         if (!vr.ok) {
             std::cerr << "[Config] FATAL: startup configuration is invalid — "
@@ -319,6 +323,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
+    engine.setWorkerCores(workerCores);
     engine.startAsync(numThreads, 8192);
     // GTD/DAY expiry. Nothing started this, so GTD orders rested and traded
     // forever. Safe in async mode: each sweep is posted to every worker as an

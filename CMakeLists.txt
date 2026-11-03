@@ -157,26 +157,17 @@ if(ENABLE_PGO)
     endif()
 endif()
 
-# Lean Mode Option
-# ─── Perf experiment (default OFF — the shipped binary is byte-identical) ───
-# Next-order prefetch was implemented, then reverted as "net-negative" on the
-# 100%-fill HonestBenchmark flow using a perf counter that was wrapped around
-# the whole process rather than the matching loop (see 156acb3). This flag is
-# what let that be re-measured properly on venue-shaped flow
-# (RealisticFlowBenchmark) instead of re-litigated: no benefit on either flow,
-# and a small penalty on RealisticFlow IOC mean, so it stays reverted and stays
-# OFF. It remains here for the one case still open — a sweep-heavy workload on
-# x86 under perf. See "Optimization History" in BENCHMARKS.md.
-#
-# The price-level arena allocator went through the same cycle to the same
-# verdict but has NO flag here: it is not carried in the tree at all. Recover
-# it from ff55338 (+ c9e2260 for the SLAB_SIZE override) if anyone revisits it.
-option(ENABLE_MATCH_PREFETCH "Prefetch the next order node in the matching loops" OFF)
-if(ENABLE_MATCH_PREFETCH)
-    message(STATUS "OB_MATCH_PREFETCH Enabled: matching loops prefetch the next node")
-    add_compile_definitions(OB_MATCH_PREFETCH)
-endif()
+# ─── Perf experiments: none carried in the tree ───
+# Next-order prefetch and the price-level arena allocator were both
+# implemented, re-measured properly on venue-shaped flow
+# (RealisticFlowBenchmark), and reverted: no benefit, and prefetch cost a
+# little on RealisticFlow IOC mean. See "Optimization History" in
+# BENCHMARKS.md. Neither has a flag here — an #ifdef that no CI lane builds is
+# deleted (roadmap 2.9). Recover prefetch from 8a30c12 (the
+# ENABLE_MATCH_PREFETCH flag), the arena from ff55338 (+ c9e2260 for the
+# SLAB_SIZE override), if anyone revisits the sweep-heavy x86 case.
 
+# Lean Mode Option
 option(USE_LEAN_MODE "Build with enterprise features disabled for raw speed" OFF)
 if(USE_LEAN_MODE)
     message(STATUS "OB_LEAN_MODE Enabled: Compiling without risk/stats features")

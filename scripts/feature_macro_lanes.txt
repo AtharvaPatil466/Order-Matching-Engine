@@ -15,7 +15,6 @@ OB_ENFORCE_LATENCY_THRESHOLD lane latency-gate    -DCMAKE_BUILD_TYPE=Release
 OB_ENFORCE_LATENCY_THRESHOLD lane latency-gate    -DENABLE_FAULT_INJECTION=OFF
 
 OB_HAVE_DPDK      none needs libdpdk and F-Stack (scripts/dpdk_aws.sh builds them on an AWS host with a bound NIC); no hosted runner has either
-OB_MATCH_PREFETCH none perf experiment measured as no benefit and kept OFF (see CMakeLists.txt and BENCHMARKS.md); no lane builds it
 
 OB_GIT_SHA    always build metadata for /version, defined unconditionally
 OB_BUILD_TIME always build metadata for /version, defined unconditionally

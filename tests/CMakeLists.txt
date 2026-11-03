@@ -984,6 +984,16 @@ add_test(NAME StopAsyncRaceTest COMMAND StopAsyncRaceTest)
 set_tests_properties(StopAsyncRaceTest PROPERTIES TIMEOUT 120
                      LABELS "project;lifecycle;concurrency")
 
+# Async workers are pinned inside the CPUs the process may use (taskset, a
+# cpuset), never to CPU <worker index> outside them. Linux only; skips (77)
+# where there is no affinity mask, or fewer than 3 allowed CPUs.
+add_executable(WorkerPinTest WorkerPinTest.cpp)
+target_link_libraries(WorkerPinTest PRIVATE OrderMatcher)
+enable_assertions(WorkerPinTest)
+add_test(NAME WorkerPinTest COMMAND WorkerPinTest)
+set_tests_properties(WorkerPinTest PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77
+                     LABELS "project;lifecycle;concurrency")
+
 # Kill-switch completeness (C5) — the safety control must be complete, not
 # best-effort: after setKillSwitch returns, zero resting orders may survive.
 # Exercises the async path with a small ring and maxPushRetries=1, the only

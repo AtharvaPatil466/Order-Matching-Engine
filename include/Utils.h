@@ -37,6 +37,25 @@ inline bool pinThread([[maybe_unused]] int core_id) {
 #endif
 }
 
+// The CPUs the calling thread may run on, ascending: what `taskset`, systemd
+// CPUAffinity= or a container's cpuset gave the process, and what every thread
+// it starts inherits. Empty where there is no affinity mask (macOS).
+inline std::vector<int> allowedCpus() {
+    std::vector<int> cpus;
+#ifdef __linux__
+    // ponytail: a fixed cpu_set_t covers CPU_SETSIZE (1024) CPUs; on a bigger
+    // box the call fails and nothing is pinned. CPU_ALLOC if that ever matters.
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof set, &set) == 0) {
+        for (int c = 0; c < CPU_SETSIZE; ++c) {
+            if (CPU_ISSET(c, &set)) cpus.push_back(c);
+        }
+    }
+#endif
+    return cpus;
+}
+
 // Low-overhead timestamp using RDTSC (x86) or portable fallback
 inline uint64_t rdtsc() {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)

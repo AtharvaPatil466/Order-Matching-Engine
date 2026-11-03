@@ -89,21 +89,50 @@ constexpr uint64_t kDrainSpins  = 2048;
 constexpr uint64_t kDrainYields = 2048;
 constexpr auto     kDrainPollSleep = std::chrono::microseconds(50);
 
-void pinCurrentThreadToCore(size_t threadIndex) {
+// Pin the calling worker to `cpu` (-1: leave it on the mask it inherited).
+// Linux pins; macOS has no CPU affinity, only an affinity tag per worker that
+// asks the scheduler to spread them — a placement hint, kept as it always was.
+void pinCurrentThreadToCore([[maybe_unused]] int cpu, [[maybe_unused]] size_t threadIndex) {
 #if defined(__linux__)
+    if (cpu < 0) return;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    CPU_SET(static_cast<int>(threadIndex), &cpuset);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    CPU_SET(cpu, &cpuset);
+    if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        rc != 0) {
+        obSink().log(obEvent("worker_pin_failed", LogSeverity::Warn)
+                         .kv("thread", (long long)threadIndex)
+                         .kv("cpu", (long long)cpu)
+                         .kv("errno", (long long)rc));
+    }
 #elif defined(__APPLE__)
     thread_affinity_policy_data_t policy{
         static_cast<integer_t>(threadIndex + 1)
     };
     (void)thread_policy_set(mach_thread_self(), THREAD_AFFINITY_POLICY,
                             reinterpret_cast<thread_policy_t>(&policy), 1);
-#else
-    (void)threadIndex;
 #endif
+}
+
+// Worker i runs on the i-th CPU the process may use — CPU i when every CPU is
+// allowed — and a worker past the last one stays on the mask it inherited. It
+// used to be CPU i whatever the mask said, so `taskset -c 2-5` put the workers
+// on 0-3 and a cpuset or a second engine shared their cores.
+std::vector<int> defaultWorkerCpus(size_t workers) {
+    const std::vector<int> allowed = Utils::allowedCpus();
+    std::vector<int> cpus(workers, -1);
+    for (size_t i = 0; i < workers && i < allowed.size(); ++i) cpus[i] = allowed[i];
+    return cpus;
+}
+
+// "2,3,-" for the engine_start log: worker i's CPU, "-" when unpinned.
+std::string cpuList(const std::vector<int>& cpus) {
+    std::string out;
+    for (size_t i = 0; i < cpus.size(); ++i) {
+        if (i) out += ',';
+        out += cpus[i] < 0 ? std::string("-") : std::to_string(cpus[i]);
+    }
+    return out;
 }
 
 // Best effort: the checkpoint thread yields the CPU to the workers. Per-thread
@@ -407,6 +436,7 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     Utils::calibrateTsc();
 
     numThreads_ = numThreads > 0 ? numThreads : 1;
+    workerCpus_ = defaultWorkerCpus(numThreads_);
     rebuildThreadSymbolIndex();
 
     // Fresh ThreadStats zero the submitted/processed counters, which is what
@@ -441,6 +471,7 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
                      .kv("mode", "async")
                      .kv("symbols", (unsigned long long)symbolIds_.size())
                      .kv("threads", (unsigned long long)numThreads_)
+                     .kv("worker_cores", cpuList(workerCpus_))
                      .kv("queue_size", (unsigned long long)queueSize));
 
     // capacityMonitor_ was a constructed member with no callbacks and no
@@ -715,7 +746,7 @@ void MatchingEngine::waitForDrain() {
 }
 
 void MatchingEngine::workerLoop(size_t threadIndex) {
-    pinCurrentThreadToCore(threadIndex);
+    pinCurrentThreadToCore(workerCpus_[threadIndex], threadIndex);
 
     OrderRequest req{};
     size_t idleSpins = 0;

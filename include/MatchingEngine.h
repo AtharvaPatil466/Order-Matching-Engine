@@ -706,6 +706,9 @@ private:
     // worker leave once it has drained everything, without the message.
     std::atomic<bool> workersShouldStop_{false};
     size_t numThreads_{1};
+    // The CPU worker i pins itself to, -1 for none. Written by startAsync()
+    // before it starts the workers, read once by each.
+    std::vector<int> workerCpus_;
     std::vector<std::unique_ptr<MpscQueue<OrderRequest>>> requestQueues_;
     std::vector<std::thread> workerThreads_;
     std::unique_ptr<std::atomic<uint64_t>[]> queueWakeups_;

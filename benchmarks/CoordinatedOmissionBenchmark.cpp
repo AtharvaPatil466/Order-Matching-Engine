@@ -77,7 +77,10 @@ int main(int argc, char* argv[]) {
     std::printf("  Total ops:    %zu, period = %.1f ns/op\n", ops.size(), periodNs);
     std::printf("\nRunning open-loop (spin to intended start time)...\n");
 
-    OrderBook book(0, MatchAlgorithm::PriceTime);
+    // Size the pool for the workload: the default (10,000 slots) sheds new
+    // orders at 95% full, and a 200k-order run rests more than 9,500 at once.
+    // No op can leave more orders live than there are ops.
+    OrderBook book(0, MatchAlgorithm::PriceTime, ops.size());
 
     BenchLatencyRecorder recNaive;      // completion − actual_start
     BenchLatencyRecorder recCorrected;  // completion − intended_start

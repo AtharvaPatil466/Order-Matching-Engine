@@ -34,6 +34,11 @@ target_link_libraries(RealisticFlowBenchmark PRIVATE OrderMatcher)
 # P2-19: coordinated-omission correction (latency vs INTENDED start at fixed rate)
 add_executable(CoordinatedOmissionBenchmark CoordinatedOmissionBenchmark.cpp)
 target_link_libraries(CoordinatedOmissionBenchmark PRIVATE OrderMatcher)
+# The workload scripts/bench_x86.sh runs (200k orders), at its fastest rate:
+# the benchmark exits 1 if any timed op did not do its job.
+add_test(NAME CoordinatedOmissionWorkloadTest
+         COMMAND CoordinatedOmissionBenchmark --orders 200000 --seed 7 --rate 6000000)
+set_tests_properties(CoordinatedOmissionWorkloadTest PROPERTIES TIMEOUT 120 LABELS "project")
 
 # P2-20: cold-cache variant (evict working set before each timed op)
 add_executable(ColdCacheBenchmark ColdCacheBenchmark.cpp)

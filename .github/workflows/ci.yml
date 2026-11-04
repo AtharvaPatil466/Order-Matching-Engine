@@ -249,16 +249,14 @@ jobs:
         run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
 
   wide-diff-fuzz:
-    name: Ubuntu Wide Differential Fuzz (non-blocking)
+    name: Ubuntu Wide Differential Fuzz
     # The widened differential fuzzer (roadmap 1.3-C1): modify, replace,
     # icebergs, STP modes, kill switch and execution reports against a
-    # price-time reference, 60 seeds x 2000 ops under ASan/UBSan. NON-BLOCKING
-    # by the user's decision 2 (2026-10-05) until an event-order spec lands
-    # (GTDIFF-7); 1.6-F5 fixed the FOK + STP class (GTDIFF-2), so the run is
-    # clean today and anything it finds is a new defect. Remove
-    # continue-on-error once the event-order spec lands.
+    # price-time reference, 60 seeds x 2000 ops under ASan/UBSan. Blocking
+    # since the event-order spec landed (MatchingRules Rule 2.5, GTDIFF-7), per
+    # the user's decision 2 (2026-10-05); 1.6-F5 fixed the FOK + STP class
+    # (GTDIFF-2). It has no known classes: anything it finds is a new defect.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

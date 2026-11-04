@@ -1,6 +1,6 @@
 // WideDifferentialFuzz — the widened differential fuzzer (roadmap 1.3-C1,
-// 1.5 "Done"; user decision 2 of 2026-10-05: a NON-BLOCKING CI lane until
-// 1.6-F5 and an event-order spec land, then blocking).
+// 1.5 "Done"; user decision 2 of 2026-10-05: a blocking CI lane once 1.6-F5
+// and the event-order spec, MatchingRules Rule 2.5, landed).
 //
 // Recovered from the audit's W/gtdiff/wide.cpp, which found GTDIFF-1/2. Against
 // a price-time reference it drives three symbols with: STP (participants not
@@ -8,15 +8,13 @@
 // CancelIncoming), PostOnly, modify, cancelReplace (newQty is the new TOTAL,
 // 1.5-E1), icebergs (--ice; display >= ceil(qty / kMaxIcebergSlices), 1.5-E2),
 // kill switch (--kill), a 19-tick grid, occasional huge quantities, and an
-// execution-report check (OrderUpdate.filledQty == that order's trades). Each
-// step also compares ladders, FIFO queues, per-order leaves and cumQty, and
-// validateIntegrity.
+// execution-report check (each OrderUpdate.filledQty == that order's trades
+// delivered before it, Rule 2.5). Each step also compares ladders, FIFO
+// queues, per-order leaves and cumQty, and validateIntegrity.
 //
-// Exits 1 on any divergence. Known classes at the time of writing: the maker's
-// Filled update dispatched before its trade (GTDIFF-7). FOK + STP partial
-// fills (GTDIFF-2) are fixed by 1.6-F5; --fok-engine now models the engine
-// BEFORE that fix (an STP-blind FOK check), so it diverges by design.
-// Not built into ctest: CI runs it in its own continue-on-error job.
+// Exits 1 on any divergence; there are no known classes. --fok-engine models
+// the engine BEFORE 1.6-F5 (an STP-blind FOK check, GTDIFF-2), so it diverges
+// by design. Not built into ctest: CI runs it in its own blocking job.
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 #include <algorithm>

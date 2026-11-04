@@ -532,9 +532,8 @@ set_tests_properties(DifferentialFuzzTest PROPERTIES
 
 # The widened differential fuzzer (1.3-C1; user decision 2): modify, replace,
 # icebergs, STP modes, kill switch, execution reports. Built here but NOT an
-# add_test: it is red on known classes (GTDIFF-2 until 1.6-F5, GTDIFF-7 until
-# an event-order spec), so CI runs it in its own continue-on-error job
-# (.github/workflows/ci.yml, wide-diff-fuzz) until then. Exits 1 on divergence.
+# add_test: CI runs it under ASan/UBSan in its own blocking job
+# (.github/workflows/ci.yml, wide-diff-fuzz). Exits 1 on divergence.
 add_executable(WideDifferentialFuzz WideDifferentialFuzz.cpp)
 target_link_libraries(WideDifferentialFuzz PRIVATE OrderMatcher)
 enable_assertions(WideDifferentialFuzz)

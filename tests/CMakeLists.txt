@@ -93,7 +93,7 @@ gtest_discover_tests(BenchmarkRegression
 # threshold is only ENFORCED in a Release build without fault injection. NDEBUG
 # can't carry this signal: ENABLE_ASSERTIONS=ON compiles -UNDEBUG, leaving NDEBUG
 # undefined even in Release. Elsewhere the workload still runs and prints, but the
-# assertion is replaced by GTEST_SKIP.
+# assertion is replaced by a skip, tagged skip-ok in tests/BenchmarkRegression.cpp.
 if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
     target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
 endif()
@@ -247,6 +247,12 @@ set_tests_properties(ImportBenchResultsTest PROPERTIES TIMEOUT 30 LABELS "projec
 add_test(NAME NoFixedTmpPathsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_fixed_tmp_paths.sh ${CMAKE_SOURCE_DIR})
 set_tests_properties(NoFixedTmpPathsTest PROPERTIES TIMEOUT 30 LABELS "project")
+
+# Roadmap 2.1: no skip, disabled test or known-divergence marker in tests or
+# benchmarks unless its line carries `skip-ok: <reason>`.
+add_test(NAME NoTestSuppressionsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_test_suppressions.sh ${CMAKE_SOURCE_DIR})
+set_tests_properties(NoTestSuppressionsTest PROPERTIES TIMEOUT 30 LABELS "project")
 
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh

@@ -24,8 +24,8 @@ uint64_t steadyNs() {
 // Debug runs 3-5x slower and fault injection adds per-op hot-path overhead, so
 // enforcing them there yields meaningless false failures. CMake defines
 // OB_ENFORCE_LATENCY_THRESHOLD only for a Release, no-FI build; elsewhere each
-// test still runs its workload and prints its numbers, then GTEST_SKIPs instead
-// of asserting. (Not keyed off NDEBUG: ENABLE_ASSERTIONS=ON compiles -UNDEBUG,
+// test still runs its workload and prints its numbers, then skips instead of
+// asserting. (Not keyed off NDEBUG: ENABLE_ASSERTIONS=ON compiles -UNDEBUG,
 // so NDEBUG is undefined even in Release.)
 #ifdef OB_ENFORCE_LATENCY_THRESHOLD
 #define OB_EXPECT_P99_UNDER(p99, bound, label)                                  \
@@ -33,7 +33,8 @@ uint64_t steadyNs() {
                               << "ns exceeds " #bound "ns threshold"
 #else
 #define OB_EXPECT_P99_UNDER(p99, bound, label)                                  \
-    GTEST_SKIP() << "latency threshold enforced only in a Release build "       \
+    GTEST_SKIP() /* skip-ok: Release-only; CI's Release Latency Gate enforces */ \
+                 << "latency threshold enforced only in a Release build "       \
                     "without fault injection (see file header); this build's "  \
                     "timings are not comparable to the x86 Release calibration"
 #endif

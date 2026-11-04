@@ -440,7 +440,7 @@ std::vector<Op> loadFlow(const std::string& path) {
 // Every *.flow case must replay without divergence; any one that diverges
 // fails the run. There is no "known divergence" class: a found defect lands
 // with its fix (or an admission reject) in the same change, never as a case
-// the build is told to ignore. A ".known.flow" suppression class used to
+// the build is told to ignore. A known-divergence file class used to
 // exist here and the modify-to-zero defect shipped through it (ENGTEST-4).
 int runCorpus(const std::string& dir) {
     std::error_code ec;

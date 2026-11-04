@@ -210,6 +210,19 @@ distribution is standard — CME's matching algorithms include an LMM/"Top Order
 step, and several venues publish DMM guarantees. I do not know of a venue that publishes
 exactly 40%, and I am not going to assert one. Treat 40% as this engine's own parameter.
 
+### Rule 2.5 — A fill's trade is delivered before either side's order update
+
+For each fill, the listener receives the `Trade` before the buyer's or the seller's
+`OrderUpdate`. So an `OrderUpdate`'s `filledQty` never exceeds the sum of the trades already
+delivered for that order. This holds on every path that fills: both algorithms, iceberg
+slices, elected stops and MITs, a replace that trades, the auction uncross, and a sweep cut
+short by STP or the market-protection collar. Price-time batches its trades, so it flushes
+them before a maker's `Filled`. Until GTDIFF-7 it did not, and a maker's owner heard `Filled`
+before the trade.
+
+**Status: Deliberate — commented and pinned.** Pinned by `tests/EventOrderTest.cpp` (every
+path above).
+
 ---
 
 ## 3. Iceberg orders

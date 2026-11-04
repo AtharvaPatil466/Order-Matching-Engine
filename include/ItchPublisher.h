@@ -378,12 +378,11 @@ private:
         Quantity shares;            // current leaves (decremented on fills)
         Price    price;
         // A fully-filled resting order's Delete (from notifyOrderUpdate(Filled))
-        // can be dispatched BEFORE its Executed: OrderBook batches onTrade to
-        // AFTER the match loop (P1-3) while the Filled notify stays inline in the
-        // loop, so the publisher sees D-then-E for the maker side. We must not
-        // tear the order down before its 'E' fires. When that happens we stash
-        // the delete here (no emit, no erase) and let the pending Executed emit
-        // 'E' first, then flush this 'D' — restoring correct E→D wire order.
+        // must not tear the order down before its 'E' fires. The book delivers
+        // the trade first (MatchingRules Rule 2.5; until GTDIFF-7 match() sent
+        // the maker's Filled ahead of its batched trade). If a source ever
+        // sends D-then-E anyway, the delete is stashed here (no emit, no erase)
+        // and the pending Executed emits 'E' first, then flushes this 'D'.
         bool     pendingDelete{false};
         uint64_t pendingDeleteTs{0};  // original delete event timestamp
     };

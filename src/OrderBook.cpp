@@ -1484,8 +1484,9 @@ Price OrderBook::match(Order* incoming) {
     // Flush the batched work: dispatch onTrade, emit trade-fill audit logs, then
     // apply the deferred lookup erases. Order among fills is preserved exactly
     // (== original per-fill order: logTradeFill then onTrade). Called when the
-    // buffer fills mid-sweep (flush-and-continue — never truncates a fill) and
-    // once after the loop.
+    // buffer fills mid-sweep (flush-and-continue — never truncates a fill),
+    // before a maker's Filled or a refreshed slice goes out, and once after
+    // the loop.
     auto flushFills = [&]() {
         const bool dispatchTrades = (!replayMode_ && hasTradeListener_);
         const bool auditLog = obSinkActive();
@@ -1673,6 +1674,10 @@ Price OrderBook::match(Order* incoming) {
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
+            // Rule 2.5 (GTDIFF-7): the trade goes out before the maker's
+            // Filled. Notified inline with the trade still buffered, the
+            // maker's owner heard "Filled" before the execution behind it.
+            flushFills();
             notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->cumQty, 0, bestPrice);
             stpNoteRemoved(bookOrder);
             untrackOrder(bookOrder);

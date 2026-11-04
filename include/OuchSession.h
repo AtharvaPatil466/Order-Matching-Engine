@@ -165,14 +165,11 @@ public:
     // between that and the gateway thread reading the maps is Phase 2's
     // problem; this neither fixes nor widens it.)
     void onOrderUpdate(const OrderUpdate& u) override {
-        // Terminal, but NOT an execution. Reaping on Filled here would be a
-        // bug: notifyOrderUpdate(Filled) fires inside match()'s loop
-        // (OrderBook.cpp:1126) while the trade is still buffered and only
-        // dispatched later by flushFills(), so erasing now would leave
-        // emitExecutedForEngineId unable to find the token and the client's
-        // 'E' execution report would be silently swallowed — precisely what
-        // handleEnterOrder's pre-registration comment exists to prevent.
-        // Fill-driven removal is already reaped by that path, after the 'E'.
+        // Terminal, but NOT an execution. Fill-driven removal is reaped by
+        // emitExecutedForEngineId, after the 'E'; the trade reaches this
+        // listener before the Filled (MatchingRules Rule 2.5), so there is
+        // nothing left to reap here. Before GTDIFF-7 the Filled came first,
+        // and reaping on it swallowed the client's 'E'.
         if (!isTerminalStatus(u.status) || isExecution(u.status)) return;
         auto rev = engineIdToToken_.find(u.orderId);
         if (rev == engineIdToToken_.end()) return;   // not ours, or already reaped

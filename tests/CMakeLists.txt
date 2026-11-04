@@ -730,6 +730,14 @@ enable_assertions(StopSweepOrderTest)
 add_test(NAME StopSweepOrderTest COMMAND StopSweepOrderTest)
 set_tests_properties(StopSweepOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# GTDIFF-7: a fill's Trade reaches listeners before either side's OrderUpdate
+# (MatchingRules Rule 2.5), on every path that fills.
+add_executable(EventOrderTest EventOrderTest.cpp)
+target_link_libraries(EventOrderTest PRIVATE OrderMatcher)
+enable_assertions(EventOrderTest)
+add_test(NAME EventOrderTest COMMAND EventOrderTest)
+set_tests_properties(EventOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
 # Roadmap 1.6-F4 (STP-13): a peg never rests at or through the opposite touch
 # and does not count pegs, itself included, in its reference.
 add_executable(PegOrderTest PegOrderTest.cpp)

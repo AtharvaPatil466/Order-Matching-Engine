@@ -2,7 +2,7 @@
 // from leanest to fullest stack:
 //
 //   Path A: OrderBook::addOrder() only
-//           Core matching engine with STP + WashTrade + LULD
+//           Core matching engine with STP
 //
 //   Path B: MatchingEngine::submitOrder() (sync mode, no journal)
 //           Adds: sequence allocation, rate limiter check, risk validation
@@ -218,7 +218,7 @@ static void runOrders(PathResult& r, const std::vector<TestOrder>& orders, size_
 
 static PathResult runPathA(const std::vector<TestOrder>& orders, size_t warmup) {
     PathResult result;
-    result.name = "Path A: OrderBook::addOrder() [core matching + STP/WashTrade/LULD]";
+    result.name = "Path A: OrderBook::addOrder() [core matching + STP]";
     OrderBook book(0, MatchAlgorithm::PriceTime);
     runOrders(result, orders, warmup,
               [&](const TestOrder& o) {

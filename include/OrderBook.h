@@ -8,8 +8,6 @@
 #include "EventListener.h"
 #include "RingBuffer.h"
 #include "SelfTradeProtection.h"
-#include "LULDManager.h"
-#include "WashTradeDetector.h"
 #include "BatchRiskValidator.h"
 #include <array>
 #include <atomic>
@@ -431,14 +429,6 @@ public:
         auto* m = stpModes_.find(participant);
         return m ? *m : STPMode::DefaultCancelIncoming;
     }
-
-    // ─── LULD Volatility Controls (Phase 4, Week 14) ─────────────────
-    LULDManager& getLULDManager() { return luld_; }
-    const LULDManager& getLULDManager() const { return luld_; }
-
-    // ─── Wash Trade Detection (Phase 4, Week 13) ─────────────────────
-    WashTradeDetector& getWashTradeDetector() { return washTradeDetector_; }
-    const WashTradeDetector& getWashTradeDetector() const { return washTradeDetector_; }
 
     // Analytics
     double getVWAP() const { return vwap_; }
@@ -1265,8 +1255,6 @@ private:
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     FlatHashMap<ParticipantId, STPMode> stpModes_{1024};
     FlatHashMap<ParticipantId, ParticipantRole> participantRoles_{1024};
-    LULDManager luld_;
-    WashTradeDetector washTradeDetector_;
 };
 
 } // namespace OrderMatcher

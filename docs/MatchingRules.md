@@ -802,6 +802,14 @@ moving touch is perpetually at the back of its queue.
 The depth change is published as a `Delete` at the old price and an `Add` at the new one, so
 incremental subscribers can follow it.
 
+The sweep moves the pegs in `peggedOrders_` order, so pegs that land on one price queue in
+that order, and a clamp sees the pegs moved before it at their new price. Removal is
+`erase_swap`, as for stops (Rule 5.7), so after a cancel or fill that order is a permutation
+of arrival order, not the level order. A checkpoint keeps it: each peg comes back at the price
+it rested at, not re-pegged against a book still being restored, and a Snapshot record flagged
+`SNAPSHOT_PEG_QUEUE` per peg, in sweep order, rebuilds the list
+(`tests/CheckpointPeggedOrderTest.cpp`).
+
 **Status: the pricing is deliberate — commented and pinned** (`tests/PegOrderTest.cpp`:
 through-the-touch reject, no ratchet, no mid drift, the clamp, the rounding;
 `tests/OrderTypeAdmissionTest.cpp`). The offset bound is commented, not pinned. **The priority

@@ -45,7 +45,7 @@ graph TD
     end
 
     subgraph "Worker Thread (Core Affinity)"
-        CB[LULD / Circuit Breakers]
+        CB[Circuit Breakers]
         OB[OrderBook Core]
         OB --> |Bids/Asks| FPM[FlatPriceMap]
         FPM --> |Levels| IL[IntrusiveList of Orders]
@@ -90,8 +90,8 @@ graph TD
 1. **Wire framing**: bytes arrive on TCP. The connection's session class (`FixSession` for FIX 4.2/4.4 text, `OuchSession` for NASDAQ OUCH binary, `SbeSession` for FIX-TG SBE) handles framing. OUCH is additionally wrapped in `SoupBinTcpSession` (3-byte length+type envelope, login/heartbeat/logout).
 2. **Ingress checks**: `MatchingEngine::submitOrder`, which every protocol calls, refuses a participant id or an enum field (side, order type, time in force, peg type) outside its range (`InvalidFieldValue`) and a GTD order, or a DAY order where no session end is scheduled, without an `expiryTime` (`MissingRequiredField`). Then the `RateLimiter` (off by default) and the pre-trade risk gate (fat-finger, position, order-to-trade; skipped entirely while none is configured).
 3. **Routing**: `MatchingEngine` hashes `SymbolId` and pushes the order into the appropriate thread's `MpscQueue`.
-4. **Dequeue & admit**: the worker thread pops the order and `OrderBook::addOrder` admits it: trading state, price, quantity and trigger fields, the configured price range, pool pressure, risk limits, the percentage price band, PostOnly, peg placement and parked-list capacity. `LULDManager` is not called ([docs/MatchingRules.md](docs/MatchingRules.md) Rule 7.6).
-5. **Matching**: `OrderBook` matches against resting liquidity, applying self-trade prevention (`SelfTradeProtection`) as the sweep reaches each of the participant's own orders. `WashTradeDetector` is not called.
+4. **Dequeue & admit**: the worker thread pops the order and `OrderBook::addOrder` admits it: trading state, price, quantity and trigger fields, the configured price range, pool pressure, risk limits, the percentage price band, PostOnly, peg placement and parked-list capacity.
+5. **Matching**: `OrderBook` matches against resting liquidity, applying self-trade prevention (`SelfTradeProtection`) as the sweep reaches each of the participant's own orders.
 6. **Persistence**: the order is appended to the `Journal` after the book has applied it, so the journal is not write-ahead (see the README).
 
 **Market data egress** (parallel to order entry):
@@ -143,8 +143,6 @@ The engine emits structured events through the `StructuredSink` interface define
 `OrderBook.cpp` wires **7 typed call sites** through the sink: order accepted (×2 paths — new and replace), order cancelled, order rejected (risk limit), trade fill, circuit breaker trip, and trading state change. Swapping the backend (e.g. from `NullSink` to `JsonStderrSink`) requires no changes to call sites. Verified by `StructuredLogTest`.
 
 ### 3.5 Regulatory & Compliance Controls
-- **WashTradeDetector (SMP)**: Prevents participants from matching against themselves.
-- **LULDManager**: Dynamically updates acceptable price bands based on recent trade prices, halting matching if prices gap too quickly.
 - **GraduatedKillSwitch**: Automatically disables trading for participants who breach soft/hard risk limits.
 - **MOC/LOC On-Close Orders**: `TradingState`-aware admission — MOC/LOC orders park in `onCloseOrders_` during Continuous/PreOpen/AuctionOpen; released to the book at `AuctionClose`; LOC remainder cancelled via `cancelLocOrders()` after uncross. Enables closing cross participation without continuous-session cross risk.
 - **LMM/DMM Floor Guarantee**: `ParticipantRole` per participant (`Regular`, `LMM`, `DMM`). ProRata allocation redistributes from Regular participants to ensure LMM/DMM orders receive at least 40% of their available qty; rounding remainders distributed to privileged roles before Regular participants.

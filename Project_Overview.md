@@ -332,7 +332,7 @@ Dual-socket Intel Xeon Platinum 8375C @ 2.90 GHz, hyperthreading disabled (`nosm
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP + WashTrade + LULD | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **Core matching** | OrderBook + STP | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **Engine wrapper** | + sequence alloc, rate limiter | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **Full-stack journal** | + GroupCommit (batch=64, async io_uring ack on EBS) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 

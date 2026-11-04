@@ -1024,7 +1024,7 @@ checkpoint.
 
 ### Rule 7.5 — What this engine calls LULD is a single fixed percentage band, not US-equities LULD
 
-The name appears throughout (`OutsidePriceBand`, `priceBandPct_`, `LULDManager`), so the
+The name appears throughout (`OutsidePriceBand`, `priceBandPct_`), so the
 distance from the real thing needs stating:
 
 | US-equities LULD (Reg NMS Plan) | This engine |
@@ -1045,20 +1045,14 @@ the exclusions are necessary (a `Market` order has no price to band-check; a `St
 trigger, not a tradeable limit). Whether the *triggered* form should be re-checked is a
 separate question the code never asks.
 
-### Rule 7.6 — `LULDManager` is not wired to anything
+### Rule 7.6 — There is no LULD pause state machine
 
-`OrderBook` holds a `LULDManager luld_` member and exposes it through a getter. **Nothing in
-the engine ever calls a method on it.** Its band computation, pause state machine, dwell timer
-and resume logic are all unreachable.
+Rules 7.4 and 7.5 are the engine's whole volatility control, done by `referencePrice_` /
+`cbThreshold_` / `priceBandPct_` on `OrderBook` directly. There is no Limit State, no pause
+and no separate resume logic.
 
-> `include/OrderBook.h:359-360`, `include/OrderBook.h:972` — the member and its accessors
-> A repository-wide grep finds no other use: no `luld_.` call site exists.
-
-Everything described in Rules 7.4 and 7.5 is done by `referencePrice_` / `cbThreshold_` /
-`priceBandPct_` on `OrderBook` directly. `LULDManager` is a parallel, dormant implementation.
-
-**Status: [Defect B8](#b8--luldmanager-is-dead-code).** Listed here so nobody reads
-`LULDManager.h` and believes it describes engine behaviour. It does not.
+**Status: Known defect, fixed ([B8](#b8--luldmanager-was-dead-code-fixed)).** `OrderBook` used
+to hold an `LULDManager`, a pause state machine nothing called; it was deleted.
 
 ### Rule 7.7 — The session transition table is enforced
 
@@ -1519,20 +1513,13 @@ The same read decides the zero-imbalance case: a candidate that pairs its whole 
 a buy surplus, so with no reference price a zero-imbalance tie clears at the highest tied price.
 That consequence is kept as the rule (Rule 7.2).
 
-### B8 — `LULDManager` is dead code
+### B8 — `LULDManager` was dead code (fixed)
 
-Constructed as an `OrderBook` member, exposed through `getLULDManager()`, and **never
-driven**. No call site anywhere in the repository invokes any of its methods.
-
-> `include/OrderBook.h:359-360`, `include/OrderBook.h:972`
-
-Its entire state machine — `Normal`/`Paused`/`Resuming`, the dwell timer, `shouldPause`,
-`enterPause`, `shouldResume`, `completeResume` — is unreachable. A reader who opens
-`LULDManager.h` to learn how this engine handles volatility pauses will learn something false:
-the real behaviour is Rules 7.4 and 7.5, implemented on `OrderBook` directly with a different
-(and simpler) model.
-
-**Severity: documentation-grade, but genuinely misleading.** Either wire it or delete it.
+Fixed by roadmap 2.5 (STP-18): deleted, together with `WashTradeDetector`, the other
+`OrderBook` member nothing called. `LULDManager` was constructed as an `OrderBook` member,
+exposed through `getLULDManager()`, and never driven, so its `Normal`/`Paused`/`Resuming`
+state machine and dwell timer described a volatility pause the engine did not have. The real
+behaviour is Rules 7.4 and 7.5.
 
 ### B9 — The expiry sweep's 4096 cap does not trigger an immediate second pass
 

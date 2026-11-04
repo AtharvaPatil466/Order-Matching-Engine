@@ -14,7 +14,7 @@
 
 This document records performance measurements for the C++20 order matching engine. All numbers come from a single benchmark binary (`HonestBenchmark`) that feeds an identical, deterministic order flow through three progressively heavier execution paths. The numbers are machine-specific and should not be treated as a portable latency SLA.
 
-**Key Result (authoritative, x86 bare metal — AWS c6in.metal)**: Core matching latency is **261 ns P50** including STP (`OrderBook` holds a `WashTradeDetector` and an `LULDManager`, but no code calls either, so neither runs on this path); full-stack with the async io_uring journal is **615 ns P50**. That 615 ns is the io_uring async-ack result, not the earlier synchronous `fdatasync` figure — the async path returns before durability, so the completion-reaper's overhead surfaces in P50 while P99 falls by a third. Journal I/O still dominates tail latency at P99+. (An earlier revision quoted ~125 ns P50 on the Apple Silicon dev machine, "~2.2× faster than x86". [BENCHMARKS.md](./BENCHMARKS.md) reports that figure did not reproduce and withdraws it; §3.1 keeps the old run for the record.)
+**Key Result (authoritative, x86 bare metal — AWS c6in.metal)**: Core matching latency is **261 ns P50** including STP; full-stack with the async io_uring journal is **615 ns P50**. That 615 ns is the io_uring async-ack result, not the earlier synchronous `fdatasync` figure — the async path returns before durability, so the completion-reaper's overhead surfaces in P50 while P99 falls by a third. Journal I/O still dominates tail latency at P99+. (An earlier revision quoted ~125 ns P50 on the Apple Silicon dev machine, "~2.2× faster than x86". [BENCHMARKS.md](./BENCHMARKS.md) reports that figure did not reproduce and withdraws it; §3.1 keeps the old run for the record.)
 
 ## 2. Methodology
 
@@ -28,7 +28,7 @@ All three paths process the **identical** deterministic order stream (seed=42):
 
 | Path | What's Measured | Entry Point |
 |------|----------------|-------------|
-| **A** | Core matching + STP (WashTrade and LULD are never called) | `OrderBook::addOrder()` |
+| **A** | Core matching + STP | `OrderBook::addOrder()` |
 | **B** | Path A + sequence allocation + rate limiter | `MatchingEngine::submitOrder()` |
 | **C** | Path B + GroupCommit journal (batch=64, fdatasync) | `MatchingEngine::submitOrder()` + `Journal` |
 
@@ -123,7 +123,7 @@ Path B can show ~84 ns), and the Path C ~1,040 ns figure is a macOS/APFS
 ### 3.1 Path A — Core Matching
 
 ```
-OrderBook::addOrder() — includes STP and price-time priority (WashTrade/LULD never called)
+OrderBook::addOrder() — includes STP and price-time priority
 
   Orders:     50,000
   Throughput: 6,561,860 orders/sec

@@ -17,7 +17,7 @@ This project is a low-latency matching-engine implementation for research and po
   `--session-schedule`, the scheduled auction states (`SessionSchedulerTest`). <!-- claim:session-schedule --> Library only, not
   enabled: the market-order collar (`marketProtectionPct_` defaults to 0 and no binary sets it), the
   percentage price band,
-  `LULDManager`, and any halt or resume (no binary or admin endpoint sets `TradingState::Halted`).
+  and any halt or resume (no binary or admin endpoint sets `TradingState::Halted`).
   See [Compliance.md](Compliance.md).
 - Iceberg refresh priority and hidden-order allocation rules for the exact venue model.
 - End-to-end sequence guarantees for trades, order updates, market data, replay, and gap recovery.

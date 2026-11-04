@@ -138,7 +138,7 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | Components |
 |------|------------|
-| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority (WashTrade and LULD are held by `OrderBook` but never called) |
+| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority |
 | **B** | Path A + `MatchingEngine::submitOrder()` — sequence allocation, rate limiter check |
 | **C** | Path B + `Journal` — GroupCommit (batch=64) with `fdatasync` per batch |
 
@@ -155,7 +155,7 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 |------|------------------|----:|----:|----:|-----------:|
-| **A** Core matching | OrderBook + STP (WashTrade and LULD are never called) | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **A** Core matching | OrderBook + STP | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **B** Engine wrapper | + sequence alloc, rate-limiter check (limiter disabled, its default) | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **C** Full-stack journal | + GroupCommit (batch=64, async io_uring ack; journal on `/tmp`, backing device not recorded) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 

@@ -137,7 +137,7 @@ Four benchmarks characterize the engine and are complementary rather than compet
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP (WashTrade and LULD are never called) | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **Core matching** | OrderBook + STP | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **Engine wrapper** | + sequence alloc, rate-limiter check (limiter disabled, its default) | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **Full-stack journal** | + async io_uring ack (batch=64; journal on `/tmp`, backing not recorded; timing stops before durability) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 

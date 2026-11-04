@@ -776,6 +776,15 @@ public:
         s.tradesExecuted = p.tradesExecuted;
     }
 
+    // Set around each re-add of a checkpoint's Snapshot record: a peg rests at
+    // the price the record carries and no reprice pass moves one. Until the
+    // last record the book is half restored, and a peg re-pegged against it
+    // lost its clamp behind a touch that was not back yet.
+    void setRestoringCheckpoint(bool on) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        restoringCheckpoint_ = on;
+    }
+
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }
     bool isReplayMode() const { return replayMode_; }
@@ -1207,6 +1216,7 @@ private:
 
     // Replay mode flag — suppresses callbacks during journal recovery
     bool replayMode_{false};
+    bool restoringCheckpoint_{false};  // see setRestoringCheckpoint
     bool itchFieldLimits_{false};  // MD-8, see setItchFieldLimits
 
     // Identity

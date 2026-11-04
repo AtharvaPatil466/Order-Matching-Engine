@@ -397,6 +397,13 @@ enable_assertions(CheckpointTimePriorityTest)
 add_test(NAME CheckpointTimePriorityTest COMMAND CheckpointTimePriorityTest)
 set_tests_properties(CheckpointTimePriorityTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# Pegged orders keep their price, queue order and reprice order across a checkpoint.
+add_executable(CheckpointPeggedOrderTest CheckpointPeggedOrderTest.cpp)
+target_link_libraries(CheckpointPeggedOrderTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointPeggedOrderTest)
+add_test(NAME CheckpointPeggedOrderTest COMMAND CheckpointPeggedOrderTest)
+set_tests_properties(CheckpointPeggedOrderTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
 add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)

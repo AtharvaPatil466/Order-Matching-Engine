@@ -2625,12 +2625,14 @@ size_t MatchingEngine::replayJournal() {
                 }
             }
             if (book && !book->getOrder(entry.orderId)) {
+                book->setRestoringCheckpoint(true);
                 book->addOrder(entry.orderId, entry.participantId, entry.side,
                                entry.price, entry.quantity, entry.orderType,
                                entry.stopPrice, entry.displayQty, entry.timeInForce,
                                entry.expiryTime, entry.stopLimitPrice, entry.pegType,
                                entry.pegOffset, entry.trailAmount, entry.minQty,
                                entry.hidden);
+                book->setRestoringCheckpoint(false);
                 if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                     book->restoreStopElection(entry.orderId, entry.stopPrice);
                 else

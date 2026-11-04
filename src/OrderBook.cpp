@@ -983,7 +983,9 @@ Price OrderBook::bestNonPegPrice(Side side) const {
 // Where the peg's instruction puts it: reference + offset, or `fallback` while
 // there is no reference. The mid rounds toward the peg's own side, so a sell
 // MidPeg on a one-unit spread lands on the ask, not on the bid.
+// A checkpoint's re-add puts it back where it was (setRestoringCheckpoint).
 Price OrderBook::pegPrice(Side side, Price fallback, PegType pegType, Price pegOffset) const {
+    if (restoringCheckpoint_) return fallback;
     const Price bid = bestNonPegPrice(Side::Buy), ask = bestNonPegPrice(Side::Sell);
     if (pegType == PegType::MidPeg) {
         if (bid > 0 && ask > 0) return bid + (ask - bid + (side == Side::Sell ? 1 : 0)) / 2 + pegOffset;

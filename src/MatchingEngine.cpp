@@ -2624,7 +2624,9 @@ size_t MatchingEngine::replayJournal() {
                     book->setReplayMode(true);
                 }
             }
-            if (book && !book->getOrder(entry.orderId)) {
+            if (book && (entry.newQty & SNAPSHOT_PEG_QUEUE)) {
+                book->restorePegQueue(entry.orderId);
+            } else if (book && !book->getOrder(entry.orderId)) {
                 book->setRestoringCheckpoint(true);
                 book->addOrder(entry.orderId, entry.participantId, entry.side,
                                entry.price, entry.quantity, entry.orderType,
@@ -3025,6 +3027,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         };
         std::vector<BookCounters> counters;
         std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
+        std::vector<std::pair<SymbolId, OrderId>> pegQueue;
         uint64_t lease = 0;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
@@ -3052,6 +3055,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                       book->sessionDate(), book->preHaltState()});
                 book->forEachOrderLocked([&](const Order& order) {
                     resting.emplace_back(symbolId, order);
+                });
+                book->forEachPeggedOrderLocked([&](const Order& order) {
+                    pegQueue.emplace_back(symbolId, order.id);
                 });
                 book->forEachPositionLocked([&](const OrderBook::ParticipantPosition& p) {
                     positions.emplace_back(symbolId, p);
@@ -3086,6 +3092,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.type == OrderType::Iceberg
                                                 ? order.visibleQty : 0);
             }
+            // After the orders, which put the pegs back in level order: the
+            // order each book's reprice pass moves them in.
+            for (const auto& [symbolId, id] : pegQueue)
+                snapshotJournal.logPegQueue(id, symbolId);
             // After the orders: each restored order's add sweeps stops at the
             // last trade, which would fire them into a half-restored book.
             for (const auto& [symbolId, nextTradeId, prices] : counters)

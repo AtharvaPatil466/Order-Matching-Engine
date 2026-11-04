@@ -602,6 +602,18 @@ public:
         });
     }
 
+    // The pegs in the order a reprice pass moves them (updatePeggedOrders):
+    // the order they queue in at a new price, and which of them a clamp sees
+    // already moved. A cancel or fill reorders it, so a checkpoint writes it
+    // rather than rebuild it from the levels; restorePegQueue reads it back.
+    // Locks like forEachOrderLocked.
+    template<typename Fn>
+    void forEachPeggedOrderLocked(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        for (const Order* o : peggedOrders_)
+            if (o) fn(*o);
+    }
+
     // MD-9: run fn() under bookLock_, a consistent cut of the book (the
     // ITCH resync). fn must not call a method that takes bookLock_.
     template<typename Fn>
@@ -775,6 +787,10 @@ public:
         s.ordersSubmitted = p.ordersSubmitted;
         s.tradesExecuted = p.tradesExecuted;
     }
+
+    // A checkpoint's PEG_QUEUE record: the peg goes to the back of the
+    // reprice list. Applied in list order, after the orders, they rebuild it.
+    void restorePegQueue(OrderId orderId);
 
     // Set around each re-add of a checkpoint's Snapshot record: a peg rests at
     // the price the record carries and no reprice pass moves one. Until the

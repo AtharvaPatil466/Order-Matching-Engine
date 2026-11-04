@@ -3659,6 +3659,16 @@ void OrderBook::restoreIcebergSlice(OrderId orderId, Quantity visibleQty) {
     o->visibleQty = std::min(visibleQty, o->remainingQty);
 }
 
+// ponytail: a linear find per record, O(pegs^2) per restore; carry each
+// peg's index in the record if a book ever rests thousands of pegs.
+void OrderBook::restorePegQueue(OrderId orderId) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    Order** found = orderLookup_.find(orderId);
+    Order** const end = peggedOrders_.end();
+    Order** const at = found ? std::find(peggedOrders_.begin(), end, *found) : end;
+    if (at != end) std::rotate(at, at + 1, end);
+}
+
 size_t OrderBook::getBidLevelsCount() const { return bids_.size(); }
 size_t OrderBook::getAskLevelsCount() const { return asks_.size(); }
 

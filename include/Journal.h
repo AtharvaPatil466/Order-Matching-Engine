@@ -150,6 +150,11 @@ inline constexpr Quantity SNAPSHOT_STOP_ELECTED = 1;
 // flag, not the field, says so: an older record's stopLimitPrice holds
 // whatever the client sent, and older readers test only the bit above.
 inline constexpr Quantity SNAPSHOT_ICEBERG_SLICE = 2;
+// PEG_QUEUE: not an order. After a book's orders, one record per peg in the
+// order its reprice pass moves them, carrying only the id and this flag; each
+// sends its peg to the back of that list, which rebuilds it. An older reader
+// finds the order already restored and skips the record.
+inline constexpr Quantity SNAPSHOT_PEG_QUEUE = 4;
 
 inline constexpr uint64_t JOURNAL_EPOCH_LEGACY     = 0;  // may hold seeded orders
 inline constexpr uint64_t JOURNAL_EPOCH_NO_SEEDING = 1;  // writer seeded nothing
@@ -472,6 +477,16 @@ public:
         entry.price = lastTradePrice;
         entry.newPrice = referencePrice;
         entry.newQty = lastTradeQty;
+        appendEntry(entry);
+    }
+
+    void logPegQueue(OrderId id, SymbolId symbolId) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Snapshot;
+        entry.newQty = SNAPSHOT_PEG_QUEUE;
+        entry.timestamp = now();
+        entry.orderId = id;
+        entry.symbolId = symbolId;
         appendEntry(entry);
     }
 

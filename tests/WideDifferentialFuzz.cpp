@@ -140,13 +140,15 @@ struct Ref {
 // ---------------- engine tap ----------------
 struct Tap : EventListener {
   std::vector<Tr> trades; std::map<std::pair<int, Price>, std::vector<OrderId>> queues;
-  std::map<OrderId, Quantity> cum; std::string execErr; struct Rep { OrderId id; Quantity f; int st; }; std::vector<Rep> reports;
-  void checkReports() { for (auto& r : reports) if (execErr.empty() && r.f != cum[r.id]) { char b[160]; std::snprintf(b, sizeof b, "exec report id=%llu status=%d filledQty=%llu but trades sum=%llu", (unsigned long long)r.id, r.st, (unsigned long long)r.f, (unsigned long long)cum[r.id]); execErr = b; } reports.clear(); }
+  // seen: the order's trades delivered BEFORE the report (Rule 2.5), captured
+  // on arrival; comparing at op end could not see a report ahead of its trade.
+  std::map<OrderId, Quantity> cum; std::string execErr; struct Rep { OrderId id; Quantity f; int st; Quantity seen; }; std::vector<Rep> reports;
+  void checkReports() { for (auto& r : reports) if (execErr.empty() && r.f != r.seen) { char b[160]; std::snprintf(b, sizeof b, "exec report id=%llu status=%d filledQty=%llu but trades delivered before it=%llu", (unsigned long long)r.id, r.st, (unsigned long long)r.f, (unsigned long long)r.seen); execErr = b; } reports.clear(); }
   void onTrade(const Trade& t) override { trades.push_back({t.buyOrderId, t.sellOrderId, t.price, t.quantity}); cum[t.buyOrderId] += t.quantity; cum[t.sellOrderId] += t.quantity; }
   void onOrderUpdate(const OrderUpdate& u) override {
     if (u.status == OrderStatus::Rejected) return;
     if (u.status == OrderStatus::Filled || u.status == OrderStatus::PartiallyFilled || u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP) {
-      reports.push_back({u.orderId, u.filledQty, (int)u.status});
+      reports.push_back({u.orderId, u.filledQty, (int)u.status, cum[u.orderId]});
     }
     if (isTerminalStatus(u.status)) erase(u.orderId);
   }

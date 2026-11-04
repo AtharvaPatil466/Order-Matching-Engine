@@ -221,7 +221,8 @@ them before a maker's `Filled`. Until GTDIFF-7 it did not, and a maker's owner h
 before the trade.
 
 **Status: Deliberate — commented and pinned.** Pinned by `tests/EventOrderTest.cpp` (every
-path above).
+path above) and by `tests/WideDifferentialFuzz.cpp`, which checks each report against the
+trades delivered before it.
 
 ---
 

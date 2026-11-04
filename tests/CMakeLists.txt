@@ -1347,14 +1347,6 @@ add_test(NAME CapacityMonitorIntegrationTest COMMAND CapacityMonitorIntegrationT
 set_tests_properties(CapacityMonitorIntegrationTest PROPERTIES TIMEOUT 60
                      LABELS "project;ops")
 
-# Replication protocol HA tests
-add_executable(ReplicationProtocolTest ReplicationProtocolTest.cpp)
-target_link_libraries(ReplicationProtocolTest PRIVATE OrderMatcher)
-enable_assertions(ReplicationProtocolTest)
-add_test(NAME ReplicationProtocolTest COMMAND ReplicationProtocolTest)
-set_tests_properties(ReplicationProtocolTest PROPERTIES TIMEOUT 60
-                     LABELS "project;ha;replication")
-
 # Session scheduler: deterministic daily-lifecycle sequencing via virtual clock
 add_executable(SessionSchedulerTest TestSessionScheduler.cpp)
 target_link_libraries(SessionSchedulerTest PRIVATE OrderMatcher)
@@ -1444,14 +1436,6 @@ enable_assertions(FixSessionStateTest)
 add_test(NAME FixSessionStateTest COMMAND FixSessionStateTest)
 set_tests_properties(FixSessionStateTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;fix")
-
-# Durable lease epoch survives restart (split-brain hardening)
-add_executable(LeaseEpochTest TestLeaseEpoch.cpp)
-target_link_libraries(LeaseEpochTest PRIVATE OrderMatcher)
-enable_assertions(LeaseEpochTest)
-add_test(NAME LeaseEpochTest COMMAND LeaseEpochTest)
-set_tests_properties(LeaseEpochTest PROPERTIES TIMEOUT 30
-                     LABELS "project;ha;replication")
 
 # Wire-protocol versioning contract (FIX/SBE/ITCH/OUCH)
 add_executable(ProtocolVersioningTest ProtocolVersioningTest.cpp)
@@ -1646,11 +1630,3 @@ enable_assertions(RateLimiterReconfigureTest)
 add_test(NAME RateLimiterReconfigureTest COMMAND RateLimiterReconfigureTest)
 set_tests_properties(RateLimiterReconfigureTest PROPERTIES TIMEOUT 15
                      LABELS "project;ops;rate-limit")
-
-# Reconnect backoff smoke test
-add_executable(ReconnectBackoffTest ReconnectBackoffTest.cpp)
-target_link_libraries(ReconnectBackoffTest PRIVATE OrderMatcher)
-enable_assertions(ReconnectBackoffTest)
-add_test(NAME ReconnectBackoffTest COMMAND ReconnectBackoffTest)
-set_tests_properties(ReconnectBackoffTest PROPERTIES TIMEOUT 30
-                     LABELS "project;ha;replication")

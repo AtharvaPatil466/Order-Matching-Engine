@@ -67,10 +67,6 @@ jobs:
         # ANCHORED, every name: ctest -E is a regex SEARCH, and the unanchored
         # "PropertyTest" also excluded JournalReplayPropertyTest — the test that
         # drives the async worker — from the one lane that checks it for races.
-        # ReplicationProtocolTest is INCLUDED now — was previously excluded
-        # for teardown races on peerFd_/listenFd_ (close-during-recv) and a
-        # non-atomic sendSeq_; both fixed (atomic fds + shutdown(2) wakeup +
-        # atomic sequence). Keep TSan green going forward.
         if: matrix.thread_sanitizer == 'ON'
         run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
 

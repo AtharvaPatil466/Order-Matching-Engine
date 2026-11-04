@@ -50,36 +50,36 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 | README.md:17 | 237ns | X86-D2E688C | pending `honest-pgo-*.txt` |
 | README.md:18 | 3.10M_ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
 | README.md:19 | 1ns/op | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:25,88,446,487 | 5 s | PARAM | n/a: not a measurement |
+| README.md:25,88,445,486 | 5 s | PARAM | n/a: not a measurement |
 | README.md:52 | 24 bytes | CODE | the code |
 | README.md:53 | 1s · 15s | PARAM | n/a: not a measurement |
 | README.md:58 | 1472 bytes | PARAM | n/a: not a measurement |
 | README.md:104 | 5 s · ~2 s | PARAM | n/a: not a measurement |
-| README.md:115 | 125 ns | WITHDRAWN | none |
-| README.md:125 | 237 ns · 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:126 | 208 ns · 709 ns · 3.4× | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| README.md:129 | 208 ns · 237 ns | ARM-M3, X86-D2E688C | pending `realistic-flow.txt` (x86 counterpart) |
-| README.md:131 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| README.md:140 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| README.md:141 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| README.md:142 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| README.md:145 | ~125 ns | WITHDRAWN | none |
-| README.md:147 | 3,568 ns · ~167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| README.md:149 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:158 | 5M ops/s | UNRECORDED | pending `stress.txt` |
-| README.md:166 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:167 | 49B · 10.2 · 98.5 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:168 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:169 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:170 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:172 | 110× | ARITH | pending `codec.txt` (x86 counterpart) |
-| README.md:432 | ~400 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:433 | ~500 ms · ~3 ms · ~110 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:435 | 30s · 4s | PARAM, CHAOS | chaos.yml, not bench-x86 |
-| README.md:437 | 200 ms · 3s | PARAM | n/a: not a measurement |
-| README.md:438 | ~3 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:441 | ~415 ms · ~2 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:447 | 2 s | PARAM | n/a: not a measurement |
+| README.md:114 | 125 ns | WITHDRAWN | none |
+| README.md:124 | 237 ns · 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:125 | 208 ns · 709 ns · 3.4× | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| README.md:128 | 208 ns · 237 ns | ARM-M3, X86-D2E688C | pending `realistic-flow.txt` (x86 counterpart) |
+| README.md:130 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| README.md:139 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| README.md:140 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| README.md:141 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| README.md:144 | ~125 ns | WITHDRAWN | none |
+| README.md:146 | 3,568 ns · ~167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| README.md:148 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:157 | 5M ops/s | UNRECORDED | pending `stress.txt` |
+| README.md:165 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:166 | 49B · 10.2 · 98.5 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:167 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:168 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:169 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:171 | 110× | ARITH | pending `codec.txt` (x86 counterpart) |
+| README.md:431 | ~400 ms | CHAOS | chaos.yml, not bench-x86 |
+| README.md:432 | ~500 ms · ~3 ms · ~110 ms | CHAOS | chaos.yml, not bench-x86 |
+| README.md:434 | 30s · 4s | PARAM, CHAOS | chaos.yml, not bench-x86 |
+| README.md:436 | 200 ms · 3s | PARAM | n/a: not a measurement |
+| README.md:437 | ~3 ms | CHAOS | chaos.yml, not bench-x86 |
+| README.md:440 | ~415 ms · ~2 ms | CHAOS | chaos.yml, not bench-x86 |
+| README.md:446 | 2 s | PARAM | n/a: not a measurement |
 
 ### BENCHMARKS.md
 

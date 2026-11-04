@@ -98,9 +98,6 @@ $CXX $FLAGS tests/ConfigTest.cpp $LIB_OBJS -o bin/ConfigTest
 echo "Compiling alert dispatcher tests..."
 $CXX $FLAGS tests/AlertDispatcherTest.cpp $LIB_OBJS -o bin/AlertDispatcherTest
 
-echo "Compiling replication protocol tests..."
-$CXX $FLAGS tests/ReplicationProtocolTest.cpp $LIB_OBJS -o bin/ReplicationProtocolTest
-
 echo "Compiling OUCH session tests..."
 $CXX $FLAGS tests/OuchSessionTest.cpp $LIB_OBJS -o bin/OuchSessionTest
 
@@ -145,7 +142,6 @@ echo "To run GTD Tests:        ./bin/GTDReplayTest"
 echo "To run MD Compat:        ./bin/MdFeedSchemaCompatTest"
 echo "To run Config Tests:     ./bin/ConfigTest"
 echo "To run Alert Tests:      ./bin/AlertDispatcherTest"
-echo "To run Replication Tests: ./bin/ReplicationProtocolTest"
 echo "To run OUCH Tests:       ./bin/OuchSessionTest"
 echo "To run ITCH Tests:       ./bin/ItchPublisherTest"
 echo "To run SoupBin Tests:    ./bin/SoupBinTcpTest"

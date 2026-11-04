@@ -2,7 +2,7 @@
 //
 // Tests cover:
 //   1.  buildSpreadObservations: positive qty → direction = +1
-//   2.  buildSpreadObservations: size mismatch → empty (NDEBUG) or skipped (debug)
+//   2.  buildSpreadObservations: size mismatch → empty (NDEBUG) or asserts (otherwise)
 //   3.  fitGlostenhHarris: fully informed flow → lambda > 0, ASF ≈ 1
 //   4.  fitGlostenhHarris: pure processing cost → lambda ≈ 0, theta > 0
 //   5.  fitGlostenhHarris: fewer than 5 obs → valid = false
@@ -78,13 +78,12 @@ TEST(BuildSpreadObservations, NegativeQtyGivesSellDirection) {
 // 2. buildSpreadObservations — size mismatch
 // ===========================================================================
 TEST(BuildSpreadObservations, SizeMismatchDefensiveReturn) {
-#ifdef NDEBUG
     std::vector<TradeRecord> trades{ {100.0, +100.0}, {100.1, -100.0} };
     std::vector<double>      mids{ 100.0, 100.05 };  // needs 3, only 2 provided
-    auto obs = buildSpreadObservations(trades, mids);
-    EXPECT_TRUE(obs.empty());
+#ifdef NDEBUG
+    EXPECT_TRUE(buildSpreadObservations(trades, mids).empty());
 #else
-    GTEST_SKIP() << "Size-mismatch triggers assert() in debug build; skipped.";
+    EXPECT_DEATH((void)buildSpreadObservations(trades, mids), "must equal trades.size");
 #endif
 }
 

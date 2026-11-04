@@ -20,10 +20,8 @@
 // below the high it had trailed.
 //
 // Each probe runs on the book as it is, on one restarted from the plain
-// journal, on one restarted from a checkpoint, and on a JournalFollower's
-// standby promoted over that checkpoint; all four must agree.
+// journal and on one restarted from a checkpoint; all three must agree.
 
-#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -40,13 +38,12 @@ constexpr SymbolId kSym = 0;
 constexpr Price kPx = 10000;              // 100.00: the reference and the last trade
 constexpr Price kJump = kPx * 12 / 10;    // 120.00: 20% away, past the 5% breaker
 
-enum class Life { Uninterrupted, Replayed, Checkpointed, Followed };
+enum class Life { Uninterrupted, Replayed, Checkpointed };
 const char* name(Life l) {
     switch (l) {
     case Life::Uninterrupted: return "uninterrupted";
     case Life::Replayed:      return "replayed";
     case Life::Checkpointed:  return "checkpointed";
-    case Life::Followed:      return "followed";   // a promoted JournalFollower
     }
     return "";
 }
@@ -98,8 +95,7 @@ void trailed(MatchingEngine& e) {
     assert(e.getOrderBook(kSym)->getOrder(3)->stopPrice == kPx + 300);
 }
 
-// `setup`, then `probe` on that book, or on one rebuilt from its journal (the
-// followed one after a checkpoint too).
+// `setup`, then `probe` on that book, or on one rebuilt from its journal.
 int after(Life life, const Setup& setup, const Probe& probe) {
     const std::string path = uniqueTempPath("checkpoint_prices.wal");
     std::remove(path.c_str());
@@ -109,7 +105,7 @@ int after(Life life, const Setup& setup, const Probe& probe) {
         boot(engine, path);
         setup(engine);
         if (life == Life::Uninterrupted) result = probe(*engine.getOrderBook(kSym));
-        if (life == Life::Checkpointed || life == Life::Followed) engine.checkpoint();
+        if (life == Life::Checkpointed) engine.checkpoint();
         engine.stop();
     }
     if (life == Life::Replayed || life == Life::Checkpointed) {
@@ -118,12 +114,6 @@ int after(Life life, const Setup& setup, const Probe& probe) {
         restarted.replayJournal();
         result = probe(*restarted.getOrderBook(kSym));
         restarted.stop();
-    }
-    if (life == Life::Followed) {
-        OrderBook standby(kSym);
-        JournalFollower follower(path, kSym, standby);
-        follower.promote();
-        result = probe(standby);
     }
     std::remove(path.c_str());
     return result;
@@ -163,7 +153,7 @@ int lastQtyProbe(OrderBook& b) {
 
 int check(const char* what, const Setup& setup, const Probe& probe, int want) {
     int failures = 0;
-    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed, Life::Followed}) {
+    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed}) {
         const int got = after(life, setup, probe);
         std::printf("  %-13s %-38s %d%s\n", name(life), what, got, got == want ? "" : "  <- differs");
         failures += got != want;

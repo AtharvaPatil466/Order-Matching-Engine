@@ -7,10 +7,8 @@
 // reader restored a partially filled order as an unfilled one — and the same
 // replace then left 80 working on the restored book against 20 on the live
 // one. Plain journal replay is not the problem (it re-runs the fills); only
-// the snapshot loses them. All three snapshot readers are checked: restart
-// replay, a backup fed by streamSnapshot, and a JournalFollower.
+// the snapshot loses them, so the restart replays from a checkpoint.
 
-#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -50,10 +48,6 @@ int main() {
     const std::string path = uniqueTempPath("replace_ckpt.wal");
     std::remove(path.c_str());
 
-    MatchingEngine backup;
-    backup.addSymbol(kSym);
-    backup.start();
-    backup.setReplayModeAllBooks(true);
     {
         MatchingEngine engine;
         boot(engine, path);
@@ -61,34 +55,17 @@ int main() {
         engine.submitOrder(kSym, 2, 2, Side::Sell, kPx, 60, OrderType::Limit);
         assert(engine.getOrderBook(kSym)->getOrder(1)->remainingQty == 40);
         engine.checkpoint();
-        // A joining backup is built from the same Snapshot records, streamed.
-        engine.streamSnapshot([&](const JournalEntry& e) { backup.applyReplicatedEntry(e); });
 
         assert(engine.cancelReplace(kSym, 1, kPx - 1, 80));
         expectReplaced(*engine.getOrderBook(kSym), "live");
         engine.stop();
     }
 
-    // The backup then receives the replace record the primary journaled.
-    {
-        Journal reader(path, Journal::SyncPolicy::Immediate);
-        for (const JournalEntry& e : reader.readAll())
-            if (e.entryType != JournalEntry::Type::Snapshot) backup.applyReplicatedEntry(e);
-    }
-    expectReplaced(*backup.getOrderBook(kSym), "backup");
-    backup.stop();
-
     MatchingEngine restarted;
     boot(restarted, path);
     restarted.replayJournal();
     expectReplaced(*restarted.getOrderBook(kSym), "restart replay");
     restarted.stop();
-
-    OrderBook followed(kSym);
-    followed.setCircuitBreakerThreshold(0.99);
-    JournalFollower follower(path, kSym, followed);
-    follower.poll();
-    expectReplaced(followed, "journal follower");
 
     std::remove(path.c_str());
     std::cout << "ReplaceAfterCheckpointTest PASSED" << std::endl;

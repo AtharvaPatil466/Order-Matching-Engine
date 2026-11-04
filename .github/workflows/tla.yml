@@ -7,7 +7,6 @@ name: TLA+ Model Checking
 #   - Auction         : exchange auction / session state machine
 #   - Oco              : One-Cancels-Other contingent-order safety
 #   - Risk             : multi-tier risk-limit aggregation safety
-#   - FixSession       : FIX inbound sequence recovery (no out-of-order delivery)
 #   - MpscQueue        : lock-free ring-buffer linearizability
 #   - EngineConsumer   : worker-loop wake-up protocol
 #   - Snapshot         : lockless snapshot (properties that hold)
@@ -52,7 +51,7 @@ jobs:
         working-directory: spec
         run: |
           set -e
-          for module in Auction Oco Risk FixSession MpscQueue EngineConsumer Snapshot SnapshotLocked; do
+          for module in Auction Oco Risk MpscQueue EngineConsumer Snapshot SnapshotLocked; do
             echo "::group::TLC $module"
             ./check.sh "$module"
             echo "::endgroup::"
@@ -148,21 +147,3 @@ jobs:
             exit 1
           fi
           echo "Non-vacuity confirmed: TLC produced the expected risk counterexample."
-
-      - name: Non-vacuity check (FIX sequence recovery must be violable)
-        working-directory: spec
-        run: |
-          set +e
-          ./check.sh FixSession FixSessionBroken.cfg > fix_broken.log 2>&1
-          status=$?
-          set -e
-          cat fix_broken.log
-          if [ "$status" -eq 0 ]; then
-            echo "::error::FixSessionBroken.cfg unexpectedly PASSED — DeliveredInOrder is vacuous"
-            exit 1
-          fi
-          if ! grep -q "Invariant DeliveredInOrder is violated" fix_broken.log; then
-            echo "::error::FixSessionBroken.cfg failed for the wrong reason (expected a DeliveredInOrder counterexample)"
-            exit 1
-          fi
-          echo "Non-vacuity confirmed: TLC produced the expected FIX counterexample."

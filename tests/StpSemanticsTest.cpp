@@ -601,15 +601,14 @@ TEST(StpUncross, OtherParticipantsStillCrossNormally) {
 // Step 4 — outbound protocol mapping for CancelledBySTP.
 //
 // Survey result: ITCH is the ONLY protocol that consumes OrderStatus.
-// FixSession is never registered as an EventListener; OuchSession is one but
-// overrides only onTrade; SbeSession and the gateway carry accept/reject at
+// OuchSession is an EventListener but overrides only onTrade; SbeSession and
+// the gateway carry accept/reject at
 // entry time and no order-status stream. So no order-entry client currently
 // learns about ANY engine-initiated cancellation — STP, kill switch, expiry or
 // OCO. These tests pin the encoder-side mapping so it is correct when the
 // lifecycle is wired, and close the ITCH gap that already exists in production.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#include "FixSession.h"
 #include "ItchProtocol.h"
 #include "ItchPublisher.h"
 #include "OuchProtocol.h"
@@ -657,69 +656,6 @@ TEST(StpProtocol, ItchEmitsOrderDeleteForCancelledBySTP) {
     EXPECT_FALSE(sawExecuted) << "nothing traded, so no 'E' may be emitted";
 
     book.setEventListener(nullptr);
-}
-
-// ─── FIX: ExecType='4' / OrdStatus='4', identical in 4.2 and 4.4 ────────────
-
-namespace {
-
-std::string fixFieldOf(const std::string& msg, const char* tagEq) {
-    // Fields are SOH-delimited; find "<tag>=" at a field boundary.
-    const std::string needle = std::string("\x01") + tagEq;
-    size_t p = msg.find(needle);
-    if (p == std::string::npos) {
-        if (msg.rfind(tagEq, 0) != 0) return {};
-        p = 0;
-    } else {
-        p += 1;
-    }
-    const size_t vs = p + std::strlen(tagEq);
-    const size_t ve = msg.find('\x01', vs);
-    return msg.substr(vs, ve - vs);
-}
-
-}  // namespace
-
-TEST(StpProtocol, FixCancellationIsExecType4OrdStatus4WithStpText) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-
-    std::string sent;
-    FixSession sess(engine, [&](std::string_view m) { sent.assign(m); });
-
-    sess.sendCancelled(/*id=*/42, Side::Buy, /*price=*/1000, /*orderQty=*/100,
-                       /*cumQty=*/40, /*bySTP=*/true);
-
-    ASSERT_FALSE(sent.empty());
-    EXPECT_EQ(fixFieldOf(sent, "150="), "4") << "ExecType Canceled";
-    EXPECT_EQ(fixFieldOf(sent, "39="),  "4") << "OrdStatus Canceled";
-    // The quantity that really executed before STP stopped the order.
-    EXPECT_EQ(fixFieldOf(sent, "14="), "40") << "CumQty must be the real fill";
-    EXPECT_EQ(fixFieldOf(sent, "151="), "0") << "LeavesQty zero — order is gone";
-    EXPECT_NE(sent.find("self-trade prevention"), std::string::npos)
-        << "no standard STP ExecType exists, so the distinction rides in Text";
-}
-
-TEST(StpProtocol, FixCancelExecTypeIsIdenticalIn42And44) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-
-    std::string v42, v44;
-    FixSession s42(engine, [&](std::string_view m) { v42.assign(m); });
-    FixSession s44(engine, [&](std::string_view m) { v44.assign(m); });
-    s44.setAcceptedVersions({"FIX.4.4"});
-
-    s42.sendCancelled(1, Side::Buy, 1000, 100, 0, true);
-    s44.sendCancelled(1, Side::Buy, 1000, 100, 0, true);
-
-    ASSERT_FALSE(v42.empty());
-    ASSERT_FALSE(v44.empty());
-    // The serializer rewrites ExecType only for '1'/'2' -> 'F' on 4.4;
-    // '4' Canceled is unchanged in both versions.
-    EXPECT_EQ(fixFieldOf(v42, "150="), "4");
-    EXPECT_EQ(fixFieldOf(v44, "150="), "4")
-        << "FIX 4.4 does not remap ExecType Canceled";
-    EXPECT_EQ(fixFieldOf(v42, "39="), fixFieldOf(v44, "39="));
 }
 
 // ─── OUCH: Order Canceled with a reason distinct from a user cancel ─────────

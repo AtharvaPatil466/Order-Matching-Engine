@@ -1,6 +1,6 @@
 // ItchByteLayoutTest — exact wire-offset coverage for the ITCH 5.0
 // encoders that previously had only a type-code/size mapping check
-// (ProtocolVersioningTest) but no field-by-field byte-layout assertion.
+// but no field-by-field byte-layout assertion.
 //
 // ITCH has no version field on the wire: a message-type byte maps to a
 // single fixed layout forever, so any drift in a field's offset is a
@@ -209,12 +209,59 @@ void test_TradeLayout() {
     } END
 }
 
+// ITCH has no version field on the wire: a message-type byte maps to one
+// fixed layout forever, and any change is a wire-breaking republish. So the
+// contract is the stability of the type-code -> size mapping and that the codes
+// are distinct. (Moved from ProtocolVersioningTest when FIX, OUCH and SBE were
+// deleted, roadmap 1.2.)
+void test_TypeCodeSizeMappingStable() {
+    TEST(TypeCodeSizeMappingStable) {
+        struct Row { uint8_t type; size_t size; };
+        const Row rows[] = {
+            {ITCH_MT_SYSTEM_EVENT,      ITCH_SIZE_SYSTEM_EVENT},
+            {ITCH_MT_STOCK_DIRECTORY,   ITCH_SIZE_STOCK_DIRECTORY},
+            {ITCH_MT_TRADING_ACTION,    ITCH_SIZE_TRADING_ACTION},
+            {ITCH_MT_ADD_ORDER,         ITCH_SIZE_ADD_ORDER},
+            {ITCH_MT_ORDER_EXECUTED,    ITCH_SIZE_ORDER_EXECUTED},
+            {ITCH_MT_ORDER_EXECUTED_PX, ITCH_SIZE_ORDER_EXECUTED_PX},
+            {ITCH_MT_ORDER_CANCEL,      ITCH_SIZE_ORDER_CANCEL},
+            {ITCH_MT_ORDER_DELETE,      ITCH_SIZE_ORDER_DELETE},
+            {ITCH_MT_TRADE,             ITCH_SIZE_TRADE},
+            {ITCH_MT_CROSS_TRADE,       ITCH_SIZE_CROSS_TRADE},
+        };
+        constexpr size_t kRows = sizeof(rows) / sizeof(rows[0]);
+
+        CHECK(ITCH_MT_SYSTEM_EVENT == 'S' && ITCH_SIZE_SYSTEM_EVENT == 12);
+        CHECK(ITCH_MT_ADD_ORDER == 'A' && ITCH_SIZE_ADD_ORDER == 36);
+        CHECK(ITCH_MT_ORDER_EXECUTED == 'E' && ITCH_SIZE_ORDER_EXECUTED == 31);
+        CHECK(ITCH_MT_ORDER_EXECUTED_PX == 'C' && ITCH_SIZE_ORDER_EXECUTED_PX == 36);
+        CHECK(ITCH_MT_ORDER_CANCEL == 'X' && ITCH_SIZE_ORDER_CANCEL == 23);
+        CHECK(ITCH_MT_ORDER_DELETE == 'D' && ITCH_SIZE_ORDER_DELETE == 19);
+        CHECK(ITCH_MT_TRADE == 'P' && ITCH_SIZE_TRADE == 44);
+
+        for (size_t i = 0; i < kRows; ++i) {
+            for (size_t j = i + 1; j < kRows; ++j) CHECK(rows[i].type != rows[j].type);
+            CHECK(rows[i].size > 0);
+        }
+
+        // The size constant IS the wire size: an encoder writes exactly it.
+        uint8_t out[64];
+        const size_t w = encodeAddOrder(out, /*stockLocate=*/1, /*trackingNumber=*/0,
+                                        /*timestampNs=*/123, /*orderRefNumber=*/9,
+                                        Side::Buy, /*shares=*/100, /*stock=*/5,
+                                        /*price=*/1000);
+        CHECK(w == ITCH_SIZE_ADD_ORDER);
+        CHECK(out[0] == ITCH_MT_ADD_ORDER);
+    } END
+}
+
 int main() {
     std::cout << "Running ItchByteLayoutTest\n";
 
     test_OrderExecutedWithPriceLayout();
     test_OrderCancelLayout();
     test_TradeLayout();
+    test_TypeCodeSizeMappingStable();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

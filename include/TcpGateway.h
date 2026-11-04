@@ -129,6 +129,9 @@ struct GatewayResponseV2 {
 };
 #pragma pack(pop)
 
+// The text a client sees after "Rejected: " for each reason.
+const char* rejectReasonToString(RejectReason reason);
+
 class TcpGateway {
 public:
     explicit TcpGateway(MatchingEngine& engine)

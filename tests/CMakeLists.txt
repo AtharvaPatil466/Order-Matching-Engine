@@ -431,13 +431,6 @@ enable_assertions(GatewayIntegrationTest)
 add_test(NAME GatewayIntegrationTest COMMAND GatewayIntegrationTest)
 set_tests_properties(GatewayIntegrationTest PROPERTIES TIMEOUT 120 LABELS "project;integration")
 
-# FIX TCP gateway integration test
-add_executable(FixTcpGatewayTest FixTcpGatewayTest.cpp)
-target_link_libraries(FixTcpGatewayTest PRIVATE OrderMatcher)
-enable_assertions(FixTcpGatewayTest)
-add_test(NAME FixTcpGatewayTest COMMAND FixTcpGatewayTest)
-set_tests_properties(FixTcpGatewayTest PROPERTIES TIMEOUT 60 LABELS "project;integration")
-
 # Submit-result contract tests
 add_executable(SubmitResultTest SubmitResultTest.cpp)
 target_link_libraries(SubmitResultTest PRIVATE OrderMatcher)
@@ -1448,22 +1441,6 @@ add_test(NAME ComplianceTest COMMAND ComplianceTest)
 set_tests_properties(ComplianceTest PROPERTIES TIMEOUT 30
                      LABELS "project;compliance;integration")
 
-# FIX session-layer sequence / recovery / heartbeat state machine
-add_executable(FixSessionStateTest TestFixSessionState.cpp)
-target_link_libraries(FixSessionStateTest PRIVATE OrderMatcher)
-enable_assertions(FixSessionStateTest)
-add_test(NAME FixSessionStateTest COMMAND FixSessionStateTest)
-set_tests_properties(FixSessionStateTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;fix")
-
-# Wire-protocol versioning contract (FIX/SBE/ITCH/OUCH)
-add_executable(ProtocolVersioningTest ProtocolVersioningTest.cpp)
-target_link_libraries(ProtocolVersioningTest PRIVATE OrderMatcher)
-enable_assertions(ProtocolVersioningTest)
-add_test(NAME ProtocolVersioningTest COMMAND ProtocolVersioningTest)
-set_tests_properties(ProtocolVersioningTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;versioning")
-
 # Shadow mode divergence detection test
 add_executable(ShadowModeTest ShadowModeTest.cpp)
 target_link_libraries(ShadowModeTest PRIVATE OrderMatcher gtest_main)
@@ -1471,15 +1448,6 @@ gtest_discover_tests(ShadowModeTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;shadow\;integration")
-
-# FIX inbound boundary-validation tests (seqnum, logon gate, required
-# fields, BodyLength cross-check, TargetCompID, unknown enums)
-add_executable(FixValidationTest FixValidationTest.cpp)
-target_link_libraries(FixValidationTest PRIVATE OrderMatcher gtest_main)
-gtest_discover_tests(FixValidationTest
-    DISCOVERY_TIMEOUT 60
-    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project\;fix\;validation")
 
 # ContingencyManager OCO linkage tests (assert-based, engine-agnostic)
 add_executable(ContingencyManagerTest TestContingencyManager.cpp)

@@ -3000,33 +3000,6 @@ void MatchingEngine::checkpoint() {
     checkpointInternal(async_ ? false : true);
 }
 
-void MatchingEngine::processFIXMessage(const std::string& rawFix) {
-    FixMessage msg;
-    if (!msg.parse(rawFix.c_str(), rawFix.size())) {
-        return;
-    }
-
-    auto params = fixToOrderParams(msg);
-    if (!params.valid) {
-        return;
-    }
-
-    switch (params.action) {
-    case FixOrderParams::Action::NewOrder:
-        processOrder(params.symbolId, params.orderId, params.participantId, params.side,
-                     params.price, params.qty, params.orderType, 0, 0, params.tif);
-        break;
-    case FixOrderParams::Action::Cancel:
-        cancelOrder(params.symbolId, params.orderId);
-        break;
-    case FixOrderParams::Action::CancelReplace:
-        cancelReplace(params.symbolId, params.orderId, params.newPrice, params.newQty);
-        break;
-    default:
-        break;
-    }
-}
-
 LatencyTracker MatchingEngine::getAggregateE2ELatency() const {
     LatencyTracker aggregate;
     if (!e2eLatency_) {

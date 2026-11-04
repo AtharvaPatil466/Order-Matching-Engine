@@ -2,7 +2,7 @@
 // on the command line. Lets the harness run on toolchains that don't ship
 // libFuzzer (notably Apple Clang on macOS).
 //
-// Usage: ./fuzz_fix_parser_replay [-q] <file-or-dir> ...
+// Usage: ./fuzz_gateway_engine_replay [-q] <file-or-dir> ...
 //        -q   Quiet: only report on crash/abort, skip per-file output.
 
 #include <cstddef>

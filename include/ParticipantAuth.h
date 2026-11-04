@@ -4,12 +4,8 @@
 //
 // THE PROBLEM (audit H7)
 //
-// Every gateway takes the participant identity straight off the wire and
-// trusts it:
-//
-//   FIX     FIXParser.h — result.participantId = msg.getInt(SenderCompID)
-//   OUCH    OuchSession — firmOf_[engineId] = o.firm
-//   binary  TcpGateway  — req.participantId, a field in the client's struct
+// The gateway takes the participant identity straight off the wire and
+// trusts it: TcpGateway reads req.participantId, a field in the client's struct.
 //
 // Nothing checks that the sender is entitled to that identity. Anyone who can
 // reach the port can:

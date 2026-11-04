@@ -9,7 +9,6 @@
 #include "HierarchicalRiskManager.h"
 #include "MpscQueue.h"
 #include "RingBuffer.h"
-#include "FIXParser.h"
 #include "FlatHashMap.h"
 #include "LatencyTracker.h"
 #include "RateLimiter.h"
@@ -553,10 +552,6 @@ public:
     uint64_t getOtrRejectCount() const {
         return otrRejects_.load(std::memory_order_relaxed);
     }
-
-    // ─── FIX protocol gateway ─────────────────────────────────────────
-    // Process a raw FIX message string and route to appropriate handler
-    void processFIXMessage(const std::string& rawFix);
 
     // ─── Phase 4: Graduated Kill Switch ──────────────────────────────
     GraduatedKillSwitch& getKillSwitch() { return killSwitch_; }

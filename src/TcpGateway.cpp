@@ -21,6 +21,9 @@ static_assert(sizeof(GatewayRequestHeader) == GATEWAY_REQUEST_HEADER_SIZE,
 static_assert(sizeof(GatewayResponseHeader) == GATEWAY_RESPONSE_HEADER_SIZE,
               "GatewayResponseHeader wire size changed");
 
+
+} // namespace
+
 const char* rejectReasonToString(RejectReason reason) {
     switch (reason) {
     case RejectReason::None: return "none";
@@ -56,8 +59,6 @@ const char* rejectReasonToString(RejectReason reason) {
     }
     return "unknown reject";
 }
-
-} // namespace
 
 void TcpGateway::setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);

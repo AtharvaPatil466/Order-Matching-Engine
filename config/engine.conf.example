@@ -5,8 +5,8 @@
 # that key (e.g. "log_sink" → OB_LOG_SINK).
 #
 # MANY KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
-# changes nothing: no risk limit, rate limit, checkpoint threshold, port or
-# replication timing is taken from this file. What is read: log_sink, the
+# changes nothing: no risk limit, rate limit, checkpoint threshold or port is
+# taken from this file. What is read: log_sink, the
 # alert_* keys, session_schedule, worker_cores, order_pool_capacity /
 # trade_history_capacity, volatility_auction_dwell_ms, instrument.<id>.min_price
 # / max_price, and, on SIGHUP only, rate_limit.default_rate /
@@ -106,20 +106,6 @@ price_band_pct   = 0.05
 # cancels DAY orders. --session-schedule and OB_SESSION_SCHEDULE win over this
 # key; a malformed value refuses to boot. Off when unset. OrderEngine only.
 # session_schedule = 13:00,13:30,19:55,20:00
-
-# ── High Availability ────────────────────────────────────────────────────────
-# not read: replication uses --role / OB_NODE_ROLE (plus
-# --allow-unsafe-replication) and OB_* env vars, with compiled-in timings
-# (heartbeat 100 ms, timeout 500 ms, lease 5000 ms)
-node_id           = 1
-node_role         = primary
-replication_port  = 9002
-# Backup settings (ignored when node_role=primary):
-# primary_host    = 10.0.0.1
-# primary_replication_port = 9002
-heartbeat_interval_ms = 100
-heartbeat_timeout_ms  = 500
-lease_duration_ms     = 5000
 
 # ── Alerting ─────────────────────────────────────────────────────────────────
 #

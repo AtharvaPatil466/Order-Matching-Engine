@@ -138,7 +138,7 @@ int main() {
     // case 4 alone would pass with any other route served ahead of the check.
     for (const char* path : {"/prometheus", "/otr?participantId=1", "/book?symbolId=0",
                              "/auction", "/fees", "/risk", "/cat", "/audit?symbolId=0",
-                             "/role", "/replication", "/journal/head", "/version",
+                             "/journal/head", "/version",
                              "/chaos/order"}) {
         auto r = httpGet(port, path);
         if (r.find("HTTP/1.1 401") == std::string::npos) {

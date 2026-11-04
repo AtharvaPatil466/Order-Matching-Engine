@@ -15,12 +15,8 @@ services:
     environment:
       - OB_THREADS=4
       - OB_JOURNAL_PATH=/app/journal/primary.wal
-      # No OB_NODE_ROLE: replication is disabled unless explicitly acknowledged
-      # (--allow-unsafe-replication) because of known defects REPL-1..6 — a
-      # deposed primary is never fenced and a promoted backup can execute
-      # orders twice. This deployment is a single node; the backup service
-      # that used to follow this one is gone. deploy/chaos still runs the
-      # 1+1 topology, opted in, because it exists to exercise that path.
+      # A single node that recovers from its journal. There is no replication
+      # (removed, roadmap 1.1 R1), and OB_NODE_ROLE refuses to boot.
       # Fail-closed: compose refuses to start without a token so the
       # admin API is never exposed unauthenticated. Set in .env or:
       #   OB_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up

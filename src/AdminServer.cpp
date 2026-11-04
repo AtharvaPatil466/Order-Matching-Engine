@@ -3,7 +3,6 @@
 #include "LatencyTracker.h"
 #include "Metrics.h"
 #include "Journal.h"
-#include "ReplicationProtocol.h"
 #include <cerrno>
 #include <charconv>
 #include <cstdlib>
@@ -370,10 +369,6 @@ void AdminServer::handleConnection(int clientSocket) {
     } else if (path == "/audit") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateAuditResponse(sym);
-    } else if (path == "/role") {
-        body = generateRoleResponse();
-    } else if (path == "/replication") {
-        body = generateReplicationResponse();
     } else if (path == "/journal/head") {
         body = generateJournalHeadResponse();
     } else if (path == "/version") {
@@ -386,7 +381,6 @@ void AdminServer::handleConnection(int clientSocket) {
                "\"/otr?participantId=X\",\"/book?symbolId=Y\","
                "\"/auction?symbolId=Y\",\"/audit?symbolId=Y\","
                "\"/fees?participantId=X\",\"/risk?tier=T&entityId=E\",\"/cat\","
-               "\"/role\",\"/replication\","
                "\"/journal/head\",\"/version\"]}";
     }
 
@@ -629,41 +623,6 @@ std::string AdminServer::generateRiskResponse(uint32_t tier, uint64_t entityId) 
 std::string AdminServer::generateCatResponse() const {
     std::ostringstream oss;
     oss << "{\"auditRecordCount\":" << engine_.auditRecordCount() << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateRoleResponse() const {
-    std::ostringstream oss;
-    if (!coord_) {
-        // Replication not configured for this engine — report
-        // standalone explicitly so chaos harnesses / operators can
-        // distinguish from "coordinator exists but is down".
-        oss << "{\"role\":\"standalone\",\"replicationEnabled\":false}";
-        return oss.str();
-    }
-    const char* role = (coord_->role() == NodeRole::Primary) ? "primary" : "backup";
-    oss << "{"
-        << "\"role\":\"" << role << "\","
-        << "\"replicationEnabled\":true,"
-        << "\"epoch\":" << coord_->epoch() << ","
-        << "\"isLeader\":" << (coord_->isLeader() ? "true" : "false") << ","
-        << "\"running\":" << (coord_->isRunning() ? "true" : "false")
-        << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateReplicationResponse() const {
-    std::ostringstream oss;
-    if (!coord_) {
-        oss << "{\"replicationEnabled\":false}";
-        return oss.str();
-    }
-    oss << "{"
-        << "\"replicationEnabled\":true,"
-        << "\"peerAlive\":" << (coord_->isPeerAlive() ? "true" : "false") << ","
-        << "\"running\":" << (coord_->isRunning() ? "true" : "false") << ","
-        << "\"epoch\":" << coord_->epoch()
-        << "}";
     return oss.str();
 }
 

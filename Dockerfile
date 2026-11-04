@@ -75,8 +75,6 @@ ENV OB_ADMIN_BIND=0.0.0.0
 EXPOSE 8080
 # Gateway
 EXPOSE 9001
-# Replication
-EXPOSE 9002
 
 # Health check using the /health endpoint
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

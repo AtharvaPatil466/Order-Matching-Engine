@@ -191,46 +191,4 @@ private:
     Listener listener_;
 };
 
-// ── Cross-DC / WAN replication tuning ─────────────────────────────────────
-// OB_REPLICATION_ASYNC_MODE     0|1    (default: 0)
-//   When 1, replicateEntry() returns immediately without waiting for the
-//   remote write to complete. Use for cross-DC where synchronous ack would
-//   add RTT to the matching hot path. Accept the corresponding RPO window.
-//
-// OB_REPLICATION_WAN_BUFFER_KB  int    (default: 256)
-//   TCP SO_SNDBUF size in kilobytes for the replication socket. 256 KB
-//   is suitable for same-rack; increase to 4096+ for cross-DC to absorb
-//   BDP (bandwidth-delay product) on WAN links.
-//
-// OB_REPLICATION_ACK_TIMEOUT_MS int    (default: 500)
-//   How long replicateEntry() waits for a TCP send to complete (via
-//   SO_SNDTIMEO) before declaring the peer dead. 500ms is correct for
-//   same-rack; for WAN set to 3000+ to tolerate jitter without false
-//   failovers.
-//
-// OB_REPLICATION_HEARTBEAT_MS   int    (default: 100)
-//   Interval between primary→backup heartbeat messages. Lower values
-//   reduce RTO but increase replication bandwidth.
-//
-// OB_REPLICATION_TIMEOUT_MS     int    (default: 500)
-//   Heartbeat miss threshold after which backup considers primary dead.
-//   Must be > OB_REPLICATION_HEARTBEAT_MS * 2. For WAN, set to 2000+.
-
-// Convenience getters for replication WAN config
-inline bool replicationAsyncMode(const Config& cfg) {
-    return cfg.getBool("OB_REPLICATION_ASYNC_MODE", false);
-}
-inline int replicationWanBufferKb(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_WAN_BUFFER_KB", 256);
-}
-inline int replicationAckTimeoutMs(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_ACK_TIMEOUT_MS", 500);
-}
-inline int replicationHeartbeatMs(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_HEARTBEAT_MS", 100);
-}
-inline int replicationTimeoutMs(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_TIMEOUT_MS", 500);
-}
-
 }  // namespace OrderMatcher

@@ -2,7 +2,6 @@
 #include "AlertDispatcher.h"
 #include "AdminServer.h"
 #include "CliFlags.h"
-#include "ReplicationProtocol.h"
 #include "Config.h"
 #include "ConfigValidator.h"
 #include "Journal.h"
@@ -61,13 +60,7 @@ int main(int argc, char* argv[]) {
          "replay a journal from a build that seeded orders [OB_REPLAY_LEGACY_JOURNAL=1]"},
         {"--session-schedule", "PRE,OPEN,CLOSE_AUCTION,CLOSE",
          "session timetable, HH:MM UTC; the close cancels DAY orders [OB_SESSION_SCHEDULE]"},
-        {"--role", "primary|backup", "replication role; refused without the next flag [OB_NODE_ROLE]"},
-        {"--allow-unsafe-replication", nullptr,
-         "run replication despite REPL-1..6 [OB_ALLOW_UNSAFE_REPLICATION=1]"},
-        {"--node-id", "N", "replication node id (default 1) [OB_NODE_ID]"},
-        {"--repl-port", "P", "primary's replication port (default 9002) [OB_REPLICATION_PORT]"},
-        {"--primary-host", "HOST", "backup only: primary's host [OB_PRIMARY_HOST]"},
-        {"--primary-port", "P", "backup only: primary's port (default 9002) [OB_PRIMARY_REPLICATION_PORT]"},
+        {"--role", "ROLE", "removed with replication; any value refuses to boot [OB_NODE_ROLE]"},
         {"--help", nullptr, "this message"},
     };
     if (const std::string err = cliArgsError(argc, argv, kFlags); !err.empty()) {
@@ -155,26 +148,16 @@ int main(int argc, char* argv[]) {
                     "': parent directory does not exist or is not writable");
         }
 
-        // Replication is disabled unless explicitly acknowledged. A role used
-        // to switch it on, and docker-compose.yml set one on both engines, so
-        // the default deployment ran a path with known CRITICAL defects
-        // (REPL-1..6): a deposed primary is never fenced; a promoted backup
-        // keeps applying the old primary's stream, so orders execute twice; a
-        // replication send blocks the journal commit path with no timeout,
-        // freezing acks; entries lost in a disconnect are never re-sent. The
-        // opt-in exists for the chaos suite, which is there to exercise exactly
-        // this path — the same shape as --no-participant-auth.
+        // Replication was removed (roadmap 1.1 R1): it had no fencing, a
+        // promoted backup kept applying the old primary's stream, its send
+        // blocked the commit path, and resync only ever added orders
+        // (REPL-1..9). A role still refuses to boot, so a deployment that sets
+        // one finds out here rather than running as an unannounced single node.
         const std::string requestedRole = flagOrEnv(argc, argv, "--role", "OB_NODE_ROLE");
-        if (!requestedRole.empty() &&
-            !flagOrEnvBool(argc, argv, "--allow-unsafe-replication",
-                           "OB_ALLOW_UNSAFE_REPLICATION")) {
-            vr.fail("replication is disabled (--role / OB_NODE_ROLE = '" + requestedRole +
-                    "'). It has known CRITICAL defects (REPL-1..6): a deposed primary "
-                    "is never fenced, a promoted backup can execute orders twice, a "
-                    "slow backup freezes acks, and entries lost in a disconnect are "
-                    "never re-sent. Run standalone (unset the role), or pass "
-                    "--allow-unsafe-replication (OB_ALLOW_UNSAFE_REPLICATION=1) to run "
-                    "it anyway");
+        if (!requestedRole.empty()) {
+            vr.fail("--role / OB_NODE_ROLE = '" + requestedRole + "': replication was "
+                    "removed. This engine runs as a single node and recovers from its "
+                    "journal; unset the role");
         }
 
         workerCores = validateWorkerCores(cfg, numThreads > 0 ? numThreads : 1,
@@ -224,11 +207,6 @@ int main(int argc, char* argv[]) {
         std::cout << "[Config] Price bands set for " << numSymbols << " symbols\n";
     }
 
-    // Optional journal — enables replication on the primary path because
-    // the coordinator hooks the journal's onCommit callback. Without a
-    // journal, the engine still runs but replication has no entries to
-    // ship (heartbeats only).
-    //
     // Enable, refuse and replay the journal — the same sequence GatewayServer
     // runs, shared through JournalBoot.h so the two cannot drift apart.
     if (const int rc = bootJournal(engine, argc, argv); rc != 0) return rc;
@@ -341,173 +319,8 @@ int main(int argc, char* argv[]) {
                   << " UTC, Monday to Friday (pre-open, open, closing auction, close)\n";
     }
 
-    // ── Replication wiring (env-driven) ──────────────────────────────
-    // The OrderEngine binary used to read these env vars only via its
-    // docker-compose.yml manifest, but no code path consumed them.
-    // Wiring them here is what closes the gap between the
-    // "TLA+-verified replication protocol" claim and the running binary.
-    std::unique_ptr<ReplicationCoordinator> coord;
-
-    const std::string role = flagOrEnv(argc, argv, "--role", "OB_NODE_ROLE");
-    if (!role.empty()) {
-        const uint32_t nodeId = static_cast<uint32_t>(
-            std::stoul(flagOrEnv(argc, argv, "--node-id", "OB_NODE_ID").empty()
-                          ? "1"
-                          : flagOrEnv(argc, argv, "--node-id", "OB_NODE_ID")));
-        const int replPort = std::stoi(
-            flagOrEnv(argc, argv, "--repl-port", "OB_REPLICATION_PORT").empty()
-                ? "9002"
-                : flagOrEnv(argc, argv, "--repl-port", "OB_REPLICATION_PORT"));
-
-        coord = std::make_unique<ReplicationCoordinator>(nodeId);
-
-        if (role == "primary") {
-            // Both hooks below MUST be registered before startAsPrimary():
-            // its accept loop is live once it returns, and a backup that
-            // connects before setOnPeerJoined is armed receives no
-            // SnapshotStart/SnapshotEnd bracket — the backup engages
-            // snapshot buffering on connect and would buffer live entries
-            // forever, never applying them. Registering the commit hook
-            // first closes the sibling window where entries committed
-            // pre-registration are never shipped to that early joiner.
-            // replicateEntry() no-ops until the role flips to Primary, so
-            // early registration is safe.
-
-            // Hook the journal's onCommit so every fsync-durable batch
-            // is shipped to the backup. The callback runs synchronously
-            // on the engine's writer thread — the coordinator's send
-            // path locks internally and writes to a non-blocking TCP
-            // socket, so the overhead is bounded.
-            if (auto* j = engine.getJournal()) {
-                ReplicationCoordinator* c = coord.get();
-                j->setOnCommit([c](const JournalEntry* entries, size_t n) {
-                    for (size_t i = 0; i < n; ++i) {
-                        c->replicateEntry(reinterpret_cast<const uint8_t*>(&entries[i]),
-                                          sizeof(JournalEntry));
-                    }
-                });
-                std::cout << "[Replication] Journal commit hook installed\n";
-            } else {
-                std::cout << "[Replication] WARNING: no journal — only heartbeats will flow.\n"
-                          << "             Set OB_JOURNAL_PATH to enable entry replication.\n";
-            }
-
-            // Snapshot-on-join: stream every currently-resting order to
-            // a backup that just connected. Closes the rolling-restart
-            // gap where pre-reconnect entries would never reach a
-            // late-joining backup. The Snapshot handler on the receive
-            // side is idempotent, so running concurrently with live
-            // replication is safe (duplicates collapse).
-            {
-                ReplicationCoordinator* c = coord.get();
-                MatchingEngine* e = &engine;
-                coord->setOnPeerJoined([c, e]() {
-                    static auto& kStreams = MetricsRegistry::instance().counter(
-                        "replication_snapshot_streams_total",
-                        "Number of times a snapshot stream was initiated to a joining peer");
-                    static auto& kSnapEntries = MetricsRegistry::instance().counter(
-                        "replication_snapshot_entries_total",
-                        "Total resting orders shipped as Snapshot entries across all streams");
-                    size_t shipped = 0;
-                    e->streamSnapshot([&](const JournalEntry& entry) {
-                        c->replicateEntry(reinterpret_cast<const uint8_t*>(&entry),
-                                          sizeof(JournalEntry));
-                        ++shipped;
-                    });
-                    kStreams.increment(1);
-                    kSnapEntries.increment(shipped);
-                    std::cout << "[Replication] Snapshot streamed " << shipped
-                              << " resting orders to joining backup\n";
-                });
-            }
-
-            if (!coord->startAsPrimary(replPort)) {
-                std::cerr << "[Replication] FATAL: failed to start as primary on port "
-                          << replPort << "\n";
-                return 1;
-            }
-            std::cout << "[Replication] Started as PRIMARY (nodeId=" << nodeId
-                      << ", port=" << replPort << ")\n";
-        } else if (role == "backup") {
-            const std::string primaryHost = flagOrEnv(argc, argv, "--primary-host",
-                                                       "OB_PRIMARY_HOST");
-            const std::string primaryPortStr = flagOrEnv(argc, argv, "--primary-port",
-                                                          "OB_PRIMARY_REPLICATION_PORT");
-            if (primaryHost.empty()) {
-                std::cerr << "[Replication] FATAL: backup role requires OB_PRIMARY_HOST\n";
-                return 1;
-            }
-            const int primaryPort = primaryPortStr.empty() ? 9002 : std::stoi(primaryPortStr);
-
-            // Backup books stay in replay mode for the duration of the
-            // backup role so applying primary-shipped entries does not
-            // emit duplicate market data or order acks to local clients.
-            // On promotion (heartbeat timeout → lease acquisition), the
-            // promotion callback below flips them back to live mode.
-            engine.setReplayModeAllBooks(true);
-
-            coord->setJournalApplyCallback([&engine](const uint8_t* data, size_t len) {
-                if (len != sizeof(JournalEntry)) {
-                    std::cerr << "[Replication] DIVERGED: malformed entry ("
-                              << len << " bytes, expected " << sizeof(JournalEntry)
-                              << ")\n";
-                    obSink().log(obEvent("replication_apply_failed", LogSeverity::Error)
-                                     .kv("reason", "malformed_entry")
-                                     .kv("bytes", (long long)len));
-                    return;
-                }
-                JournalEntry entry{};
-                std::memcpy(&entry, data, sizeof(entry));
-
-                // applyReplicatedEntry returns false when it could NOT apply —
-                // most importantly when the entry names a symbol this backup was
-                // not configured with, because start() freezes books_ (worker
-                // threads iterate it, so inserting under them would race) and a
-                // running backup therefore cannot create a book on demand.
-                //
-                // This return value was discarded. A backup that ignores it keeps
-                // looking healthy while its book silently diverges from the
-                // primary's, and finds out at promotion — which is the
-                // split-brain the whole replication path exists to prevent. It is
-                // loud now: the operator can resync or fail over deliberately
-                // rather than discovering it during an incident.
-                if (!engine.applyReplicatedEntry(entry)) {
-                    std::cerr << "[Replication] DIVERGED: could not apply entry"
-                              << " type=" << static_cast<int>(entry.entryType)
-                              << " symbol=" << entry.symbolId
-                              << " order=" << entry.orderId
-                              << " — this backup is NO LONGER a faithful copy\n";
-                    obSink().log(obEvent("replication_apply_failed", LogSeverity::Error)
-                                     .kv("entry_type", (long long)static_cast<int>(entry.entryType))
-                                     .kv("symbol", (long long)entry.symbolId)
-                                     .kv("order", (long long)entry.orderId));
-                }
-            });
-
-            coord->setPromotionCallback([&engine]() {
-                std::cout << "[Replication] PROMOTED to primary — exiting replay mode\n";
-                engine.setReplayModeAllBooks(false);
-            });
-
-            if (!coord->startAsBackup(primaryHost, primaryPort)) {
-                std::cerr << "[Replication] FATAL: failed to connect to primary at "
-                          << primaryHost << ":" << primaryPort << "\n";
-                return 1;
-            }
-            std::cout << "[Replication] Started as BACKUP (nodeId=" << nodeId
-                      << ", primary=" << primaryHost << ":" << primaryPort << ")\n";
-        } else {
-            std::cerr << "[Replication] FATAL: OB_NODE_ROLE must be 'primary' or 'backup', got '"
-                      << role << "'\n";
-            return 1;
-        }
-    } else {
-        std::cout << "[Replication] Disabled (standalone mode)\n";
-    }
-
     // ── Admin HTTP server ────────────────────────────────────────────
     AdminServer admin(engine, adminPort);
-    admin.setReplicationCoordinator(coord.get());  // null is fine — standalone
     // Loopback unless widened. The Docker image sets OB_ADMIN_BIND=0.0.0.0: a
     // published port or a k8s probe arrives on the container's interface, not
     // its loopback. A bad address makes admin.start() below refuse.
@@ -598,8 +411,6 @@ int main(int argc, char* argv[]) {
     std::cout << "    GET /metrics              — throughput & queue depth\n";
     std::cout << "    GET /otr?participantId=X  — order-to-trade ratio\n";
     std::cout << "    GET /book?symbolId=Y      — L2 order book snapshot\n";
-    std::cout << "    GET /role                 — primary | backup | standalone\n";
-    std::cout << "    GET /replication          — peer liveness, epoch, bytes\n";
     std::cout << "═══════════════════════════════════════════════════\n";
     std::cout << "Press Ctrl-C to shut down.\n\n";
 
@@ -647,7 +458,6 @@ int main(int argc, char* argv[]) {
               << ", other=" << shutdownReport.otherOrdersPersisted << ")"
               << (shutdownReport.journalEnabled ? "" : " [no journal — not durable]")
               << "\n";
-    if (coord) coord->stop();
     engine.stopAsync();
     std::cout << "[Engine] Shutdown complete.\n";
 

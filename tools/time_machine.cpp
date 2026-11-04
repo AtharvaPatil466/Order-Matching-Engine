@@ -100,25 +100,19 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Replay into a fresh engine ────────────────────────────────────────────
+    // Stop-at-timestamp gate: keep the entries up to the first one past
+    // stopTimestamp, then replay them the way a restart does (replayEntries).
+    uint64_t lastTs = 0;
+    size_t   kept   = 0;
+    while (kept < entries.size() && entries[kept].timestamp <= stopTimestamp) {
+        lastTs = entries[kept].timestamp;
+        ++kept;
+    }
+    entries.resize(kept);
+
     MatchingEngine engine;
     engine.start();
-    engine.setReplayModeAllBooks(true);  // suppress local market-data callbacks
-
-    size_t replayed     = 0;
-    uint64_t lastTs     = 0;
-
-    for (const auto& entry : entries) {
-        // Stop-at-timestamp gate: apply entries whose timestamp <= stopTimestamp.
-        if (entry.timestamp > stopTimestamp) {
-            break;
-        }
-
-        engine.applyReplicatedEntry(entry);
-        lastTs = entry.timestamp;
-        ++replayed;
-    }
-
-    engine.setReplayModeAllBooks(false);
+    const size_t replayed = engine.replayEntries(entries);
 
     // ── Summary ───────────────────────────────────────────────────────────────
     std::printf("[TimeMachine] Replayed %zu entries", replayed);

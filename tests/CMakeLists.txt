@@ -105,13 +105,6 @@ enable_assertions(EngineLifecycleTest)
 add_test(NAME EngineLifecycleTest COMMAND EngineLifecycleTest)
 set_tests_properties(EngineLifecycleTest PROPERTIES TIMEOUT 60 LABELS "project;lifecycle")
 
-# Replication apply + snapshot (H11). No GTest dependency.
-add_executable(ReplicationApplyTest ReplicationApplyTest.cpp)
-target_link_libraries(ReplicationApplyTest PRIVATE OrderMatcher)
-enable_assertions(ReplicationApplyTest)
-add_test(NAME ReplicationApplyTest COMMAND ReplicationApplyTest)
-set_tests_properties(ReplicationApplyTest PROPERTIES TIMEOUT 60 LABELS "project;replication")
-
 # Participant authentication (H7). No GTest dependency.
 add_executable(ParticipantAuthTest ParticipantAuthTest.cpp)
 target_link_libraries(ParticipantAuthTest PRIVATE OrderMatcher)

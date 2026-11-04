@@ -1235,7 +1235,7 @@ void MatchingEngine::addSymbol(SymbolId symbolId, MatchAlgorithm algo) {
     // Public entry point: take bookMutex_, then delegate the mutation. Every
     // books_/symbolIds_/ocoListeners_ mutation runs under bookMutex_ so it
     // cannot rehash the FlatHashMap (freeing the bucket array) underneath a
-    // concurrent off-hot-path reader (snapshot/checkpoint/replication apply)
+    // concurrent off-hot-path reader (snapshot/checkpoint)
     // iterating symbolIds_ or calling getOrderBook().
     std::lock_guard<std::mutex> lock(bookMutex_);
     addSymbolLocked(symbolId, algo);
@@ -2518,17 +2518,21 @@ size_t MatchingEngine::replayJournal() {
         return 0;
     }
 
+    std::vector<JournalEntry> entries;
+    {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        entries = journal_->readAll(true, true);
+    }
+    return replayEntries(entries);
+}
+
+size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId)) {
             book->setReplayMode(true);
         }
     }
 
-    std::vector<JournalEntry> entries;
-    {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        entries = journal_->readAll(true, true);
-    }
     size_t replayed = 0;
     uint64_t lastSequence = 0;
 
@@ -2654,8 +2658,7 @@ size_t MatchingEngine::replayJournal() {
 }
 
 void MatchingEngine::setReplayModeAllBooks(bool replay) {
-    // Can run on the promotion path concurrently with the replication apply
-    // thread (which adds symbols), so iterate symbolIds_ under bookMutex_.
+    // Iterate symbolIds_ under bookMutex_, like every other off-hot-path reader.
     std::lock_guard<std::mutex> lock(bookMutex_);
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId)) {
@@ -2675,9 +2678,9 @@ void MatchingEngine::rebuildPositionsLocked() {
     // after the restart also sees what is held.
     // ponytail: not atomic against a concurrent admission — an order a worker
     // admits between the zeroing and the walk of its book counts twice.
-    // replayJournal runs before the workers start; on promotion the window is
-    // this walk.
-    // Post it to the workers as a control message if that window matters.
+    // replayJournal runs before the workers start, so nothing admits during
+    // this walk there. Post it to the workers as a control message if a caller
+    // ever leaves replay mode on a running engine.
     for (auto& p : positions_) p.store(0, std::memory_order_relaxed);
     for (SymbolId symbolId : symbolIds_) {
         const OrderBook* book = getOrderBook(symbolId);
@@ -2690,226 +2693,6 @@ void MatchingEngine::rebuildPositionsLocked() {
             reservePosition(o.participantId, o.side, o.remainingQty);
         });
     }
-}
-
-void MatchingEngine::streamSnapshot(
-        const std::function<void(const JournalEntry&)>& fn) const {
-    if (!fn) return;
-    // Runs on the replication coordinator thread while workers mutate books.
-    // Hold bookMutex_ for a consistent symbolIds_/books_ view, and iterate each
-    // book under its own lock via forEachOrderLocked. Lock order: bookMutex_ ->
-    // book->bookLock_.
-    std::lock_guard<std::mutex> lock(bookMutex_);
-    for (SymbolId symbolId : symbolIds_) {
-        const auto* book = getOrderBook(symbolId);
-        if (!book) continue;
-        // The state before the orders, as the checkpoint writes it (AUCT-1).
-        if (book->getTradingState() != TradingState::Continuous) {
-            JournalEntry st{};
-            st.entryType = JournalEntry::Type::TradingStateChange;
-            st.symbolId  = symbolId;
-            st.quantity  = static_cast<Quantity>(book->getTradingState());
-            fn(st);
-        }
-        book->forEachOrderLocked([&](const Order& o) {
-            JournalEntry e{};
-            e.entryType    = JournalEntry::Type::Snapshot;
-            e.orderId      = o.id;
-            e.participantId = o.participantId;
-            e.symbolId     = symbolId;
-            e.side         = o.side;
-            e.price        = o.price;
-            // Use remainingQty so the snapshot reflects the live
-            // state (partial fills already applied), not the original
-            // submission size. Re-applying a Snapshot on backup uses
-            // this as the order's qty.
-            e.quantity     = o.remainingQty;
-            e.orderType    = o.type;
-            e.timeInForce  = o.timeInForce;
-            e.expiryTime   = o.expiryTime;
-            e.stopPrice    = o.stopPrice;
-            e.stopLimitPrice = o.stopLimitPrice;
-            e.displayQty   = o.displayQty;
-            e.pegType      = o.pegType;
-            e.pegOffset    = o.pegOffset;
-            e.trailAmount  = o.trailAmount;
-            e.minQty       = o.minQty;
-            e.hidden       = o.isHidden;
-            e.newQty       = o.isStopTriggered ? SNAPSHOT_STOP_ELECTED : 0;
-            e.newPrice     = static_cast<Price>(o.cumQty);  // see snapshotCumQty
-            fn(e);
-        });
-    }
-}
-
-bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
-    // Mirrors the per-entry dispatch in replayJournal(), but driven
-    // by network-delivered entries instead of disk replay. Backups
-    // are expected to be in replay mode (see setReplayModeAllBooks)
-    // so order updates and market data are suppressed locally — the
-    // primary is the canonical source. When the backup has its own
-    // journal enabled (the production posture), the entry is ALSO
-    // persisted to the backup's local journal so the backup retains
-    // durability of received entries across its own restarts — and
-    // so the chaos suite can observe replication progress via
-    // /journal/head on the backup.
-    // The replication receive thread mutates books_/symbolIds_ via ensureBook
-    // (addSymbol) and iterates symbolIds_ in the Cancel/Modify branches. Hold
-    // bookMutex_ across the whole apply so neither the structural mutation nor
-    // the iterations race a concurrent symbol add / off-hot-path reader. Lock
-    // order bookMutex_ -> book->bookLock_ (taken inside addOrder/cancelOrder),
-    // matching streamSnapshot/checkpoint; no path takes a book lock before
-    // bookMutex_, so there is no inversion. ensureBook uses addSymbolLocked
-    // because we already hold bookMutex_.
-    std::lock_guard<std::mutex> booksLock(bookMutex_);
-
-    auto ensureBook = [this](SymbolId sym) -> OrderBook* {
-        auto* book = getOrderBook(sym);
-        if (!book) {
-            addSymbolLocked(sym);
-            book = getOrderBook(sym);
-            if (book) book->setReplayMode(true);
-        }
-        return book;
-    };
-
-    bool applied = false;
-    Quantity replaceTotal = entry.newQty;  // CancelReplace only; re-logged below
-    switch (entry.entryType) {
-    case JournalEntry::Type::AddOrder: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        book->addOrder(entry.orderId, entry.participantId, entry.side,
-                       entry.price, entry.quantity, entry.orderType,
-                       entry.stopPrice, entry.displayQty, entry.timeInForce,
-                       entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                       entry.pegOffset, entry.trailAmount, entry.minQty,
-                       entry.hidden);
-        applied = true;
-        break;
-    }
-    case JournalEntry::Type::CancelOrder: {
-        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            book->cancelOrder(entry.orderId);
-            applied = true;
-        }
-        break;
-    }
-    case JournalEntry::Type::ModifyOrder: {
-        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            book->modifyOrder(entry.orderId, entry.newQty);
-            applied = true;
-        }
-        break;
-    }
-    case JournalEntry::Type::CancelReplace: {
-        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            replaceTotal = journaledReplaceTotal(entry,
-                                                 book->getOrder(entry.orderId)->cumQty);
-            book->cancelReplace(entry.orderId, entry.newPrice, replaceTotal);
-            applied = true;
-        }
-        break;
-    }
-    case JournalEntry::Type::TradingStateChange:
-    case JournalEntry::Type::Uncross: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        applySessionRecord(*book, entry);
-        applied = true;
-        break;
-    }
-    case JournalEntry::Type::Counters:
-        restoreCounters(entry.orderId != 0 ? ensureBook(entry.symbolId) : nullptr, entry);
-        applied = true;
-        break;
-    case JournalEntry::Type::Position: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        applyPositionRecord(*book, entry);
-        applied = true;
-        break;
-    }
-    case JournalEntry::Type::Snapshot: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        if (!book->getOrder(entry.orderId)) {
-            book->addOrder(entry.orderId, entry.participantId, entry.side,
-                           entry.price, entry.quantity, entry.orderType,
-                           entry.stopPrice, entry.displayQty, entry.timeInForce,
-                           entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                           entry.pegOffset, entry.trailAmount, entry.minQty,
-                           entry.hidden);
-            if (entry.newQty & SNAPSHOT_STOP_ELECTED)
-                book->restoreStopElection(entry.orderId, entry.stopPrice);
-            else
-                book->restoreTrailingStop(entry.orderId, entry.stopPrice);
-            book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
-            book->restoreIcebergSlice(entry.orderId, snapshotIcebergSlice(entry));
-        }
-        applied = true;
-        break;
-    }
-    }
-
-    // Persist to backup's local journal if one is configured. The
-    // backup's Journal::onCommit is NOT hooked (only the primary's
-    // is, to ship to peers), so this write does not re-replicate
-    // back to the primary — no echo loop.
-    if (applied && journal_) {
-        switch (entry.entryType) {
-        case JournalEntry::Type::AddOrder:
-            journal_->logAddOrder(entry.orderId, entry.participantId,
-                                  entry.symbolId, entry.side, entry.price,
-                                  entry.quantity, entry.orderType,
-                                  entry.timeInForce, entry.expiryTime,
-                                  entry.stopPrice, entry.stopLimitPrice,
-                                  entry.displayQty, entry.pegType,
-                                  entry.pegOffset, entry.trailAmount,
-                                  entry.minQty, entry.hidden);
-            break;
-        case JournalEntry::Type::CancelOrder:
-            journal_->logCancelOrder(entry.orderId, entry.symbolId);
-            break;
-        case JournalEntry::Type::ModifyOrder:
-            journal_->logModifyOrder(entry.orderId, entry.symbolId, entry.newQty);
-            break;
-        case JournalEntry::Type::CancelReplace:
-            // The resolved total: the local journal writes total records only.
-            journal_->logCancelReplace(entry.orderId, entry.symbolId,
-                                       entry.newPrice, replaceTotal);
-            break;
-        case JournalEntry::Type::TradingStateChange:
-            journal_->logTradingState(entry.symbolId, journaledTradingState(entry),
-                                      static_cast<uint32_t>(entry.expiryTime));
-            break;
-        case JournalEntry::Type::Uncross:
-            journal_->logUncross(entry.symbolId);
-            break;
-        case JournalEntry::Type::Counters:
-            journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity,
-                                  entry.price, entry.newPrice, entry.newQty);
-            break;
-        case JournalEntry::Type::Position:
-            journal_->logPosition(entry.symbolId, entry.participantId, entry.price,
-                                  entry.quantity, entry.newQty);
-            break;
-        case JournalEntry::Type::Snapshot:
-            journal_->logSnapshot(entry.orderId, entry.participantId,
-                                  entry.symbolId, entry.side, entry.price,
-                                  entry.quantity, entry.orderType,
-                                  entry.timeInForce, entry.expiryTime,
-                                  entry.stopPrice, entry.stopLimitPrice,
-                                  entry.displayQty, entry.pegType,
-                                  entry.pegOffset, entry.trailAmount,
-                                  entry.minQty, entry.hidden,
-                                  (entry.newQty & SNAPSHOT_STOP_ELECTED) != 0,
-                                  snapshotCumQty(entry), snapshotIcebergSlice(entry));
-            break;
-        }
-    }
-
-    return applied;
 }
 
 void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {

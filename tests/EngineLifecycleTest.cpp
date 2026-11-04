@@ -11,8 +11,8 @@
 // Not obscure corners. The expiry timer is the only thing that retires a GTD
 // order once its time passes — untested, an engine can keep matching orders
 // whose instructions expired. resumeVolatilityAuctions is how a halted symbol
-// returns to trading. setReplayModeAllBooks is what a backup toggles at
-// promotion.
+// returns to trading. setReplayModeAllBooks is what journal replay toggles
+// around a restore.
 //
 // GTDReplayTest covers journal REPLAY of expiries and GracefulShutdownTest
 // covers drain-time GTD handling; neither starts the background timer thread.
@@ -185,9 +185,9 @@ void test_ResumeVolatilityAuctionsReturnsSymbolsToTrading() {
 
 // ─── 5: replay mode toggles every book ──────────────────────────────────────
 //
-// A backup runs in replay mode so local order updates and market data are
-// suppressed — the primary is canonical — and leaves it at promotion. Getting
-// this wrong makes a backup emit market data as if it were live.
+// Journal replay runs in replay mode so restored records re-emit no order
+// updates or market data, and leaves it when the restore is done. Getting this
+// wrong makes a restart re-publish history as if it were live.
 void test_ReplayModeAppliesToAllBooks() {
     TEST(ReplayModeAppliesToAllBooks);
     MatchingEngine engine;

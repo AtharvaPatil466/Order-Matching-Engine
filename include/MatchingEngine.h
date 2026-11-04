@@ -393,8 +393,6 @@ public:
                        Journal::SyncPolicy policy = Journal::SyncPolicy::GroupCommit);
 
     // Access the underlying Journal (null if enableJournal not called).
-    // Used by the replication coordinator wiring to attach an onCommit
-    // hook that ships each committed batch to backups.
     Journal* getJournal() { return journal_.get(); }
 
     // ── C4: durable client acknowledgements ─────────────────────────────────
@@ -423,41 +421,20 @@ public:
     // value means the journal has stalled and clients are hearing nothing.
     size_t pendingDurableEvents() const { return durabilityGate_.pendingGroups(); }
 
-    // Toggle replay mode across every registered book. Backups run
-    // permanently in replay mode so that applying primary-shipped
-    // journal entries does not re-emit market data or order updates
-    // to local clients (the primary is the canonical source). Leaving
-    // replay mode (promotion; the end of replayJournal) rebuilds every
+    // Toggle replay mode across every registered book: a book in replay mode
+    // re-applies records without re-emitting market data or order updates.
+    // Leaving replay mode (the end of replayJournal) rebuilds every
     // participant's position-limit exposure from the restored books.
     void setReplayModeAllBooks(bool replay);
 
-    // Apply a single deserialized JournalEntry to the engine. Used by
-    // the replication backup path: the coordinator receives an entry
-    // over the wire and dispatches it through this method so the
-    // backup's books stay byte-identical to the primary's. Returns
-    // false if the entry references a symbol unknown to this engine
-    // (caller can decide whether to log/halt).
-    bool applyReplicatedEntry(const struct JournalEntry& entry);
-
-    // Stream a snapshot of all currently-resting orders. For each
-    // order, builds a JournalEntry of type Snapshot and invokes the
-    // callback. Used by the replication primary path to bring a
-    // newly-connected backup up to date before resuming live
-    // replication — closes the "joined-after-orders-existed" gap
-    // surfaced by the rolling-restart chaos scenario.
-    //
-    // Concurrency: takes bookMutex_, then each book's bookLock_ while
-    // iterating it. bookLock_ is a plain std::mutex (it was a shared_mutex
-    // when this note was written), so that hold is EXCLUSIVE — streaming one
-    // book blocks matching on that symbol for the length of its walk. New
-    // orders accepted during iteration may or may not appear in the stream;
-    // the Snapshot handler on the receiver side is idempotent (skips
-    // already-known orderIds), so the overlap is safe — duplicates collapse,
-    // no entries are lost.
-    void streamSnapshot(const std::function<void(const struct JournalEntry&)>& fn) const;
-
     // Replay journal to rebuild order book state (crash recovery)
     size_t replayJournal();
+
+    // The replay itself, over records already read: what replayJournal runs on
+    // this engine's journal, and TimeMachine on a prefix of a journal file.
+    // Records whose sequence does not advance are skipped. Returns how many
+    // were applied.
+    size_t replayEntries(const std::vector<JournalEntry>& entries);
 
     // Write full snapshot of all active orders to journal (checkpoint)
     void checkpoint();
@@ -612,8 +589,8 @@ private:
     void ensureDefaultSymbol();
     // Raw symbol registration. ASSUMES bookMutex_ is already held by the
     // caller. addSymbol() is the public, self-locking wrapper; internal callers
-    // that already hold bookMutex_ (e.g. applyReplicatedEntry's ensureBook) use
-    // this form to avoid re-locking the non-recursive mutex.
+    // that already hold bookMutex_ use this form to avoid re-locking the
+    // non-recursive mutex.
     void addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo = MatchAlgorithm::PriceTime);
     void workerLoop(size_t threadIndex);
     // commitJournal() once the batch's oldest entry is past the commit delay.
@@ -642,7 +619,7 @@ private:
     // engine whose lease covers it, never by the next engine on that thread.
     inline static std::atomic<uint64_t> seqOwnerTags_{0};
     const uint64_t seqOwnerTag_ = seqOwnerTags_.fetch_add(1, std::memory_order_relaxed) + 1;
-    // Apply a Counters record (replay, replication): `book` is its symbol's
+    // Apply a Counters record (replay): `book` is its symbol's
     // book, or null when the record names none.
     void restoreCounters(OrderBook* book, const JournalEntry& e);
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.

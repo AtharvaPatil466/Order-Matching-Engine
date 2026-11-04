@@ -4,14 +4,11 @@
 // A restarted publisher must NOT reset its sequence counter to 1. A
 // subscriber that last held seq N would then be re-fed a 1..N range it
 // already delivered and, worse, could interpret the venue as having
-// rewound — a false gap / broken continuity. The fix persists the
-// high-water mark on every group commit (flush / end-of-session) via a
-// durable sink (EpochStore) and reloads it on restart.
-//
-// This mirrors spec/EpochDurability.tla: persist-on-commit +
-// reload-on-restart, with the persisted value strictly monotonic
-// (never regresses on disk), so "resume above the last committed
-// sequence" holds across crashes.
+// rewound — a false gap / broken continuity. The publisher hands the
+// high-water mark to a persistence hook on every group commit (flush /
+// end-of-session), strictly monotonic, and a restart resumes from what the
+// hook last stored. `Store` below stands in for the caller's durable sink:
+// what is under test is the hook contract, not a file format.
 //
 // Coverage:
 //   1. Each flush persists the next-to-publish high-water durably.
@@ -24,8 +21,6 @@
 //      demonstrating the false-continuity the persistence prevents.
 //   5. The persisted value is monotonic across further commits.
 
-#include "EpochStore.h"
-#include "TempPath.h"
 #include "MoldUDP64.h"
 
 #include <cassert>
@@ -33,7 +28,6 @@
 #include <cstdio>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 using namespace OrderMatcher;
@@ -60,9 +54,13 @@ static int tests_failed = 0;
         }                                                                 \
     } while (0)
 
-static std::string tmpPath() {
-    return uniqueTempPath("mold_seq_persist.bin");
-}
+// What a durable sink keeps across the "crash": the last value stored, 0 for
+// a node that never stored one.
+struct Store {
+    uint64_t value = 0;
+    void store(uint64_t v) { value = v; }
+    uint64_t load() const { return value; }
+};
 
 // Header sequence number of a captured MoldUDP64 packet.
 static uint64_t headerSeq(const std::vector<uint8_t>& pkt) {
@@ -73,9 +71,7 @@ static uint64_t headerSeq(const std::vector<uint8_t>& pkt) {
 
 void test_SequenceResumesAcrossRestart() {
     TEST(SequenceResumesAcrossRestart) {
-        const std::string path = tmpPath();
-        std::remove(path.c_str());
-        EpochStore store(path);
+        Store store;
 
         std::vector<std::vector<uint8_t>> allPackets;
         auto capture = [&](std::string_view b) {
@@ -129,8 +125,6 @@ void test_SequenceResumesAcrossRestart() {
         CHECK(sub.gapsObserved() == 0
               && "contiguous 1..5 across the restart → zero false gaps");
         CHECK(sub.nextExpectedSequence() == 6);
-
-        std::remove(path.c_str());
     } END
 }
 
@@ -140,7 +134,7 @@ void test_BrokenRestartRewindsAndStalls() {
         // persisted counter restarts at seq 1. A subscriber already at
         // seq 4 treats the rewound 1..3 as stale duplicates (seq < front)
         // and never advances — the feed appears frozen. Non-vacuity
-        // control for the fix above (cf. EpochDurabilityBroken.cfg).
+        // control for the fix above.
         std::vector<std::vector<uint8_t>> pre, post;
 
         {
@@ -180,9 +174,7 @@ void test_BrokenRestartRewindsAndStalls() {
 
 void test_PersistedHighWaterIsMonotonic() {
     TEST(PersistedHighWaterIsMonotonic) {
-        const std::string path = tmpPath();
-        std::remove(path.c_str());
-        EpochStore store(path);
+        Store store;
 
         uint64_t last = 0;
         bool monotonic = true;
@@ -200,8 +192,6 @@ void test_PersistedHighWaterIsMonotonic() {
         CHECK(monotonic && "persisted high-water must never regress");
         CHECK(store.load() == 33);   // 32 msgs from seq 1 → next-to-publish 33
         CHECK(last == 33);
-
-        std::remove(path.c_str());
     } END
 }
 

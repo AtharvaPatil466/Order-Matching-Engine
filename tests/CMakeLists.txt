@@ -1414,14 +1414,6 @@ add_test(NAME ComplianceTest COMMAND ComplianceTest)
 set_tests_properties(ComplianceTest PROPERTIES TIMEOUT 30
                      LABELS "project;compliance;integration")
 
-# Durable lease-epoch persistence
-add_executable(EpochStoreTest TestEpochStore.cpp)
-target_link_libraries(EpochStoreTest PRIVATE OrderMatcher)
-enable_assertions(EpochStoreTest)
-add_test(NAME EpochStoreTest COMMAND EpochStoreTest)
-set_tests_properties(EpochStoreTest PROPERTIES TIMEOUT 30
-                     LABELS "project;ha;durability")
-
 # FIX session-layer sequence / recovery / heartbeat state machine
 add_executable(FixSessionStateTest TestFixSessionState.cpp)
 target_link_libraries(FixSessionStateTest PRIVATE OrderMatcher)

@@ -216,7 +216,6 @@ add_library(OrderMatcher
     src/SessionScheduler.cpp
     src/ContingencyManager.cpp
     src/HierarchicalRiskManager.cpp
-    src/EpochStore.cpp
     src/TcpGateway.cpp
     src/FaultInjector.cpp
     src/DpdkGateway.cpp

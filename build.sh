@@ -117,12 +117,6 @@ $CXX $FLAGS tests/ItchRetransmissionTest.cpp $LIB_OBJS -o bin/ItchRetransmission
 echo "Compiling ITCH market-data feed integration tests..."
 $CXX $FLAGS tests/ItchMarketDataFeedTest.cpp $LIB_OBJS -o bin/ItchMarketDataFeedTest
 
-echo "Compiling SBE protocol tests..."
-$CXX $FLAGS tests/SbeProtocolTest.cpp $LIB_OBJS -o bin/SbeProtocolTest
-
-echo "Compiling SBE session tests..."
-$CXX $FLAGS tests/SbeSessionTest.cpp $LIB_OBJS -o bin/SbeSessionTest
-
 echo "Build successful!"
 echo "To run Engine:           ./bin/OrderEngine"
 echo "To run Gateway:          ./bin/GatewayServer [port]"
@@ -143,6 +137,4 @@ echo "To run Mold Tests:       ./bin/MoldUDP64Test"
 echo "To run ITCH UDP Tests:   ./bin/ItchUdpTransportTest"
 echo "To run Retransmit Tests: ./bin/ItchRetransmissionTest"
 echo "To run MD Feed Tests:    ./bin/ItchMarketDataFeedTest"
-echo "To run SBE Tests:        ./bin/SbeProtocolTest"
-echo "To run SBE Sess Tests:   ./bin/SbeSessionTest"
 echo "To run Codec Bench:      ./bin/BinaryCodecBenchmark"

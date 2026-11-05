@@ -55,8 +55,7 @@ enum class OrderStatus : uint8_t {
     //
     // Placed here rather than appended because OrderStatus — unlike
     // RejectReason — is never cast to an integer, serialized, journalled, or
-    // put on the wire (SBE carries its own SBE_ORDER_ACK_STATUS_* codes), so
-    // renumbering is not observable. Verified repo-wide before moving it.
+    // put on the wire, so renumbering is not observable. Verified repo-wide before moving it.
     CancelledBySTP,
     Rejected
 };
@@ -140,9 +139,8 @@ enum class RejectReason : uint8_t {
     PoolCapacityExceeded,
 
     // Iceberg submitted with displayQty == 0. Appended rather than filed next
-    // to InvalidQuantity on purpose: the raw uint8_t goes on the wire (SBE
-    // field 9, GatewayProtocol.h ExecutionReport.rejectReason), so inserting
-    // mid-enum would silently renumber every later reason for live clients and
+    // to InvalidQuantity on purpose: the raw uint8_t goes on the wire
+    // (GatewayResponse.rejectReason), so inserting mid-enum would silently renumber every later reason for live clients and
     // for any recorded capture. New reasons go at the end, always.
     InvalidDisplayQty,
 
@@ -154,7 +152,7 @@ enum class RejectReason : uint8_t {
     NotOrderOwner,
 
     // A field is present on the wire but carries a value the schema does not
-    // define — an SBE side byte of 7, an orderType of 99. Distinct from
+    // define — a side byte of 7, an orderType of 99. Distinct from
     // MissingRequiredField, which is for a field that is not there at all:
     // telling a client "missing required field" about a field they did send
     // points them at the wrong half of their encoder.

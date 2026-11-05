@@ -1210,22 +1210,6 @@ add_test(NAME StpOccupancyTest COMMAND StpOccupancyTest)
 set_tests_properties(StpOccupancyTest PROPERTIES TIMEOUT 30
                      LABELS "project;matching;stp")
 
-# SBE — schema-driven binary protocol with forward-compat versioning
-add_executable(SbeProtocolTest SbeProtocolTest.cpp)
-target_link_libraries(SbeProtocolTest PRIVATE OrderMatcher)
-enable_assertions(SbeProtocolTest)
-add_test(NAME SbeProtocolTest COMMAND SbeProtocolTest)
-set_tests_properties(SbeProtocolTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol")
-
-# SBE session: schema-driven NewOrder → engine + OrderAck reply
-add_executable(SbeSessionTest SbeSessionTest.cpp)
-target_link_libraries(SbeSessionTest PRIVATE OrderMatcher)
-enable_assertions(SbeSessionTest)
-add_test(NAME SbeSessionTest COMMAND SbeSessionTest)
-set_tests_properties(SbeSessionTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;integration")
-
 # GTD virtual clock deterministic replay tests
 # Graceful shutdown with state persistence (P3-6): GTD/GTC persist + restore,
 # DAY cancelled at session end, in-flight IOC/partial-fill drained.

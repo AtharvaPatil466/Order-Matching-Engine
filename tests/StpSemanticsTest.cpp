@@ -600,9 +600,9 @@ TEST(StpUncross, OtherParticipantsStillCrossNormally) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Step 4 — outbound protocol mapping for CancelledBySTP.
 //
-// Survey result: ITCH is the ONLY protocol that consumes OrderStatus.
-// SbeSession and the gateway carry accept/reject at
-// entry time and no order-status stream. So no order-entry client currently
+// Survey result: ITCH is the ONLY protocol that consumes OrderStatus. The
+// gateway carries accept/reject at entry time and no order-status stream. So no
+// order-entry client currently
 // learns about ANY engine-initiated cancellation — STP, kill switch, expiry or
 // OCO. These tests pin the encoder-side mapping so it is correct when the
 // lifecycle is wired, and close the ITCH gap that already exists in production.

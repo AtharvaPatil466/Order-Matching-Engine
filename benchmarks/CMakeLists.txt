@@ -18,7 +18,7 @@ target_link_libraries(HonestBenchmark PRIVATE OrderMatcher)
 add_executable(MemoryProbe MemoryProbe.cpp)
 target_link_libraries(MemoryProbe PRIVATE OrderMatcher)
 
-# Binary-codec microbenchmark — ITCH / SBE encode rates
+# Binary-codec microbenchmark — ITCH encode rate
 add_executable(BinaryCodecBenchmark BinaryCodecBenchmark.cpp)
 target_link_libraries(BinaryCodecBenchmark PRIVATE OrderMatcher)
 

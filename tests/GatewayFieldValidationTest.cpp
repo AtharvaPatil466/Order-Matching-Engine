@@ -5,8 +5,7 @@
 // side byte of 2 entered the book as a SELL and traded, an orderType one past
 // the last enumerator rested, and a `hidden` byte of 2 was loaded as a bool —
 // undefined behaviour (UBSan: "load of value 2 ... not a valid value for type
-// 'bool'"). The SBE path already rejects these with InvalidFieldValue; this is
-// the native gateway, the only order-entry protocol a shipped binary exposes.
+// 'bool'"). This is the native gateway, the only order-entry protocol.
 
 #include "GatewayTestClient.h"
 

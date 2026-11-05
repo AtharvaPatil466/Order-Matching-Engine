@@ -50,26 +50,26 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 | README.md:17 | 3.10M_ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
 | README.md:18 | 1ns/op | ARM-M3 | pending `codec.txt` (x86 counterpart) |
 | README.md:50 | 24 bytes | CODE | the code |
-| README.md:51 | 1s · 15s | PARAM | n/a: not a measurement |
-| README.md:56 | 1472 bytes | PARAM | n/a: not a measurement |
-| README.md:107 | 125 ns | WITHDRAWN | none |
-| README.md:117 | 237 ns · 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:118 | 208 ns · 709 ns · 3.4× | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| README.md:121 | 208 ns · 237 ns | ARM-M3, X86-D2E688C | pending `realistic-flow.txt` (x86 counterpart) |
-| README.md:123 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| README.md:132 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| README.md:133 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| README.md:134 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| README.md:137 | ~125 ns | WITHDRAWN | none |
-| README.md:139 | 3,568 ns · ~167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| README.md:141 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:150 | 5M ops/s | UNRECORDED | pending `stress.txt` |
-| README.md:158 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:159 | 49B · 10.2 · 98.5 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:160 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:161 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:162 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:164 | 110× | ARITH | pending `codec.txt` (x86 counterpart) |
+| README.md:50 | 1s · 15s | PARAM | n/a: not a measurement |
+| README.md:55 | 1472 bytes | PARAM | n/a: not a measurement |
+| README.md:106 | 125 ns | WITHDRAWN | none |
+| README.md:116 | 237 ns · 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:117 | 208 ns · 709 ns · 3.4× | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| README.md:120 | 208 ns · 237 ns | ARM-M3, X86-D2E688C | pending `realistic-flow.txt` (x86 counterpart) |
+| README.md:122 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| README.md:131 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| README.md:132 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| README.md:133 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| README.md:136 | ~125 ns | WITHDRAWN | none |
+| README.md:138 | 3,568 ns · ~167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| README.md:140 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:149 | 5M ops/s | UNRECORDED | pending `stress.txt` |
+| README.md:157 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:158 | 49B · 10.2 · 98.5 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:159 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:160 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:161 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:163 | 110× | ARITH | pending `codec.txt` (x86 counterpart) |
 
 ### BENCHMARKS.md
 

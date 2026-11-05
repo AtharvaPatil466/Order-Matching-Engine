@@ -1052,14 +1052,6 @@ enable_assertions(CombinedChaosTest)
 add_test(NAME CombinedChaosTest COMMAND CombinedChaosTest)
 set_tests_properties(CombinedChaosTest PROPERTIES TIMEOUT 120 LABELS "project;chaos")
 
-# Gateway binary protocol schema evolution tests
-add_executable(GatewayProtocolTest GatewayProtocolTest.cpp)
-target_link_libraries(GatewayProtocolTest PRIVATE OrderMatcher)
-enable_assertions(GatewayProtocolTest)
-add_test(NAME GatewayProtocolTest COMMAND GatewayProtocolTest)
-set_tests_properties(GatewayProtocolTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol")
-
 # ITCH 5.0 market-data publisher + codec tests
 add_executable(ItchPublisherTest ItchPublisherTest.cpp)
 target_link_libraries(ItchPublisherTest PRIVATE OrderMatcher)

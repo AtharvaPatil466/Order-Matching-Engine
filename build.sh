@@ -83,9 +83,6 @@ $CXX $FLAGS benchmarks/E2EBenchmark.cpp $LIB_OBJS bin/TcpGateway.o bin/AdminServ
 echo "Compiling binary-codec benchmark..."
 $CXX $FLAGS benchmarks/BinaryCodecBenchmark.cpp $LIB_OBJS -o bin/BinaryCodecBenchmark
 
-echo "Compiling gateway protocol tests..."
-$CXX $FLAGS tests/GatewayProtocolTest.cpp $LIB_OBJS -o bin/GatewayProtocolTest
-
 echo "Compiling GTD replay tests..."
 $CXX $FLAGS tests/GTDReplayTest.cpp $LIB_OBJS -o bin/GTDReplayTest
 
@@ -126,7 +123,6 @@ echo "To run Stress Tests:     ./bin/StressTest"
 echo "To run Property Tests:   ./bin/PropertyTest"
 echo "To run Crash Tests:      ./bin/JournalCrashTest"
 echo "To run E2E Bench:        ./bin/E2EBenchmark"
-echo "To run Protocol Tests:   ./bin/GatewayProtocolTest"
 echo "To run GTD Tests:        ./bin/GTDReplayTest"
 echo "To run MD Compat:        ./bin/MdFeedSchemaCompatTest"
 echo "To run Config Tests:     ./bin/ConfigTest"

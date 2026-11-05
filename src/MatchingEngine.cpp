@@ -53,7 +53,7 @@ inline void cpuRelax() {
 
 // Sequence ids for SubmitResult. They must be UNIQUE and must INCREASE for a
 // given caller; nothing consumes a dense global order — the gateway echoes the
-// id straight back to the client (GatewayProtocol.h:234) and AdminServer prints
+// id straight back to the client (GatewayResponse.sequenceId) and AdminServer prints
 // it. This used to be one engine-wide fetch_add on the submit path, contended
 // by every producer on every order.
 //

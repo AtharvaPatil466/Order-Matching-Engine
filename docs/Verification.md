@@ -1,11 +1,10 @@
 # TLA+ Verification Report
 
 > **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,796,145 states generated, 2,726,157 distinct, depth 14, complete · each of the seven `MatchingEngineBroken*.cfg` variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`) <!-- claim:tla-matching-engine -->
-> **Replication.tla** (lease-propagation model): **VACUOUS** — zero violations at both cfgs, but in both the backup can never promote, so `NoSplitBrain` and `NoCommittedLoss` hold trivially. `TickDegraded` stops advancing the timers once `heartbeatTimer` reaches `HeartbeatTimeout + 1`, the two timers are always equal, and `BackupPromote` needs `leaseTimer > LeaseTimeout`, which is larger (2 vs 5; 3 vs 7). The bug-injected variant (lease check stripped) is the only configuration in which promotion is reachable, and there it splits the brain — the spec has no primary step-down. No `ReplicationBroken` cfg is committed, and CI does not run this spec.
 
 > **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22 <!-- claim:tla-auction -->
 
-> **New specs (2026-05-28)**: EpochDurability.tla · FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
+> **New specs (2026-05-28)**: FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
 
 ## MatchingEngine.tla
 
@@ -186,41 +185,6 @@ without its uncross. Now `Halted` resumes only to the state it was halted
 from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 `AuctionBrokenHalt.cfg` puts the detour back and must fail it.
 
-## Replication.tla — Lease-Propagation Model
-
-Updated after the live chaos suite (`deploy/chaos/`) caught a split-brain bug under packet loss that the original spec didn't catch. The original spec had a "god-mode" `~primaryAlive` guard on `BackupPromote`, which let the invariants hold vacuously — TLC never had to reason about the case where the primary is alive but unreachable.
-
-The current spec drops the god-mode guard and replaces it with the actual protocol mechanism:
-
-- Primary broadcasts a `LeaseGrant` on every heartbeat tick (modeled as `TickHealthy` resetting both the heartbeat timer and the lease timer).
-- A network partition or primary crash advances both timers (`TickDegraded`).
-- `BackupPromote` requires `heartbeatTimer > HeartbeatTimeout` AND `leaseTimer > LeaseTimeout` — the second clause is the fence.
-
-### Default cfg (`spec/Replication.cfg`)
-
-```
-MaxEntries       = 6
-HeartbeatTimeout = 2
-LeaseTimeout     = 5
-INVARIANTS NoCommittedLoss NoDuplicateExecution NoSplitBrain
-```
-
-Result: **1373 states generated, 448 distinct, 0 violations**.
-
-### Strengthened cfg
-
-```
-MaxEntries       = 10
-HeartbeatTimeout = 3
-LeaseTimeout     = 7
-```
-
-Result: **4192 states generated, 1320 distinct, 0 violations**.
-
-### Bug-injected sanity check
-
-Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating the pre-fix protocol) causes TLC to terminate immediately with `Invariant NoSplitBrain is violated` at 188 distinct states. That does **not** show the real result is genuine: with the line in place `BackupPromote` is unreachable under both cfgs (see the header), so the pass is vacuous. The variant is a hand edit; no cfg for it is committed.
-
 ## Spec Files
 
 | File | Purpose |
@@ -228,15 +192,11 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 | `spec/MatchingEngine.tla` | Continuous price-time matching with STP, Modify and Replace (section above) |
 | `spec/MatchingEngine.cfg` | The bounds CI checks (MaxOrders=3, MaxReplaces=1) |
 | `spec/MatchingEngineBroken*.cfg` | Seven non-vacuity variants, one injected bug each; CI requires each to fail on its property |
-| `spec/Replication.tla` | Primary-backup replication spec with lease propagation (passes vacuously — promotion unreachable) |
-| `spec/Replication.cfg` | TLC configuration for Replication |
 | `spec/MpscQueue.tla` | MPSC ring: no item invented or duplicated, per-producer FIFO, every item eventually consumed |
 | `spec/EngineConsumer.tla` | Worker loop: no item invented or duplicated, every item eventually consumed |
 | `spec/Snapshot.tla` / `spec/SnapshotLocked.tla` | Torn-snapshot prevention |
 | `spec/Auction.tla` | Session state machine through the enforced transition table, order admission per state, uncross (section above) |
 | `spec/Auction.cfg`, `spec/AuctionBroken*.cfg` | The bounds CI checks; four broken variants CI requires to fail |
-| `spec/EpochDurability.tla` | Epoch-store durability under crash |
-| `spec/EpochDurability.cfg` / `spec/EpochDurabilityBroken.cfg` | Config + broken variant |
 | `spec/FixSession.tla` | FIX inbound sequence recovery: messages delivered strictly in order (no logon or heartbeat is modelled) |
 | `spec/FixSession.cfg` / `spec/FixSessionBroken.cfg` | Config + broken variant |
 | `spec/Oco.tla` | OCO (one-cancels-other) atomicity — cancel sibling on fill |
@@ -246,11 +206,10 @@ Removing the `leaseTimer > LeaseTimeout` line from `BackupPromote` (simulating t
 
 ## New Specs (2026-05-28)
 
-Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. (`Replication.tla` has no such cfg and its pass is vacuous; see the header.) The bounds are small: the correct cfgs reach 4 (FixSession), 8 (EpochDurability, Risk) and 198 (Oco) distinct states. <!-- claim:tla-small-specs -->
+Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. The bounds are small: the correct cfgs reach 4 (FixSession), 8 (Risk) and 198 (Oco) distinct states. <!-- claim:tla-small-specs -->
 
 | Spec | Property Verified | Broken Variant |
 |------|------------------|----------------|
-| `EpochDurability.tla` | Committed epoch entries survive crash; no epoch can be observed in a state it never transitioned to | Removing durability write fence → TLC finds a stale-read violation |
 | `FixSession.tla` | The receiver delivers messages strictly in `MsgSeqNum` order: a gap is held, not delivered (sending the ResendRequest is not modelled) | `BROKEN_NO_GAP_DETECT` (deliver past a gap) → `DeliveredInOrder` violated |
 | `Oco.tla` | When one leg of an OCO pair fills, the sibling is cancelled before any further fills; no double-fill | Removing sibling-cancel action → TLC finds a double-fill state |
 | `Risk.tla` | Neither tier is breached: `FirmWithinCap`, `TradersWithinCap`, `FirmIsSumOfTraders` — two tiers (Firm over Traders), not four | `BROKEN_NO_FIRM_AGG` (drop the firm-aggregate check) → `FirmWithinCap` violated |
@@ -264,9 +223,6 @@ cd spec/
 # Each broken variant must fail with its property's counterexample, e.g.
 # "Action property PricePriority is violated":
 ./check.sh MatchingEngine MatchingEngineBrokenPrice.cfg
-
-# Replication lease-propagation verification (seconds):
-./check.sh Replication
 ```
 
-Expected output for the correct cfgs: `Model checking completed. No error has been found.` For Replication that output is the vacuous pass described above.
+Expected output for the correct cfgs: `Model checking completed. No error has been found.`

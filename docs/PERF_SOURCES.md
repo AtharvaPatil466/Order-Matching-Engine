@@ -29,12 +29,11 @@ is not scanned either: its four ms/µs figures are simulation-model parameters
 | `ARM-M3` | Runs on the Apple M3 Pro dev machine, `-O3 -march=native`, on a non-isolated box | none | No. No log; a ~42 ns clock tick |
 | `AWS-WIRE` | Two-host `WireLatencySender`/`Receiver` run on two c6in.metal | none | Only with two hosts (`scripts/wire_latency_aws.sh`) |
 | `X86-CI-JOURNAL` | fdatasync ~438 µs (`include/Journal.h`) and 165–190k appends/s from the x86 CI journal-contention run | none | Yes, by dispatching journal-contention.yml; no artifact kept |
-| `CHAOS` | Timings printed by the deploy/chaos scenarios | none | Yes, by dispatching chaos.yml; no artifact kept |
 | `UNRECORDED` | A measurement or observation whose machine, commit and run are not recorded | none | **No reproducible source** |
 | `ESTIMATE` | A planning figure or rule of thumb that no benchmark produces | none | **No reproducible source** |
 | `WITHDRAWN` | Kept only so a withdrawal has something to point at; the doc says not to cite it | none | No |
 | `CODE` | A property of the source: a `static_assert`ed size, a compiled-in constant | the code | Yes |
-| `PARAM` | A configured value or workload parameter (lease, heartbeat, offered rate, buffer size), not a measurement | n/a | n/a |
+| `PARAM` | A configured value or workload parameter (offered rate, buffer size), not a measurement | n/a | n/a |
 | `ARITH` | Arithmetic on other numbers in the same doc (a ratio, a sum, a cycle count) | n/a | Follows its inputs |
 | `NOT-PERF` | A number with a unit that is not engine performance (TLC wall time, a research-result interval) | n/a | n/a |
 
@@ -47,39 +46,30 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 
 | Where | Numbers | Source | Raw artifact |
 |---|---|---|---|
-| README.md:17 | 237ns | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:18 | 3.10M_ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:19 | 1ns/op | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:25,88,445,486 | 5 s | PARAM | n/a: not a measurement |
-| README.md:52 | 24 bytes | CODE | the code |
-| README.md:53 | 1s · 15s | PARAM | n/a: not a measurement |
-| README.md:58 | 1472 bytes | PARAM | n/a: not a measurement |
-| README.md:104 | 5 s · ~2 s | PARAM | n/a: not a measurement |
-| README.md:114 | 125 ns | WITHDRAWN | none |
-| README.md:124 | 237 ns · 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:125 | 208 ns · 709 ns · 3.4× | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| README.md:128 | 208 ns · 237 ns | ARM-M3, X86-D2E688C | pending `realistic-flow.txt` (x86 counterpart) |
-| README.md:130 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| README.md:139 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| README.md:140 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| README.md:141 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| README.md:144 | ~125 ns | WITHDRAWN | none |
-| README.md:146 | 3,568 ns · ~167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| README.md:148 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
-| README.md:157 | 5M ops/s | UNRECORDED | pending `stress.txt` |
-| README.md:165 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:166 | 49B · 10.2 · 98.5 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:167 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:168 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:169 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| README.md:171 | 110× | ARITH | pending `codec.txt` (x86 counterpart) |
-| README.md:431 | ~400 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:432 | ~500 ms · ~3 ms · ~110 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:434 | 30s · 4s | PARAM, CHAOS | chaos.yml, not bench-x86 |
-| README.md:436 | 200 ms · 3s | PARAM | n/a: not a measurement |
-| README.md:437 | ~3 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:440 | ~415 ms · ~2 ms | CHAOS | chaos.yml, not bench-x86 |
-| README.md:446 | 2 s | PARAM | n/a: not a measurement |
+| README.md:16 | 237ns | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:17 | 3.10M_ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:18 | 1ns/op | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:50 | 24 bytes | CODE | the code |
+| README.md:51 | 1s · 15s | PARAM | n/a: not a measurement |
+| README.md:56 | 1472 bytes | PARAM | n/a: not a measurement |
+| README.md:107 | 125 ns | WITHDRAWN | none |
+| README.md:117 | 237 ns · 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:118 | 208 ns · 709 ns · 3.4× | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| README.md:121 | 208 ns · 237 ns | ARM-M3, X86-D2E688C | pending `realistic-flow.txt` (x86 counterpart) |
+| README.md:123 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| README.md:132 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| README.md:133 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| README.md:134 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| README.md:137 | ~125 ns | WITHDRAWN | none |
+| README.md:139 | 3,568 ns · ~167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| README.md:141 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
+| README.md:150 | 5M ops/s | UNRECORDED | pending `stress.txt` |
+| README.md:158 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:159 | 49B · 10.2 · 98.5 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:160 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:161 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:162 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| README.md:164 | 110× | ARITH | pending `codec.txt` (x86 counterpart) |
 
 ### BENCHMARKS.md
 
@@ -241,87 +231,84 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 | Where | Numbers | Source | Raw artifact |
 |---|---|---|---|
 | Project_Overview.md:5 | 237 ns · 125 ns | X86-D2E688C, WITHDRAWN | pending `honest-pgo-*.txt` |
-| Project_Overview.md:99,350,703 | 165–190k appends/s | X86-CI-JOURNAL | journal-contention.yml, not bench-x86; `env.txt` records an O_DSYNC probe |
+| Project_Overview.md:99,342,693 | 165–190k appends/s | X86-CI-JOURNAL | journal-contention.yml, not bench-x86; `env.txt` records an O_DSYNC probe |
 | Project_Overview.md:106 | ~1 ns/op | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:119,691 | 48.2 µs · 55.3 µs · 24.1 µs | AWS-WIRE | scripts/wire_latency_aws.sh on two hosts, not bench-x86 |
+| Project_Overview.md:119,681 | 48.2 µs · 55.3 µs · 24.1 µs | AWS-WIRE | scripts/wire_latency_aws.sh on two hosts, not bench-x86 |
 | Project_Overview.md:190 | 35× | NOT-PERF | n/a: not a measurement |
-| Project_Overview.md:215 | 30s | PARAM | n/a: not a measurement |
-| Project_Overview.md:216 | ~3 ms · 500ms · 30s | CHAOS, PARAM | chaos.yml, not bench-x86 |
-| Project_Overview.md:291,388,526,571 | 41 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| Project_Overview.md:292,297,424,425 | 42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| Project_Overview.md:296 | ~41.67 ns · 208 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| Project_Overview.md:321 | ~0.34 ns · 120× | ARITH | n/a: not a measurement |
-| Project_Overview.md:322 | 41.67 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| Project_Overview.md:335 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| Project_Overview.md:336 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| Project_Overview.md:337 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| Project_Overview.md:349 | 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| Project_Overview.md:358 | 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| Project_Overview.md:361 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
-| Project_Overview.md:365 | 12,638 instructions | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
-| Project_Overview.md:376 | 12,638 instructions · ~9,430 cycles | ARITH | none |
-| Project_Overview.md:377 | ~3.25 µs · 261 ns | ARITH | none |
-| Project_Overview.md:394 | 250 ns · 542 ns · 1,166 ns · 1,709 ns · 91,917 ns · 2.76M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| Project_Overview.md:395 | 250 ns · 500 ns · 791 ns · 1,208 ns · 43,292 ns · 2.95M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| Project_Overview.md:396 | 1,750 ns · 4,096 ns · 1,761,280 ns · 3,899,392 ns · 10,773,458 ns · 24,603 ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| Project_Overview.md:400,529 | 250 ns | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| Project_Overview.md:402,572 | 8 ns | ARITH | pending `honest-native-*.txt` |
-| Project_Overview.md:404 | 615 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| Project_Overview.md:406 | ~125 ns | WITHDRAWN | none |
-| Project_Overview.md:418 | 42 ns · 375 ns · 667 ns · 792 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:419 | 208 ns · 583 ns · 708 ns · 1,416 ns · 8,583 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:420 | 208 ns · 375 ns · 791 ns · 1,792 ns · 4,792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:421 | 292 ns · 667 ns · 1,125 ns · 1,750 ns · 2,625 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:422 | 208 ns · 458 ns · 709 ns · 1,250 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:431 | 208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:436 | 174 ns · 135 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:440 | 18 µs | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:441 | 792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| Project_Overview.md:475 | 100K/s · 1,166 ns · 1,250 ns · 4,192 ns · 5,280 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:476 | 500K/s · 834 ns · 1,000 ns · 2,334 ns · 5,536 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:477 | 1M/s · 750 ns · 1,000 ns · 1,958 ns · 6,016 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:478,502 | 2M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:479,501,573 | 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:480 | 4M/s · 583 ns · 27,136 ns · 1,458 ns · 56,576 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:481 | 6M/s · 500 ns · 16,777,216 ns · 1,333 ns · 17,039,360 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:485,488,490 | 1M/s | PARAM | n/a: not a measurement |
-| Project_Overview.md:487 | 1.26× · 100K/s · 2.37× · 500K/s · 3.07× | ARITH | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:491 | 834 ns · 1,208 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:494 | 6M/s · 500 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:495 | 16.8 ms | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:498 | 8.5 ms | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:503 | 2.6 ms · 10.4 ms · 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:509 | 1M/s · 4M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| Project_Overview.md:516 | 64 MB | PARAM | n/a: not a measurement |
-| Project_Overview.md:521 | 250 ns · 500 ns · 958 ns · 4,832 ns · 36,542 ns · 302 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
-| Project_Overview.md:522 | 2,625 ns · 7,648 ns · 12,416 ns · 34,560 ns · 3,531,875 ns · 3,855 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
-| Project_Overview.md:523 | 2,375 ns · 7,148 ns · 11,458 ns · 29,728 ns | ARITH | pending `cold-cache.txt` (x86 counterpart) |
-| Project_Overview.md:525 | 10× | ARITH | pending `cold-cache.txt` (x86 counterpart) |
-| Project_Overview.md:538 | 30.2 s · 999,987 orders/sec | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| Project_Overview.md:539 | 843,520 KB · 1,186,016 KB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| Project_Overview.md:551,711 | ~780 ms · ~48 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| Project_Overview.md:554 | 1,073,741,824 ns | ARITH | n/a: not a measurement |
-| Project_Overview.md:559 | 500K/s · 1M/s | PARAM | n/a: not a measurement |
-| Project_Overview.md:560 | 999,987/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| Project_Overview.md:584,601 | 261 ns | X86-D2E688C | pending `honest-native-*.txt` |
-| Project_Overview.md:586 | 0 ns · 10 ns · 62 ns · 261 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
-| Project_Overview.md:599 | 10 ns · 62 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
-| Project_Overview.md:608 | ~80–100 | WITHDRAWN | none |
-| Project_Overview.md:609 | ~60–80 · 10 ns · 62 ns | WITHDRAWN, X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
-| Project_Overview.md:610 | ~50–60 | WITHDRAWN | none |
-| Project_Overview.md:611 | ~30–40 | WITHDRAWN | none |
-| Project_Overview.md:613 | 0 ns · 10 ns · 62 ns · 3,568 ns · 237 ns · ~3.6 µs | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
-| Project_Overview.md:619 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:620 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:621 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:622 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:624 | 0.5 ns | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:632 | ~325 cycles · 49 bytes | UNRECORDED | pending `codec.txt` (x86 counterpart) |
-| Project_Overview.md:686 | 261 ns · 0 ns · 10 ns | X86-D2E688C | pending `honest-native-*.txt` |
-| Project_Overview.md:687 | 3,568 ns · 167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| Project_Overview.md:708 | 80 ms · 100k msg/s | ARITH | n/a: not a measurement |
-| Project_Overview.md:710 | 1 ms | PARAM | n/a: not a measurement |
-| Project_Overview.md:713 | 1M/s · 999,987/s | PARAM, ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| Project_Overview.md:283,380,518,563 | 41 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| Project_Overview.md:284,289,416,417 | 42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| Project_Overview.md:288 | ~41.67 ns · 208 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| Project_Overview.md:313 | ~0.34 ns · 120× | ARITH | n/a: not a measurement |
+| Project_Overview.md:314 | 41.67 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| Project_Overview.md:327 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| Project_Overview.md:328 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| Project_Overview.md:329 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| Project_Overview.md:341 | 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| Project_Overview.md:350 | 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| Project_Overview.md:353 | 237 ns · 910 ns · 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
+| Project_Overview.md:357 | 12,638 instructions | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
+| Project_Overview.md:368 | 12,638 instructions · ~9,430 cycles | ARITH | none |
+| Project_Overview.md:369 | ~3.25 µs · 261 ns | ARITH | none |
+| Project_Overview.md:386 | 250 ns · 542 ns · 1,166 ns · 1,709 ns · 91,917 ns · 2.76M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| Project_Overview.md:387 | 250 ns · 500 ns · 791 ns · 1,208 ns · 43,292 ns · 2.95M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| Project_Overview.md:388 | 1,750 ns · 4,096 ns · 1,761,280 ns · 3,899,392 ns · 10,773,458 ns · 24,603 ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| Project_Overview.md:392,521 | 250 ns | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| Project_Overview.md:394,564 | 8 ns | ARITH | pending `honest-native-*.txt` |
+| Project_Overview.md:396 | 615 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| Project_Overview.md:398 | ~125 ns | WITHDRAWN | none |
+| Project_Overview.md:410 | 42 ns · 375 ns · 667 ns · 792 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:411 | 208 ns · 583 ns · 708 ns · 1,416 ns · 8,583 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:412 | 208 ns · 375 ns · 791 ns · 1,792 ns · 4,792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:413 | 292 ns · 667 ns · 1,125 ns · 1,750 ns · 2,625 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:414 | 208 ns · 458 ns · 709 ns · 1,250 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:423 | 208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:428 | 174 ns · 135 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:432 | 18 µs | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:433 | 792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| Project_Overview.md:467 | 100K/s · 1,166 ns · 1,250 ns · 4,192 ns · 5,280 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:468 | 500K/s · 834 ns · 1,000 ns · 2,334 ns · 5,536 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:469 | 1M/s · 750 ns · 1,000 ns · 1,958 ns · 6,016 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:470,494 | 2M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:471,493,565 | 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:472 | 4M/s · 583 ns · 27,136 ns · 1,458 ns · 56,576 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:473 | 6M/s · 500 ns · 16,777,216 ns · 1,333 ns · 17,039,360 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:477,480,482 | 1M/s | PARAM | n/a: not a measurement |
+| Project_Overview.md:479 | 1.26× · 100K/s · 2.37× · 500K/s · 3.07× | ARITH | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:483 | 834 ns · 1,208 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:486 | 6M/s · 500 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:487 | 16.8 ms | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:490 | 8.5 ms | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:495 | 2.6 ms · 10.4 ms · 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:501 | 1M/s · 4M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| Project_Overview.md:508 | 64 MB | PARAM | n/a: not a measurement |
+| Project_Overview.md:513 | 250 ns · 500 ns · 958 ns · 4,832 ns · 36,542 ns · 302 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
+| Project_Overview.md:514 | 2,625 ns · 7,648 ns · 12,416 ns · 34,560 ns · 3,531,875 ns · 3,855 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
+| Project_Overview.md:515 | 2,375 ns · 7,148 ns · 11,458 ns · 29,728 ns | ARITH | pending `cold-cache.txt` (x86 counterpart) |
+| Project_Overview.md:517 | 10× | ARITH | pending `cold-cache.txt` (x86 counterpart) |
+| Project_Overview.md:530 | 30.2 s · 999,987 orders/sec | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| Project_Overview.md:531 | 843,520 KB · 1,186,016 KB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| Project_Overview.md:543,699 | ~780 ms · ~48 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| Project_Overview.md:546 | 1,073,741,824 ns | ARITH | n/a: not a measurement |
+| Project_Overview.md:551 | 500K/s · 1M/s | PARAM | n/a: not a measurement |
+| Project_Overview.md:552 | 999,987/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| Project_Overview.md:576,593 | 261 ns | X86-D2E688C | pending `honest-native-*.txt` |
+| Project_Overview.md:578 | 0 ns · 10 ns · 62 ns · 261 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
+| Project_Overview.md:591 | 10 ns · 62 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
+| Project_Overview.md:600 | ~80–100 | WITHDRAWN | none |
+| Project_Overview.md:601 | ~60–80 · 10 ns · 62 ns | WITHDRAWN, X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
+| Project_Overview.md:602 | ~50–60 | WITHDRAWN | none |
+| Project_Overview.md:603 | ~30–40 | WITHDRAWN | none |
+| Project_Overview.md:605 | 0 ns · 10 ns · 62 ns · 3,568 ns · 237 ns · ~3.6 µs | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
+| Project_Overview.md:611 | 49B · 112.0 · 8.9 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| Project_Overview.md:612 | 36B · 34.1 · 29.4 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| Project_Overview.md:613 | 32B · 1.0 · 1015 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| Project_Overview.md:614 | 32B · 0.5 · 2128 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| Project_Overview.md:616 | 0.5 ns | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| Project_Overview.md:624 | ~325 cycles · 49 bytes | UNRECORDED | pending `codec.txt` (x86 counterpart) |
+| Project_Overview.md:677 | 261 ns · 0 ns · 10 ns | X86-D2E688C | pending `honest-native-*.txt` |
+| Project_Overview.md:678 | 3,568 ns · 167 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| Project_Overview.md:698 | 80 ms · 100k msg/s | ARITH | n/a: not a measurement |
+| Project_Overview.md:701 | 1M/s · 999,987/s | PARAM, ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
 
 ### docs/CapacityPlanning.md
 
@@ -343,39 +330,35 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 | docs/CapacityPlanning.md:40 | ~2 GB | ESTIMATE | none |
 | docs/CapacityPlanning.md:41 | ~8 GB | ESTIMATE | none |
 | docs/CapacityPlanning.md:44 | 10.3 MiB · 0.5 GiB · 5 GiB · 20 GiB | ARITH | pending `memory-probe.txt` |
-| docs/CapacityPlanning.md:72 | 25M ops/s · 1.9M ops/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:73 | 80M ops/s · 7M ops/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:74 | 150M ops/s · 14M ops/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:75 | 280M ops/s · 25M ops/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:77 | 2.80M ops/s | X86-D2E688C | pending `honest-pgo-*.txt`, `honest-native-*.txt` |
-| docs/CapacityPlanning.md:93 | 50–200 µs | ESTIMATE | none |
-| docs/CapacityPlanning.md:102,108,109,110,112 | 134 bytes | CODE | the code (`memory-probe.txt` prints the sizeof) |
-| docs/CapacityPlanning.md:104 | 24-100 bytes | WITHDRAWN | none |
-| docs/CapacityPlanning.md:111 | 24 bytes | CODE | the code |
-| docs/CapacityPlanning.md:117 | 100 bytes | ESTIMATE | none |
-| docs/CapacityPlanning.md:122 | ~10 MB · ~300 MB | ESTIMATE | none |
-| docs/CapacityPlanning.md:123 | ~150 MB · ~4.5 GB | ESTIMATE | none |
-| docs/CapacityPlanning.md:124 | ~1.5 GB · ~45 GB | ESTIMATE | none |
-| docs/CapacityPlanning.md:125 | ~15 GB · ~450 GB | ESTIMATE | none |
-| docs/CapacityPlanning.md:129 | 64 MiB | CODE | the code |
-| docs/CapacityPlanning.md:137 | ~1K-5K · ~438 µs · ~1-5 µs | ESTIMATE, X86-CI-JOURNAL, WITHDRAWN | journal-contention.yml, not bench-x86; `env.txt` records an O_DSYNC probe |
-| docs/CapacityPlanning.md:138 | 10K-100K | ESTIMATE | none |
-| docs/CapacityPlanning.md:160 | ~0 | ESTIMATE | none |
-| docs/CapacityPlanning.md:161,162 | ~10–30 µs | ESTIMATE | none |
-| docs/CapacityPlanning.md:163 | ~1–4 ms | ESTIMATE | none |
-| docs/CapacityPlanning.md:166,174 | 3,568 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| docs/CapacityPlanning.md:191 | 200-400 bytes · 4 MB/s · 40 MB/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:192 | 300-600 bytes · 6 MB/s · 60 MB/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:193 | 300 bytes · 3 MB/s · 30 MB/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:194 | ~100 bytes · 1 MB/s · 10 MB/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:195 | ~500 bytes | ESTIMATE | none |
-| docs/CapacityPlanning.md:196 | ~14 MB/s · ~140 MB/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:201 | ~50-100μs | ESTIMATE | none |
-| docs/CapacityPlanning.md:202 | ~5-10μs | ESTIMATE | none |
-| docs/CapacityPlanning.md:203 | ~1-2μs | ESTIMATE | none |
-| docs/CapacityPlanning.md:216 | 10μs · ~11μs · 90K entries/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:217 | 100μs · ~101μs · 10K entries/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:218 | 1ms · ~1.1ms · 1K entries/s | ESTIMATE | none |
-| docs/CapacityPlanning.md:232 | 50K orders/sec · 10μs | PARAM | n/a: not a measurement |
-| docs/CapacityPlanning.md:235 | 512 MB · 248 bytes · 124 MB | ESTIMATE | none |
-| docs/CapacityPlanning.md:236 | 200 GB · 86400s · 80 bytes · 345 GB | ESTIMATE | none |
+| docs/CapacityPlanning.md:70 | 25M ops/s · 1.9M ops/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:71 | 80M ops/s · 7M ops/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:72 | 150M ops/s · 14M ops/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:73 | 280M ops/s · 25M ops/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:75 | 2.80M ops/s | X86-D2E688C | pending `honest-pgo-*.txt`, `honest-native-*.txt` |
+| docs/CapacityPlanning.md:91 | 50–200 µs | ESTIMATE | none |
+| docs/CapacityPlanning.md:100,106,107,108,110 | 134 bytes | CODE | the code (`memory-probe.txt` prints the sizeof) |
+| docs/CapacityPlanning.md:102 | 24-100 bytes | WITHDRAWN | none |
+| docs/CapacityPlanning.md:109 | 24 bytes | CODE | the code |
+| docs/CapacityPlanning.md:115 | 100 bytes | ESTIMATE | none |
+| docs/CapacityPlanning.md:120 | ~10 MB · ~300 MB | ESTIMATE | none |
+| docs/CapacityPlanning.md:121 | ~150 MB · ~4.5 GB | ESTIMATE | none |
+| docs/CapacityPlanning.md:122 | ~1.5 GB · ~45 GB | ESTIMATE | none |
+| docs/CapacityPlanning.md:123 | ~15 GB · ~450 GB | ESTIMATE | none |
+| docs/CapacityPlanning.md:127 | 64 MiB | CODE | the code |
+| docs/CapacityPlanning.md:135 | ~1K-5K · ~438 µs · ~1-5 µs | ESTIMATE, X86-CI-JOURNAL, WITHDRAWN | journal-contention.yml, not bench-x86; `env.txt` records an O_DSYNC probe |
+| docs/CapacityPlanning.md:136 | 10K-100K | ESTIMATE | none |
+| docs/CapacityPlanning.md:158 | ~0 | ESTIMATE | none |
+| docs/CapacityPlanning.md:159,160 | ~10–30 µs | ESTIMATE | none |
+| docs/CapacityPlanning.md:161 | ~1–4 ms | ESTIMATE | none |
+| docs/CapacityPlanning.md:164,172 | 3,568 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| docs/CapacityPlanning.md:188 | 200-400 bytes · 4 MB/s · 40 MB/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:189 | 300-600 bytes · 6 MB/s · 60 MB/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:190 | 300 bytes · 3 MB/s · 30 MB/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:191 | ~500 bytes | ESTIMATE | none |
+| docs/CapacityPlanning.md:192 | ~13 MB/s · ~130 MB/s | ESTIMATE | none |
+| docs/CapacityPlanning.md:197 | ~50-100μs | ESTIMATE | none |
+| docs/CapacityPlanning.md:198 | ~5-10μs | ESTIMATE | none |
+| docs/CapacityPlanning.md:199 | ~1-2μs | ESTIMATE | none |
+| docs/CapacityPlanning.md:208 | 50K orders/sec · 10μs | PARAM | n/a: not a measurement |
+| docs/CapacityPlanning.md:211 | 512 MB · 248 bytes · 124 MB | ESTIMATE | none |
+| docs/CapacityPlanning.md:212 | 200 GB · 86400s · 80 bytes · 345 GB | ESTIMATE | none |

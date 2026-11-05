@@ -6,7 +6,7 @@ This document details the architectural decisions, component lifecycles, failure
 
 ## 1. Design Philosophy & Key Trade-offs
 
-The architecture is driven by three primary constraints: **predictable low latency**, **deterministic execution**, and **high availability**.
+The architecture is driven by three primary constraints: **predictable low latency**, **deterministic execution**, and **crash recovery from a journal**.
 
 ### Why Not One Contended Mutex?
 A naive matching engine protects one order book with one `std::mutex` that every thread fights over. Under high load, threads spend more time context-switching and contending than executing trades. 
@@ -51,10 +51,8 @@ graph TD
         FPM --> |Levels| IL[IntrusiveList of Orders]
     end
 
-    subgraph "Persistence & HA"
+    subgraph "Persistence"
         WAL[CRC-32 Journal / WAL]
-        REP[Replication Coordinator]
-        BK[Backup Node]
     end
 
     subgraph "Market Data Egress"
@@ -75,7 +73,6 @@ graph TD
     Hash -->|SOL/AVAX| Q2
     Q1 --> CB --> OB
     OB --> WAL
-    WAL --> REP --> BK
     OB --> MUX
     MUX --> ITCH
     MUX --> SHM
@@ -109,9 +106,9 @@ The `AdminServer` exposes a lightweight HTTP interface for ops tooling and conta
 | Endpoint | Auth required | Description |
 | :--- | :--- | :--- |
 | `GET /health` | No | Liveness probe: returns 200 while the process is running. |
-| `GET /readyz` | No | Readiness probe (k8s `readinessProbe`): returns HTTP 503 until `admin.setReady(true)` is called after warmup (or backup replay-mode entry), then 200. Auth-exempt so k8s can poll it without credentials. |
+| `GET /readyz` | No | Readiness probe (k8s `readinessProbe`): returns HTTP 503 until `admin.setReady(true)` is called once the engine is up, then 200. Auth-exempt so k8s can poll it without credentials. |
 | `GET /metrics` | Yes | JSON snapshot of internal counters and gauges. |
-| `GET /prometheus` | Yes | Prometheus text-exposition format: `journal_entries_committed_total`, `replication_entries_shipped_total`, `replication_bytes_sent_total`, etc. |
+| `GET /prometheus` | Yes | Prometheus text-exposition format: `journal_entries_committed_total`, etc. |
 | `GET /version` | Yes | Returns `gitSha` (12-char), UTC `buildTime`, and `engineVersion` captured at CMake configure time. |
 | `POST /kill-switch` | Yes | Toggles the graduated kill-switch for a participant. |
 
@@ -182,9 +179,9 @@ This is proven byte-exactly via test in `SbeProtocolTest`: encoding a struct wit
 
 ---
 
-## 4. Resilience & High Availability
+## 4. Resilience
 
-To achieve institutional-grade uptime, the engine implements a Primary-Backup HA model.
+The engine is a single node with no failover: durability is the journal, and recovery is a restart that replays it. Primary/backup replication was deleted rather than finished (it had no fencing, a promoted backup kept applying the old primary's stream, and its send blocked the commit path); `--role` / `OB_NODE_ROLE` refuse to boot.
 
 ### 4.1 Write-Ahead Logging (CRC-32 Journal)
 Before sending execution reports to the client, the engine writes the state mutation to a binary `Journal`. 
@@ -192,25 +189,13 @@ Before sending execution reports to the client, the engine writes the state muta
 - A virtual clock (GTD/DAY expirations) ensures time-based events replay deterministically.
 - `Checkpointing`: Periodically, the engine writes a compressed snapshot of the entire resting book to disk and prunes the old journal to bound recovery time.
 
-### 4.2 Replication Coordinator & Epoch Fencing (wired end-to-end)
-The `ReplicationCoordinator` is instantiated in `src/main.cpp` when `OB_NODE_ROLE` is set (`primary` or `backup`). Primary listens on `OB_REPLICATION_PORT`; backup connects to `OB_PRIMARY_HOST:OB_PRIMARY_REPLICATION_PORT`. It manages TCP log-shipping between primary and backup, with the following mechanisms — all empirically verified by the 19-scenario chaos suite in `deploy/chaos/`:
-
-- **Journal commit hook**: Primary's `Journal::onCommit` fires for every fsync-durable batch, calling `coord->replicateEntry()` per entry. Backup's `applyReplicatedEntry` writes incoming entries to its own local journal so the replica is durable across its own restarts.
-- **Heartbeats**: 100 ms interval, 500 ms timeout. `HeartbeatMonitor` exposes `isAlive()` to the coordinator and admin endpoints.
-- **LeaderLease + LeaseGrant propagation**: Primary broadcasts a `LeaseGrant` with `durationMs` payload every heartbeat tick. Backup's local lease state is refreshed by the same-epoch-from-same-holder path in `acceptRemoteLease`. `BackupPromote` is gated on BOTH heartbeat-miss AND local-lease-expiry — prevents split brain under partial network failure (asymmetric partition, packet loss, clock skew).
-- **Transport auto-reconnect**: `receiveLoop` retries `connectTo()` against saved host/port after socket loss. ~3 ms recovery measured in chaos tests. Reconnect retries use **exponential backoff** (500 ms → 1 s → 2 s → … → 30 s cap), resetting to 500 ms on successful connect, to avoid hammering the primary socket during sustained outages.
-- **Snapshot catchup on join**: Primary's `setOnPeerJoined` hook fires after `acceptOne` succeeds; iterates engine state via `MatchingEngine::streamSnapshot` and ships every resting order as a `JournalEntry::Snapshot`. Idempotent on receiver — safe to overlap with live replication.
-- **Atomic teardown**: `peerFd_`, `listenFd_`, `sendSeq_` are `std::atomic`; `stop()` calls `shutdown(2)` before `close()` to wake blocked `recv`. `ReplicationProtocolTest` runs TSan-clean under CI.
-
-### 4.3 Formal Verification
-Concurrency is notoriously difficult to test. We rely on **11 TLA+ Specifications**:
+### 4.2 Formal Verification
+Concurrency is notoriously difficult to test. We rely on **9 TLA+ Specifications**:
 - `MatchingEngine.tla`: price-time matching with STP, modify and replace; 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. Properties and scope: [docs/Verification.md](docs/Verification.md).
-- `Replication.tla`: Realistic lease-propagation model. `BackupPromote` requires heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Zero violations at `MaxEntries=10` / `LeaseTimeout=7`, but vacuously: under both cfgs the backup can never promote. A bug-injected variant (lease check stripped from `BackupPromote`) is the only configuration where promotion happens, and it splits the brain in 188 states.
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
 - `EngineConsumer.tla`: Verifies worker thread shutdown safety.
 - `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.
 - `Auction.tla`: the session state machine through the enforced transition table (Rule 7.7), order admission per state, and the uncross. It models no price collar. `NoReopenAfterClose` holds: a halt resumes only to the state it paused (see docs/Verification.md).
-- `EpochDurability.tla`: Epoch-store durability invariant under crash.
 - `FixSession.tla`: FIX session state machine safety (logon/heartbeat/gap-fill).
 - `Oco.tla`: OCO one-cancels-other atomicity.
 - `Risk.tla`: Hierarchical risk limit enforcement.
@@ -224,10 +209,10 @@ Designing for low latency means knowing exactly how the system behaves when unde
 | Failure Mode | Impact | Mitigation |
 | :--- | :--- | :--- |
 | **Microburst / News Event** | High ingress rate overwhelms matching thread. | `MpscQueue` depth triggers **Queue Backpressure**. Gateway immediately replies with `RejectReason::QueueFull`. Rate limiting throttles at the ingress edge. |
-| **Disk I/O Stall** | Journal fsync() blocks the matching thread. | Journal uses `SyncPolicy::GroupCommit` or asynchronous OS buffers. Engine relies on network HA replication for strict durability rather than local fsync. |
-| **Primary Server Crash** | Connection dropped, engine stops. | Backup detects missing heartbeats within ~400 ms (chaos-measured); promotion is then gated on local-lease-expiry (~5 s) — see `deploy/chaos/test_failover_detection.py`. Backup `setReplayModeAllBooks(false)` flips it into a writable primary. Clients reconnect to backup gateway. **Verified empirically**: 200 orders → 192 primary-committed → 192 on backup, **0 lost across SIGKILL** (`test_committed_loss.py`). |
+| **Disk I/O Stall** | Journal fsync() blocks the matching thread. | Journal uses `SyncPolicy::GroupCommit` or asynchronous OS buffers, so a crash can lose what the batch had not yet synced. `SyncPolicy::Immediate` syncs every entry, at one fsync per order. |
+| **Server Crash** | Connection dropped, engine stops. | No failover: the node is down until it restarts. A restart replays the journal, so what was synced survives; clients reconnect to the restarted node. |
 | **Memory Exhaustion** | System runs out of RAM under load. | `ObjectPool` pre-allocates everything at startup. `CapacityMonitor` triggers soft-rejects if pool utilization exceeds 90%, preventing OS OOM killer. |
-| **Corrupted Disk / Bit Flip** | Journal file is mutated by hardware failure. | CRC-32 validation on every read. `JournalReplay` halts exactly before the corrupted entry. Data is recovered from the replication peer. |
+| **Corrupted Disk / Bit Flip** | Journal file is mutated by hardware failure. | CRC-32 validation on every read. `JournalReplay` halts exactly before the corrupted entry. Anything after it has to come from the operator's own copy of the journal. |
 
 ## 6. Microstructure Research Infrastructure
 

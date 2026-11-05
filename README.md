@@ -1,9 +1,8 @@
 # High-Performance Order Matching Engine
 
 > [!WARNING]
-> **Single node. Not production-ready.** Replication is off unless you pass
-> `--allow-unsafe-replication`, and it has known CRITICAL defects: a deposed
-> primary is never fenced, and a promoted backup can execute orders twice. <!-- claim:repl-refuses-role -->
+> **Single node. Not production-ready.** There is no replication or failover: a
+> node recovers from its journal, and `--role` / `OB_NODE_ROLE` refuse to boot. <!-- claim:repl-refuses-role -->
 > **Acks are durable only from `GatewayServer` started with `--journal`**, which
 > syncs each order to disk before acknowledging it. <!-- claim:gw-durable-ack --> `OrderEngine` acknowledges
 > at enqueue and group-commits its journal, so an acknowledged order can be
@@ -18,11 +17,10 @@
 [![Throughput](https://img.shields.io/badge/Throughput-3.10M_ops/s-blue.svg)](#performance)
 [![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
 [![Tests](https://img.shields.io/badge/Tests-CTest_suite-brightgreen.svg)](#verification)
-[![Chaos](https://img.shields.io/badge/Chaos_Scenarios-19_live-orange.svg)](#chaos-suite)
-[![TLA+](https://img.shields.io/badge/TLA%2B-11_specs-blueviolet.svg)](#formal-verification)
+[![TLA+](https://img.shields.io/badge/TLA%2B-9_specs-blueviolet.svg)](#formal-verification)
 [![Protocols](https://img.shields.io/badge/Wire_Protocol_codecs_(library)-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
 
-A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire-protocol codecs (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) with TCP and UDP transports and MoldUDP64 gap recovery — library code with tests, served by no shipped binary (`GatewayServer` speaks only its native binary protocol), TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->; `Replication.tla` passes only vacuously — its backup can never promote), a live multi-container chaos suite (19 scenarios: failover detection, snapshot catchup, rolling restart, and a journal-count check of committed entries under `SIGKILL` — its no-split-brain checks all finish inside the 5 s lease, so they do not exercise split brain), primary-backup replication wired into `OrderEngine` but disabled by default because of known CRITICAL defects, a token-authenticated chaos injection endpoint, and an operational stack (config management, Prometheus metrics with replication counters, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **39.4K LOC (engine) / 73.5K with tests, 19 chaos scenarios, 12 TLA+ specifications.**
+A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire-protocol codecs (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) with TCP and UDP transports and MoldUDP64 gap recovery — library code with tests, served by no shipped binary (`GatewayServer` speaks only its native binary protocol), TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **39.4K LOC (engine) / 73.5K with tests, 9 TLA+ specifications.**
 
 ## 🔬 Research
 
@@ -84,24 +82,19 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 
 ### Reliability & Observability
 - **CRC-32 Journaling**: a journal replayed on boot <!-- claim:journal-replay-on-boot --> (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind <!-- claim:journal-torn-tail -->), atomic checkpoint <!-- claim:checkpoint-atomic -->, and deterministic replay via virtual clock <!-- claim:gtd-replay -->. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `GatewayServer` holds acks, fills and order updates until the entry is synced <!-- claim:gw-durable-events -->; `OrderEngine` acks at enqueue and group-commits. A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
-- **Primary-Backup Replication — disabled by default, known defects**: `ReplicationCoordinator` is wired into `src/main.cpp` behind `OB_NODE_ROLE`, but a role now refuses to boot unless `--allow-unsafe-replication` acknowledges it. <!-- claim:repl-refuses-role --> The path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced, and a promoted backup can execute orders twice. The chaos suite still runs the 1+1 topology, opted in
-- **Lease Propagation (no fencing)**: Primary broadcasts `LeaseGrant` (durationMs) every heartbeat tick; backup's local lease state is refreshed via same-epoch-from-same-holder path; `BackupPromote` requires both heartbeat miss AND local lease expiry. <!-- claim:repl-lease-promotion --> That delays promotion; it does **not** prevent split brain: a primary never steps down (`ReplicationCoordinator` has no path out of `Primary`, and `isFenced()` has no caller), so a partition that outlasts the 5 s lease leaves two primaries
-- **TCP Auto-Reconnect**: `ReplicationTransport::receiveLoop` retries `connectTo()` against saved host/port after socket loss — backup re-establishes within milliseconds of primary recovery without external orchestration <!-- claim:repl-chaos -->
-- **Snapshot Catchup on Join**: When a backup connects, primary streams all currently-resting orders via `streamSnapshot` → `JournalEntry::Snapshot` messages; idempotent on receiver — closes the rolling-restart gap <!-- claim:repl-chaos -->
-- **Warm Standby (library only)**: `JournalFollower` — single-host tailing with a `promote()` API. No shipped binary constructs it
+- **Single Node, Journal Recovery**: one `OrderEngine` and no replication or failover; a restart replays the journal. Replication was deleted rather than finished, and `--role` / `OB_NODE_ROLE` refuse to boot, saying so. <!-- claim:repl-refuses-role -->
 - **Deterministic Sequencing**: a book's `MarketDataUpdate` events carry strictly increasing `sequenceNumber`s, and a subscriber that applies only them holds the book's depth <!-- claim:md-l2-sequence -->. `Trade` and `OrderUpdate` carry one too; no test holds either to an order
 - **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically <!-- claim:gtd-replay -->
 - **Structured Logging**: Pluggable `StructuredSink` API with `NullSink` (zero-cost default), `JsonStderrSink` (dev), and `CapturingSink` (tests)
-- **Prometheus Metrics**: `MetricsRegistry` with atomic Counters, Gauges, Histograms; `/prometheus` text-exposition endpoint exposes `journal_entries_committed_total`, `replication_entries_shipped_total`, `replication_bytes_sent_total`, `replication_snapshot_streams_total`, `replication_snapshot_entries_total`
+- **Prometheus Metrics**: `MetricsRegistry` with atomic Counters, Gauges, Histograms; `/prometheus` text-exposition endpoint exposes `journal_entries_committed_total` among others
 - **Webhook Alerting**: `AlertDispatcher` — background thread delivery to Slack, PagerDuty, or generic HTTP webhooks with configurable severity filtering
 - **Config Management**: `Config` key-value loader with env var override (`OB_` prefix), type-safe getters, registered-listener callbacks on set/loadFile/loadMap. Hot-reload via SIGHUP wired — `--config PATH` flag, async-signal-safe `g_reload_config` atomic flag, config reloaded on signal receipt; only `rate_limit.default_rate` / `rate_limit.default_burst` take effect, and many keys in `config/engine.conf.example` are read by nothing
 - **End-to-End Latency Tracking**: Ingress timestamps on every order; per-thread `LatencyTracker` histograms for real P50/P99/P99.9 including queue delay
 - **Hardware Timing**: `DeterministicBenchmark` reads the cycle counter — `rdtsc` (x86) / `cntvct_el0` (ARM) — for sub-clock-quantum micro-measurement. The headline `HonestBenchmark` numbers below use `nowNs()`, which is `std::chrono::high_resolution_clock`
-- **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for primary-backup topology with health checks and journal volumes; `.dockerignore` excludes host build artifacts; entrypoint shim conditionally LD_PRELOADs `libfaketime` for chaos clock-skew scenarios
+- **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for a single node with health checks and a journal volume; `.dockerignore` excludes host build artifacts
 
-### Formal Verification & Chaos Engineering
-- **TLA+ Specifications**: 11 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> `Replication.tla` — realistic lease-propagation model (heartbeat timeout AND lease expiry required for `BackupPromote`, no god-mode `~primaryAlive` guard) passes at `MaxEntries=10` / `HeartbeatTimeout=3` / `LeaseTimeout=7`, but only vacuously: the backup can never promote. Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `EpochDurability`, `FixSession`, `Oco`, `Risk`.
-- **Live Multi-Container Chaos Suite**: 19 scenarios in `deploy/chaos/` running against real running binaries in Docker Compose. Checks `NoCommittedLoss` as a count (after a `SIGKILL` of the primary process, the backup's journal head grew at least as much as the primary's), that no backup promotes while partitioned, lossy or clock-skewed — but every such check finishes inside the 5 s lease, before a backup could promote, so none tests split brain (the partition tests assert within ~2 s and heal) — snapshot catchup on backup join, rolling restart, transport auto-reconnect, lease-gated promotion, token-authenticated chaos injection, Prometheus replication counters. See [deploy/chaos/README.md](./deploy/chaos/README.md). <!-- claim:repl-chaos -->
+### Formal Verification & Fault Injection
+- **TLA+ Specifications**: 9 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `FixSession`, `Oco`, `Risk`.
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison <!-- claim:shadow-mode -->
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; compiled out unless built with `ENABLE_FAULT_INJECTION` (`OB_ENABLE_FAULT_INJECTION`)
 - **Coverage-Guided Fuzzing**: libFuzzer targets for the FIX parser, framer and round trip, and `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
@@ -143,7 +136,7 @@ Four benchmarks characterize the engine and are complementary rather than compet
 > [!NOTE]
 > x86 figures (AWS c6in.metal, dual Xeon Platinum 8375C, 50K orders seed=42) measured at commit `d2e688c`, 340 commits before this revision; no raw log is committed and they have not been re-run since. The Apple M3 Pro reference of ~125 ns P50 that used to sit here did not reproduce and is withdrawn. See [BENCHMARKS.md](./BENCHMARKS.md).
 >
-> The full-stack journal path now uses the **async io_uring ack** (onCommit fires on the completion reaper, not on submit): Path C P99 dropped **32.8%** (5,312 → 3,568 ns) versus the synchronous `fdatasync` path, trading ~167 ns of added P50.
+> The full-stack journal path now uses the **async io_uring ack** (`onDurable` fires on the completion reaper, not on submit): Path C P99 dropped **32.8%** (5,312 → 3,568 ns) versus the synchronous `fdatasync` path, trading ~167 ns of added P50.
 >
 > **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42 HonestBenchmark workload) takes Path A core matching to **P50 237 ns / P99 910 ns / 3.10M ops/s** — the headline figure above. The three-path table is the standard (non-PGO) Release build.
 
@@ -299,20 +292,18 @@ AUTH="Authorization: Bearer $OB_ADMIN_TOKEN"
 curl localhost:8080/health                # k8s liveness probe
 curl localhost:8080/readyz                # refused while the journal replays, 503 until the engine is up, then 200
 
-# Liveness / build / replication state
+# Liveness / build state
 curl -H "$AUTH" localhost:8080/version               # gitSha + buildTime + engineVersion
-curl -H "$AUTH" localhost:8080/role                  # primary | backup | standalone, epoch, isLeader
-curl -H "$AUTH" localhost:8080/replication           # peerAlive, running, epoch
 curl -H "$AUTH" localhost:8080/journal/head          # last committed journal sequence
 
 # Operational state
 curl -H "$AUTH" localhost:8080/metrics               # throughput & queue depth (JSON)
-curl -H "$AUTH" localhost:8080/prometheus            # Prometheus text exposition (incl. replication counters)
+curl -H "$AUTH" localhost:8080/prometheus            # Prometheus text exposition
 curl -H "$AUTH" "localhost:8080/book?symbolId=0"     # L2 order book snapshot
 curl -H "$AUTH" "localhost:8080/audit?symbolId=0"    # spread / depth / level counts
 curl -H "$AUTH" "localhost:8080/otr?participantId=1" # order-to-trade ratio
 
-# Chaos-only (gated by OB_CHAOS_INJECT=1; X-Chaos-Token required when OB_CHAOS_TOKEN is set)
+# Test-only order injection (off unless OB_CHAOS_INJECT=1 and OB_CHAOS_TOKEN are set; needs a matching X-Chaos-Token)
 curl -H "X-Chaos-Token: $TOK" \
      "localhost:8080/chaos/order?orderId=1&participantId=1&price=100000&qty=1&side=0"
 ```
@@ -380,10 +371,8 @@ The gateway it forwards to authenticates that shared connection, not each
 client, so treat the proxy as unauthenticated. (`OrderEngine` has no order
 port, so the only thing it can forward to is another `GatewayServer`.)
 
-### Replication (live binary)
-**Disabled unless explicitly acknowledged.** Setting `OB_NODE_ROLE` / `--role` alone makes `OrderEngine` refuse to boot, because the path has open CRITICAL defects (REPL-1..6): a deposed primary is never fenced; a promoted backup keeps applying the old primary's stream, so orders execute twice; a replication send blocks the journal commit path with no timeout, freezing acks; entries lost in a disconnect are never re-sent. The default `docker-compose.yml` is a single node. To run it anyway, also pass `--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`). <!-- claim:repl-refuses-role -->
-
-With the acknowledgement, the OrderEngine binary instantiates `ReplicationCoordinator` when `OB_NODE_ROLE` is set. Primary listens on `OB_REPLICATION_PORT` (default 9002); backup connects to `OB_PRIMARY_HOST`:`OB_PRIMARY_REPLICATION_PORT` and runs in replay mode until promotion. Set `OB_JOURNAL_PATH` to enable journal commit → backup shipping. The chaos suite (`docker compose -f deploy/chaos/docker-compose.chaos.yml up -d --build`) provides a fully-wired 1+1 topology, opted in.
+### Replication: removed
+`OrderEngine` runs as a single node and recovers from its journal. Primary/backup replication had no fencing, a promoted backup kept applying the old primary's stream, its send blocked the journal commit path and resync only added orders, so it was deleted rather than finished. `--role` / `OB_NODE_ROLE` still refuse to boot, so a deployment that sets one finds out at startup. <!-- claim:repl-refuses-role -->
 
 ## 🧪 Verification
 
@@ -398,8 +387,8 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 | **Integration** | GatewayIntegrationTest, FixTcpGatewayTest, AdminServerEndpointsTest, OuchTcpGatewayTest, ItchUdpTransportTest, ItchMarketDataFeedTest | Real-loopback TCP/UDP round-trip, FIX/OUCH/ITCH session, HTTP endpoints |
 | **Protocol — text** | GatewayProtocolTest, MarketDataSchemaTest, MdFeedSchemaCompatTest, RejectReasonContractTest, SubmitResultTest | Binary wire format evolution, ShmHeader compat |
 | **Protocol — binary** | OuchSessionTest, ItchPublisherTest, SoupBinTcpTest, MoldUDP64Test, SbeProtocolTest, SbeSessionTest | OUCH/ITCH/SBE codec + session layers, SoupBinTCP login/heartbeat, MoldUDP64 gap detection, SBE forward-compat |
-| **Recovery** | JournalCrashTest, JournalFollowerTest, GTDReplayTest, ItchRetransmissionTest | Crash recovery, log-ship convergence, virtual-clock replay, **gap-recovery via SoupBinTCP re-request** |
-| **HA & Ops** | ReplicationProtocolTest, ConfigTest, AlertDispatcherTest | Primary-backup replication, config loader, webhook alerts |
+| **Recovery** | JournalCrashTest, GTDReplayTest, ItchRetransmissionTest | Crash recovery, virtual-clock replay, **gap-recovery via SoupBinTCP re-request** |
+| **Ops** | ConfigTest, AlertDispatcherTest | Config loader, webhook alerts |
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
 | **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
 
@@ -407,45 +396,18 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 
 ### Formal Verification (TLA+)
 
-**11 TLA+ specifications**, model-checked with TLC:
+**9 TLA+ specifications**, model-checked with TLC:
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
 | `MatchingEngine.tla` | **2,726,157 distinct, 0 violations** (`MatchingEngine.cfg`: 3 orders, 1 replace, 2 participants, 2 prices, qty 1-3; checked in CI) | PricePriority, FIFOExecution, ExecPriceIsPassive, NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation, MatchingConservation, NoNegativeQuantity. Limit orders, default STP, modify and replace only; each of seven broken cfgs must fail. See [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-matching-engine --> |
-| `Replication.tla` (lease-propagation model) | 1373 → 4192 states at MaxEntries=6 / 10, 0 violations — **vacuous** | NoCommittedLoss, NoDuplicateExecution, NoSplitBrain hold only because the backup can never promote: `TickDegraded` stops the timers at `HeartbeatTimeout+1`, below the `LeaseTimeout` that `BackupPromote` needs. The lease-stripped variant, the only config where promotion happens, splits the brain in 188 states. See [docs/Verification.md](./docs/Verification.md). |
 | `MpscQueue.tla` | 3,672 distinct | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) <!-- claim:tla-concurrency-specs --> |
 | `EngineConsumer.tla` | 252 distinct | Worker loop: no item invented or duplicated, every item eventually consumed <!-- claim:tla-concurrency-specs --> |
 | `Snapshot.tla` / `SnapshotLocked.tla` | 515,380 / 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) <!-- claim:tla-concurrency-specs --> |
 | `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail, and one that never reopens a volatility auction; see [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-auction --> |
-| `EpochDurability.tla` | 8 distinct | Epoch-store durability invariant under crash <!-- claim:tla-small-specs --> |
 | `FixSession.tla` | 4 distinct | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) <!-- claim:tla-small-specs --> |
 | `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity <!-- claim:tla-small-specs --> |
 | `Risk.tla` | 8 distinct | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. <!-- claim:tla-small-specs --> |
-
-### <a name="chaos-suite"></a>Live Chaos Suite
-
-**19 scenarios** in `deploy/chaos/` run against the actual `OrderEngine` binary inside Docker Compose. They exercise the replication path of the real binary; `Replication.tla` proves nothing they could confirm, because it passes only vacuously. <!-- claim:repl-chaos --> See [deploy/chaos/README.md](./deploy/chaos/README.md) for the full table and how to run them.
-
-| # | Scenario | Measured behavior |
-|---|---|---|
-| 1 | Primary kill → backup detects | ~400 ms RTO (heartbeat-timeout bounded) |
-| 2 | Bidirectional partition + heal | detect ~500 ms / ~3 ms, recover ~110 ms |
-| 3 | Asymmetric partition (primary→backup only) | backup sees peer death, primary doesn't, no split brain |
-| 4 | **Backup clock skew (+30s via libfaketime)** | no split brain across 4s of sampling |
-| 5 | 30% packet loss on replication link | heartbeats survive, no split brain |
-| 6 | Slow link (200 ms one-way latency) | bilateral peerAlive stable for 3s |
-| 7 | Rolling backup restart | bilateral recover ~3 ms via auto-reconnect |
-| 8 | **NoCommittedLoss under SIGKILL** | 200 orders → 192 primary-committed → 192 on backup, **0 lost** |
-| 9 | **Snapshot catchup on late join** | 576 pre-existing entries replicated to joining backup |
-| 10 | Pause / unpause primary | detect ~415 ms, recover ~2 ms |
-| 11 | `/chaos/order` auth | rejects missing & wrong token; accepts correct |
-| 12 | Prometheus replication counters | `_shipped_total`, `_bytes_sent_total`, `_snapshot_streams_total` all advance |
-| 13–19 | Steady-state guards, no-split-brain checks, replication metrics | always-on regression pins |
-
-"No split brain" in rows 3-5 means no promotion *inside the 5 s lease*: each
-scenario asserts within about 2 s of the fault (or, for skew and loss, while
-heartbeats keep arriving), so none reaches the point where a backup may
-promote. Past the lease the primary never steps down (REPL-1..6).
 
 ### Shadow Mode Validation
 - Dual `OrderBook` instances fed identical order streams
@@ -460,8 +422,7 @@ promote. Past the lease the primary never steps down (REPL-1..6).
 | [docs/MatchingRules.md](./docs/MatchingRules.md) | **The rulebook** — iceberg/pro-rata allocation, STP, stop-election bounds, pegs, auction uncross, expiry, and the suspected defects |
 | [BENCHMARKS.md](./BENCHMARKS.md) | Three-path latency methodology + binary codec results |
 | [PerformanceWhitepaper.md](./PerformanceWhitepaper.md) | Benchmark methodology & analysis |
-| [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results (MatchingEngine + Replication) |
-| [deploy/chaos/README.md](./deploy/chaos/README.md) | Live chaos suite — 19 scenarios, how to run, scenario catalog |
+| [docs/Verification.md](./docs/Verification.md) | TLA+ model checking results |
 | [docs/Compliance.md](./docs/Compliance.md) | Regulatory mapping (MiFID II / SEC Rule 15c3-5 / Reg NMS) |
 | [docs/Runbook.md](./docs/Runbook.md) | Operational procedures, incident response |
 | [docs/CapacityPlanning.md](./docs/CapacityPlanning.md) | Memory, CPU, disk, network sizing |
@@ -476,20 +437,17 @@ The wire-protocol codecs (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retra
 | Item | Status | Blocker |
 |------|--------|---------|
 | x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
-| `Replication.tla` TLC run | Passes at MaxEntries=10, but **vacuously**: the backup can never promote under either cfg. When promotion is reachable, split brain appears; the spec has no primary step-down | Spec rework (step-down, bounded skew, a liveness property) |
 | io_uring async journal writes | Implemented behind `#ifdef __linux__` (`fdatasync`/`F_FULLFSYNC` fallback elsewhere); the `Ubuntu io_uring Journal` CI lane builds it and runs the suite on it (with a runtime probe, so a silent fallback cannot pass); latency not yet measured on x86 | Linux + `liburing` — **no special NIC** |
 | DPDK kernel bypass | **Written, never executed** — no run, no measurement, no demonstrated benefit. Not hardware-blocked: it targets commodity AWS ENA | Linux + a secondary ENI + hugepages + the DPDK/F-Stack toolchain |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
 | Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified <!-- claim:auction-uncross --> | Volume-maximization algorithm: max-qty uncross implemented |
 | Schema-driven SBE codegen | Hand-coded v1/v2 + forward-compat proven <!-- claim:sbe-forward-compat --> | XML schema → codec generator (tooling) |
-| Cross-host failure-drill validation | 19-scenario live chaos suite in `deploy/chaos/` covers failover detection, snapshot catchup and rolling restart; its partition, loss and skew checks end inside the 5 s lease, and NoCommittedLoss is a journal-count comparison | Scenarios that hold a partition past the lease; true cross-physical-host still needs hardware |
-| TSan coverage | `ReplicationProtocolTest` now TSan-clean (closed atomic-fd + sendSeq_ races); CI runs it under TSan. 24h+ soak still pending | Clock time |
-| Real FIX path through chaos topology | `GatewayServer` runs its own engine with a journal but no replication, and serves no FIX. `/chaos/order` exercises `OrderEngine`, and `FixTcpGatewayTest` exercises library code; neither says anything about `GatewayServer` | Architectural refactor of gateway/engine binary split |
+| TSan coverage | CI runs the project tests under TSan. 24h+ soak still pending | Clock time |
 | TLS + full auth on admin port | Token auth on `/chaos/order` only | Design decision: token-everywhere vs reverse-proxy vs mTLS |
 | Regulatory submission (CAT / MiFID RTS 22) | Event pipeline + journal in place | Broker-dealer / venue registration |
 | Clearing integration (DTCC / OCC / CME) | Trade event surface in place | Clearing membership |
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 39.4K LOC engine (73.5K with tests) · 19 chaos scenarios · 11 TLA+ specifications · MatchingEngine.tla checked in CI · Replication.tla passes vacuously · TSan-clean replication transport*
+*C++20 · 39.4K LOC engine (73.5K with tests) · 9 TLA+ specifications · MatchingEngine.tla checked in CI*

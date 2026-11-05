@@ -358,7 +358,7 @@ add_test(NAME CheckpointPositionTest COMMAND CheckpointPositionTest)
 set_tests_properties(CheckpointPositionTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
 # The engine-wide position limit sees the same position after a restart —
-# replay, checkpoint or a promoted backup — as the engine that traded.
+# plain replay or checkpoint — as the engine that traded.
 add_executable(RestartPositionLimitTest RestartPositionLimitTest.cpp)
 target_link_libraries(RestartPositionLimitTest PRIVATE OrderMatcher)
 enable_assertions(RestartPositionLimitTest)

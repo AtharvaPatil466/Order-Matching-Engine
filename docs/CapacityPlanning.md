@@ -55,13 +55,11 @@ for 2,000, before any other overhead.
 | Gateway (FIX I/O) | 1 | Pin to core |
 | Admin HTTP | 1 | Shared core OK |
 | Journal flush | 1 (background) | Shared core OK |
-| Replication | 1 (if HA) | Shared core OK |
-| **Total** | **N + 3-4** | |
+| **Total** | **N + 3** | |
 
 ### Sizing Formula
 ```
 Cores = num_worker_threads + 3 (gateway + admin + journal)
-      + 1 if replication enabled
       + 1 headroom for OS/monitoring
 ```
 
@@ -143,7 +141,7 @@ There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
 ### Recommended Disk
 - **Development**: Any SSD
 - **Production**: NVMe SSD with ≥100K IOPS write
-- **Ultra-low-latency**: Intel Optane. tmpfs only if losing the journal on a host reboot is acceptable: replication, which this line used to lean on, is disabled by default and has known CRITICAL defects
+- **Ultra-low-latency**: Intel Optane. tmpfs only if losing the journal on a host reboot is acceptable: there is no replication to cover it
 
 ### Journal Storage Backing — HARD Deployment Constraint
 
@@ -157,7 +155,7 @@ There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
 
 | Backing | Journal flush latency | Verdict |
 |---------|-----------------------|---------|
-| RAM tmpfs (`/dev/shm`) | ~0 | ⚠️ Lost on host reboot. Replication, which was supposed to cover that, is disabled by default with known CRITICAL defects — no durability across a host failure |
+| RAM tmpfs (`/dev/shm`) | ~0 | ⚠️ Lost on host reboot, and there is no replication to cover that — no durability across a host failure |
 | Instance-store NVMe (e.g. `c6id.metal`, `c6gd`, `i4i`) | ~10–30 µs | ✅ Required minimum for production |
 | Local physical NVMe (bare metal) | ~10–30 µs | ✅ Equivalent to instance-store NVMe |
 | **EBS / PD / Managed Disk / SAN / NFS** | **~1–4 ms round-trip** | ❌ **NOT acceptable for the journal** |
@@ -178,8 +176,7 @@ achievable production tail.
 NVMe instance-store — `c6id`/`c7gd`/`m6id`/`i4i`/`c6gd` — and place the
 journal on the mounted instance-store volume (or a tmpfs). Do **not** put
 the journal on the root EBS volume. A RAM tmpfs journal is only durable if
-something else is, and replication is disabled by default with known CRITICAL
-defects.
+something else is, and there is no replication.
 
 ---
 
@@ -191,9 +188,8 @@ defects.
 | FIX 4.4 inbound | 200-400 bytes | 4 MB/s | 40 MB/s |
 | FIX 4.4 outbound | 300-600 bytes | 6 MB/s | 60 MB/s |
 | Market data (SHM) | sizeof(ShmEntry) ≈ 300 bytes | 3 MB/s | 30 MB/s |
-| Replication | ~100 bytes/entry | 1 MB/s | 10 MB/s |
 | Admin HTTP | ~500 bytes/req | negligible | negligible |
-| **Total** | | **~14 MB/s** | **~140 MB/s** |
+| **Total** | | **~13 MB/s** | **~130 MB/s** |
 
 ### Network Requirements
 | Scenario | NIC | Latency |
@@ -204,27 +200,7 @@ defects.
 
 ---
 
-## 5. Replication Sizing (HA)
-
-### Replication Lag Budget
-```
-Replication lag = network_rtt + journal_entry_size / bandwidth
-```
-
-| Network | RTT | Lag per Entry | Max Sustainable Rate |
-|---------|-----|---------------|---------------------|
-| Same rack | 10μs | ~11μs | 90K entries/s |
-| Same DC | 100μs | ~101μs | 10K entries/s |
-| Cross-DC | 1ms | ~1.1ms | 1K entries/s |
-
-### Recommendation
-- **Same rack**: Full synchronous replication viable
-- **Same DC**: Semi-synchronous (ack after write, don't wait for fsync)
-- **Cross-DC**: Async replication only — accept data loss window
-
----
-
-## 6. Quick Sizing Calculator
+## 5. Quick Sizing Calculator
 
 For a given target:
 
@@ -240,7 +216,7 @@ Network: 10 GbE
 
 ---
 
-## 7. Monitoring Checklist
+## 6. Monitoring Checklist
 
 Run these checks daily:
 
@@ -249,5 +225,4 @@ Run these checks daily:
 - [ ] `curl /prometheus | grep queue_depth` — queue < 50% capacity
 - [ ] `curl /prometheus | grep p99` — latency within SLA
 - [ ] `curl /health` — returns 200
-- [ ] Backup replication lag < 1 second
 - [ ] Journal size < 80% of checkpoint threshold

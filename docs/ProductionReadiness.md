@@ -34,7 +34,7 @@ This project is a low-latency matching-engine implementation for research and po
 ## Validation Already Covered In This Repo
 
 - CRC-validated journal replay stops at truncated or corrupted records. <!-- claim:journal-crc -->
-- Checkpoint replay restores active orders after journal rewrite, with each level's time priority, every book's last trade and reference price, a trailing stop's ratcheted trigger, a stop's election latch (replay, backup and `JournalFollower` alike), a peg's price and the order the next reprice moves the pegs in, and an undated session's start (`CheckpointTimePriorityTest`, `CheckpointPriceStateTest`, `StopLatchCheckpointTest`, `CheckpointPeggedOrderTest`, `SessionTransitionTest`). <!-- claim:checkpoint-restore -->
+- Checkpoint replay restores active orders after journal rewrite, with each level's time priority, every book's last trade and reference price, a trailing stop's ratcheted trigger, a stop's election latch, a peg's price and the order the next reprice moves the pegs in, and an undated session's start (`CheckpointTimePriorityTest`, `CheckpointPriceStateTest`, `StopLatchCheckpointTest`, `CheckpointPeggedOrderTest`, `SessionTransitionTest`). <!-- claim:checkpoint-restore -->
 - Randomized command streams are replayed and compared against the original final book state. <!-- claim:replay-determinism -->
 - Ingress submit APIs return explicit reject reasons for stopped engines, unknown symbols, bad orders and rate limits (`SubmitResultTest`). No test drives a queue past its backpressure threshold. <!-- claim:ingress-reject-reasons -->
 - Gateway requests surface ingress rejects as error responses instead of unconditional ACKs. <!-- claim:gw-reject-responses -->
@@ -45,23 +45,11 @@ This project is a low-latency matching-engine implementation for research and po
 - LMM/DMM ProRata floor guarantee: 40% floor allocation with correct redistribution (does not inflate `allocated` counter, preventing unsigned underflow). Verified by the `LmmDmm` cases in `TestLmmDmmAllocation.cpp`. <!-- claim:prorata-lmm-floor -->
 - Config SIGHUP hot-reload: `RateLimiterReconfigureTest` covers the `reconfigure()` a reload calls. No ctest sends SIGHUP to the binary; Runbook §6 under `scripts/runbook_smoke.sh` does. <!-- claim:rate-limit-reload -->
 
-## Live Multi-Container Chaos Suite (`deploy/chaos/`)
+## Admin Endpoints
 
-19 scenarios run against the actual `OrderEngine` binary inside Docker Compose. The replication path that was previously library-only (verified by unit test but not exercised in the running binary) is now wired into `src/main.cpp` via `OB_NODE_ROLE` / `OB_PRIMARY_HOST` / `OB_JOURNAL_PATH` env vars and validated end-to-end.
-
-Empirically verified:
-
-- **NoCommittedLoss under SIGKILL**: 200 orders → 192 primary-committed → 192 on backup, a journal-count comparison: the backup's journal grew at least as much as the primary's. `Replication.tla` cannot back it, because its `NoCommittedLoss` holds only vacuously. <!-- claim:repl-chaos -->
-- **No promotion inside the 5 s lease** under: bidirectional partition, asymmetric partition, 30% packet loss, +30s clock skew on backup (via `libfaketime`). Every scenario ends before the lease could expire, so none tests split brain; past the lease the primary never steps down (REPL-1..6). <!-- claim:repl-chaos -->
-- **Snapshot catchup on backup join**: primary streams all currently-resting orders via `MatchingEngine::streamSnapshot` when a backup connects. Closes the rolling-restart gap where pre-restart entries would otherwise never reach a late-joining backup. <!-- claim:repl-chaos -->
-- **Transport auto-reconnect**: backup re-runs `connectTo()` from its receive loop after socket loss — bilateral recovery in ~3 ms after primary recovery, no external orchestration needed. Reconnect now uses exponential backoff (500ms → 30s cap), resetting to base delay on each successful connect. `ReconnectBackoffTest` runs the reconnect loop but asserts nothing about the delays. <!-- claim:repl-chaos -->
-- **Lease propagation under partial failure**: backup's local lease is refreshed by every primary heartbeat-tick `LeaseGrant`; `BackupPromote` is gated on local lease expiry, not just heartbeat miss. <!-- claim:repl-lease-promotion -->
-- **Auth gating on `/chaos/order`**: rejects missing / wrong token, accepts matching `X-Chaos-Token` header when `OB_CHAOS_TOKEN` is set. <!-- claim:repl-chaos -->
-- **Observability**: Prometheus counters (`replication_entries_shipped_total`, `_bytes_sent_total`, `_snapshot_streams_total`, `_snapshot_entries_total`) advance under load and on backup rejoin. <!-- claim:repl-chaos -->
+- **Auth gating on `/chaos/order`**: off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set; refuses a missing or wrong `X-Chaos-Token` even with a valid bearer token (`AdminAuthTest`). <!-- claim:admin-auth -->
 - **`/readyz` k8s readiness probe**: HTTP 503 until `admin.setReady(true)` is called, which is after journal replay has finished, then 200. Auth-exempt (same as `/health`). `AdminAuthTest` covers both probes, including `/readyz` before and after ready. <!-- claim:admin-readyz -->
 - **Build-metadata endpoint**: `/version` returns `gitSha` + `buildTime` for ops.
-
-See [deploy/chaos/README.md](../deploy/chaos/README.md) for the full scenario catalog, RTO/RPO measurements, and instructions to run the suite locally.
 
 ## Benchmark Artifact Workflow
 
@@ -76,13 +64,14 @@ README latency tables should be updated only from saved artifacts, preferably us
 ## Operational Work Required
 
 - ~~Structured logging with stable event schemas~~ — done. 7 call sites wired in `OrderBook.cpp` via typed helpers in `StructuredLog.h` (order accepted ×2 paths, cancelled, rejected/risk, trade fill, circuit breaker, trading state change). `StructuredSink` backends remain hot-swappable.
-- Metrics contracts for order flow, rejects, queue depth, latency histograms, journal health, and gateway sessions. Replication metrics are in (see chaos suite section above).
+- Metrics contracts for order flow, rejects, queue depth, latency histograms, journal health, and gateway sessions.
 - Configuration files for symbols, risk limits, gateway ports, admin endpoints, rate limits, and persistence.
 - Deployment and recovery runbooks (started — see `docs/Runbook.md`).
 - Hot-reload via SIGHUP is now wired: `--config PATH` CLI flag in `src/main.cpp`; async-signal-safe `g_reload_config` atomic; SIGHUP sets flag; main event loop calls `cfg.loadFile(configPath)`. SIGHUP now also calls `RateLimiter::reconfigure()` — updates default rate/burst from config keys `rate_limit.default_rate` / `rate_limit.default_burst` and clears all participant token buckets (`RateLimiterReconfigureTest` covers this path). <!-- claim:rate-limit-reload --> Journal auto-rotation is wired in the main loop: `OB_JOURNAL_MAX_SIZE_MB` env var sets the threshold; main loop calls `engine.checkpoint()` when `Journal::needsCheckpoint()` fires. Remaining cold-restart-only settings: thread count, journal path, and ports.
 - Backward-compatible protocol versioning for gateway and market-data consumers.
-- **Admin auth: done — TLS still open.** Every admin endpoint except the k8s probes (`/health`, `/readyz`) requires `Authorization: Bearer <OB_ADMIN_TOKEN>` (constant-time compare, JSON 401 otherwise). Wired via `--admin-token` / `OB_ADMIN_TOKEN` in `src/main.cpp`; `docker-compose.yml` fails closed if the token is unset, and the chaos topology runs with auth enabled so every scenario exercises the authenticated path (`test_chaos_endpoint_auth.py` pins the 401/200 contract, `AdminAuthTest` covers it in-process). <!-- claim:admin-auth --> The port binds `127.0.0.1` unless `--admin-bind` / `OB_ADMIN_BIND` widens it (the Docker image sets `0.0.0.0`; `AdminBindsLoopbackTest` probes it from a non-loopback address). <!-- claim:admin-loopback --> Remaining: TLS — terminate at a reverse proxy or ingress in front of the admin port; the in-process server intentionally stays plain HTTP.
+- **Admin auth: done — TLS still open.** Every admin endpoint except the k8s probes (`/health`, `/readyz`) requires `Authorization: Bearer <OB_ADMIN_TOKEN>` (constant-time compare, JSON 401 otherwise). Wired via `--admin-token` / `OB_ADMIN_TOKEN` in `src/main.cpp`; `docker-compose.yml` fails closed if the token is unset, and `AdminAuthTest` pins the 401/200 contract in-process. <!-- claim:admin-auth --> The port binds `127.0.0.1` unless `--admin-bind` / `OB_ADMIN_BIND` widens it (the Docker image sets `0.0.0.0`; `AdminBindsLoopbackTest` probes it from a non-loopback address). <!-- claim:admin-loopback --> Remaining: TLS — terminate at a reverse proxy or ingress in front of the admin port; the in-process server intentionally stays plain HTTP.
 
 ## Architectural Gaps Worth Documenting
 
-- **`GatewayServer` runs its own embedded `MatchingEngine`**, not the replicated `OrderEngine`. Wiring FIX through the replication topology would require merging the two binaries or building an order-forwarding RPC between them. `/chaos/order` calls `engine.submitOrder` directly on `OrderEngine`, and `FixTcpGatewayTest` exercises the library's FIX gateway; neither says anything about `GatewayServer`.
+- **No high availability.** A single node recovers by replaying its journal; a host loss is an outage. Replication was removed rather than finished (roadmap 1.1).
+- **`GatewayServer` runs its own embedded `MatchingEngine`**, not `OrderEngine`. `/chaos/order` calls `engine.submitOrder` directly on `OrderEngine`, and `FixTcpGatewayTest` exercises the library's FIX gateway; neither says anything about `GatewayServer`.

@@ -217,8 +217,8 @@ device's flush latency is added straight onto the order-entry path.
   such as `c6id.metal` is ideal.
 - **Placement**: mount the instance-store volume and point `--journal` at it (or
   at a `tmpfs`). Never leave the journal on the root EBS/boot volume.
-- **tmpfs (RAM) option**: lowest latency, but durability must then come from
-  primary-backup replication (see [CapacityPlanning.md](./CapacityPlanning.md) §5).
+- **tmpfs (RAM) option**: lowest latency, but the journal is lost on a host
+  reboot and there is no replication to cover it.
 - **Nitro gotcha**: instance-store *and* EBS both appear as `/dev/nvme*`, so
   `TRAN=nvme` is not proof of locality — check the device model string
   (`Amazon EC2 NVMe Instance Storage` vs `Amazon Elastic Block Store`). The

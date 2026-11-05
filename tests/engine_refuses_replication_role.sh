@@ -1,7 +1,7 @@
 #!/bin/sh
 # A replication role refuses to boot: replication was removed (roadmap 1.1 R1).
 #
-# WHY. OrderEngine started a ReplicationCoordinator whenever --role /
+# WHY. OrderEngine started replication whenever --role /
 # OB_NODE_ROLE was set, and docker-compose.yml once set it on both of its
 # engines. That path had no fencing, a promoted backup kept applying the old
 # primary's stream, its send blocked the journal commit path and resync only
@@ -17,8 +17,7 @@
 set -u
 
 unset OB_NODE_ROLE OB_ALLOW_UNSAFE_REPLICATION OB_JOURNAL_PATH OB_CONFIG_PATH \
-      OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_PRIMARY_HOST OB_PRIMARY_REPLICATION_PORT \
-      OB_REPLICATION_PORT OB_NODE_ID OB_CHAOS_INJECT OB_CHAOS_TOKEN
+      OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_CHAOS_INJECT OB_CHAOS_TOKEN
 
 ENGINE="$1"
 TMP="${TMPDIR:-/tmp}/ob_repl_role_$$"

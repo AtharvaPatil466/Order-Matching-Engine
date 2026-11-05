@@ -1027,8 +1027,7 @@ quantity, 0 for none). A book restarted
 from one used to have neither, so the breaker re-seeded its reference from the next order (a
 20% print traded instead of tripping) and an auction holding only market orders cancelled them
 instead of crossing at the last trade price (Rule 7.2). Pinned by
-`tests/CheckpointPriceStateTest.cpp`, which also restarts a `JournalFollower` from the
-checkpoint.
+`tests/CheckpointPriceStateTest.cpp`.
 
 ### Rule 7.5 — What this engine calls LULD is a single fixed percentage band, not US-equities LULD
 
@@ -1197,8 +1196,8 @@ scheduled. Both used to be accepted and rest as `GTC` while the client believed 
 time-bounded. `MatchingEngine::setSessionEndScheduled` says whether a session end is
 scheduled: `OrderEngine` and `GatewayServer` set it false at startup, a `SessionScheduler`
 sets it true, and the library default is true, for an in-process owner that ends its sessions
-itself. The check is in `submitOrder`, so it covers every ingress; journal replay and
-`JournalFollower` call the book directly and do not apply it. Pinned by
+itself. The check is in `submitOrder`, so it covers every ingress; journal replay
+calls the book directly and does not apply it. Pinned by
 `tests/ExpiryAdmissionTest.cpp`.
 
 There is a separate session-end sweep, `cancelDayOrders()`, which cancels every `DAY` order
@@ -1552,7 +1551,7 @@ Deliberately out of scope, so their absence is not mistaken for "the engine has 
   see `docs/Compliance.md` and `include/HierarchicalRiskManager.h`.
 - **Market-data encoding.** ITCH/MoldUDP64/SBE wire formats and sequencing; see
   `Architecture.md`.
-- **Journalling, replay and replication determinism.** See `docs/Verification.md`.
+- **Journalling and replay determinism.** See `docs/Verification.md`.
 - **Session scheduling.** `SessionScheduler` drives the trading-state transitions that §7
   assumes; it does not participate in matching. Its default clock reads the wall clock once
   and then advances on `steady_clock`, and within a trading date it never runs backwards: a

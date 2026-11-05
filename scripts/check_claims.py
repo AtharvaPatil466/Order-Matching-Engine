@@ -22,12 +22,9 @@ from pathlib import Path
 DOCS = ["README.md", "docs/Compliance.md", "docs/Verification.md",
         "docs/ProductionReadiness.md"]
 
-# Claims about code whose future waits on a user decision: replication (roadmap
-# 1.1) and the unshipped protocol stacks (1.2). Nothing else may go untested.
-PENDING = {
-    "repl-chaos": "1.1",
-    "repl-lease-promotion": "1.1",
-}
+# Claims about code whose future waits on a user decision, as {id: decision}.
+# Nothing else may go untested.
+PENDING = {}
 
 MARKER = re.compile(r"<!-- claim:([a-z][a-z0-9-]*) -->")
 ROW_ID = re.compile(r"`?([a-z][a-z0-9-]*)`?")

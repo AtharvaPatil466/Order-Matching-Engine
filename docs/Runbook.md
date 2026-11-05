@@ -163,12 +163,7 @@ grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
 | `--journal-max-mb MB` | `OB_JOURNAL_MAX_SIZE_MB` | off | Checkpoint once the journal reaches MB megabytes |
 | `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | off | Replay an epoch-0 journal (§2) |
 | `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` | `OB_SESSION_SCHEDULE` | off | Session timetable, HH:MM UTC |
-| `--role primary\|backup` | `OB_NODE_ROLE` | standalone | Replication role; refused without the next flag (§10) |
-| `--allow-unsafe-replication` | `OB_ALLOW_UNSAFE_REPLICATION=1` | off | Run replication despite its known defects |
-| `--node-id N` | `OB_NODE_ID` | 1 | Replication node id |
-| `--repl-port P` | `OB_REPLICATION_PORT` | 9002 | Primary's replication listen port |
-| `--primary-host HOST` | `OB_PRIMARY_HOST` | — | Backup only: the primary's host |
-| `--primary-port P` | `OB_PRIMARY_REPLICATION_PORT` | 9002 | Backup only: the primary's port |
+| `--role ROLE` | `OB_NODE_ROLE` | — | Removed with replication; any value refuses to boot (§10) |
 | `--help` | — | — | Print the flags and exit |
 
 Other environment variables `OrderEngine` reads: `OB_CHAOS_INJECT` and
@@ -183,8 +178,7 @@ and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
    step 4, which finds no price bands (unless the environment supplies them,
    §6).
 3. Startup validation: the `instrument.*` and `participant.*` keys, the journal
-   path's parent directory, and a replication role without
-   `--allow-unsafe-replication`. Any failure prints
+   path's parent directory, and a replication role (§10). Any failure prints
    `[Config] FATAL: startup configuration is invalid` with one line per
    problem and exits 1.
 4. With a config file, each symbol's price band is set from
@@ -200,12 +194,11 @@ and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
    a local TLS terminator on `http://127.0.0.1`.
 7. Worker threads, the GTD/DAY expiry timer and, with `--session-schedule`,
    the session scheduler start.
-8. Replication starts, if a role was allowed.
-9. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
+8. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
    is a failed bind.
-10. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
+9. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
 
-Because the admin port opens only at step 9, a probe during replay gets
+Because the admin port opens only at step 8, a probe during replay gets
 connection refused rather than 503. Give a liveness probe enough initial delay
 for your replay time.
 
@@ -226,7 +219,6 @@ for your replay time.
 | `GET /fees?participantId=N` | token | Accrued fee (no fee schedule is set by this binary) |
 | `GET /risk?tier=T&entityId=E` | token | Net position at a risk tier (0 Trader … 3 Firm) |
 | `GET /cat` | token | Audit-record count |
-| `GET /role`, `GET /replication` | token | `standalone` unless replication runs |
 | `GET /journal/head` | token | Whether a journal is on and its sequence number |
 | `GET /version` | token | Git SHA and build time |
 | `GET /chaos/order?...` | token + `X-Chaos-Token` | Submits an order. `{"enabled":false}` unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set |
@@ -247,11 +239,8 @@ test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/metrics)" =
 
 Prometheus series `OrderEngine` can export (each appears once it is first
 used): `orders_accepted_total`, `orders_rejected_total`,
-`journal_entries_committed_total`, `order_pool_utilization_percent{symbol="N"}`,
-and with replication `replication_entries_shipped_total`,
-`replication_bytes_sent_total`, `replication_snapshot_streams_total`,
-`replication_snapshot_entries_total`. `pendingOrders` and the latency
-percentiles are in `/metrics` JSON only. `GatewayServer` keeps
+`journal_entries_committed_total`, `order_pool_utilization_percent{symbol="N"}`.
+`pendingOrders` and the latency percentiles are in `/metrics` JSON only. `GatewayServer` keeps
 `gateway_connections_total` and `gateway_disconnects_total` but has no port to
 read them from.
 
@@ -338,8 +327,8 @@ sleep 1
 grep -F "[Config] Rate limiter reconfigured: 1000 msg/s" /var/lib/orderengine/engine.log
 ```
 
-Thread count, symbol count, ports, the journal path and the replication role
-take effect only at a restart.
+Thread count, symbol count, ports and the journal path take effect only at a
+restart.
 
 ---
 
@@ -375,18 +364,15 @@ history. What it keeps:
   trades executed (`Position` records), which `maxPositionSize` and `/otr` read.
 
 The engine-wide position limit's positions (`setPositionLimit`) are not
-recorded: when the books leave replay mode — the end of any replay, checkpoint
-or not, and a backup's promotion — each is rebuilt as the participant's net
-position summed over the books plus the signed remaining quantity of its
+recorded: when the books leave replay mode, at the end of any replay,
+checkpoint or not, each is rebuilt as the participant's net position summed over the books plus the signed remaining quantity of its
 working orders, parked ones included.
 
 It does not keep a book's VWAP or trade count (read only by the research
 bindings) or rejected-order counts. Full replay does not rebuild those either,
 nor the order-to-trade throttle's window, which starts at zero after any
 restart (it spans a second by default, less than a restart takes), nor the
-hierarchical risk manager's tier positions. A backup that joined late got only
-the resting orders (`streamSnapshot` sends no `Position` records), so its
-rebuilt positions miss what was filled before it joined.
+hierarchical risk manager's tier positions.
 
 Checkpoints run:
 
@@ -549,15 +535,24 @@ Trading behaviour (STP, the circuit breaker, auctions, order types) is in
 
 ## 10. Replication
 
-Replication between two `OrderEngine` nodes exists but is refused unless
-`--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`) is passed with a
-role, because of open CRITICAL defects (REPL-1..6): a deposed primary is never
-fenced, a promoted backup can execute orders twice, a slow backup freezes acks,
-and entries lost in a disconnect are never re-sent. A backup promotes itself
-when the primary's heartbeats and lease lapse and logs
-`[Replication] PROMOTED to primary — exiting replay mode`; there is no
-operator step and no client failover, since `OrderEngine` has no order-entry
-port. Do not rely on it for business continuity.
+There is none, and no failover: an `OrderEngine` is a single node, and it
+recovers by restarting on its journal (§7). Primary/backup replication was
+removed rather than finished (roadmap 1.1), so a host loss is an outage until
+the node, or its journal on another host, comes back. Anything `OrderEngine`
+acknowledged but had not yet synced is gone with the host.
+
+`--role` / `OB_NODE_ROLE` refuse to boot, so a deployment that sets one finds
+out at startup rather than running as a single node it did not ask for:
+
+<!-- runbook-smoke: skip — sample output, not a command -->
+```text
+[Config] FATAL: startup configuration is invalid — refusing to start:
+  - --role / OB_NODE_ROLE = 'primary': replication was removed. This engine runs as a single node and recovers from its journal; unset the role
+```
+
+Unset the role. `--allow-unsafe-replication`, `--node-id`, `--repl-port`,
+`--primary-host` and `--primary-port` are gone too, and an unknown argument is
+fatal.
 
 ---
 

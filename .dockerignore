@@ -9,7 +9,6 @@ bin/
 
 # Local dev artifacts
 .venv/
-deploy/chaos/.venv/
 __pycache__/
 *.pyc
 .pytest_cache/

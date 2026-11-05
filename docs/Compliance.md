@@ -86,7 +86,7 @@ All endpoints are on OrderEngine's admin port (`src/main.cpp:473`); GatewayServe
 
 ## Formal Verification
 
-11 TLA+ specifications model parts of the engine at small bounds. None is linked to the C++ by a refinement proof; see [Verification.md](Verification.md) for what each checks.
+9 TLA+ specifications model parts of the engine at small bounds. None is linked to the C++ by a refinement proof; see [Verification.md](Verification.md) for what each checks.
 
 | Component | Spec File | Invariants Verified |
 |-----------|-----------|-------------------|

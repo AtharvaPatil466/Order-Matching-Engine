@@ -663,7 +663,7 @@ src/                  14 source files — thin compilation units
 tests/                test sources and their CTest registrations
 benchmarks/           11 benchmark binaries
 fuzz/                 4 libFuzzer harnesses + standalone driver
-spec/                 TLA+ formal specifications (11 specs)
+spec/                 TLA+ formal specifications (9 specs)
 tools/                CLI tools and data utilities
 config/               Example configuration files
 docs/                 Runbooks, CapacityPlanning, ProductionReadiness

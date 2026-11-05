@@ -14,6 +14,7 @@
 //   - a checkpoint whose OWN temp file fails (h3: RLIMIT_FSIZE=2000 against a
 //     4 KB book) leaves the live journal as it was, and the process running.
 
+#include "GatewayTestClient.h"
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 #include "TempPath.h"
@@ -193,6 +194,53 @@ void testAsyncAdmissionRejects() {
     assert(rc == kOk && "async engine on a failed journal write");
 }
 
+// OrderEngine's shape: async, Immediate, behind TcpGateway. The write fails on a
+// worker after admission said yes, so the gateway has to look again before it
+// tells the client the order is safe.
+void testAsyncGatewayDoesNotAckAFailedWrite() {
+    const std::string path = uniqueTempPath("journal_halt_gateway.wal");
+    std::filesystem::remove(path);
+    const int rc = inChild("async gateway", [&]() -> int {
+        if (!limitFileSize(midFourthRecord())) return kSetrlimitFailed;
+        MatchingEngine engine;
+        engine.addSymbol(kSym);
+        engine.enableJournal(path, Journal::SyncPolicy::Immediate);
+        engine.startAsync(1);
+        TcpGateway gateway(engine);
+        if (!gateway.start(0)) return kWrongReason;
+        TestClient client;
+        if (!client.connect(gateway.port())) return kWrongReason;
+        client.setRecvTimeout(30);
+
+        const auto answerTo = [&](OrderId id, GatewayResponse& out) {
+            OrderRequest r{};
+            r.type = OrderRequest::Type::NewOrder;
+            r.symbolId = kSym;
+            r.orderId = id;
+            r.participantId = kOwner;
+            r.side = Side::Buy;
+            r.price = 10000 - static_cast<Price>(id);
+            r.qty = 10;
+            r.orderType = OrderType::Limit;
+            return client.sendOrder(r) && client.recvResponse(out);
+        };
+        GatewayResponse resp{};
+        for (OrderId id = 1; id <= kWholeBeforeLimit; ++id) {
+            if (!answerTo(id, resp) || resp.type != GatewayResponse::Type::Ack) return kWrongReason;
+        }
+        // The fourth commit hits the limit mid-record.
+        if (!answerTo(4, resp)) return kWrongReason;
+        if (resp.type == GatewayResponse::Type::Ack) return kAcceptedUndurable;
+        if (resp.rejectReason != RejectReason::JournalHalted) return kWrongReason;
+        return kOk;
+    });
+    const size_t resting = restoredFrom(path, 10);
+    std::filesystem::remove(path);
+    std::printf("  async gateway: %zu resting after restart\n", resting);
+    assert(rc == kOk && "the gateway acked an order the journal refused");
+    assert(resting == static_cast<size_t>(kWholeBeforeLimit));
+}
+
 // h3: a checkpoint under RLIMIT_FSIZE=2000 against a 30-order book. The temp
 // file fails; the live journal must be left exactly as it was.
 void testCheckpointFailureKeepsTheJournal() {
@@ -269,6 +317,7 @@ void testCheckpointDirectorySyncFailureHalts() {
 int main() {
     testSyncPathRejectsAndHolds();
     testAsyncAdmissionRejects();
+    testAsyncGatewayDoesNotAckAFailedWrite();
     testCheckpointFailureKeepsTheJournal();
     testCheckpointDirectorySyncFailureHalts();
     std::puts("JournalHaltTest passed");

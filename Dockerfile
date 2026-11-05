@@ -65,7 +65,7 @@ VOLUME /app/journal
 # boundary; auth still applies.
 ENV OB_ADMIN_BIND=0.0.0.0
 EXPOSE 8080
-# Gateway
+# Order entry (TcpGateway). Refuses to start without OB_PARTICIPANT_CREDENTIALS.
 EXPOSE 9001
 
 # Health check using the /health endpoint

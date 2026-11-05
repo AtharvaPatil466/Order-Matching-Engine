@@ -142,6 +142,11 @@ public:
     TcpGateway(const TcpGateway&) = delete;
     TcpGateway& operator=(const TcpGateway&) = delete;
 
+    // IPv4 address to listen on. Call before start(); start() refuses one that
+    // does not parse. Every interface by default: this is the port clients reach,
+    // and a client that cannot log in cannot do anything on it.
+    void setBindAddress(const std::string& address) { bindAddress_ = address; }
+
     bool start(uint16_t port, int backlog = 128);
     void stop();
     bool isRunning() const { return running_; }
@@ -230,6 +235,7 @@ private:
     int listenFd_;
     int evFd_;           // kqueue or epoll fd
     uint16_t port_{0};
+    std::string bindAddress_{"0.0.0.0"};
     std::atomic<bool> running_;
     std::thread eventThread_;
 

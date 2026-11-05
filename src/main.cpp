@@ -6,10 +6,14 @@
 #include "ConfigValidator.h"
 #include "Journal.h"
 #include "JournalBoot.h"
+#include "MarketDataPublisher.h"
 #include "Metrics.h"
+#include "ParticipantAuth.h"
 #include "SessionScheduler.h"
+#include "TcpGateway.h"
 
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -17,6 +21,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -32,6 +37,80 @@ void signalHandler(int) {
 void sighupHandler(int) {
     g_reload_config.store(true, std::memory_order_release);
 }
+
+namespace {
+
+// H7: participant credentials. A separate file, not engine.conf — same reasoning
+// as the admin token: the main config travels into tickets and chat logs, and
+// secrets should not travel with it.
+//
+// Required, not optional. This is the order-entry port; an operator who forgets
+// the credentials file should find out at startup, not from an incident review.
+// Opting out stays available and has to be deliberate. False once it has said
+// why the engine cannot start.
+bool loadParticipantAuth(const std::string& credPath, bool authDisabled, ParticipantAuth& auth) {
+    if (!credPath.empty()) {
+        if (ParticipantAuth::fileIsOverlyPermissive(credPath)) {
+            std::cerr << "[Auth] WARNING: " << credPath
+                      << " is readable by group or other. Secrets in a "
+                         "world-readable file are not secrets; chmod 600 it.\n";
+        }
+        std::string err;
+        const int n = auth.loadFromFile(credPath, &err);
+        if (n < 0) {
+            std::cerr << "[Auth] FATAL: " << err << "\n";
+            return false;
+        }
+        // A file of nothing but comments parses cleanly and yields no
+        // credentials, so enabled() is false and the gateway would take each
+        // claimed identity on trust. A fail-open on a control that WAS
+        // configured is worse than one that was forgotten, because nothing in
+        // the log looks wrong.
+        if (n == 0) {
+            std::cerr << "[Auth] FATAL: " << credPath
+                      << " parsed cleanly but contains no credentials.\n"
+                      << "        Every line was blank or a comment. Starting would\n"
+                      << "        leave the order-entry port accepting any claimed\n"
+                      << "        participant id.\n"
+                      << "        Add a credential as user:secret:id[,id...], or pass\n"
+                      << "        --no-participant-auth (OB_NO_PARTICIPANT_AUTH=1) to\n"
+                      << "        accept every claimed identity on purpose.\n";
+            return false;
+        }
+        std::cout << "[Auth] Loaded " << n << " participant credential(s) from "
+                  << credPath << "\n";
+        return true;
+    }
+    if (authDisabled) {
+        std::cout << "[Auth] Participant auth explicitly disabled via "
+                     "--no-participant-auth. Every identity on the order port is "
+                     "taken on trust.\n";
+        return true;
+    }
+    std::cerr << "[Auth] FATAL: no participant credentials configured.\n"
+              << "        Set --participant-credentials /path/to/file\n"
+              << "        (OB_PARTICIPANT_CREDENTIALS), one credential per\n"
+              << "        line as user:secret:id[,id...], or pass\n"
+              << "        --no-participant-auth (OB_NO_PARTICIPANT_AUTH=1)\n"
+              << "        to accept every claimed identity on purpose.\n";
+    return false;
+}
+
+// Publishes each book's updates from the worker that owns the book, and nowhere
+// else: nothing here reads a book off its own thread (LF-2, MD-11). The ring has
+// one writer at a time because the lock hands it between workers.
+// ponytail: one lock across workers, per-worker rings if it shows in the latency.
+struct MarketDataListener : EventListener {
+    explicit MarketDataListener(MarketDataPublisher& p) : pub(p) {}
+    void onMarketData(const MarketDataUpdate& u) override {
+        const std::lock_guard<std::mutex> lock(mu);
+        pub.publishUpdate(u);
+    }
+    MarketDataPublisher& pub;
+    std::mutex mu;
+};
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
     std::cout << "╔═══════════════════════════════════════════════════╗\n"
@@ -50,6 +129,12 @@ int main(int argc, char* argv[]) {
         {"--admin-bind", "ADDR", "admin listen address (default 127.0.0.1) [OB_ADMIN_BIND]"},
         {"--admin-token", "TOKEN", "admin bearer token [OB_ADMIN_TOKEN]"},
         {"--admin-no-auth", nullptr, "run the admin port without a token [OB_ADMIN_NO_AUTH=1]"},
+        {"--gateway-port", "P", "order-entry port, 0 picks a free one (default 9001) [OB_GATEWAY_PORT]"},
+        {"--gateway-bind", "ADDR", "order-entry listen address (default 0.0.0.0) [OB_GATEWAY_BIND]"},
+        {"--participant-credentials", "FILE",
+         "credentials, one per line as user:secret:id[,id...] [OB_PARTICIPANT_CREDENTIALS]"},
+        {"--no-participant-auth", nullptr,
+         "accept every claimed identity on the order port [OB_NO_PARTICIPANT_AUTH=1]"},
         {"--config", "PATH", "config file, re-read on SIGHUP [OB_CONFIG_PATH]"},
         {"--journal", "PATH", "journal file, replayed at boot [OB_JOURNAL_PATH]"},
         {"--journal-max-mb", "MB", "checkpoint past this size [OB_JOURNAL_MAX_SIZE_MB]"},
@@ -169,7 +254,37 @@ int main(int argc, char* argv[]) {
         std::cout << "[Config] Startup validation passed\n";
     }
 
+    // ── Order entry settings ─────────────────────────────────────────
+    // Checked here so a refusal comes before a journal is replayed. Each is the
+    // flag, then the environment, then the config file (Config::getString reads
+    // the same OB_ name first).
+    const auto setting = [&](const char* flag, const char* key, const char* fallback) {
+        const std::string fromFlag = flagOrEnv(argc, argv, flag, "");
+        return fromFlag.empty() ? cfg.getString(key, fallback) : fromFlag;
+    };
+    const std::string gatewayBind = setting("--gateway-bind", "gateway_bind", "0.0.0.0");
+    const std::string gatewayPortText = setting("--gateway-port", "gateway_port", "9001");
+    uint16_t gatewayPort = 0;
+    const char* const gatewayPortEnd = gatewayPortText.data() + gatewayPortText.size();
+    if (const auto [end, ec] =
+            std::from_chars(gatewayPortText.data(), gatewayPortEnd, gatewayPort);
+        ec != std::errc{} || end != gatewayPortEnd || gatewayPortText.empty()) {
+        std::cerr << "[Config] FATAL: gateway port '" << gatewayPortText
+                  << "' is not a number from 0 to 65535\n";
+        return 1;
+    }
+    ParticipantAuth participantAuth;
+    if (!loadParticipantAuth(setting("--participant-credentials", "participant_credentials", ""),
+                             flagOrEnvBool(argc, argv, "--no-participant-auth",
+                                           "OB_NO_PARTICIPANT_AUTH"),
+                             participantAuth)) {
+        return 1;
+    }
+
     // ── Engine ────────────────────────────────────────────────────────
+    // The publisher outlives the engine, whose workers call its listener.
+    MarketDataPublisher mdPub("orderbook_md");
+    MarketDataListener mdListener(mdPub);
     MatchingEngine engine;
     for (size_t s = 0; s < numSymbols; ++s) {
         engine.addSymbol(static_cast<SymbolId>(s));
@@ -204,9 +319,18 @@ int main(int argc, char* argv[]) {
         std::cout << "[Config] Price bands set for " << numSymbols << " symbols\n";
     }
 
-    // Enable, refuse and replay the journal — the same sequence GatewayServer
-    // runs, shared through JournalBoot.h so the two cannot drift apart.
-    if (const int rc = bootJournal(engine, argc, argv); rc != 0) return rc;
+    // Enable, refuse and replay the journal (JournalBoot.h). Immediate, not the
+    // default group commit: the order port's ack waits for the worker, and under
+    // Immediate that worker's append has synced by then, so kill -9 cannot lose an
+    // acked order. Group commit would leave it in a 64-entry user-space batch.
+    if (const int rc = bootJournal(engine, argc, argv, Journal::SyncPolicy::Immediate);
+        rc != 0)
+        return rc;
+    if (!engine.getJournal()) {
+        std::cout << "[Engine] WARNING: no journal (--journal / OB_JOURNAL_PATH). Every\n"
+                     "         order the port acknowledges lives only in memory and is\n"
+                     "         lost on any restart.\n";
+    }
 
     const std::string maxSizeStr = flagOrEnv(argc, argv, "--journal-max-mb", "OB_JOURNAL_MAX_SIZE_MB");
     const size_t journalMaxMb = maxSizeStr.empty() ? 0 : std::stoul(maxSizeStr);
@@ -297,6 +421,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // After replay, so replayed orders are not republished, and before the workers
+    // start, because they read the listener slot unlocked.
+    if (mdPub.start()) {
+        for (size_t s = 0; s < numSymbols; ++s) {
+            engine.getOrderBook(static_cast<SymbolId>(s))->setEventListener(&mdListener);
+        }
+        std::cout << "[MarketData] Publishing to shared memory /orderbook_md\n";
+    } else {
+        std::cerr << "[MarketData] WARNING: could not open /orderbook_md; no feed\n";
+    }
+
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
     engine.setWorkerCores(workerCores);
     engine.startAsync(numThreads, 8192);
@@ -358,6 +493,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // ── Order entry ──────────────────────────────────────────────────
+    // After replay, so no order races the book being rebuilt, and before Ready.
+    TcpGateway gateway(engine);
+    gateway.setBindAddress(gatewayBind);
+    gateway.setParticipantAuth(participantAuth.enabled() ? &participantAuth : nullptr);
+    if (!gateway.start(gatewayPort)) {
+        std::cerr << "[Gateway] FATAL: Failed to start gateway on " << gatewayBind << ":"
+                  << gatewayPort << "\n";
+        return 1;
+    }
+    std::cout << "[Gateway] Order Gateway listening on " << gatewayBind << ":" << gateway.port()
+              << std::endl;
+
     // ── Ready ────────────────────────────────────────────────────────
     // A "warmup" used to run here: 200 Limit orders per symbol — 800 at the
     // default --symbols 4 — attributed to participants 1 and 2 and submitted
@@ -376,6 +524,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[Engine] Ready for traffic.\n";
 
     std::cout << "═══════════════════════════════════════════════════\n";
+    std::cout << "  Order entry:   port " << gateway.port() << "\n";
     std::cout << "  Admin server:  http://localhost:" << adminPort << "\n";
     std::cout << "  Endpoints:\n";
     std::cout << "    GET /metrics              — throughput & queue depth\n";
@@ -415,6 +564,7 @@ int main(int argc, char* argv[]) {
     // orders on each one. Nothing here knows when a session ends, so nothing
     // here cancels them.
     std::cout << "\n[Engine] Shutting down — draining queues...\n";
+    gateway.stop();
     admin.stop();
     if (scheduler) scheduler->stop();  // no session transition during the drain
     const auto shutdownReport = engine.gracefulShutdown();
@@ -426,6 +576,7 @@ int main(int argc, char* argv[]) {
               << (shutdownReport.journalEnabled ? "" : " [no journal — not durable]")
               << "\n";
     engine.stopAsync();
+    mdPub.stop();
     std::cout << "[Engine] Shutdown complete.\n";
 
     return 0;

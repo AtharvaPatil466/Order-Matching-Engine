@@ -63,10 +63,14 @@ order_pool_capacity    = 10000
 trade_history_capacity = 65536
 
 # ── Networking ───────────────────────────────────────────────────────────────
-# not read: OrderEngine's admin port is --port; GatewayServer's order port is an
-# optional leading positional argument (default 9876)
+# admin_port is not read: the admin port is --port.
+# Order entry takes the flag, then OB_GATEWAY_PORT / OB_GATEWAY_BIND /
+# OB_PARTICIPANT_CREDENTIALS, then these keys. The credentials file is required
+# (one user:secret:id[,id...] per line) unless --no-participant-auth is passed.
 admin_port      = 8080
 gateway_port    = 9001
+# gateway_bind  = 0.0.0.0
+# participant_credentials = /etc/orderengine/participants.cred
 
 # ── Journaling ───────────────────────────────────────────────────────────────
 # journal_path is only validated; the journal opened is --journal / OB_JOURNAL_PATH.

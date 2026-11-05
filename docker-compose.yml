@@ -8,12 +8,17 @@ services:
     command: ["--threads", "4", "--port", "8080", "--symbols", "4"]
     ports:
       - "8080:8080"    # Admin HTTP
-      - "9001:9001"    # FIX Gateway
+      - "9001:9001"    # Order entry (TcpGateway)
+    # The market-data ring is shared memory; md-subscriber joins this namespace.
+    ipc: shareable
     volumes:
       - journal-primary:/app/journal
       - ./config/engine.conf.example:/app/config/engine.conf:ro
+      # Fail-closed, like the admin token: no credentials file, no engine.
+      - ${OB_PARTICIPANT_CREDENTIALS_FILE:?set OB_PARTICIPANT_CREDENTIALS_FILE — a file of user:secret:id[,id...] lines}:/app/config/participants.cred:ro
     environment:
       - OB_THREADS=4
+      - OB_PARTICIPANT_CREDENTIALS=/app/config/participants.cred
       - OB_JOURNAL_PATH=/app/journal/primary.wal
       # A single node that recovers from its journal. There is no replication
       # (removed, roadmap 1.1 R1), and OB_NODE_ROLE refuses to boot.
@@ -33,7 +38,8 @@ services:
     build: .
     container_name: orderengine-mdsub
     entrypoint: ["/app/MdSubscriber"]
-    command: ["orderengine_md"]
+    command: ["orderbook_md"]
+    ipc: "service:engine-primary"
     depends_on:
       engine-primary:
         condition: service_healthy

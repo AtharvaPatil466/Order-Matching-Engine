@@ -17,6 +17,8 @@
 set -u
 
 unset OB_JOURNAL_PATH OB_CONFIG_PATH OB_NODE_ROLE OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_ADMIN_BIND
+# The order port is not what this test is about: no credentials, any free port.
+export OB_NO_PARTICIPANT_AUTH=1 OB_GATEWAY_PORT=0
 CHAOS_TOKEN="test-only-chaos-token-not-a-secret"
 export OB_CHAOS_INJECT=1
 export OB_CHAOS_TOKEN="$CHAOS_TOKEN"

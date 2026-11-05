@@ -84,8 +84,12 @@ bool TcpGateway::start(uint16_t port, int backlog) {
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, bindAddress_.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "TcpGateway: '" << bindAddress_ << "' is not an IPv4 bind address\n";
+        close(listenFd_); listenFd_ = -1;
+        return false;
+    }
 
     if (bind(listenFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "TcpGateway bind failed: " << std::strerror(errno) << "\n";
@@ -713,6 +717,23 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
         default:
             result = SubmitResult::rejected(RejectReason::InvalidQuantity);
             break;
+    }
+
+    // An async engine has only queued the request. Answer once a worker has run
+    // it, and turn a write the journal refused into a reject: with an Immediate
+    // journal (OrderEngine) an Ack then means the entry is on disk, so kill -9
+    // cannot lose it. It does NOT mean the book took the order: a reject the
+    // worker decides (post-only, FOK, a cancel of an unknown id) still answers
+    // Ack until sessions hear about their orders (roadmap 1.9-I7).
+    //
+    // ponytail: this thread waits out one fsync per request, and every worker's
+    // queue with it. Roadmap D7 (a per-worker gate releasing acks at the durable
+    // ordinal) is the upgrade path once 0.4 has measured what it buys.
+    if (engine_.isAsync() && result.isAccepted()) {
+        engine_.waitForDrain();
+        if (const Journal* j = engine_.getJournal(); j && j->halted()) {
+            result = SubmitResult::rejected(RejectReason::JournalHalted);
+        }
     }
 
     GatewayResponse resp{};

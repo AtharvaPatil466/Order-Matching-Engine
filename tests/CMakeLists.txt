@@ -475,14 +475,6 @@ add_test(NAME StructuredLogTest COMMAND StructuredLogTest)
 set_tests_properties(StructuredLogTest PROPERTIES TIMEOUT 30
                      LABELS "project;ops")
 
-# Journal follower convergence test (HA replication primitive)
-add_executable(JournalFollowerTest JournalFollowerTest.cpp)
-target_link_libraries(JournalFollowerTest PRIVATE OrderMatcher)
-enable_assertions(JournalFollowerTest)
-add_test(NAME JournalFollowerTest COMMAND JournalFollowerTest)
-set_tests_properties(JournalFollowerTest PROPERTIES TIMEOUT 60
-                     LABELS "project;property")
-
 # Snapshot consistency under concurrent writes
 add_executable(SnapshotConsistencyTest SnapshotConsistencyTest.cpp)
 target_link_libraries(SnapshotConsistencyTest PRIVATE OrderMatcher)

@@ -284,12 +284,11 @@ public:
           batchSize_(batchSize == 0 ? 1 : batchSize) {
         // NOTE: the stale-".tmp" cleanup deliberately does NOT live here.
         // Constructing a Journal must not modify anything on disk, because
-        // several consumers construct one purely to READ — JournalFollower
-        // does it on every poll (1ms by default), and ResearchHarness and the
-        // CLI tools do it once. Removing the sibling here meant a follower
-        // tailing a live leader DELETED the leader's in-progress checkpoint:
-        // the leader went on writing to an unlinked inode, its rename failed
-        // with ENOENT, and the checkpoint silently never happened.
+        // several consumers construct one purely to READ — ResearchHarness
+        // and the CLI tools. Removing the sibling here meant a reader of a
+        // live journal DELETED the writer's in-progress checkpoint: the writer
+        // went on writing to an unlinked inode, its rename failed with ENOENT,
+        // and the checkpoint silently never happened.
         // The cleanup now runs in prepareRewrite(), which is the only place
         // that is about to create a .tmp and therefore the only place that
         // has any business removing a stale one.
@@ -858,97 +857,6 @@ public:
         const size_t bytes = headerBytesOfStream(f);
         std::fclose(f);
         return bytes;
-    }
-
-    // Result of readTailFromPath(): the anchors a tailing reader needs to
-    // decide WHICH file it is looking at, plus the records it has not seen yet,
-    // all taken from ONE fopen.
-    //
-    // WHY ONE OPEN. A reader that tails a live journal has to answer two
-    // questions per poll — "is this still the file I was following?" and "what
-    // is new in it?" — and a checkpoint can rename(2) a fresh file over the
-    // path between them. Asking them through two separate opens pairs one
-    // file's identity with another file's contents, which is the same window
-    // that made st_ino useless here (see JournalFollower::classify). Both
-    // answers come off the same handle, so what is checked IS what is read.
-    struct TailRead {
-        JournalEntry first{};          // record 1, the file-identity anchor
-        bool         hasFirst{false};  // false: empty/unreadable/invalid first
-        JournalEntry beforeTail{};     // the record at startIndex-1
-        bool         hasBeforeTail{false};  // false: the file is shorter than that
-        std::vector<JournalEntry> tail;     // records [startIndex, end)
-        // Whole records pulled off the disk by this call — the cost of the
-        // read, independent of how many records were kept. Lets a caller assert
-        // that polling a large unchanging file stays cheap.
-        size_t recordsRead{0};
-    };
-
-    // Reads `path` from `startIndex` onward WITHOUT re-reading (or re-CRCing)
-    // the prefix, and returns the two identity anchors alongside the tail.
-    //
-    // Validation is per-record and identical to readEntriesFromPath's: a short,
-    // CRC-invalid or out-of-sequence record ends the read and is not returned.
-    // Because records are numbered contiguously from 1, the tail's expected
-    // sequence is seeded at startIndex+1 — exactly the number a full strict
-    // read would have reached by then.
-    //
-    // WHAT SKIPPING THE PREFIX GIVES UP: corruption STRICTLY INSIDE the already
-    // consumed prefix — not at record 1, not at startIndex-1 — is no longer
-    // seen, because those bytes are never read again. Both anchors are still
-    // CRC- and sequence-checked, so a caller still detects a replaced file and
-    // a prefix that lost records; what it no longer detects is a record it
-    // already consumed rotting afterwards, which it could not have un-applied
-    // anyway. Corruption at or after startIndex ends the tail exactly as
-    // before.
-    //
-    // Returns false only when the file could not be opened.
-    static bool readTailFromPath(const std::string& path, size_t startIndex,
-                                 bool validateCRC, bool validateSequence,
-                                 TailRead& out) {
-        out = TailRead{};
-        FILE* file = std::fopen(path.c_str(), "rb");
-        if (!file) return false;
-
-        const long dataOffset = static_cast<long>(headerBytesOfStream(file));
-        const long recordSize = static_cast<long>(sizeof(JournalEntry));
-        auto offsetOf = [&](size_t index) {
-            return dataOffset + static_cast<long>(index) * recordSize;
-        };
-
-        // One record at a known index, validated the same way the streaming
-        // loop validates it. A record that is absent, torn, CRC-invalid or
-        // misnumbered reports false — the same thing a full read would show by
-        // stopping short of it.
-        auto readAt = [&](size_t index, JournalEntry& entry) {
-            if (std::fseek(file, offsetOf(index), SEEK_SET) != 0) return false;
-            if (std::fread(&entry, sizeof(entry), 1, file) != 1) return false;
-            ++out.recordsRead;
-            if (validateCRC &&
-                entry.checksum !=
-                    computeCRC32(&entry, offsetof(JournalEntry, checksum))) {
-                return false;
-            }
-            return !validateSequence || entry.sequenceNumber == index + 1;
-        };
-
-        if (startIndex > 0) {
-            out.hasFirst = readAt(0, out.first);
-            out.hasBeforeTail = readAt(startIndex - 1, out.beforeTail);
-        }
-        if (std::fseek(file, offsetOf(startIndex), SEEK_SET) == 0) {
-            out.recordsRead +=
-                readRecords(file, validateCRC, validateSequence,
-                            static_cast<uint64_t>(startIndex) + 1, out.tail);
-        }
-        // From record 1 the tail already carries the identity anchor; no
-        // second read for it.
-        if (startIndex == 0 && !out.tail.empty()) {
-            out.first = out.tail.front();
-            out.hasFirst = true;
-        }
-
-        std::fclose(file);
-        return true;
     }
 
     const std::string& path() const { return filePath_; }
@@ -1897,10 +1805,9 @@ private:
         const long size = std::ftell(file_);
         if (size <= 0) {
             // Deferred, NOT written here. Opening must not modify the file:
-            // JournalFollower, ResearchHarness, JournalReplayCLI and
-            // TimeMachine all construct a Journal purely to READ, and writing
-            // a header at construction made a read-only consumer mutate the
-            // file it was tailing — which broke the follower outright. The
+            // ResearchHarness, JournalReplayCLI and TimeMachine all construct
+            // a Journal purely to READ, and writing a header at construction
+            // made a read-only consumer mutate the file it was reading. The
             // header goes down immediately before the first record instead.
             pendingHeader_ = true;
             dataOffset_ = sizeof(JournalFileHeader);
@@ -2055,8 +1962,7 @@ private:
 
         // How many records a STRICT read would return, computed from the lax
         // read rather than by reading the file a second time — the sequence
-        // numbers are already in hand, and this runs in the constructor, which
-        // JournalFollower invokes on every poll.
+        // numbers are already in hand, and this runs in every constructor.
         //
         // Mirrors readEntriesFromPath's strict mode exactly: expect 1, then
         // +1, stop at the first gap.
@@ -2092,8 +1998,7 @@ private:
                    ? sizeof(JournalFileHeader) : 0;
     }
 
-    // The record loop, shared by readEntriesFromPath and readTailFromPath so
-    // the two cannot drift on what counts as a valid record. Reads whole
+    // The record loop behind readEntriesFromPath. Reads whole
     // records from an already-positioned handle and stops at the first one that
     // is short, CRC-invalid or out of sequence; that record is not appended.
     // `expectedSequence` is the number the NEXT record must carry.

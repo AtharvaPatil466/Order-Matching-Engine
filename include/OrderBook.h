@@ -776,7 +776,7 @@ public:
         std::lock_guard<std::mutex> lock(bookLock_);
         participantRisk_.forEach([&](const OTRKey& key, const ParticipantRiskState& s) {
             if (s.currentExposure != 0 || s.ordersSubmitted != 0 || s.tradesExecuted != 0)
-                fn(ParticipantPosition{key.value >> 32, s.currentExposure,
+                fn(ParticipantPosition{key.participant, s.currentExposure,
                                        s.ordersSubmitted, s.tradesExecuted});
         });
     }

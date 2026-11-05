@@ -2,7 +2,7 @@
 #
 # set_irq_affinity.sh — pin all IRQs of a NIC to a housekeeping core mask so
 # hardware interrupts (and their softirq bottom halves) stop landing on the
-# isolated matching / DPDK-poll cores. See docs/OSTuning.md §3 (P2-13).
+# isolated matching cores. See docs/OSTuning.md §3 (P2-13).
 #
 # Run this BEFORE starting the engine, and again after any NIC reset, driver
 # reload, or `ethtool -L` queue-count change (those re-create the IRQs).

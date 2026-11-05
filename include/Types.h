@@ -125,8 +125,8 @@ enum class RejectReason : uint8_t {
 
     // ─── Hot-path risk controls (P2-8 … P2-11) ──────────────────────────────
     // NOTE: extending this enum requires a matching case in every exhaustive
-    // switch over RejectReason (OuchProtocol.h, TcpGateway.cpp). The Release
-    // build is -Wall -Wextra -Werror, so a missing
+    // switch over RejectReason (TcpGateway.cpp). The Release build is
+    // -Wall -Wextra -Werror, so a missing
     // case is a hard compile error, not a warning.
     KillSwitchActive,          // P2-8: engine kill switch engaged; new orders blocked
     PositionLimitExceeded,     // P2-9: participant net-position limit would be breached

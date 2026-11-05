@@ -5,7 +5,7 @@
 // OrderBook holds exactly one EventListener pointer. That's the right
 // shape for hot-path performance (one vtable dispatch, no container
 // iteration) but means that any setup with multiple interested
-// subscribers — OUCH session + ITCH publisher + structured-log sink —
+// subscribers — ITCH publisher + market-data ring + structured-log sink —
 // would clobber each other.
 //
 // MultiplexListener composes N listeners behind a single EventListener

@@ -24,14 +24,9 @@
 //    16. Heartbeat fires after idle interval
 //    17. Peer-idle timeout returns false from tick()
 //    18. Client heartbeat extends peer-idle clock
-//
-//   Integration
-//    19. OUCH EnterOrder wrapped in SoupBinTCP UnsequencedData
-//        round-trips through framer + session and lands in OuchSession.
 
 #include "MatchingEngine.h"
-#include "OuchProtocol.h"
-#include "OuchSession.h"
+#include "WireBytes.h"
 #include "SoupBinTCP.h"
 #include "SoupBinTcpFramer.h"
 #include "SoupBinTcpSession.h"
@@ -439,81 +434,6 @@ void test_SessionClientHeartbeatExtendsLiveness() {
     } END
 }
 
-// ─── Integration: OUCH over SoupBinTCP ──────────────────────────────────────
-
-void test_OuchOverSoupBinTcp() {
-    TEST(OuchOverSoupBinTcp) {
-        // Build the stack: SoupBinTcpSession at the bottom; OuchSession
-        // consumes the payloads the soup session hands up; OUCH
-        // responses pass back through soup as UnsequencedData (server
-        // → client, ack pattern).
-        MatchingEngine engine;
-        engine.addSymbol(7);
-        engine.start();
-
-        std::string wireOut;
-        SoupBinTcpSession soup(
-            [&](std::string_view b) { wireOut.append(b); }, "S");
-        soup.setOnLoginRequest([](const SoupLoginRequest&) { return char{0}; });
-
-        // Wire OUCH on top of soup. The OUCH session's send_ wraps
-        // outbound bytes in SoupBinTCP UnsequencedData packets — that
-        // way, what arrives on the actual TCP socket is spec-compliant
-        // top-to-bottom.
-        OuchSession ouch(engine, [&](std::string_view ouchBytes) {
-            soup.sendUnsequenced(ouchBytes.data(), ouchBytes.size());
-        });
-
-        // Soup hands unwrapped payloads up to OUCH.
-        soup.setOnAppPayload([&](const uint8_t* p, size_t n, bool) {
-            ouch.feed(reinterpret_cast<const char*>(p), n);
-        });
-
-        // 1. Client logs in.
-        auto login = buildLoginRequest("U", "P");
-        CHECK(soup.feed(reinterpret_cast<const char*>(login.data()),
-                        login.size(), 100));
-        CHECK(soup.loggedIn());
-
-        // Clear the LoginAccepted from the captured wire.
-        wireOut.clear();
-
-        // 2. Client sends an OUCH EnterOrder wrapped in soup.
-        std::vector<uint8_t> ouchEnter(OUCH_SIZE_ENTER_ORDER, ' ');
-        ouchEnter[0] = OUCH_MT_ENTER_ORDER;
-        writeAsciiDecimal(ouchEnter.data() + 1, 14, /*token=*/12345);
-        ouchEnter[15] = 'B';
-        writeU32BE(ouchEnter.data() + 16, /*shares=*/50);
-        writeAsciiDecimal(ouchEnter.data() + 20, 8, /*stock=*/7);
-        writeU32BE(ouchEnter.data() + 28, /*price=*/1000);
-        writeU32BE(ouchEnter.data() + 32, OUCH_TIF_DAY);
-        writeAsciiDecimal(ouchEnter.data() + 36, 4, /*firm=*/1);
-        ouchEnter[40] = 'Y'; ouchEnter[41] = 'O'; ouchEnter[42] = 'N';
-        writeU32BE(ouchEnter.data() + 43, 0);
-        ouchEnter[47] = 'N'; ouchEnter[48] = 'R';
-
-        std::vector<uint8_t> soupWrapped(3 + ouchEnter.size());
-        soupWriteEnvelope(soupWrapped.data(), SOUP_PT_UNSEQUENCED_DATA,
-                          ouchEnter.data(), ouchEnter.size());
-
-        CHECK(soup.feed(reinterpret_cast<const char*>(soupWrapped.data()),
-                        soupWrapped.size(), 150));
-
-        // The OUCH session must have accepted and acked the order.
-        CHECK(ouch.ordersAccepted() == 1);
-        auto* book = engine.getOrderBook(7);
-        CHECK(book != nullptr);
-        CHECK(book->getOrder(12345) != nullptr);
-
-        // The wire response is a SoupBinTCP Unsequenced packet wrapping
-        // an OUCH 'A' (OrderAccepted) reply.
-        CHECK(wireOut.size() == 3 + OUCH_SIZE_ORDER_ACCEPTED);
-        const auto* resp = reinterpret_cast<const uint8_t*>(wireOut.data());
-        CHECK(resp[2] == SOUP_PT_UNSEQUENCED_DATA);
-        CHECK(resp[3] == OUCH_MT_ORDER_ACCEPTED);
-    } END
-}
-
 int main() {
     std::cout << "Running SoupBinTcpTest\n";
 
@@ -537,8 +457,6 @@ int main() {
     test_SessionEmitsHeartbeatAfterIdle();
     test_SessionPeerIdleTimeoutClosesSession();
     test_SessionClientHeartbeatExtendsLiveness();
-
-    test_OuchOverSoupBinTcp();
 
     std::cout << "\n" << tests_passed << " passed, "
               << tests_failed << " failed\n";

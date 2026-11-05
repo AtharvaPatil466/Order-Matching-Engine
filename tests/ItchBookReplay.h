@@ -12,7 +12,7 @@
 //   GapRecoveryReconstructionTest — replays a stream with induced packet loss
 
 #include "ItchProtocol.h"
-#include "OuchProtocol.h"  // readU16BE / readU32BE / readU64BE
+#include "WireBytes.h"  // readU16BE / readU32BE / readU64BE
 #include "Types.h"
 
 #include <cstdint>

@@ -1,13 +1,13 @@
 #pragma once
 
 // SoupBinTCP — Nasdaq's lightweight TCP session-framing protocol. Wraps
-// application messages (OUCH, ITCH gap-fill) with a 3-byte envelope plus a
-// session state machine (login, 1s heartbeats, logout). Nasdaq uses it as the
-// OUCH order-entry transport and the ITCH multicast gap-recovery channel.
+// application messages with a 3-byte envelope plus a session state machine
+// (login, 1s heartbeats, logout). Here it is the ITCH multicast gap-recovery
+// channel (ItchRetransmissionService), and nothing else.
 //
 // Wire envelope:
 //   [length: 2 bytes BE, EXCLUDES the length field][type: 1 byte][payload]
-// The length counts type+payload, so a 49-byte OUCH EnterOrder in a Sequenced
+// The length counts type+payload, so a 49-byte message in a Sequenced
 // Data packet is 2+1+49=52 wire bytes with the length field reading 50.
 //
 // Packet types:
@@ -22,7 +22,7 @@
 // disconnect after 15s of peer silence. Both timers are caller-driven via
 // tick(nowMs) — no background thread — keeping the session deterministic.
 
-#include "OuchProtocol.h"  // reuses writeU16BE / readU16BE / writeAsciiDecimal
+#include "WireBytes.h"  // writeU16BE / readU16BE / writeAsciiDecimal
 
 #include <cstddef>
 #include <cstdint>

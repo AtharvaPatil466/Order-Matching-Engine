@@ -8,9 +8,6 @@
 #include "JournalBoot.h"
 #include "Metrics.h"
 #include "SessionScheduler.h"
-#ifdef OB_HAVE_DPDK
-#include "DpdkGateway.h"
-#endif
 
 #include <atomic>
 #include <chrono>
@@ -378,28 +375,6 @@ int main(int argc, char* argv[]) {
     admin.setReady(true);
     std::cout << "[Engine] Ready for traffic.\n";
 
-#ifdef OB_HAVE_DPDK
-    // Kernel-bypass OUCH ingestion on the secondary ENI (F-Stack/DPDK). Behind
-    // OB_HAVE_DPDK so the default kernel build is unchanged; further gated on
-    // OB_DPDK=1 so a DPDK-capable binary can still run the kernel path. F-Stack
-    // reads its NIC/lcore/IP config from the process args (--conf) via ff_init.
-    std::unique_ptr<DpdkGateway> dpdk;
-    if (const char* d = std::getenv("OB_DPDK"); d && std::string(d) == "1") {
-        DpdkConfig dcfg;
-        if (const char* p = std::getenv("OB_DPDK_PORT")) {
-            dcfg.port = static_cast<uint16_t>(std::stoul(p));
-        }
-        dpdk = std::make_unique<DpdkGateway>(engine, dcfg);
-        if (dpdk->start(argc, argv)) {
-            std::cout << "[DPDK] F-Stack kernel-bypass ingestion started on port "
-                      << dcfg.port << "\n";
-        } else {
-            std::cerr << "[DPDK] FATAL: F-Stack ingestion failed to start\n";
-            return 1;
-        }
-    }
-#endif
-
     std::cout << "═══════════════════════════════════════════════════\n";
     std::cout << "  Admin server:  http://localhost:" << adminPort << "\n";
     std::cout << "  Endpoints:\n";
@@ -441,9 +416,6 @@ int main(int argc, char* argv[]) {
     // here cancels them.
     std::cout << "\n[Engine] Shutting down — draining queues...\n";
     admin.stop();
-#ifdef OB_HAVE_DPDK
-    if (dpdk) dpdk->stop();
-#endif
     if (scheduler) scheduler->stop();  // no session transition during the drain
     const auto shutdownReport = engine.gracefulShutdown();
     std::cout << "[Engine] Queues drained. DAY orders cancelled: "

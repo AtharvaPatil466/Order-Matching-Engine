@@ -13,7 +13,7 @@
 // Total payload: 11 bytes.
 //
 // Real Nasdaq uses a different exact format (see "Sequenced Data
-// Re-request" packet in the Nasdaq SoupBinTCP / NASDAQ-OUCH spec);
+// Re-request" packet in the Nasdaq SoupBinTCP spec);
 // this is the same shape with our tag instead of a multi-byte
 // header. Documented inline so consumers know what to expect.
 //
@@ -21,13 +21,12 @@
 // SoupBinTCP SequencedData packet, then leaves the connection open
 // for follow-up re-requests until the subscriber disconnects.
 //
-// Composition: an OuchTcpGateway-style server (acceptor + per-
-// connection thread). Each connection runs a SoupBinTcpSession;
+// Composition: a TCP server (acceptor + per-connection thread). Each connection runs a SoupBinTcpSession;
 // the session's app-payload callback parses the re-request and
 // streams the response.
 
 #include "MoldPacketJournal.h"
-#include "OuchProtocol.h"  // readU16BE / readU64BE
+#include "WireBytes.h"  // readU16BE / readU64BE
 #include "RateLimiter.h"
 #include "StructuredLog.h"
 #include "SoupBinTcpSession.h"

@@ -1,13 +1,8 @@
 // ParticipantAuthTest — audit H7: a wire-supplied ParticipantId must be backed
 // by a credential.
 //
-// Before this, every gateway trusted the identity in the message:
-//
-//   FIX     result.participantId = msg.getInt(SenderCompID)
-//   OUCH    firmOf_[engineId] = o.firm
-//   binary  req.participantId, a field in the client's own struct
-//
-// So anyone who could reach the port could trade as any participant, evade the
+// Before this, the gateway trusted the identity in the message
+// (req.participantId, a field in the client's own struct). So anyone who could reach the port could trade as any participant, evade the
 // per-participant rate limiter by rotating ids, and reach participant-scoped
 // controls including the kill switch.
 //
@@ -15,7 +10,6 @@
 
 #include "ParticipantAuth.h"
 #include "TempPath.h"
-#include "SoupBinTCP.h"
 
 #include <cassert>
 #include <cstdio>
@@ -144,18 +138,6 @@ void test_ConstantTimeEqualsBasics() {
     PASS();
 }
 
-// ─── 8: the OUCH gateway had the reject code all along ──────────────────────
-//
-// SOUP_LOGIN_REJECT_NOT_AUTHORIZED ('A') has been defined since the SoupBinTCP
-// header was written. Nothing ever sent it, because nothing ever checked a
-// credential — the login validator defaulted to "accept every login".
-void test_SoupNotAuthorizedCodeExists() {
-    TEST(SoupNotAuthorizedCodeExists);
-    assert(SOUP_LOGIN_REJECT_NOT_AUTHORIZED == 'A');
-    assert(SOUP_LOGIN_REJECT_SESSION_NOT_AVAILABLE == 'S');
-    PASS();
-}
-
 // ─── 9: a credential covering no participants authorises nothing ────────────
 //
 // A misconfiguration — credential present, allow-list empty — must fail
@@ -259,7 +241,6 @@ int main() {
     test_ReAddingCredentialReplaces();
     test_WrongSecretsAllFailRegardlessOfPrefix();
     test_ConstantTimeEqualsBasics();
-    test_SoupNotAuthorizedCodeExists();
     test_EmptyAllowListAuthorizesNothing();
     test_LoadsCredentialsFromFile();
     test_MalformedCredentialLineIsFatal();

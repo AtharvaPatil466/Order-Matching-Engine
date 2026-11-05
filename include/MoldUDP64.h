@@ -19,7 +19,7 @@
 // missing ranges from a separate SoupBinTCP-style Request Server. This codec
 // produces the multicast frames only; the recovery channel is the caller's.
 
-#include "OuchProtocol.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
+#include "WireBytes.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
 
 #include <algorithm>
 #include <atomic>

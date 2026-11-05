@@ -2,8 +2,7 @@
 
 // SoupBinTcpFramer — reassembles complete SoupBinTCP packets from an
 // arbitrarily-fragmented byte stream and hands each off via a
-// callback. Same shape as FixFramer / OuchSession's accumulation
-// buffer; the protocol-specific bits are the 2-byte big-endian
+// callback. The protocol-specific bits are the 2-byte big-endian
 // length prefix and the bound on packet size.
 //
 // Usage:

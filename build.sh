@@ -98,8 +98,6 @@ $CXX $FLAGS tests/ConfigTest.cpp $LIB_OBJS -o bin/ConfigTest
 echo "Compiling alert dispatcher tests..."
 $CXX $FLAGS tests/AlertDispatcherTest.cpp $LIB_OBJS -o bin/AlertDispatcherTest
 
-echo "Compiling OUCH session tests..."
-$CXX $FLAGS tests/OuchSessionTest.cpp $LIB_OBJS -o bin/OuchSessionTest
 
 echo "Compiling ITCH publisher tests..."
 $CXX $FLAGS tests/ItchPublisherTest.cpp $LIB_OBJS -o bin/ItchPublisherTest
@@ -109,9 +107,6 @@ $CXX $FLAGS tests/SoupBinTcpTest.cpp $LIB_OBJS -o bin/SoupBinTcpTest
 
 echo "Compiling MoldUDP64 multicast tests..."
 $CXX $FLAGS tests/MoldUDP64Test.cpp $LIB_OBJS -o bin/MoldUDP64Test
-
-echo "Compiling OUCH TCP gateway tests..."
-$CXX $FLAGS tests/OuchTcpGatewayTest.cpp $LIB_OBJS -o bin/OuchTcpGatewayTest
 
 echo "Compiling ITCH UDP transport tests..."
 $CXX $FLAGS tests/ItchUdpTransportTest.cpp $LIB_OBJS -o bin/ItchUdpTransportTest
@@ -142,11 +137,9 @@ echo "To run GTD Tests:        ./bin/GTDReplayTest"
 echo "To run MD Compat:        ./bin/MdFeedSchemaCompatTest"
 echo "To run Config Tests:     ./bin/ConfigTest"
 echo "To run Alert Tests:      ./bin/AlertDispatcherTest"
-echo "To run OUCH Tests:       ./bin/OuchSessionTest"
 echo "To run ITCH Tests:       ./bin/ItchPublisherTest"
 echo "To run SoupBin Tests:    ./bin/SoupBinTcpTest"
 echo "To run Mold Tests:       ./bin/MoldUDP64Test"
-echo "To run OUCH GW Tests:    ./bin/OuchTcpGatewayTest"
 echo "To run ITCH UDP Tests:   ./bin/ItchUdpTransportTest"
 echo "To run Retransmit Tests: ./bin/ItchRetransmissionTest"
 echo "To run MD Feed Tests:    ./bin/ItchMarketDataFeedTest"

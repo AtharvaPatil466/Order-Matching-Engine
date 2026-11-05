@@ -722,8 +722,7 @@ public:
     //
     // KNOWN HAZARD, deliberately NOT guarded here — see the Phase 0 report.
     // There is exactly ONE public listener slot, and ItchPublisher,
-    // OuchSession::attachFillListener, MarketMaker and InformedTrader all
-    // claim it through this setter. A second claim silently replaces the
+    // MarketMaker and InformedTrader all claim it through this setter. A second claim silently replaces the
     // first, so two protocols (or two agents) on one book means one of them
     // goes deaf with no diagnostic. MarketMaker.h:89 and InformedTrader.h:88
     // collide exactly this way today.
@@ -752,7 +751,7 @@ public:
 
     // Secondary, engine-owned listener for internal observation (e.g. OCO
     // contingent-order tracking). Kept separate from the user listener slot
-    // above so installing one does not clobber a gateway/OUCH market-data
+    // above so installing one does not clobber a market-data
     // listener. Receives the same order-update events.
     void setEngineListener(EventListener* listener) {
         engineListener_ = listener ? listener : &nullListener();

@@ -2,8 +2,8 @@
 //
 // The 0.13 stop-gap range-checked side, orderType, tif and pegType in
 // TcpGateway::processMessage, so only that one ingress was covered. Every
-// other caller of MatchingEngine::submitOrder — the admin endpoint, OUCH, SBE,
-// FIX, an in-process strategy, the async worker it enqueues for — handed the
+// other caller of MatchingEngine::submitOrder — the admin endpoint, the other
+// protocol stacks of the time, an in-process strategy, the async worker it enqueues for — handed the
 // raw enum straight to the book. A side byte of 2 rested in the asks (the book
 // picks a side with `side == Buy ? bids_ : asks_`), and an orderType past LOC
 // fell through every switch in matching, market data and the journal and

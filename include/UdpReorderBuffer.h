@@ -1,14 +1,11 @@
 #pragma once
 //
-// UdpReorderBuffer — RECEIVER-SIDE gap recovery for the DPDK UDP order-entry
-// path (Component 2). DPDK-free and header-only (like UdpSequencer) so the whole
-// gap/reorder/NAK decision layer is unit-testable on any platform; DpdkGateway
-// composes one and wires the delivery + NAK hooks to its MpscQueue and its
-// rte_eth_tx_burst NAK sender.
+// UdpReorderBuffer — RECEIVER-SIDE gap recovery for a sequenced UDP stream.
+// Header-only, so the whole gap/reorder/NAK decision layer is unit-testable on
+// any platform. No shipped binary composes one since DpdkGateway was deleted
+// (roadmap 1.2); kept with the ITCH stack (J3).
 //
-// This REPLACES the old UdpSequencer::observe() behaviour of "accept the
-// post-gap datagram and resync forward" (which silently lost the gap). Instead a
-// future (out-of-order) datagram is HELD in a fixed ring until the hole ahead of
+// A future (out-of-order) datagram is HELD in a fixed ring until the hole ahead of
 // it is filled, so a merely-reordered datagram is recovered with NO NAK, and a
 // genuinely-lost one triggers a NAK for exactly the newly-missing range.
 //
@@ -42,9 +39,8 @@
 // A NAK'd hole stays tracked and is NAK'd again every kReNakDatagrams arrivals
 // while it is still open: the NAK or the retransmission can be lost as well.
 //
-// Threading: single-consumer. onDatagram() is called only from the DPDK poll
-// thread. No internal synchronization (a lock would defeat the isolated poll
-// core). Read counters from another thread as approximate telemetry only.
+// Threading: single-consumer. onDatagram() is called only from one receive
+// thread. No internal synchronization. Read counters from another thread as approximate telemetry only.
 //
 // No heap on the hot path: the ring is a fixed inline array sized at compile
 // time; delivery of a not-yet-buffered in-order datagram uses a stack RxMessage.
@@ -66,13 +62,11 @@ class UdpReorderBuffer {
                   "kReorderDepth must be a power of two");
 
 public:
-    // Deliver an in-order datagram's payload to the next stage (DpdkGateway pushes
-    // it onto the MpscQueue). Fires for direct in-order arrivals AND for datagrams
+    // Deliver an in-order datagram's payload to the next stage. Fires for direct in-order arrivals AND for datagrams
     // drained out of the reorder ring, always in ascending sequence order.
     using DeliverFn = std::function<void(const RxMessage&)>;
-    // Request retransmission of [seqStart, seqStart+count). DpdkGateway wires this
-    // to sendNak (rte_eth_tx_burst). Fire-and-forget: the hook's own success/drop
-    // accounting (tx_naks_sent / tx_nak_drops) lives in the hook implementation.
+    // Request retransmission of [seqStart, seqStart+count). Fire-and-forget: the
+    // hook's own success/drop accounting lives in the hook implementation.
     using NakFn = std::function<void(uint64_t seqStart, uint32_t count)>;
 
     static constexpr uint32_t kReorderDepth = Depth;
@@ -89,7 +83,7 @@ public:
     void setDeliverHook(DeliverFn fn) { deliverHook_ = std::move(fn); }
     void setNakHook(NakFn fn) { nakHook_ = std::move(fn); }
 
-    // Feed one received datagram: its 64-bit sequence and its OUCH payload (the
+    // Feed one received datagram: its 64-bit sequence and its payload (the
     // bytes AFTER the sequence header). Handles in-order delivery, buffering of
     // future datagrams, draining once a hole fills, NAK emission for newly-missing
     // ranges, and duplicate/overflow accounting. Never throws, never allocates.
@@ -165,8 +159,7 @@ public:
     // would previously have produced a spurious retransmission request.
     uint64_t naksAvoided() const { return naksAvoided_; }
 
-    // ── Counters (5 of the 7 required live here; tx_naks_sent / tx_nak_drops are
-    //    owned by the NAK hook implementation in DpdkGateway) ──────────────────
+    // ── Counters (NAK send/drop counts belong to the hook implementation) ─────
     uint64_t gapsDetected()     const { return gapsDetected_; }     // rx_gaps_detected
     uint64_t gapDatagrams()     const { return gapDatagrams_; }     // rx_gap_datagrams
     uint64_t reorderBuffered()  const { return reorderBuffered_; }  // rx_reorder_buffered
@@ -189,7 +182,7 @@ private:
     // subsequent arrivals. If it closes first — the ordinary reordering case —
     // it is dropped without ever asking for a retransmission.
     //
-    // Fixed capacity, no allocation: this runs on the DPDK poll core. If more
+    // Fixed capacity, no allocation. If more
     // distinct holes are outstanding than the window can track, the oldest is
     // NAK'd immediately rather than forgotten — under that much loss, waiting
     // is not what recovery needs.

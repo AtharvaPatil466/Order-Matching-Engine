@@ -1,9 +1,10 @@
 #pragma once
 //
-// UdpRetransmitBuffer — SENDER-SIDE retransmit window for the DPDK UDP
-// order-entry path. Standalone and DPDK-free: it does NOT touch DpdkGateway or
-// the receiver path (Component 5 constraint — sender and receiver stay cleanly
-// separated). The only shared type is the RxMessage payload POD.
+// UdpRetransmitBuffer — SENDER-SIDE retransmit window for a sequenced UDP
+// stream. Standalone: it does NOT touch the receiver path (sender and receiver
+// stay cleanly separated). The only shared type is the RxMessage payload POD.
+// No shipped binary composes one since DpdkGateway was deleted (roadmap 1.2);
+// kept with the ITCH stack (J3).
 //
 // The sender records every datagram it transmits into a fixed ring keyed by
 // sequence number. When it receives a NAK (a resend request for a range of
@@ -102,7 +103,7 @@ private:
     static constexpr uint64_t kMask = Depth - 1;
 
     // seq == 0 is the empty sentinel (valid datagram sequences start at 1, per the
-    // UdpSequencer wire model), so a default-constructed slot never false-matches.
+    // big-endian sequence header), so a default-constructed slot never false-matches.
     struct Slot {
         uint64_t  seq{0};
         RxMessage payload;

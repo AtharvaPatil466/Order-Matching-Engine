@@ -21,7 +21,7 @@
 // real layout bug in the corresponding encoder.
 
 #include "ItchProtocol.h"
-#include "OuchProtocol.h"  // readU16BE/readU32BE/readU64BE, parseAsciiDecimal
+#include "WireBytes.h"  // readU16BE/readU32BE/readU64BE, parseAsciiDecimal
 
 #include <cstdint>
 #include <cstring>

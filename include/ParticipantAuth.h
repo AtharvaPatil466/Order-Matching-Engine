@@ -24,9 +24,8 @@
 // WHAT THIS IS
 //
 // A credential store and an authorisation check, deliberately separate from
-// any protocol. Each gateway authenticates at its own session start (FIX
-// Logon, OUCH Login, a binary handshake) and then asks this class one question
-// per order: may this session act as this participant?
+// the protocol. The gateway authenticates at session start (its login frame)
+// and then asks this class one question per order: may this session act as this participant?
 //
 // One credential may cover several participant ids — a firm running multiple
 // desks or strategies legitimately submits under more than one — so

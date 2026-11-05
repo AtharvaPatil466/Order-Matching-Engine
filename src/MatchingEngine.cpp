@@ -29,7 +29,7 @@ namespace OrderMatcher {
 namespace {
 
 // PROTO-1: every enum an order carries is range-checked here, where every
-// ingress meets — TcpGateway, admin, OUCH, SBE, FIX, in-process callers and
+// ingress meets — TcpGateway, admin, in-process callers and
 // the async queue behind them. In the gateway alone (0.13) the rest handed a
 // side of 2 to the book, which rested it in the asks, and an orderType past
 // LOC rested as a limit. Bounded by the LAST enumerator of each type in
@@ -1257,7 +1257,7 @@ void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
     symbolIds_.push_back(symbolId);
 
     // Install the per-book OCO observer (separate from the user listener
-    // slot, so gateway/OUCH market-data listeners are untouched). It only
+    // slot, so market-data listeners are untouched). It only
     // buffers while OCO is active, so this is free until an OCO is registered.
     auto oco = std::make_unique<OcoBookListener>();
     oco->engine = this;
@@ -1881,7 +1881,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
 
     // ENGTEST-1: position and OTR state is indexed by participant id. Past the
     // arrays those controls were skipped, not enforced, so an id there traded
-    // with no limits. Every ingress (gateway, admin, OUCH/DPDK, SBE, FIX) comes
+    // with no limits. Every ingress (gateway, admin) comes
     // through here; checked before the rate limiter so a junk id grows nothing.
     if (participantId >= MAX_PARTICIPANTS) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidFieldValue);

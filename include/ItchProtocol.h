@@ -2,8 +2,7 @@
 
 // ItchProtocol — NASDAQ ITCH 5.0-style market-data binary codec.
 //
-// ITCH is the public market-data feed companion to OUCH order entry:
-// unidirectional, venue → subscribers, sequenced, big-endian, fixed-
+// ITCH is the public market-data feed: unidirectional, venue → subscribers, sequenced, big-endian, fixed-
 // width. Real deployments distribute over UDP multicast with A/B feed
 // redundancy and gap recovery via a separate retransmission service;
 // this codec emits the wire frames only — transport is the caller's
@@ -23,13 +22,13 @@
 //   * Numeric fields big-endian.
 //   * Timestamp is 48-bit nanoseconds since midnight (BE).
 //   * Stock is 8-byte ASCII, left-justified, space-padded. We encode
-//     SymbolId as decimal in the slot (parallel to OUCH).
+//     SymbolId as decimal in the slot.
 //   * StockLocate (2B) is the exchange-internal symbol index. We use
 //     the SymbolId directly (truncated to 16 bits) — fine up to 64k
 //     symbols; production venues maintain a separate locate-code
 //     table seeded by the Stock Directory ('R') message.
 
-#include "OuchProtocol.h"  // reuses writeU16BE/U32BE/U64BE + writeAsciiDecimal
+#include "WireBytes.h"  // writeU16BE/U32BE/U64BE + writeAsciiDecimal
 #include "Types.h"
 
 #include <cstddef>

@@ -11,11 +11,10 @@
 // disconnects are derived from those calls — no background thread,
 // so the session is straightforward to test and to shut down.
 //
-// Application payloads (OUCH order entry, ITCH gap fill, etc.) are
-// surfaced via setOnAppPayload(); the session itself is protocol-
-// agnostic about the inner messages, it only enforces the SoupBinTCP
-// envelope and session lifecycle. Drop in an OuchSession (or any
-// other consumer) under that callback to get OUCH-over-SoupBinTCP.
+// Application payloads (ITCH gap-fill re-requests) are surfaced via
+// setOnAppPayload(); the session itself is protocol-agnostic about the
+// inner messages, it only enforces the SoupBinTCP envelope and session
+// lifecycle.
 //
 // Default policy intervals:
 //   * Server sends a heartbeat after 1s of send-side idle.
@@ -41,7 +40,7 @@ public:
     // Called when the peer sends an UnsequencedData or SequencedData
     // packet. The session has already validated the envelope and is
     // logged in; the consumer just needs to interpret the inner
-    // bytes (e.g. as an OUCH or ITCH frame).
+    // bytes (e.g. as an ITCH frame).
     using OnAppPayload   = std::function<void(const uint8_t* data, size_t len, bool sequenced)>;
     // Called when the session validates a LoginRequest. Return
     // SOUP_LOGIN_REJECT_* to reject; return 0 to accept. The session
@@ -246,7 +245,7 @@ private:
         if (!send_) return;
         // Envelope is 3 bytes; we use a small stack buffer for the
         // common envelope and a heap allocation only for the
-        // payload-bearing slice. Since most OUCH/ITCH messages fit
+        // payload-bearing slice. Since most ITCH messages fit
         // well under 1KB, a 1KB stack buffer is enough for the hot
         // path; oversize payloads spill to heap.
         if (len + 3 <= 1024) {

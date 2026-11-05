@@ -16,7 +16,7 @@
 //     8. Aggressor that fully filled on entry emits NO 'E' (was never on book)
 //     9. Cancel emits 'D'
 //    10. Full-fill emits 'E' followed by 'D'
-//    11. MultiplexListener fan-out: ITCH and OUCH coexist on same book
+//    11. MultiplexListener fan-out: ITCH and another listener on one book
 //    12. System event manual emission
 
 #include "ItchBookReplay.h"
@@ -24,8 +24,7 @@
 #include "ItchPublisher.h"
 #include "MatchingEngine.h"
 #include "MultiplexListener.h"
-#include "OuchProtocol.h"
-#include "OuchSession.h"
+#include "WireBytes.h"
 
 #include <cassert>
 #include <chrono>
@@ -642,64 +641,41 @@ void test_PublisherSystemEventManualEmit() {
 
 void test_MultiplexListenerFansOut() {
     TEST(MultiplexListenerFansOut) {
-        // Install both an OUCH session and an ITCH publisher on the
-        // same book via the fan-out adapter. A single trade should
-        // generate one OUCH 'E' (private to the OUCH client) AND one
-        // ITCH 'E' (public market data).
+        // An ITCH publisher and a second listener on the same book via the
+        // fan-out adapter: one trade reaches both, and the 'A' rides the
+        // onBookVisible channel through the mux.
         MatchingEngine engine;
         engine.addSymbol(7);
         engine.start();
 
         auto* book = engine.getOrderBook(7);
 
-        std::string ouchSent;
-        OuchSession ouch(engine, [&](std::string_view b) { ouchSent.append(b); });
+        struct TradeCounter : EventListener {
+            int trades = 0;
+            void onTrade(const Trade&) override { ++trades; }
+        } counter;
 
         std::string itchSent;
         ItchPublisher itch(*book, [&](std::string_view b) { itchSent.append(b); });
 
         MultiplexListener mux;
-        mux.add(&ouch);
+        mux.add(&counter);
         mux.add(&itch);
         book->setEventListener(&mux);
         CHECK(mux.size() == 2);
 
-        // OUCH-place a resting buy. Both listeners see the events:
-        //   OUCH: hears nothing on its own events at this point (it
-        //     receives the 'A' equivalent via its dispatch path, not
-        //     via the listener — handleEnterOrder already wrote it).
-        //   ITCH: emits 'A' from onOrderUpdate(Accepted, rem>0).
-        auto wire = std::vector<uint8_t>(OUCH_SIZE_ENTER_ORDER, ' ');
-        wire[0] = OUCH_MT_ENTER_ORDER;
-        writeAsciiDecimal(wire.data() + 1, 14, 600);
-        wire[15] = 'B';
-        writeU32BE(wire.data() + 16, 50);
-        writeAsciiDecimal(wire.data() + 20, 8, 7);
-        writeU32BE(wire.data() + 28, 1000);
-        writeU32BE(wire.data() + 32, OUCH_TIF_DAY);
-        writeAsciiDecimal(wire.data() + 36, 4, 1);
-        wire[40] = 'Y'; wire[41] = 'O'; wire[42] = 'N';
-        writeU32BE(wire.data() + 43, 0);
-        wire[47] = 'N'; wire[48] = 'R';
-
-        CHECK(ouch.feed(reinterpret_cast<const char*>(wire.data()),
-                         wire.size()));
+        // A resting buy: ITCH emits 'A' from onBookVisible.
+        engine.submitOrder(7, 600, 1, Side::Buy, 1000, 50, OrderType::Limit);
         CHECK(itch.addsEmitted() == 1
               && "ITCH must see the Accepted event through the mux");
 
-        // Now drive a fill via the engine. Both publishers should see it.
-        ouchSent.clear();
+        // A fill against it. ITCH announced only 600 — the aggressor 601
+        // fully filled on entry and never displayed — so one 'E' against
+        // 600 and no 'D' (600 still has 30 leaves).
         itchSent.clear();
         engine.submitOrder(7, 601, 2, Side::Sell, 1000, 20, OrderType::Limit);
-
-        // OUCH only knows about its own order (id=600), so it emits 'E' for
-        // one side. ITCH announced only 600 — the aggressor 601 fully filled
-        // on entry and never displayed — so it emits one 'E' against 600 and
-        // no 'D' (600 still has 30 leaves). The point of the test is that
-        // both listeners are reached through the mux, including on the
-        // onBookVisible channel that carries the 'A'.
-        CHECK(ouch.fillsEmitted() == 1
-              && "OUCH session sees only its own order on one side");
+        CHECK(counter.trades == 1
+              && "the second listener sees the trade through the mux");
         CHECK(itch.executedEmitted() == 1
               && "ITCH publishes 'E' for the displayed maker through the mux");
         CHECK(itch.deletesEmitted() == 0

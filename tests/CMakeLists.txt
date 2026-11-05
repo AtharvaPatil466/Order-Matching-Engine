@@ -1060,14 +1060,6 @@ add_test(NAME GatewayProtocolTest COMMAND GatewayProtocolTest)
 set_tests_properties(GatewayProtocolTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
-# OUCH 4.2 binary order-entry codec + session-layer tests
-add_executable(OuchSessionTest OuchSessionTest.cpp)
-target_link_libraries(OuchSessionTest PRIVATE OrderMatcher)
-enable_assertions(OuchSessionTest)
-add_test(NAME OuchSessionTest COMMAND OuchSessionTest)
-set_tests_properties(OuchSessionTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol")
-
 # ITCH 5.0 market-data publisher + codec tests
 add_executable(ItchPublisherTest ItchPublisherTest.cpp)
 target_link_libraries(ItchPublisherTest PRIVATE OrderMatcher)
@@ -1139,14 +1131,6 @@ add_test(NAME MoldUDP64Test COMMAND MoldUDP64Test)
 set_tests_properties(MoldUDP64Test PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
-# OUCH-over-SoupBinTCP end-to-end gateway over real loopback TCP
-add_executable(OuchTcpGatewayTest OuchTcpGatewayTest.cpp)
-target_link_libraries(OuchTcpGatewayTest PRIVATE OrderMatcher)
-enable_assertions(OuchTcpGatewayTest)
-add_test(NAME OuchTcpGatewayTest COMMAND OuchTcpGatewayTest)
-set_tests_properties(OuchTcpGatewayTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;integration")
-
 # ITCH-over-MoldUDP64 transport over real loopback UDP
 add_executable(ItchUdpTransportTest ItchUdpTransportTest.cpp)
 target_link_libraries(ItchUdpTransportTest PRIVATE OrderMatcher)
@@ -1207,9 +1191,8 @@ add_test(NAME MoldSeqPersistenceTest COMMAND MoldSeqPersistenceTest)
 set_tests_properties(MoldSeqPersistenceTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;durability;recovery")
 
-# Option A UDP gap recovery: reorder buffer (hold-and-drain out-of-order
-# datagrams, NAK only the new gap) + sender retransmit window. DPDK-free logic,
-# runs headless on CI; the rte_eth_tx_burst NAK path is validated on hardware.
+# UDP gap recovery: reorder buffer (hold-and-drain out-of-order datagrams, NAK
+# only the new gap) + sender retransmit window.
 add_executable(UdpGapRecoveryTest UdpGapRecoveryTest.cpp)
 target_link_libraries(UdpGapRecoveryTest PRIVATE OrderMatcher)
 enable_assertions(UdpGapRecoveryTest)

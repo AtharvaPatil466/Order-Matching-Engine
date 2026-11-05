@@ -865,6 +865,18 @@ add_test(NAME GatewayJournalRestartTest
          COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
 set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
+# Roadmap 1.2-B2: OrderEngine is the binary clients trade through. A client logs
+# in on its order port, trades on symbol 1, kill -9, and the orders come back from
+# the journal; a client without valid credentials is refused. Ports 31500-31509
+# (order entry) and 31590-31599 (admin).
+add_executable(OrderEngineGatewayTest OrderEngineGatewayTest.cpp)
+target_link_libraries(OrderEngineGatewayTest PRIVATE OrderMatcher)
+enable_assertions(OrderEngineGatewayTest)
+add_test(NAME OrderEngineGatewayTest
+         COMMAND OrderEngineGatewayTest $<TARGET_FILE:OrderEngine>)
+set_tests_properties(OrderEngineGatewayTest PROPERTIES TIMEOUT 120
+                     LABELS "project;recovery;security;integration")
+
 # Roadmap 1.3-C4 (2.8): kill -9 GatewayServer at a random point in a stream of
 # adds and cancels, restart on the same journal, and require every acknowledged
 # order present and every acknowledged cancel still applied.

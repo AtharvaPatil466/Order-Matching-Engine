@@ -19,6 +19,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 namespace gwtest {
 
@@ -59,6 +60,13 @@ public:
             if (isAnswer && out.orderId == orderId) return true;
         }
         return false;
+    }
+
+    bool sendRaw(const void* b, size_t n) { return sendAll(b, n); }
+    ssize_t recvSome(void* b, size_t n) {
+        ssize_t r;
+        do { r = ::recv(fd_, b, n, 0); } while (r < 0 && errno == EINTR);
+        return r;
     }
 
 private:
@@ -115,6 +123,52 @@ inline pid_t startGateway(const char* bin, uint16_t port, const std::string& jou
     kill(pid, SIGKILL);
     waitpid(pid, nullptr, 0);
     return -1;
+}
+
+// Start OrderEngine with its order port on `gatewayPort` and `args` as the rest
+// of its command line, or return -1 if it exited before that port answered (a
+// taken port, or a refusal to boot). Nothing is inherited that would change
+// which boot this is.
+inline pid_t startEngine(const char* bin, uint16_t gatewayPort,
+                         const std::vector<std::string>& args) {
+    const pid_t pid = fork();
+    if (pid == 0) {
+        for (const char* v : {"OB_CONFIG_PATH", "OB_JOURNAL_PATH", "OB_NODE_ROLE",
+                              "OB_ADMIN_TOKEN", "OB_ADMIN_NO_AUTH", "OB_ADMIN_BIND",
+                              "OB_GATEWAY_PORT", "OB_GATEWAY_BIND",
+                              "OB_PARTICIPANT_CREDENTIALS", "OB_NO_PARTICIPANT_AUTH",
+                              "OB_REPLAY_LEGACY_JOURNAL"})
+            unsetenv(v);
+        const std::string port = std::to_string(gatewayPort);
+        std::vector<const char*> argv{bin, "--gateway-port", port.c_str()};
+        for (const std::string& a : args) argv.push_back(a.c_str());
+        argv.push_back(nullptr);
+        execv(bin, const_cast<char* const*>(argv.data()));
+        _exit(127);
+    }
+    for (int i = 0; i < 600; ++i) {                 // up to 30 s: a sanitizer boot is slow
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == pid) return -1;
+        Client probe;
+        if (probe.connect(gatewayPort)) return pid;
+        usleep(50 * 1000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    return -1;
+}
+
+// GET `path` from an admin port on loopback; the body, or "" if none came.
+inline std::string httpGet(uint16_t port, const std::string& path) {
+    Client c;
+    if (!c.connect(port)) return {};
+    const std::string req = "GET " + path + " HTTP/1.0\r\nConnection: close\r\n\r\n";
+    if (!c.sendRaw(req.data(), req.size())) return {};
+    std::string reply;
+    char buf[4096];
+    for (ssize_t n; (n = c.recvSome(buf, sizeof(buf))) > 0;) reply.append(buf, static_cast<size_t>(n));
+    const size_t body = reply.find("\r\n\r\n");
+    return body == std::string::npos ? std::string{} : reply.substr(body + 4);
 }
 
 inline pid_t startOnFreePort(const char* bin, uint16_t& port, const std::string& journal) {

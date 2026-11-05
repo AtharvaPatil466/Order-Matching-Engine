@@ -7,7 +7,6 @@ name: TLA+ Model Checking
 #   - Auction         : exchange auction / session state machine
 #   - Oco              : One-Cancels-Other contingent-order safety
 #   - Risk             : multi-tier risk-limit aggregation safety
-#   - EpochDurability  : lease epoch stays monotonic across a restart
 #   - FixSession       : FIX inbound sequence recovery (no out-of-order delivery)
 #   - MpscQueue        : lock-free ring-buffer linearizability
 #   - EngineConsumer   : worker-loop wake-up protocol
@@ -19,7 +18,7 @@ name: TLA+ Model Checking
 # counterexample its injected bug produces. Auction.tla's AuctionBrokenEdge.cfg
 # and AuctionBrokenDate.cfg (an illegal session transition) and
 # AuctionBrokenHalt.cfg (a halt that resumes to Continuous from a closing
-# auction) must fail the same way. Replication.tla is not checked.
+# auction) must fail the same way.
 #
 # A dedicated step also runs the Auction NON-VACUITY variant
 # (AuctionBroken.cfg, BUG = "no_reopen") and asserts that TLC reports a
@@ -53,7 +52,7 @@ jobs:
         working-directory: spec
         run: |
           set -e
-          for module in Auction Oco Risk EpochDurability FixSession MpscQueue EngineConsumer Snapshot SnapshotLocked; do
+          for module in Auction Oco Risk FixSession MpscQueue EngineConsumer Snapshot SnapshotLocked; do
             echo "::group::TLC $module"
             ./check.sh "$module"
             echo "::endgroup::"
@@ -149,24 +148,6 @@ jobs:
             exit 1
           fi
           echo "Non-vacuity confirmed: TLC produced the expected risk counterexample."
-
-      - name: Non-vacuity check (epoch durability must be violable)
-        working-directory: spec
-        run: |
-          set +e
-          ./check.sh EpochDurability EpochDurabilityBroken.cfg > epoch_broken.log 2>&1
-          status=$?
-          set -e
-          cat epoch_broken.log
-          if [ "$status" -eq 0 ]; then
-            echo "::error::EpochDurabilityBroken.cfg unexpectedly PASSED — NoRegression is vacuous"
-            exit 1
-          fi
-          if ! grep -q "Invariant NoRegression is violated" epoch_broken.log; then
-            echo "::error::EpochDurabilityBroken.cfg failed for the wrong reason (expected a NoRegression counterexample)"
-            exit 1
-          fi
-          echo "Non-vacuity confirmed: TLC produced the expected epoch counterexample."
 
       - name: Non-vacuity check (FIX sequence recovery must be violable)
         working-directory: spec

@@ -510,7 +510,7 @@ public:
     // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue),
     // as do submitModify and submitCancelReplace for their requester;
     // symbol ids at or above MAX_RISK_SYMBOLS bypass the fat-finger arrays.
-    static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // positions_ / OTR array bound
+    static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // ledger / OTR array bound
     static constexpr size_t MAX_RISK_SYMBOLS = 256;   // fat-finger array bound
 
     // P2-8 Kill switch. setKillSwitch(true) is callable from a monitoring thread
@@ -521,10 +521,19 @@ public:
         return killSwitchActive_.load(std::memory_order_acquire);
     }
 
-    // P2-9 Position limits. Limit is the max absolute net position (signed
-    // exposure = filled ± working orders). 0 = unlimited.
+    // P2-9 Position limits. The limit bounds the position each side could reach
+    // if everything working on it filled: filled + working buys, and working
+    // sells - filled. Working orders on opposite sides do not net: either side
+    // can fill alone. 0 = unlimited, and the ledger still keeps count once any
+    // limit is set. Set one before traffic; see rebuildPositionsLocked.
     void setPositionLimit(ParticipantId pid, int64_t maxAbsPosition);
+    // Filled net position ± working quantity. 0 until a limit is set.
     int64_t getPosition(ParticipantId pid) const;
+    // The ledger behind it. Working on a side is the sum of the remaining
+    // quantity of that participant's live orders on that side, queued ones
+    // included; filled is the signed net of its executions.
+    int64_t getWorkingQty(ParticipantId pid, Side side) const;
+    int64_t getFilledPosition(ParticipantId pid) const;
 
     // P2-10 Fat-finger, per instrument. maxQty / maxNotional 0 = unset;
     // maxDeviationPct 0 = unset (e.g. 0.10 for ±10% around the reference price).
@@ -843,6 +852,9 @@ private:
         std::vector<Trade>   tradesScratch;
         void onOrderUpdate(const OrderUpdate& u) override;
         void onTrade(const Trade& t) override;
+        void onWorkingReleased(ParticipantId p, Side side, Quantity qty) override {
+            if (engine) engine->releaseWorking(p, side, qty);
+        }
     };
     // Drain a book's observer after a request: OCO sibling cancels, then the
     // trade-driven consumers (fees / risk accrual / audit).
@@ -887,10 +899,15 @@ private:
     std::atomic<bool> otrActive_{false};             // P2-11
     std::atomic<bool> anyRiskActive_{false};         // gates onRiskFill()
 
-    // P2-9 positions: signed net exposure (filled ± working orders), and the
-    // per-participant absolute limit (0 = unlimited). Value-initialised to 0.
-    std::atomic<int64_t> positions_[MAX_PARTICIPANTS]{};
+    // P2-9 reservation ledger, roadmap 1.9 I2: signed filled net, and working
+    // quantity per side, plus the per-participant limit (0 = unlimited).
+    // Admission reserves an order's whole quantity before it reaches a book, a
+    // fill moves it from working to filled, and whatever leaves without trading
+    // comes back through OcoBookListener::onWorkingReleased.
+    std::atomic<int64_t> filled_[MAX_PARTICIPANTS]{};
+    std::atomic<int64_t> working_[MAX_PARTICIPANTS][2]{};  // [pid][sideIndex]
     std::atomic<int64_t> positionLimit_[MAX_PARTICIPANTS]{};
+    static constexpr size_t sideIndex(Side side) { return side == Side::Buy ? 0 : 1; }
 
     // P2-10 fat-finger per-symbol config + reference (last-trade) price.
     std::atomic<uint64_t> ffMaxQty_[MAX_RISK_SYMBOLS]{};          // 0 = unset
@@ -919,11 +936,17 @@ private:
         std::numeric_limits<ParticipantId>::max();
 
     // Combined pre-trade risk gate (fat-finger, position, OTR). Returns
-    // RejectReason::None to admit. Kill switch is checked separately (first).
+    // RejectReason::None to admit, with qty reserved in the ledger: every later
+    // refusal owes a releaseWorking. Kill switch is checked separately (first).
     RejectReason checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
                                    Price price, Quantity qty, OrderType type);
-    // Reserve/release working-order exposure for the position limit.
-    void reservePosition(ParticipantId pid, Side side, Quantity restingQty);
+    // Reserve qty against the limit in one atomic step (THR-3); false, reserving
+    // nothing, if that would breach it.
+    bool tryReserveWorking(ParticipantId pid, Side side, Quantity qty);
+    // Give back what a refused or departed order held. No-op until a limit is set.
+    void releaseWorking(ParticipantId pid, Side side, Quantity qty);
+    // A fill turns qty of a participant's working quantity into position.
+    void settleFill(ParticipantId pid, Side side, Quantity qty);
     // Only the OrderExposure overload exists. The Order* one was removed: it
     // had no callers, and it dereferenced a pooled Order — the exact hazard
     // (H1) that OrderExposure was introduced to avoid by copying the fields it

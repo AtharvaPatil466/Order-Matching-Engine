@@ -306,6 +306,15 @@ public:
                      ParticipantId requester = kAnyParticipant);
 
 private:
+    // Roadmap 1.9 I2: tell the engine's reservation ledger that `qty` of this
+    // order's working quantity is gone without trading. A fill goes back through
+    // onTrade instead, so what is reserved stays the sum of the live orders'
+    // remaining quantity. Replay rebuilds the ledger afterwards.
+    void releaseWorking(const Order& order, Quantity qty) {
+        if (qty != 0 && !replayMode_)
+            engineListener_->onWorkingReleased(order.participantId, order.side, qty);
+    }
+
     // Drop `order` from every special-order tracking list that can hold a raw
     // pointer to it. MUST run before the order is returned to the pool: those
     // lists outlive the order, and a stale entry is a dangling pointer that a

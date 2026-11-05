@@ -1146,6 +1146,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
     if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
         if (sweepFillQty(*order) < minQty) {
             if (type == OrderType::IOC || type == OrderType::Market) {
+                releaseWorking(*order, order->remainingQty);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
@@ -1171,6 +1172,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
                 ? (!asks_.empty() && price >= asks_.bestPrice())
                 : (!bids_.empty() && price <= bids_.bestPrice());
             if (wouldCross) [[unlikely]] {
+                releaseWorking(*order, order->remainingQty);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
@@ -1178,6 +1180,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
             }
             if (!addToBook(order)) {
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, 0);
+                releaseWorking(*order, order->remainingQty);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else if (!order->isHidden) {
@@ -1201,6 +1204,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             // with nothing left said "still working" and closed nothing
             // downstream (GTDIFF-4).
             notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
+            releaseWorking(*order, order->remainingQty);
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
         } else {
@@ -1208,6 +1212,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             if (!addToBook(order)) {
                 // Depth limit or price range exceeded — cancel the order
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
+                releaseWorking(*order, order->remainingQty);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else {
@@ -1420,6 +1425,7 @@ bool OrderBook::finalizeIfStpCancelled(Order* order) {
     // genuinely traded still wins its group. This used to report
     // PartiallyFilled with nothing left, a status that never closes.
     notifyOrderUpdate(order->id, OrderStatus::CancelledBySTP, order->cumQty, 0);
+    releaseWorking(*order, order->remainingQty);
     orderLookup_.erase(order->id);
     orderPool_.deallocate(order);
     return true;

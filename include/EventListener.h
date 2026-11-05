@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Types.h"
+
 namespace OrderMatcher {
 
 // Forward declarations
@@ -43,6 +45,13 @@ public:
     // Called once per uncross that printed, after its onTrade calls (each of
     // which carries Trade::auctionCross). Not called in replay.
     virtual void onUncross(const UncrossReport& /*report*/) {}
+
+    // Fired on the engine listener only (OrderBook::setEngineListener), and not
+    // in replay: `qty` of this participant's working quantity on `side` left
+    // the book without trading. The reservation ledger's way back; see
+    // OrderBook::releaseWorking.
+    virtual void onWorkingReleased(ParticipantId /*participant*/, Side /*side*/,
+                                   Quantity /*qty*/) {}
 };
 
 // Null listener singleton — avoids nullptr checks on hot path.

@@ -459,6 +459,16 @@ gtest_discover_tests(RiskControlsTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;risk")
 
+# Roadmap 1.9 I2/I3/I6: reservation ledger, hierarchical gate and graduated kill
+# switch on the admission path, on both engine paths.
+add_executable(RiskLedgerTest RiskLedgerTest.cpp)
+target_link_libraries(RiskLedgerTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(RiskLedgerTest)
+gtest_discover_tests(RiskLedgerTest
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;risk")
+
 # AdminServer endpoint integration test (HTTP /prometheus, /health)
 add_executable(AdminServerEndpointsTest AdminServerEndpointsTest.cpp)
 target_link_libraries(AdminServerEndpointsTest PRIVATE OrderMatcher)

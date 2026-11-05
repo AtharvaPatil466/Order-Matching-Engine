@@ -1113,7 +1113,7 @@ private:
     // PartiallyFilled (GTS-4). New orders and elected stops pass 0.
     OB_ALWAYS_INLINE void finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
                               OrderType type, Quantity cumBefore = 0);
-    bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
+    bool checkRiskLimits(ParticipantId participantId, Side side, Price price, Quantity qty);
 
     // STP DecreaseAndCancel: shrink both by the smaller remaining quantity;
     // true => the resting order reached zero and must be cancelled.

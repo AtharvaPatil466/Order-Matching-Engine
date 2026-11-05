@@ -342,29 +342,14 @@ void OrderBook::removeFromBook(Order* order) {
 
 // ─── Risk & Validation ──────────────────────────────────────────────────────
 
-bool OrderBook::checkRiskLimits(ParticipantId participantId, Price price, Quantity qty) {
+// Side-aware (STP-9): the projected position is the filled one moved by this
+// order, up for a buy and down for a sell. It used to add qty whichever the
+// side, so a sell that took a long position back towards flat was refused as
+// if it made it longer.
+bool OrderBook::checkRiskLimits(ParticipantId participantId, Side side, Price price,
+                                Quantity qty) {
     const auto* state = participantRisk_.find(OTRKey(participantId, symbolId_));
-    if (!state) return true;
-
-    if (state->maxOrderSize > 0 && qty > state->maxOrderSize) return false;
-
-    // price == 0: a market order with no touch and no reference to value it at.
-    if (state->maxOrderNotional > 0) {
-        if (price == 0 || orderNotional(price, qty) > static_cast<__int128>(state->maxOrderNotional))
-            return false;
-    }
-
-    if (state->maxPositionSize > 0) {
-        int64_t projected = state->currentExposure + static_cast<int64_t>(qty);
-        // std::abs(INT64_MIN) is UB. Convert to a saturating
-        // unsigned magnitude that handles the full int64 range.
-        uint64_t magnitude = projected < 0
-            ? static_cast<uint64_t>(-(projected + 1)) + 1u
-            : static_cast<uint64_t>(projected);
-        if (magnitude > state->maxPositionSize) return false;
-    }
-
-    return true;
+    return !state || state->checkOrder(price, qty, side);
 }
 
 void OrderBook::setRiskLimits(ParticipantId participantId, const RiskLimits& limits) {
@@ -438,7 +423,7 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     // Risk limits (maxOrderSize / maxOrderNotional / maxPositionSize). A
     // replace passes its new total, so growing an order and repricing it both
     // face the same caps as a new order of that size.
-    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty))
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, side, price, qty))
         return RejectReason::RiskLimitBreached;
 #else
     (void)participantId; (void)riskChecksBypassed;
@@ -1269,7 +1254,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     const Price riskPrice = valuedOffTheBook(type) ? notionalPriceLocked(side, type, price, stopPrice,
                                                                          stopLimitPrice, trailAmount)
                                                    : price;
-    if (!riskChecksBypassed && !checkRiskLimits(participantId, riskPrice, qty)) [[unlikely]] {
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, side, riskPrice, qty)) [[unlikely]] {
         const RejectReason reason =
             rejectOrder(orderId, participantId, qty, RejectReason::RiskLimitBreached);
         obSink().log(logOrderRejected(orderId, participantId, "risk_limit_breached"));

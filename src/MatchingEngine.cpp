@@ -2149,6 +2149,11 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     // client gets: on the async path the request would otherwise be queued, be
     // accepted to the client's face, be refused by the worker, and never be
     // mentioned again. An accept that silently means no is worse than a reject.
+    // ENGTEST-1, as in submitOrder: an id past the risk arrays has no controls
+    // behind it. kAnyParticipant is not an id; it is the venue asking.
+    if (requester >= MAX_PARTICIPANTS && requester != kAnyParticipant) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
+    }
     if (newQty == 0) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidQuantity);
     }
@@ -2208,6 +2213,11 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
                                                  ParticipantId requester) {
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
+    }
+    // ENGTEST-1, as in submitOrder: an id past the risk arrays has no controls
+    // behind it. kAnyParticipant is not an id; it is the venue asking.
+    if (requester >= MAX_PARTICIPANTS && requester != kAnyParticipant) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
     }
     if (journalHalted()) [[unlikely]] {
         return rejectedAsync(RejectReason::JournalHalted);

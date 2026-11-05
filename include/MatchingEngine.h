@@ -504,7 +504,8 @@ public:
     // on the accept path. Each control is opt-in: it does nothing until configured
     // at startup, so the existing hot path is unchanged when unused. Per-id state
     // lives in fixed-size arrays indexed by participant/symbol id. submitOrder
-    // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue);
+    // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue),
+    // as do submitModify and submitCancelReplace for their requester;
     // symbol ids at or above MAX_RISK_SYMBOLS bypass the fat-finger arrays.
     static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // positions_ / OTR array bound
     static constexpr size_t MAX_RISK_SYMBOLS = 256;   // fat-finger array bound

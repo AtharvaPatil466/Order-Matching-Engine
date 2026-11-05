@@ -10,6 +10,11 @@
 // refused (InvalidPrice) because that buy peg now sat on its price. Each later
 // re-add ran a reprice pass against the same partial book.
 //
+// An auction's call period may cross the book around a peg already resting,
+// and a sell peg, re-added after the bids, was refused for being through a bid
+// that had arrived after it: the check is for a peg entering, not for one
+// coming back.
+//
 // peggedOrders_ is the order a reprice pass moves the pegs in, and so the
 // queue order they land in at a new price. A cancel reorders it (the list
 // erases by swapping the last entry in). A checkpoint rebuilt it in level
@@ -108,6 +113,22 @@ void swappedProbe(OrderBook& b) {
     b.addOrder(20, 20, Side::Buy, kPx - 5, 10, OrderType::Limit);
 }
 
+// Pegs resting when an auction starts; in the call period a bid above the
+// sell peg and an offer below the buy peg cross the book, which an auction
+// allows. The opening print moves the touch.
+void auction(MatchingEngine& e) {
+    limit(e, 1, Side::Buy, kPx - 10);
+    limit(e, 2, Side::Sell, kPx + 10);
+    peg(e, 3, Side::Sell, -1);
+    peg(e, 4, Side::Buy, 1);
+    assert(e.setTradingStateBatch({kSym}, TradingState::AuctionOpen) == 1);
+    limit(e, 5, Side::Buy, kPx + 20);
+    limit(e, 6, Side::Sell, kPx - 20);
+}
+void auctionProbe(OrderBook& b) {
+    b.setTradingState(TradingState::Continuous);
+}
+
 struct Outcome { std::string restored, moved; };
 
 Outcome after(Life life, const Setup& setup, const Probe& probe) {
@@ -160,6 +181,7 @@ int main() {
     int failures = 0;
     failures += check("pegs clamped behind the touch, two at one bid", clamped, clampedProbe);
     failures += check("pegs whose reprice order a cancel swapped", swapped, swappedProbe);
+    failures += check("pegs in an auction whose call period crossed the book", auction, auctionProbe);
     if (failures != 0) {
         std::printf("CheckpointPeggedOrderTest FAILED: %d restarted book state(s) differ\n",
                     failures);

@@ -998,8 +998,10 @@ Price OrderBook::pegPrice(Side side, Price fallback, PegType pegType, Price pegO
 
 // `price`, or one unit behind the opposite touch if it reaches it. The
 // opposite side never holds this peg, so it is the touch the peg must not
-// cross.
+// cross. Not a checkpoint's re-add: an auction's call period may have crossed
+// the book around a peg already resting (setRestoringCheckpoint).
 Price OrderBook::behindOppositeTouch(Side side, Price price) const {
+    if (restoringCheckpoint_) return price;
     if (side == Side::Buy)
         return (!asks_.empty() && price >= asks_.bestPrice()) ? asks_.bestPrice() - 1 : price;
     return (!bids_.empty() && price <= bids_.bestPrice()) ? bids_.bestPrice() + 1 : price;

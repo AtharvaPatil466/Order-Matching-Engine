@@ -924,8 +924,8 @@ enable_assertions(JournalCorruptionTest)
 add_test(NAME JournalCorruptionTest COMMAND JournalCorruptionTest)
 set_tests_properties(JournalCorruptionTest PROPERTIES TIMEOUT 60 LABELS "project;chaos")
 
-# Journal ack-durability test — onCommit (replication ack) must fire strictly
-# after a successful durable sync, never before / when fsync is skipped.
+# Journal ack-durability test — onDurable must fire strictly after a successful
+# durable sync, never before / when fsync is skipped.
 add_executable(JournalAckDurabilityTest JournalAckDurabilityTest.cpp)
 target_link_libraries(JournalAckDurabilityTest PRIVATE OrderMatcher)
 enable_assertions(JournalAckDurabilityTest)

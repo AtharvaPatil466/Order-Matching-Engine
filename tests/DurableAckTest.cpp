@@ -9,8 +9,8 @@
 // Under the default GroupCommit(64) that is up to 63 orders whose fills
 // clients have acted on and the venue has no record of.
 //
-// Distinct from JournalAckDurabilityTest, which covers the REPLICATION ack
-// (that onCommit_ fires only after a successful sync). That path was already
+// Distinct from JournalAckDurabilityTest, which covers the journal's barrier
+// (that onDurable_ fires only after a successful sync). That path was already
 // correct; this one is about what reaches the client.
 
 #include "MatchingEngine.h"

@@ -307,7 +307,7 @@ public:
         if (useIoUring_) {
             // Pre-size each inflight slot's copy buffer so the hot commit path
             // never allocates (Hazard A). Then start the completion reaper that
-            // fires onCommit_ once the write→fdatasync chain is durable.
+            // fires onDurable_ once the write→fdatasync chain is durable.
             for (auto& slot : inflight_) {
                 slot.buf.reserve(batchSize_);
             }
@@ -317,7 +317,7 @@ public:
     }
 
     ~Journal() {
-        flush();  // commits + drains the final batch; reaper fires its onCommit
+        flush();  // commits + drains the final batch; reaper fires its onDurable
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
         // After flush() the ring is idle (inflightCount_ == 0). Stop and join
         // the reaper BEFORE closing the fd / tearing the ring down, so it can
@@ -533,7 +533,7 @@ public:
         }
         // Barrier: on the async io_uring path commitBatch() only *submits* the
         // durability chain — block here until the reaper has reaped it and
-        // fired onCommit. On the synchronous path (macOS, or Linux without
+        // fired onDurable. On the synchronous path (macOS, or Linux without
         // liburing) this is a no-op: commits are already durable-and-acked
         // inline. Guarantees read-after-flush consistency for readAll(),
         // truncate(), rewriteAtomically(), and the destructor.
@@ -541,9 +541,9 @@ public:
     }
 
     // Block until every in-flight durability chain has been reaped and its
-    // onCommit callback has fired. On the synchronous commit path this is a
+    // onDurable callback has fired. On the synchronous commit path this is a
     // no-op. Callers that submitted orders asynchronously use this to
-    // establish a happens-before edge before observing onCommit side effects.
+    // establish a happens-before edge before observing onDurable side effects.
     void quiesce() { drainCompletions(); }
 
     void truncate() {
@@ -861,29 +861,14 @@ public:
 
     const std::string& path() const { return filePath_; }
 
-    // Callback fired once per batch immediately after a successful
-    // commit (entries are fsync-durable on disk). Used to feed
-    // committed entries into the replication coordinator without
-    // intruding on the matching-engine hot path. Receives a pointer
-    // to the prefix of committed entries and the count.
-    //
-    // Lifetime: the entries pointer is only valid for the duration
-    // of the callback. Copy the bytes if you need them longer.
-    using OnCommitFn = std::function<void(const JournalEntry* entries, size_t count)>;
-    void setOnCommit(OnCommitFn fn) { onCommit_ = std::move(fn); }
-    OnCommitFn onCommit() const { return onCommit_; }
-
-    // Second post-barrier hook, reserved for the owning MatchingEngine, fired
-    // under exactly the same durability guarantee as onCommit_. Separate slot
-    // rather than chaining onto onCommit_ because that one belongs to the
-    // application (main.cpp installs the replication ack there): whichever set
-    // it last would silently disable the other, and one of the two would be a
-    // durability guarantee that stopped holding without any sign.
-    // `n` is the number of entries that just became durable.
+    // Post-barrier hook, reserved for the owning MatchingEngine: fired once per
+    // batch, strictly after a successful commit, so the entries it counts are
+    // fsync-durable on disk. `n` is the number of entries that just became
+    // durable. See the contract on onDurable_.
     void setOnDurable(std::function<void(size_t)> fn) { onDurable_ = std::move(fn); }
 
     // Total entries handed to appendEntry() since construction. Pair with the
-    // count reported to onCommit_ to learn which appends are durable.
+    // count reported to onDurable_ to learn which appends are durable.
     uint64_t entriesAppended() const { return entriesAppended_; }
 
     // Durability configuration, so a caller (or a test) can assert what a
@@ -999,7 +984,7 @@ protected:
         commitBatchSync();
     }
 
-    // Synchronous commit path: write(2) → fdatasync, then fire onCommit inline
+    // Synchronous commit path: write(2) → fdatasync, then fire onDurable inline
     // once the sync is durable. Used on macOS, on Linux without liburing (or
     // when the ring failed to init), and as the io_uring SQE-exhaustion
     // fallback. A real error at either step halts the journal (see halt()).
@@ -1063,12 +1048,11 @@ protected:
             return;
         }
 
-        // Durability barrier. The replication ack (onCommit_, fired below)
-        // must happen STRICTLY AFTER a successful durable sync — never before,
-        // and never when the sync was skipped or failed. Otherwise the backup
-        // would ack entries the primary has not durably written; a crash
-        // between flush and fsync then loses them on the primary while the
-        // backup keeps them (ack-before-fsync hazard / backup divergence).
+        // Durability barrier. The ack (onDurable_, fired below) must happen
+        // STRICTLY AFTER a successful durable sync — never before, and never
+        // when the sync was skipped or failed. Otherwise a client would hold an
+        // ack for an entry a crash between flush and fsync then loses
+        // (ack-before-fsync hazard).
         //
         // Fault: skip the durability barrier when armed, modelling an fsync
         // that did not make the data durable. (Data still sits in the buffer
@@ -1099,20 +1083,13 @@ protected:
             "Total journal entries successfully written to disk");
         kEntriesCommitted.increment(toWrite);
 
-        // Fire the commit callback ONLY after a successful durable sync (see
-        // the durability barrier above), and BEFORE erasing the prefix so the
-        // pointer remains valid for the duration of the callback. The callback
-        // runs synchronously on the writer thread — implementers should keep it
-        // short (the replication coordinator queues bytes for an async send,
-        // which is the intended use).
+        // Fire the callback ONLY after a successful durable sync (see the
+        // durability barrier above). It runs synchronously on the writer
+        // thread, so implementers should keep it short.
         //
         // `durable` is false only when the fsync_fail fault skipped the sync.
-        // The bytes are not on stable storage, so they must not be acked to
-        // the backup — withholding the ack is what closes the ack-before-fsync
-        // hazard.
-        if (durable && onCommit_) {
-            onCommit_(batch_.data(), toWrite);
-        }
+        // The bytes are not on stable storage, so they must not be acked —
+        // withholding the ack is what closes the ack-before-fsync hazard.
         if (durable && onDurable_) {
             onDurable_(toWrite);
         }
@@ -1148,7 +1125,7 @@ protected:
     // Async durability commit (Hazards A–D). Assigns sequence + CRC, copies the
     // prefix into a free inflight slot, submits a write→fdatasync linked chain,
     // and returns WITHOUT waiting. The reaper thread reaps both CQEs and fires
-    // onCommit only once the chain is durable. Called on the writer thread.
+    // onDurable only once the chain is durable. Called on the writer thread.
     void commitBatchAsync() {
         // The ring appends at EOF, so the header has to be on disk before the
         // first record goes down this path as well. (A no-op once halted.)
@@ -1337,7 +1314,7 @@ protected:
         io_uring_sqe_set_data64(sqe, kStopUserData);
     }
 
-    // Reaper thread loop: reap CQEs, finalize chains, fire onCommit. Runs until
+    // Reaper thread loop: reap CQEs, finalize chains, fire onDurable. Runs until
     // stopReaper() sets reaperStop_ and posts the NOP shutdown token.
     void reaperLoop() {
         for (;;) {
@@ -1389,11 +1366,10 @@ protected:
         finalizeChain(slotIdx);
     }
 
-    // Chain complete: compute durability, update counters, fire onCommit iff
+    // Chain complete: compute durability, update counters, fire onDurable iff
     // durable, or — on a real error — halt and hand the chain back to the
     // writer; then free the slot.
     void finalizeChain(uint32_t slotIdx) {
-        const JournalEntry* bufPtr = nullptr;
         size_t written = 0;
         bool durable = false;
         std::string failed;   // non-empty: what failed
@@ -1434,7 +1410,6 @@ protected:
             } else {
                 written = slot.count;
                 durable = slot.wantAck;
-                bufPtr = slot.buf.data();
             }
         }
 
@@ -1460,11 +1435,7 @@ protected:
 
         // Fire the ack STRICTLY after durability, on this reaper thread. The
         // slot stays active (inflightCount_ still 1) until after the callback,
-        // so the writer cannot reuse the slot's buffer mid-callback. The
-        // ReplicationCoordinator locks internally, so this is safe from here.
-        if (durable && onCommit_ && written > 0) {
-            onCommit_(bufPtr, written);
-        }
+        // so quiesce() returning means the callback has run.
         if (durable && onDurable_ && written > 0) {
             onDurable_(written);
         }
@@ -1678,8 +1649,8 @@ private:
     //     fsync — so the file holds exactly what was reported durable, and a
     //     restart replays neither a torn record nor an order a client was
     //     refused (the engine answers the failed request JournalHalted);
-    //   * the entries stay in memory and are never reported durable: onCommit
-    //     and onDurable do not fire and the persisted counters do not move;
+    //   * the entries stay in memory and are never reported durable: onDurable
+    //     does not fire and the persisted counters do not move;
     //   * every later commit is a no-op, so nothing lands behind the failure;
     //   * the engine rejects every new request (MatchingEngine::submit*).
     // Sticky. Resuming in-process would mean rolling the in-memory book back
@@ -1722,8 +1693,8 @@ private:
     }
 
     // Returns true iff the durable barrier actually made the bytes durable.
-    // Callers gate the replication ack (onCommit_) on this: an ack may only
-    // be sent once the data is provably on stable storage.
+    // Callers gate the ack (onDurable_) on this: an ack may only be sent once
+    // the data is provably on stable storage.
     bool syncFile() const {
         if (!file_) {
             return false;
@@ -2082,19 +2053,16 @@ private:
     std::atomic<bool>   halted_{false};
     uint64_t            entriesAppended_{0};
     std::vector<JournalEntry> batch_;
-    // CONTRACT: onCommit_ fires on the reaper thread — must be lock-free and
+    // CONTRACT: onDurable_ fires on the reaper thread — must be lock-free and
     // must not touch OrderBook state.
     //
-    // On the async io_uring path finalizeChain() invokes onCommit_ from the
+    // On the async io_uring path finalizeChain() invokes onDurable_ from the
     // reaper thread, concurrently with the matching thread that owns and mutates
     // the OrderBook. A callback that grabbed a lock the matching thread also
     // holds, or that read/wrote OrderBook state without external synchronization,
     // would either stall the durability reaper or race the matching thread. On
     // the synchronous path it fires inline on the writer thread, but the same
     // discipline is required so a single callback body is safe under both paths.
-    // Keep it to lock-free byte-shipping only — e.g. hand committed bytes to the
-    // ReplicationCoordinator's transport; never reach back into engine state.
-    OnCommitFn onCommit_;
     std::function<void(size_t)> onDurable_;
     size_t maxSizeMb_{0};
     // Records in the replacement the last prepareRewrite() built.

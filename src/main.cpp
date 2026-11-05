@@ -375,11 +375,6 @@ int main(int argc, char* argv[]) {
     // Nothing replaces it. If pre-faulting the pools is ever worth doing,
     // MemoryPool::warmup (include/MemoryPool.h:89) touches the memory without
     // inventing orders — the book is the wrong place for a page-fault workaround.
-    //
-    // The primary/backup split went with it: both arms did the same two
-    // statements once the orders were gone, and the comment about breaking the
-    // byte-identical-state invariant described a hazard that only the injected
-    // orders created in the first place.
     admin.setReady(true);
     std::cout << "[Engine] Ready for traffic.\n";
 

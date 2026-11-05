@@ -483,9 +483,9 @@ public:
     uint32_t sessionDate() const { return sessionDate_; }  // 0 = none/undated
     bool sessionBegun() const { return sessionBegun_; }    // dated or not
     // Safe from any thread: reads publishedState_, the atomic copy the owner
-    // stores after every change. Admin /auction, checkpoint and the
-    // replication snapshot call it off the worker; tradingState_ itself is
-    // the worker's plain copy for the hot path.
+    // stores after every change. Admin /auction and checkpoint call it off
+    // the worker; tradingState_ itself is the worker's plain copy for the hot
+    // path.
     TradingState getTradingState() const { return publishedState_.load(std::memory_order_acquire); }
     // The state a halt resumes to (meaningful while Halted).
     TradingState preHaltState() const { return preHaltState_; }
@@ -569,18 +569,18 @@ public:
     }
 
     // Same as forEachOrder, but acquires bookLock_ for the whole iteration so
-    // it is safe to call from a thread that does NOT own the book — snapshot
-    // streaming, checkpoint, replication. Writers take the lock exclusively, so
+    // it is safe to call from a thread that does NOT own the book — checkpoint,
+    // position rebuild. Writers take the lock exclusively, so
     // orderLookup_ cannot be mutated/rehashed mid-walk. The callback must not
     // re-enter a method that takes bookLock_ (no re-entrancy on the non-
     // recursive mutex).
     //
     // Resting orders come first, each level front to back (bids, then asks),
     // then the parked ones, each list front to back: stops, trailing stops,
-    // auction market orders, on-close orders. A checkpoint and a joining
-    // backup re-add the orders in this order, so it is the time priority and
-    // the queue order they restore; the id map's order queued a level, and
-    // then each list, by order id. The list order decides which elected stops
+    // auction market orders, on-close orders. A checkpoint re-adds the orders
+    // in this order, so it is the time priority and the queue order it
+    // restores; the id map's order queued a level, and then each list, by order
+    // id. The list order decides which elected stops
     // run first and which market orders an uncross fills first.
     template<typename Fn>
     void forEachOrderLocked(Fn&& fn) const {

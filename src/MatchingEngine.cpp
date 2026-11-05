@@ -560,17 +560,11 @@ void MatchingEngine::installCapacityCallbacks() {
         });
     }
 
-    // Deliberately NOT installed, both blocked on a decision this code cannot
-    // make:
-    //   * memory — CapacityThresholds.memoryUsagePct is a fraction of a
-    //     limit, and no limit exists anywhere in the config or the code. RSS
-    //     over total host RAM is not it (the engine shares the host); the
-    //     real ceiling is the container/cgroup limit the deployment sets.
-    //   * replication lag — the ReplicationCoordinator is owned by main.cpp
-    //     and constructed after startAsync(), so there is nothing to read
-    //     here, and installing the callback later would race the running
-    //     monitor thread. Moving coordinator setup ahead of startAsync() is
-    //     the fix, and it is a change to startup ordering, not to this.
+    // Deliberately NOT installed, blocked on a decision this code cannot make:
+    // memory — CapacityThresholds.memoryUsagePct is a fraction of a limit, and
+    // no limit exists anywhere in the config or the code. RSS over total host
+    // RAM is not it (the engine shares the host); the real ceiling is the
+    // container/cgroup limit the deployment sets.
 }
 
 void MatchingEngine::startExpiryTimer(uint64_t intervalMs) {

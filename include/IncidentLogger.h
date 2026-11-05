@@ -28,7 +28,6 @@ enum class IncidentType : uint8_t {
     // 5, 6 (LULD pause/resume) and 8 (wash trade flagged) were for deleted code.
     STPTriggered   = 7,
     CapacityAlert  = 9,
-    ReplicationLag = 10
 };
 
 inline const char* incidentTypeStr(IncidentType t) {
@@ -39,7 +38,6 @@ inline const char* incidentTypeStr(IncidentType t) {
         case IncidentType::KillSwitch:       return "kill_switch";
         case IncidentType::STPTriggered:     return "stp_triggered";
         case IncidentType::CapacityAlert:    return "capacity_alert";
-        case IncidentType::ReplicationLag:   return "replication_lag";
     }
     return "unknown";
 }

@@ -72,7 +72,7 @@ them is ever stored as one:
 |---|---|---|
 | `cbThreshold_` | `include/OrderBook.h:957` | Circuit-breaker threshold, default 0.05 (5%) |
 | `priceBandPct_` | `include/OrderBook.h:958` | Price-band half-width, 0 = disabled |
-| `marketProtectionPct_` | `include/OrderBook.h:959` | Market-order sweep collar, 0 = disabled |
+| `marketProtectionPct_` | `include/OrderBook.h:959` | Market-order sweep collar, default 0.05 (5%), 0 = disabled |
 | `vwap_` | `include/OrderBook.h:948` | Session VWAP — an analytics output, never an input to matching |
 
 Each is used in exactly one shape: multiply an `int64_t` reference price by the percentage,
@@ -1370,11 +1370,20 @@ If the dry run fills less than `minQty`: an `IOC` or `Market` order is cancelled
 **non-crossing** limit order rests and waits.
 
 **A `Market` order with `minQty` is an IOC with `minQty`.** It is counted at every level it can
-reach — every level, or under price-time with market protection on, the levels inside the collar
-(`OrderBook::marketCollar`) where `match()` stops; one that misses its minimum is cancelled
-untraded, and one that meets it trades and has its remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
+reach — the levels inside the collar, below, where the sweep stops; one that misses its minimum
+is cancelled untraded, and one that meets it trades and has its remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
 liquidity and was **rested in the book as a bid at 0**, where it later printed at 0; roadmap
 0.12 rejected `Market` + `minQty` outright until 1.6-F2 (OTM-2).
+
+**The market-order collar.** A `Market` order, and a `Stop` or `MIT` once elected, trades at most
+5% from the opposite touch it arrives at, under both algorithms, inclusive of the bound
+(`OrderBook::marketCollar`). The remainder is cancelled, so one order cannot walk the book. The
+value is fixed like the circuit breaker's, and for a reason: it is on by default and replay re-runs
+matching, so a value that changed across a restart would replay different fills than clients were
+told. `setMarketProtectionPct` changes it for a library owner, 0 turning it off. At very low prices
+the band truncates to nothing (5% of a touch under 20 ticks is 0), so such an order trades only at
+the touch. A journal written before the default changed replays under the collar: a market order
+that walked further than 5% then fills less on replay than it did live (MATCH-16).
 
 **Not in an auction state.** In `PreOpen` and the auction states the screen does not run: the
 order rests and takes part in the uncross, **which does not apply `minQty`**. A crossing
@@ -1390,7 +1399,8 @@ part of its size (GTDIFF-2).
 > locked-book reasoning in `screenMinQty()`
 
 **Status: Deliberate — commented and pinned.** `tests/FokStpLiquidityTest.cpp` (each STP mode,
-the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`.
+the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`,
+`tests/MarketCollarTest.cpp`.
 
 ---
 

@@ -94,6 +94,7 @@ void auditSequence() {
 void minimumNotMetIsCancelledUntraded(Side side) {
     OrderBook book(1);
     book.setCircuitBreakerThreshold(1e9);
+    book.setMarketProtectionPct(0.0);  // the levels are 20% apart; the collar has its own test
     Recorder rec;
     book.setEventListener(&rec);
     const Side resting = side == Side::Buy ? Side::Sell : Side::Buy;

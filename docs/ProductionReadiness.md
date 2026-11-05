@@ -14,9 +14,9 @@ This project is a low-latency matching-engine implementation for research and po
   auction (`tripBreakerOnFirstFill` in `src/OrderBook.cpp`; `VolatilityBreakerTest`) <!-- claim:circuit-breaker -->, in OrderEngine with
   a config file each symbol's static price range (`instrument.<s>.min_price` / `max_price`, enforced at
   admission; `PriceRangeTest`, `EngineRequiresPriceBandTest`) <!-- claim:price-range -->, and, only in OrderEngine with
-  `--session-schedule`, the scheduled auction states (`SessionSchedulerTest`). <!-- claim:session-schedule --> Library only, not
-  enabled: the market-order collar (`marketProtectionPct_` defaults to 0 and no binary sets it), the
-  percentage price band,
+  `--session-schedule`, the scheduled auction states (`SessionSchedulerTest`) <!-- claim:session-schedule -->, and in every book a
+  5% market-order collar on both algorithms (`MarketCollarTest`). <!-- claim:market-collar --> Library only, not
+  enabled: the percentage price band,
   and any halt or resume (no binary or admin endpoint sets `TradingState::Halted`).
   See [Compliance.md](Compliance.md).
 - Iceberg refresh priority and hidden-order allocation rules for the exact venue model.

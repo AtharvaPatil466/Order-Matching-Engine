@@ -696,6 +696,16 @@ enable_assertions(PriceRangeTest)
 add_test(NAME PriceRangeTest COMMAND PriceRangeTest)
 set_tests_properties(PriceRangeTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# The market-order collar: on by default, both algorithms (1.9 I4, MATCH-16).
+add_executable(MarketCollarTest MarketCollarTest.cpp)
+target_link_libraries(MarketCollarTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(MarketCollarTest)
+gtest_discover_tests(MarketCollarTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
 # GTD, and DAY with no session end, must carry an expiry (1.6-F6, PRIOR-7).
 add_executable(ExpiryAdmissionTest ExpiryAdmissionTest.cpp)
 target_link_libraries(ExpiryAdmissionTest PRIVATE OrderMatcher)

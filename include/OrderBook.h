@@ -524,9 +524,10 @@ public:
 
     // Market-order sweep protection: cap how far a market order may walk
     // from the arrival touch price (fractional half-width, e.g. 0.10 = 10%).
-    // 0 disables. The portion of a market order that would fill beyond the
-    // collar is left unfilled (and cancelled), so a single sweep cannot
-    // clear the book at runaway prices.
+    // 0 disables; default 5%. The portion of a market order that would fill
+    // beyond the collar is left unfilled (and cancelled), so a single sweep
+    // cannot clear the book at runaway prices. Replay re-runs matching, so set
+    // it before traffic and to the value the journal was written under.
     void setMarketProtectionPct(double pct) { marketProtectionPct_ = pct < 0 ? 0 : pct; }
     double getMarketProtectionPct() const   { return marketProtectionPct_; }
     // Takes bookLock_: the admin /otr endpoint calls this from its own thread
@@ -934,13 +935,14 @@ private:
     Price matchProRata(Order* order);
     bool checkSMP(const Order& incoming, const Order& resting) const;
     Quantity sweepFillQty(const Order& in) const;
-    // Market protection's collar: the farthest price match() lets a Market
-    // order reach from the opposite touch. Callers check it is on and the side
-    // is not empty.
+    // Market protection's collar: the farthest price a Market order may reach
+    // from the opposite touch. Callers check it is on and the side is not empty.
     Price marketCollar(const FlatPriceMap& opposite, bool isBuy) const {
         const Price touch = opposite.bestPrice();
         const Price band = static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
-        return isBuy ? touch + band : touch - band;
+        if (!isBuy) return touch - band;
+        return band > std::numeric_limits<Price>::max() - touch
+                   ? std::numeric_limits<Price>::max() : touch + band;
     }
 
     void runTriggerSweeps(Price firstPrint);
@@ -1268,7 +1270,7 @@ private:
     uint64_t volatilityClockStart_{0};    // caller's clock at the first due-check
     bool     volatilityClockStarted_{false};
     double priceBandPct_{0.0};   // LULD price-band half-width (0 = disabled)
-    double marketProtectionPct_{0.0};  // market-order sweep collar (0 = disabled)
+    double marketProtectionPct_{0.05};  // market-order sweep collar, as the breaker (0 = disabled)
 
     // Per-participant tracking — open-addressing hash maps
     FlatHashMap<OTRKey, ParticipantRiskState, OTRKeyHash> participantRisk_;

@@ -464,12 +464,12 @@ bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
 // pro-rata's STP pre-pass settles a level's own orders before it allocates,
 // so one that ends the sweep ends it before that level fills anything.
 // A Market order (Market+minQty) stops at market protection's collar, as in
-// match(); matchProRata applies no collar, so neither does its dry run.
+// match() and matchProRata().
 Quantity OrderBook::sweepFillQty(const Order& in) const {
     const bool isBuy = (in.side == Side::Buy);
     const bool proRata = (matchAlgorithm_ == MatchAlgorithm::ProRata);
     const FlatPriceMap& opposite = isBuy ? asks_ : bids_;
-    const bool collared = !proRata && in.type == OrderType::Market &&
+    const bool collared = in.type == OrderType::Market &&
                           marketProtectionPct_ > 0.0 && !opposite.empty();
     const Price collar = collared ? marketCollar(opposite, isBuy) : 0;
     const STPMode stpMode = getSTPMode(in.participantId);
@@ -1738,19 +1738,24 @@ Price OrderBook::matchProRata(Order* incoming) {
     struct Alloc { Order* order; Quantity qty; };
     static constexpr size_t MAX_LEVEL_ORDERS = 1024;
     Price firstPrint = 0;  // as match(): the sweep's first print
+    const bool isBuy = (incoming->side == Side::Buy);
+
+    // Branchless opposite-book select: incoming side is ~50/50 and so
+    // unpredictable by any HW branch predictor. Index a pointer array
+    // instead of branching. books[isBuy] is the same-side book
+    // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
+    FlatPriceMap* books[2] = {&asks_, &bids_};
+    FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
+
+    // The collar, from the arrival touch, as in match() (MATCH-16).
+    const bool useMktProt = incoming->type == OrderType::Market && marketProtectionPct_ > 0.0;
+    const Price mktProtBound = useMktProt && !opposite.empty() ? marketCollar(opposite, isBuy) : 0;
 
     while (incoming->remainingQty > 0) {
-        bool isBuy = (incoming->side == Side::Buy);
-
-        // Branchless opposite-book select: incoming side is ~50/50 and so
-        // unpredictable by any HW branch predictor. Index a pointer array
-        // instead of branching. books[isBuy] is the same-side book
-        // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
-        FlatPriceMap* books[2] = {&asks_, &bids_};
-        FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
         if (opposite.empty()) break;
 
         Price bestPrice = opposite.bestPrice();
+        if (useMktProt && (isBuy ? bestPrice > mktProtBound : bestPrice < mktProtBound)) break;
         if (isBuy) {
             if (incoming->type != OrderType::Market && incoming->price < bestPrice) break;
         } else {

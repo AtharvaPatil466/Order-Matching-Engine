@@ -2682,14 +2682,13 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
             if (book && (entry.newQty & SNAPSHOT_PEG_QUEUE)) {
                 book->restorePegQueue(entry.orderId);
             } else if (book && !book->getOrder(entry.orderId)) {
-                book->setRestoringCheckpoint(true);
-                book->addOrder(entry.orderId, entry.participantId, entry.side,
-                               entry.price, entry.quantity, entry.orderType,
-                               entry.stopPrice, entry.displayQty, entry.timeInForce,
-                               entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                               entry.pegOffset, entry.trailAmount, entry.minQty,
-                               entry.hidden);
-                book->setRestoringCheckpoint(false);
+                // Put back, not re-admitted: see OrderBook::restoreOrder.
+                (void)book->restoreOrder(entry.orderId, entry.participantId, entry.side,
+                                         entry.price, entry.quantity, entry.orderType,
+                                         entry.stopPrice, entry.displayQty, entry.timeInForce,
+                                         entry.expiryTime, entry.stopLimitPrice, entry.pegType,
+                                         entry.pegOffset, entry.trailAmount, entry.minQty,
+                                         entry.hidden);
                 if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                     book->restoreStopElection(entry.orderId, entry.stopPrice);
                 else

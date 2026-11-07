@@ -395,6 +395,15 @@ enable_assertions(CheckpointPeggedOrderTest)
 add_test(NAME CheckpointPeggedOrderTest COMMAND CheckpointPeggedOrderTest)
 set_tests_properties(CheckpointPeggedOrderTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# Every order comes back from a checkpoint in every trading state, and the book
+# takes its next transition as it would have; a halted or closed book restored
+# empty.
+add_executable(CheckpointTradingStateTest CheckpointTradingStateTest.cpp)
+target_link_libraries(CheckpointTradingStateTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointTradingStateTest)
+add_test(NAME CheckpointTradingStateTest COMMAND CheckpointTradingStateTest)
+set_tests_properties(CheckpointTradingStateTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
 add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)

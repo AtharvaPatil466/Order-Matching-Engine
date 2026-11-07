@@ -1024,9 +1024,7 @@ Price OrderBook::bestNonPegPrice(Side side) const {
 // Where the peg's instruction puts it: reference + offset, or `fallback` while
 // there is no reference. The mid rounds toward the peg's own side, so a sell
 // MidPeg on a one-unit spread lands on the ask, not on the bid.
-// A checkpoint's re-add puts it back where it was (setRestoringCheckpoint).
 Price OrderBook::pegPrice(Side side, Price fallback, PegType pegType, Price pegOffset) const {
-    if (restoringCheckpoint_) return fallback;
     const Price bid = bestNonPegPrice(Side::Buy), ask = bestNonPegPrice(Side::Sell);
     if (pegType == PegType::MidPeg) {
         if (bid > 0 && ask > 0) return bid + (ask - bid + (side == Side::Sell ? 1 : 0)) / 2 + pegOffset;
@@ -1039,10 +1037,8 @@ Price OrderBook::pegPrice(Side side, Price fallback, PegType pegType, Price pegO
 
 // `price`, or one unit behind the opposite touch if it reaches it. The
 // opposite side never holds this peg, so it is the touch the peg must not
-// cross. Not a checkpoint's re-add: an auction's call period may have crossed
-// the book around a peg already resting (setRestoringCheckpoint).
+// cross.
 Price OrderBook::behindOppositeTouch(Side side, Price price) const {
-    if (restoringCheckpoint_) return price;
     if (side == Side::Buy)
         return (!asks_.empty() && price >= asks_.bestPrice()) ? asks_.bestPrice() - 1 : price;
     return (!bids_.empty() && price <= bids_.bestPrice()) ? bids_.bestPrice() + 1 : price;
@@ -3731,6 +3727,57 @@ size_t OrderBook::getAllOrders(const Order** out, size_t maxOrders) const {
 const Order* OrderBook::getOrder(OrderId orderId) const {
     const auto* ptr = orderLookup_.find(orderId);
     return ptr ? *ptr : nullptr;
+}
+
+RejectReason OrderBook::restoreOrder(OrderId orderId, ParticipantId participantId, Side side,
+                                     Price price, Quantity qty, OrderType type, Price stopPrice,
+                                     Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                                     Price stopLimitPrice, PegType pegType, Price pegOffset,
+                                     Price trailAmount, Quantity minQty, bool hidden) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    if (qty == 0) return RejectReason::InvalidQuantity;
+    if (orderLookup_.find(orderId)) return RejectReason::DuplicateOrderId;
+
+    const TradingState state =
+        tradingState_ == TradingState::Halted ? preHaltState_ : tradingState_;
+    const bool released = state == TradingState::AuctionClose || state == TradingState::PostClose;
+    FixedVector<Order*, 16384>* list = nullptr;
+    bool rests = false, releasedLoc = false;
+    switch (type) {
+    case OrderType::Stop:
+    case OrderType::StopLimit:
+    case OrderType::MIT:          list = &stopOrders_; break;
+    case OrderType::TrailingStop: list = &trailingStopOrders_; break;
+    case OrderType::Market:       list = &auctionMarketOrders_; break;
+    case OrderType::MOC:          list = released ? &auctionMarketOrders_ : &onCloseOrders_; break;
+    case OrderType::LOC:
+        if (released) rests = releasedLoc = true;
+        else list = &onCloseOrders_;
+        break;
+    case OrderType::Pegged:       list = &peggedOrders_; rests = true; break;
+    case OrderType::Limit:
+    case OrderType::PostOnly:
+    case OrderType::Iceberg:
+    case OrderType::Hidden:       rests = true; break;
+    case OrderType::IOC:
+    case OrderType::FOK:          break;
+    }
+    if (!list && !rests) return RejectReason::OrderTypeNotAllowedInState;  // never rests
+    if ((list && list->full()) || (releasedLoc && locActiveIds_.full()))
+        return RejectReason::CapacityExhausted;
+
+    Order* order = allocateAndRegisterOrder(orderId, participantId, side, price, qty, type,
+                                           stopPrice, displayQty, tif, expiryTime, stopLimitPrice,
+                                           pegType, pegOffset, trailAmount, minQty, hidden);
+    if (!order) return RejectReason::CapacityExhausted;
+    if (rests && !addToBook(order)) {
+        orderLookup_.erase(orderId);
+        orderPool_.deallocate(order);
+        return RejectReason::OutOfPriceRange;
+    }
+    if (list) (void)list->push_back(order);  // slots checked above
+    if (releasedLoc) (void)locActiveIds_.push_back(orderId);
+    return RejectReason::None;
 }
 
 void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {

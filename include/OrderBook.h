@@ -672,6 +672,25 @@ public:
     // getOrder() remains for single-threaded tests and read-only inspection.
     const Order* getOrder(OrderId orderId) const;
 
+    // Recovery only: put a checkpoint's order back where it rested or was
+    // parked, as it was. Not an arrival — addOrder judged one, and refused a
+    // halted or closed book's every order, a trailing stop entered without a
+    // price (no last trade until the Counters record after the orders) and a
+    // post-only offer an auction's call period crossed. So no admission rule,
+    // no match, no sweep or reprice, no reference price seeded: the book it
+    // came from had done all of that. Placed by type and the restored state: a
+    // resting type behind its level, a stop, trailing stop or auction market
+    // order at the back of its list, an on-close order on onCloseOrders_, or
+    // where the close released it once the book reached AuctionClose (a halt
+    // there keeps it released; PostClose has cancelled every unreleased one).
+    // Returns None, or why it could not be placed: a duplicate id, a type
+    // that never rests, a full list or pool, a price the book cannot hold.
+    RejectReason restoreOrder(OrderId orderId, ParticipantId participantId, Side side,
+                              Price price, Quantity qty, OrderType type, Price stopPrice,
+                              Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                              Price stopLimitPrice, PegType pegType, Price pegOffset,
+                              Price trailAmount, Quantity minQty, bool hidden);
+
     // Recovery only: mark a parked stop as already elected, frozen at
     // `stopPrice`, the state a checkpoint found it in (see
     // kMaxStopExecutionsPerSweep). It fires on the next sweep. No-op for an
@@ -819,15 +838,6 @@ public:
     // A checkpoint's PEG_QUEUE record: the peg goes to the back of the
     // reprice list. Applied in list order, after the orders, they rebuild it.
     void restorePegQueue(OrderId orderId);
-
-    // Set around each re-add of a checkpoint's Snapshot record: a peg rests at
-    // the price the record carries and no reprice pass moves one. Until the
-    // last record the book is half restored, and a peg re-pegged against it
-    // lost its clamp behind a touch that was not back yet.
-    void setRestoringCheckpoint(bool on) {
-        std::lock_guard<std::mutex> lock(bookLock_);
-        restoringCheckpoint_ = on;
-    }
 
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }
@@ -1275,7 +1285,6 @@ private:
 
     // Replay mode flag — suppresses callbacks during journal recovery
     bool replayMode_{false};
-    bool restoringCheckpoint_{false};  // see setRestoringCheckpoint
     bool itchFieldLimits_{false};  // MD-8, see setItchFieldLimits
 
     // Identity

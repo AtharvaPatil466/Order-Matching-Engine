@@ -693,3 +693,31 @@ TEST_P(RiskPath, ModifyStillOverACapIsRefused) {
     drain();
     EXPECT_EQ(leaves(1), 40u);
 }
+
+// ─── GW-4: the sync path runs the hierarchical gate too ─────────────────────
+
+namespace {
+constexpr uint64_t kFirm = 1000;
+}  // namespace
+
+TEST_P(RiskPath, HierarchicalOrderCapIsEnforced) {
+    engine.mapParticipant(kA, 10, 100, kFirm);
+    engine.setRiskTierLimits(RiskTier::Trader, kA, TierLimits{/*maxOrderSize=*/10, 0, 0, 0.0});
+    expectRefused(add(1, kA, Side::Buy, kPx, 20), RejectReason::RiskLimitBreached);
+    EXPECT_TRUE(add(2, kA, Side::Buy, kPx, 10).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 0u);
+    EXPECT_EQ(leaves(2), 10u);
+}
+
+TEST_P(RiskPath, HierarchicalNetPositionAccruesFills) {
+    engine.mapParticipant(kA, 10, 100, kFirm);
+    engine.setRiskTierLimits(RiskTier::Firm, kFirm, TierLimits{0, 0, /*maxNetPosition=*/100, 0.0});
+    ASSERT_TRUE(add(1, kB, Side::Sell, kPx, 60).isAccepted());
+    ASSERT_TRUE(add(2, kA, Side::Buy, kPx, 60).isAccepted());
+    drain();
+    EXPECT_EQ(engine.riskNetPosition(RiskTier::Firm, kFirm), 60);
+    expectRefused(add(3, kA, Side::Buy, kPx - 100, 60), RejectReason::RiskLimitBreached);
+    drain();
+    EXPECT_EQ(leaves(3), 0u);
+}

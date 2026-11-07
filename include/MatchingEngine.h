@@ -870,10 +870,15 @@ private:
     RejectReason checkBookValuedNotional(const OrderBook& book, SymbolId sym, ParticipantId pid,
                                          Side side, OrderType type, Price price, Quantity qty,
                                          Price stopPrice, Price stopLimitPrice, Price trailAmount);
+    // The sync path's driveOco, after the request as the worker's is. Returns
+    // the journal ordinal its events wait behind: past any sibling cancel the
+    // drain journaled, if the request journaled at all.
+    uint64_t driveOcoSync(SymbolId symbolId, OrderBook* book, uint64_t appendOrdinal);
     // Pre-trade hierarchical risk gate; true = admit. No-op (true) when risk
-    // is not configured. Runs on the worker thread, where book reads are safe.
+    // is not configured. Both paths: the worker at apply time, the sync path
+    // before the book.
     bool preTradeRiskCheck(ParticipantId trader, Side side, Price price,
-                           Quantity qty, Price referencePrice);
+                           Quantity qty, OrderType type, const OrderBook& book);
 
     ContingencyManager contingency_;
     std::mutex contingencyMutex_;

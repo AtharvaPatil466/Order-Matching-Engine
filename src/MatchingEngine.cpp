@@ -1031,16 +1031,9 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             break;
         }
 
-        // Hierarchical pre-trade risk gate (no-op unless configured). Market
-        // orders have no limit price, so they skip the fat-finger reference
-        // check (pass 0); limit-priced orders use the book mid as an NBBO
-        // proxy. Reading book state here is safe — one writer per book.
-        if (!preTradeRiskCheck(req.participantId, req.side,
-                               book->notionalPrice(req.side, req.orderType, req.price,
-                                                   req.stopPrice, req.stopLimitPrice,
-                                                   req.trailAmount),
-                               req.qty,
-                               req.orderType == OrderType::Market ? 0 : book->getMidPrice())) {
+        // Hierarchical pre-trade risk gate (no-op unless configured).
+        if (!preTradeRiskCheck(req.participantId, req.side, req.price, req.qty,
+                               req.orderType, *book)) {
             releaseWorking(req.participantId, req.side, req.qty);
             book->emitReject(req.orderId, req.qty, RejectReason::RiskLimitBreached);
             break;
@@ -1359,10 +1352,30 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
 }
 
 bool MatchingEngine::preTradeRiskCheck(ParticipantId trader, Side side, Price price,
-                                       Quantity qty, Price referencePrice) {
+                                       Quantity qty, OrderType type, const OrderBook& book) {
     if (!riskActive_.load(std::memory_order_relaxed)) return true;
+    // Market orders have no limit price, so they skip the fat-finger reference
+    // check (0); the rest use the book mid as an NBBO proxy. Read under the
+    // book lock: on the sync path another caller may be matching on it.
+    Price referencePrice = 0;
+    if (type != OrderType::Market) book.withBookLock([&] { referencePrice = book.getMidPrice(); });
     std::lock_guard<std::mutex> lock(riskMutex_);
     return riskManager_.check(trader, side, price, qty, referencePrice).allowed;
+}
+
+// ponytail: the observer's buffers have one drainer per book; the sync path
+// gets that from its caller (one event loop in the gateway). Concurrent sync
+// callers on one book with OCO, fees, CAT or hierarchical risk on would need
+// the swap in driveOco under the book lock and per-call scratch buffers.
+uint64_t MatchingEngine::driveOcoSync(SymbolId symbolId, OrderBook* book,
+                                      uint64_t appendOrdinal) {
+    if (!ocoActive_.load(std::memory_order_relaxed) &&
+        !observersActive_.load(std::memory_order_relaxed))
+        return appendOrdinal;
+    driveOco(symbolId, book);
+    if (!journal_ || appendOrdinal == 0) return appendOrdinal;
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    return journal_->entriesAppended();
 }
 
 // ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ────────────────────────
@@ -1973,6 +1986,13 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(rr);
     }
 
+    // GW-4: the hierarchical gate, which the async worker runs at apply time,
+    // ran on this path not at all.
+    if (!preTradeRiskCheck(participantId, side, price, qty, type, *book)) [[unlikely]] {
+        releaseWorking(participantId, side, qty);
+        return rejectedAsync(RejectReason::RiskLimitBreached);
+    }
+
     // Capture everything this order emits so none of it reaches the client
     // before the journal entry behind it is durable. No-op when disabled.
     durabilityGate_.beginOrder();
@@ -1983,22 +2003,21 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
                                            minQty, hidden);
     // Refused: no order lives, nothing traded. Admitted, the book answers for
     // the reservation from here.
-    if (!std::holds_alternative<OrderId>(result)) releaseWorking(participantId, side, qty);
-    if (journal_ && std::holds_alternative<OrderId>(result)) {
-        uint64_t appendOrdinal = 0;
-        {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            logBreakerTrip(symbolId, stateBefore, book->getTradingState());
-            journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
-                                  expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
-                                  pegOffset, trailAmount, minQty, hidden);
-            appendOrdinal = journal_->entriesAppended();
-        }
-        holdUntilDurable(appendOrdinal);
-        maybeTriggerAutoCheckpoint();
-    } else {
-        holdUntilDurable(0);
+    const bool admitted = std::holds_alternative<OrderId>(result);
+    if (!admitted) releaseWorking(participantId, side, qty);
+    uint64_t appendOrdinal = 0;
+    if (journal_ && admitted) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        logBreakerTrip(symbolId, stateBefore, book->getTradingState());
+        journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
+                              expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
+                              pegOffset, trailAmount, minQty, hidden);
+        appendOrdinal = journal_->entriesAppended();
     }
+    // Its fills reach OCO, fees, hierarchical risk and CAT as the worker's do.
+    if (admitted) appendOrdinal = driveOcoSync(symbolId, book, appendOrdinal);
+    holdUntilDurable(appendOrdinal);
+    if (appendOrdinal) maybeTriggerAutoCheckpoint();
     // The append above may be the commit that failed. Then the order is not
     // on disk and a restart will not have it, so its client is told that —
     // not "accepted" — and the gate keeps everything it produced (D4).
@@ -2308,6 +2327,7 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
         journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
         appendOrdinal = journal_->entriesAppended();
     }
+    if (replaced) appendOrdinal = driveOcoSync(symbolId, book, appendOrdinal);  // GTS-4
     holdUntilDurable(appendOrdinal);
     if (appendOrdinal) maybeTriggerAutoCheckpoint();
     if (appendOrdinal && journalHalted()) [[unlikely]] {

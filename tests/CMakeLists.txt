@@ -715,6 +715,16 @@ gtest_discover_tests(MarketNotionalTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;risk")
 
+# An expired GTD/DAY maker never trades, before the sweep reaches it (1.9 I9, THR-10).
+add_executable(LazyExpiryTest LazyExpiryTest.cpp)
+target_link_libraries(LazyExpiryTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(LazyExpiryTest)
+gtest_discover_tests(LazyExpiryTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;session")
+
 # GTD, and DAY with no session end, must carry an expiry (1.6-F6, PRIOR-7).
 add_executable(ExpiryAdmissionTest ExpiryAdmissionTest.cpp)
 target_link_libraries(ExpiryAdmissionTest PRIVATE OrderMatcher)

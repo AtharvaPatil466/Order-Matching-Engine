@@ -5,6 +5,7 @@
 #include "Metrics.h"         // for the per-symbol pool-utilization gauge (P3-8)
 #include "StructuredLog.h"
 #include <algorithm>
+#include <chrono>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -535,11 +536,12 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
         Quantity reserve = 0;  // what the level fills after this pass
         if (proRata) {
             for (const Order* o = level.front(); o; o = o->next)
-                if (checkSMP(in, *o) && !passOwn(*o)) return false;
+                if (!makerExpired(*o) && checkSMP(in, *o) && !passOwn(*o)) return false;
             for (const Order* o = level.front(); o; o = o->next)
-                if (!checkSMP(in, *o)) reserve += o->remainingQty;
+                if (!makerExpired(*o) && !checkSMP(in, *o)) reserve += o->remainingQty;
         } else {
             for (const Order* o = level.front(); o && need > 0; o = o->next) {
+                if (makerExpired(*o)) continue;   // the sweep cancels it (THR-10)
                 if (checkSMP(in, *o)) {
                     if (!passOwn(*o)) return false;
                     continue;
@@ -799,7 +801,8 @@ std::optional<Price> OrderBook::firstFillPrice(const Order& in) const {
         return market || (in.side == Side::Buy ? px <= in.price : px >= in.price);
     };
     if (!crosses(opposite.bestPrice())) return std::nullopt;
-    if (stpNoneResting(in.participantId)) return opposite.bestPrice();
+    if (stpNoneResting(in.participantId) && !makerExpired(*opposite.bestLevel()->front()))
+        return opposite.bestPrice();
 
     const STPMode mode = getSTPMode(in.participantId);
     const bool ownOrderStopsIncoming = mode == STPMode::DefaultCancelIncoming ||
@@ -809,6 +812,7 @@ std::optional<Price> OrderBook::firstFillPrice(const Order& in) const {
     opposite.forEachLevelWhile([&](Price px, const OrderList& level) -> bool {
         if (!crosses(px)) return false;
         for (const Order* r = level.front(); r; r = r->next) {
+            if (makerExpired(*r)) continue;   // the sweep cancels it (THR-10)
             if (r->participantId != in.participantId) { fill = px; return false; }
             if (ownOrderStopsIncoming) return false;
         }
@@ -1255,6 +1259,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                           Quantity minQty, bool hidden,
                           [[maybe_unused]] bool riskChecksBypassed) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    sweepNow_ = 0;
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
     if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty,
@@ -1596,6 +1601,14 @@ Price OrderBook::match(Order* incoming) {
         OrderList* level = opposite.bestLevel();
         Order* bookOrder = level->front();
 
+        // THR-10: an expired GTD/DAY maker never trades, swept yet or not. The
+        // fills before it go out first; its cancel is an event of its own.
+        if (makerExpired(*bookOrder)) [[unlikely]] {
+            flushFills();
+            expireMaker(bookOrder);
+            continue;
+        }
+
         // Past every break: this level is about to change, by a fill or an STP
         // removal. Recorded after the cross-check so a non-crossing order —
         // the common case — publishes nothing. The sweep walks levels in price
@@ -1803,6 +1816,19 @@ Price OrderBook::matchProRata(Order* incoming) {
         }
 
         OrderList& level = *opposite.bestLevel();
+
+        // THR-10, as in match(): an expired maker leaves before the level is
+        // allocated, so it takes no share.
+        bool expiredAny = false;
+        for (Order* o = level.front(); o; ) {
+            Order* next = o->next;   // read before the cancel frees `o`
+            if (makerExpired(*o)) [[unlikely]] {
+                expireMaker(o);
+                expiredAny = true;
+            }
+            o = next;
+        }
+        if (expiredAny) continue;
 
         // ── C1: STP pre-pass ────────────────────────────────────────────────
         // Resolve self-trade prevention BEFORE computing allocations. The
@@ -2479,6 +2505,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                               RejectReason& reason, ParticipantId requester) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    sweepNow_ = 0;
     reason = RejectReason::OrderNotFound;
 
     auto* orderPtr = orderLookup_.find(orderId);
@@ -2703,16 +2730,24 @@ uint64_t OrderBook::cancelAllForParticipant(ParticipantId participantId) {
 
 // ─── Time-based expiry ───────────────────────────────────────────────────────
 
+static constexpr size_t kMaxExpiryBatch = 4096;
+
 void OrderBook::expireOrders(uint64_t currentTime,
                              const std::function<void(OrderId)>& onExpire) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    (void)expireDueLocked(currentTime, onExpire);
+}
 
+// Precondition: bookLock_ held. Returns how many it cancelled, at most
+// kMaxExpiryBatch.
+size_t OrderBook::expireDueLocked(uint64_t currentTime,
+                                  const std::function<void(OrderId)>& onExpire) {
     // Collect expired order IDs into stack buffer (avoids heap allocation)
-    OrderId toExpire[4096];
+    OrderId toExpire[kMaxExpiryBatch];
     size_t expireCount = 0;
 
     orderLookup_.forEach([&](OrderId id, Order* order) {
-        if (!order || expireCount >= 4096) return;
+        if (!order || expireCount >= kMaxExpiryBatch) return;
         if ((order->timeInForce == TimeInForce::GTD || order->timeInForce == TimeInForce::DAY)
             && order->expiryTime != 0 && currentTime >= order->expiryTime) {
             toExpire[expireCount++] = id;
@@ -2723,6 +2758,29 @@ void OrderBook::expireOrders(uint64_t currentTime,
         if (onExpire) onExpire(toExpire[i]);  // notify (e.g. journal) BEFORE cancel
         cancelOrderImpl(toExpire[i]);          // already holding the lock
     }
+    return expireCount;
+}
+
+// The clock is read once per operation (sweepNow_). Expired at expiryTime
+// itself, as the sweep counts it.
+bool OrderBook::expiredNow(const Order& o) const {
+    if (replayMode_ || (o.timeInForce != TimeInForce::GTD && o.timeInForce != TimeInForce::DAY))
+        return false;
+    if (sweepNow_ == 0) sweepNow_ = expiryClockNow();
+    return sweepNow_ >= o.expiryTime;
+}
+
+uint64_t OrderBook::expiryClockNow() const {
+    if (expiryClock_) return expiryClock_();
+    // Wall-clock ns since the Unix epoch, expiryTime's unit (MatchingEngine::expiryNow).
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+void OrderBook::expireMaker(Order* o) {
+    const OrderId id = o->id;
+    if (onLazyExpire_) onLazyExpire_(id);   // journal BEFORE the cancel, as the sweep does
+    cancelOrderImpl(id);
 }
 
 // ─── Stop Order Triggers ─────────────────────────────────────────────────────
@@ -2948,6 +3006,13 @@ void OrderBook::uncross() {
 
 // Precondition: bookLock_ held.
 void OrderBook::uncrossLocked() {
+    // THR-10: an order past its expiry takes no part in the cross. Replay applies
+    // the cancels this journaled instead.
+    if (!replayMode_) {
+        const uint64_t now = expiryClockNow();
+        while (expireDueLocked(now, onLazyExpire_) == kMaxExpiryBatch) {}
+    }
+
     // H5: resolve self-crossing pairs first, exactly as discovery assumed.
     std::vector<Order*> selfCrossed;
     planAuctionSelfCrosses(selfCrossed);

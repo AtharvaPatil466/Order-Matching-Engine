@@ -23,6 +23,10 @@
 #include <cstdio>
 #include <iostream>
 
+// GTD expiry is wall-clock ns, and a match cancels an expired maker it meets
+// (THR-10). These orders must outlive the test, so they are due in 2100.
+static constexpr uint64_t kNotDue = 4'102'444'800ULL * 1'000'000'000ULL;
+
 using namespace OrderMatcher;
 
 static int tests_passed = 0;
@@ -53,7 +57,7 @@ void test_gtd_persists_day_cancelled() {
 
         // Three non-crossing resting buys (no asks → nothing matches).
         engine.submitOrder(1, 100, 1, Side::Buy, 990000, 10, OrderType::Limit,
-                           0, 0, TimeInForce::GTD, /*expiryTime=*/1'000'000);
+                           0, 0, TimeInForce::GTD, /*expiryTime=*/kNotDue);
         engine.submitOrder(1, 101, 1, Side::Buy, 980000, 10, OrderType::Limit,
                            0, 0, TimeInForce::DAY);
         engine.submitOrder(1, 102, 2, Side::Buy, 970000, 10, OrderType::Limit,
@@ -111,7 +115,7 @@ void test_partial_fill_gtd_remainder_persists() {
 
         // GTD buy 10 @ 100.0000; GTC sell 4 crosses → GTD left resting with 6.
         engine.submitOrder(1, 200, 1, Side::Buy, 1000000, 10, OrderType::Limit,
-                           0, 0, TimeInForce::GTD, /*expiryTime=*/1'000'000);
+                           0, 0, TimeInForce::GTD, /*expiryTime=*/kNotDue);
         engine.submitOrder(1, 201, 2, Side::Sell, 1000000, 4, OrderType::Limit);
 
         auto* o200 = engine.getOrderBook(1)->getOrder(200);
@@ -195,7 +199,7 @@ void test_async_drain_ioc_and_gtd() {
         // GTD + DAY resting buys, plus an IOC buy with no asks (unmatchable →
         // its remainder is cancelled during matching; it never rests).
         engine.submitOrder(1, 400, 1, Side::Buy, 990000, 10, OrderType::Limit,
-                           0, 0, TimeInForce::GTD, /*expiryTime=*/1'000'000);
+                           0, 0, TimeInForce::GTD, /*expiryTime=*/kNotDue);
         engine.submitOrder(1, 401, 1, Side::Buy, 980000, 10, OrderType::Limit,
                            0, 0, TimeInForce::DAY);
         engine.submitOrder(1, 402, 2, Side::Buy, 970000, 5, OrderType::IOC);
@@ -240,7 +244,7 @@ void test_no_journal_safe() {
     engine.start();
 
     engine.submitOrder(1, 500, 1, Side::Buy, 990000, 10, OrderType::Limit,
-                       0, 0, TimeInForce::GTD, /*expiryTime=*/1'000'000);
+                       0, 0, TimeInForce::GTD, /*expiryTime=*/kNotDue);
     engine.submitOrder(1, 501, 1, Side::Buy, 980000, 10, OrderType::Limit,
                        0, 0, TimeInForce::DAY);
 

@@ -406,6 +406,18 @@ public:
     void expireOrders(uint64_t currentTime,
                       const std::function<void(OrderId)>& onExpire = {});
 
+    // Lazy expiry (THR-10). A GTD/DAY maker past its expiryTime never trades,
+    // whether or not the sweep above has reached it: the match that meets it
+    // cancels it, calling onExpire first so the engine journals the cancel ahead
+    // of the order that met it, as it does for the sweep. Replay never reads the
+    // clock; it applies that cancel. `clock` is in expiryTime's unit, the wall
+    // clock when unset. Set before traffic.
+    using ExpiryClock = std::function<uint64_t()>;
+    void setExpiryHooks(ExpiryClock clock, std::function<void(OrderId)> onExpire) {
+        expiryClock_ = std::move(clock);
+        onLazyExpire_ = std::move(onExpire);
+    }
+
     // Market Data
     MarketDataSnapshot getSnapshot(size_t depth = 10) const;
 
@@ -969,6 +981,13 @@ private:
                               Price stopLimitPrice, Price trailAmount) const;
 
     void runTriggerSweeps(Price firstPrint);
+    // THR-10. One branch on the hot path: expiryTime shares the cache line the
+    // fill reads participantId from (Order.h), and is 0 for most orders.
+    bool makerExpired(const Order& o) const { return o.expiryTime != 0 && expiredNow(o); }
+    bool expiredNow(const Order& o) const;
+    uint64_t expiryClockNow() const;
+    void expireMaker(Order* o);
+    size_t expireDueLocked(uint64_t currentTime, const std::function<void(OrderId)>& onExpire);
     void checkStopOrders(Price lowPrint, Price highPrint);
     void updateTrailingStops(Price firstPrint, Price lastPrint);
     void updatePeggedOrders();
@@ -1294,6 +1313,12 @@ private:
     bool     volatilityClockStarted_{false};
     double priceBandPct_{0.0};   // LULD price-band half-width (0 = disabled)
     double marketProtectionPct_{0.05};  // market-order sweep collar, as the breaker (0 = disabled)
+    ExpiryClock expiryClock_;                     // lazy expiry (THR-10); unset = wall clock
+    std::function<void(OrderId)> onLazyExpire_;
+    // The expiry clock as one operation read it, so its screens and its sweep
+    // agree on what has expired. 0 = not read yet; addOrder and cancelReplace,
+    // the only callers of match(), reset it.
+    mutable uint64_t sweepNow_{0};
 
     // Per-participant tracking — open-addressing hash maps
     FlatHashMap<OTRKey, ParticipantRiskState, OTRKeyHash> participantRisk_;

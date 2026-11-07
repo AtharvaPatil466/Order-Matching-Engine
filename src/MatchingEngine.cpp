@@ -1271,7 +1271,16 @@ void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
     oco->trades.reserve(kOcoBufferReserve);
     oco->firedScratch.reserve(kOcoBufferReserve);
     oco->tradesScratch.reserve(kOcoBufferReserve);
-    if (auto* bk = getOrderBook(symbolId)) bk->setEngineListener(oco.get());
+    if (auto* bk = getOrderBook(symbolId)) {
+        bk->setEngineListener(oco.get());
+        // THR-10: a book cancels an expired maker its match meets, on the
+        // sweep's clock, journaled as the sweep journals one.
+        bk->setExpiryHooks([this] { return expiryNow(); },
+                           [this, symbolId](OrderId id) {
+                               std::lock_guard<std::mutex> lock(journalMutex_);
+                               if (journal_) journal_->logCancelOrder(id, symbolId);
+                           });
+    }
     ocoListeners_.insert(symbolId, std::move(oco));
 
     rebuildThreadSymbolIndex();

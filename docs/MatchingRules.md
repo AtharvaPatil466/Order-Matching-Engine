@@ -1170,9 +1170,12 @@ The mechanism end to end:
 
 ### Rule 8.2 — What it costs, and who pays
 
-**It does not cost the hot path per order.** No matching path reads `expiryTime` — `match()`,
-`matchProRata()` and `uncross()` contain no expiry test at all. Submitting an order pays
-nothing for expiry.
+**It costs the hot path one branch per maker met.** `match()` tests each maker's `expiryTime`
+against 0 before it trades it (Rule 8.3); the field shares the cache line the fill reads the
+maker's participant from, and the clock is read only for a maker that has an expiry, once per
+operation. `matchProRata()` makes the same test over each level it allocates. Measured A/B on
+`DeterministicBenchmark` and `HonestBenchmark --only a`, the difference was inside the noise
+(commit message of the change that added it).
 
 **It costs the hot path per sweep.** The sweep takes the same exclusive `bookLock_` that
 `addOrder` takes, so once per interval, matching stalls for the duration of a full hash-table
@@ -1183,18 +1186,27 @@ absolute terms, but it is a **lock-held stall on the matching thread**, not back
 and its duration scales with pool capacity rather than with how many orders are actually
 expiring.
 
-### Rule 8.3 — An expired order remains fully tradeable until the next sweep
+### Rule 8.3 — An expired maker never trades; it is cancelled when the match meets it
 
-Because nothing on the matching path checks `expiryTime`, an order whose expiry has passed
-continues to rest, display, and fill normally until a sweep reaches it. **The window is up to
-one full interval — one second at the default.**
+A `GTD` or `DAY` order whose `expiryTime` has passed (at or after it, as the sweep counts it)
+does not trade as a maker, whether or not the sweep has reached it. The match that meets it —
+`match()`, `matchProRata()`'s pass over a level before it allocates, or the auction uncross,
+which first expires every order due — cancels it with the same `Cancelled` update the sweep
+sends, after the fills it has already made go out, and the engine journals that cancel ahead
+of the order that met it. Replay never reads the clock: it applies the journaled cancel. The
+screens that count liquidity before a sweep, the FOK and `minQty` dry run and the breaker's
+first-fill price, look past an expired maker the same way, so a FOK cannot be filled in part
+by liquidity that leaves under it. One operation reads the clock once, so its screens and its
+sweep agree on what has expired (THR-10).
 
-This is a genuine semantic, not a detail: a client whose GTD order expires at T can receive a
-fill stamped as late as T + 1s.
+Until then an expired order still rests and displays: the public feed shows it until a match
+meets it or the sweep, up to one interval later, removes it. A `PostOnly` priced through an
+expired maker is still refused as crossing. An expired order that is not a maker can still
+trade in that window: an expired parked stop that is elected, or a `GTD` sent with an
+`expiryTime` already past, trades as the aggressor.
 
-**Status: Undocumented — no test pins this, may be incidental.** `tests/GTDReplayTest.cpp`
-and `tests/TestOrderBook.cpp:389` drive expiry with an injected clock and assert that expiry
-*happens*; nothing asserts anything about the window during which it has not happened yet.
+**Status: Deliberate — pinned.** `tests/LazyExpiryTest.cpp` (both algorithms, sync and async,
+FOK, breaker, uncross, replay with a clock that disagrees).
 
 ### Rule 8.4 — At most 4096 orders expire per sweep
 
@@ -1254,8 +1266,8 @@ carries an `expiryTime` expires like `GTD` either way.
 session", and deriving the session-end timestamp from the session calendar is how I would
 expect it to be implemented. Venues do **not** publish their expiry *mechanism* — timer wheel
 versus scan is an implementation detail, not a rule — so there is nothing to compare Rules
-8.1–8.4 against. The part that *is* rulebook material is Rule 8.3, the tradeable-after-expiry
-window, and I do not know of a venue that publishes one.
+8.1–8.4 against. The part that *is* rulebook material is Rule 8.3: an expired order does not
+trade as a maker, and the sweep's interval only bounds how long it stays displayed.
 
 ### Rule 8.6 — Absolute expiry timestamps are in an unspecified epoch
 

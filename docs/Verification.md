@@ -4,7 +4,7 @@
 
 > **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22 <!-- claim:tla-auction -->
 
-> **New specs (2026-05-28)**: FixSession.tla · Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
+> **New specs (2026-05-28)**: Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
 
 ## MatchingEngine.tla
 
@@ -197,8 +197,6 @@ from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 | `spec/Snapshot.tla` / `spec/SnapshotLocked.tla` | Torn-snapshot prevention |
 | `spec/Auction.tla` | Session state machine through the enforced transition table, order admission per state, uncross (section above) |
 | `spec/Auction.cfg`, `spec/AuctionBroken*.cfg` | The bounds CI checks; four broken variants CI requires to fail |
-| `spec/FixSession.tla` | FIX inbound sequence recovery: messages delivered strictly in order (no logon or heartbeat is modelled) |
-| `spec/FixSession.cfg` / `spec/FixSessionBroken.cfg` | Config + broken variant |
 | `spec/Oco.tla` | OCO (one-cancels-other) atomicity — cancel sibling on fill |
 | `spec/Oco.cfg` / `spec/OcoBroken.cfg` | Config + broken variant |
 | `spec/Risk.tla` | Risk limit enforcement, two tiers: one Firm over Traders T1, T2 |
@@ -206,11 +204,10 @@ from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 
 ## New Specs (2026-05-28)
 
-Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. The bounds are small: the correct cfgs reach 4 (FixSession), 8 (Risk) and 198 (Oco) distinct states. <!-- claim:tla-small-specs -->
+Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. The bounds are small: the correct cfgs reach 8 (Risk) and 198 (Oco) distinct states. <!-- claim:tla-small-specs -->
 
 | Spec | Property Verified | Broken Variant |
 |------|------------------|----------------|
-| `FixSession.tla` | The receiver delivers messages strictly in `MsgSeqNum` order: a gap is held, not delivered (sending the ResendRequest is not modelled) | `BROKEN_NO_GAP_DETECT` (deliver past a gap) → `DeliveredInOrder` violated |
 | `Oco.tla` | When one leg of an OCO pair fills, the sibling is cancelled before any further fills; no double-fill | Removing sibling-cancel action → TLC finds a double-fill state |
 | `Risk.tla` | Neither tier is breached: `FirmWithinCap`, `TradersWithinCap`, `FirmIsSumOfTraders` — two tiers (Firm over Traders), not four | `BROKEN_NO_FIRM_AGG` (drop the firm-aggregate check) → `FirmWithinCap` violated |
 

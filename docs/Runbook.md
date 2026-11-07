@@ -1,17 +1,17 @@
 # Operational Runbook
 
-This runbook covers the two binaries this repository builds and ships:
-`OrderEngine` (`src/main.cpp`) and `GatewayServer` (`src/gateway_main.cpp`).
-It describes what they do today, including what they do not do.
+This runbook covers the one binary this repository builds and ships,
+`OrderEngine` (`src/main.cpp`), which takes client orders on one TCP port in one
+protocol. It describes what it does today, including what it does not do.
 
-**Every `bash` block below is executed.** `scripts/runbook_smoke.sh` builds both
-binaries and `JournalReplayCLI` in an `ubuntu:24.04` container, puts them on
+**Every `bash` block below is executed.** `scripts/runbook_smoke.sh` builds
+`OrderEngine` and `JournalReplayCLI` in an `ubuntu:24.04` container, puts them on
 `PATH`, and runs the blocks top to bottom in one shell, as an operator working
 through this page would. A block preceded by a `runbook-smoke: skip` marker is
 not run, and the marker says why (it needs systemd, Docker, a real NIC, or it
 is a config file or sample output rather than a command). The script prints
 every block it skips. It also fails if a flag listed in a table here is not in
-the `--help` of the binary that table describes.
+`OrderEngine --help`.
 
 ---
 
@@ -19,33 +19,31 @@ the `--help` of the binary that table describes.
 
 | Binary | Takes client orders | Admin HTTP port | Journal | Market data |
 |---|---|---|---|---|
-| `OrderEngine` | No TCP order-entry port. Orders reach it only through the admin port's `/chaos/order` (off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set), or as OUCH in a build with `-DENABLE_DPDK=ON` (off by default) started with `OB_DPDK=1`. | Yes (default 8080) | Optional (`--journal`), group commit | None |
-| `GatewayServer` | Yes: a TCP port (default 9876) speaking the binary protocol in `include/GatewayProtocol.h` | None | Optional (`--journal`), each order synced before its ack | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
+| `OrderEngine` | Yes: a TCP port (default 9001) speaking the native binary protocol in `include/TcpGateway.h` (§8). Also the admin port's `/chaos/order`, off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set | Yes (default 8080) | Optional (`--journal`), each entry synced; the order port acks once its entry is on disk | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
 
 `OrderEngine` runs a multi-threaded engine (`--threads`) over `--symbols`
-symbols numbered from 0. `GatewayServer` runs a single-threaded engine over
-symbols 0 and 1. The two do not talk to each other: each has its own book and
-its own journal.
+symbols numbered from 0. FIX, OUCH, SBE, the DPDK path and the separate
+`GatewayServer` binary were deleted (roadmap 1.2).
 
-Both binaries refuse an argument they do not understand, and a value flag with
+`OrderEngine` refuses an argument it does not understand, and a value flag with
 nothing after it, before doing anything else:
 
 <!-- runbook-smoke: skip — sample output, not a command -->
 ```text
 [Config] FATAL: unknown argument '--lean' — refusing to start. See --help.
-[Gateway] FATAL: --journal needs a value — refusing to start. See --help.
+[Config] FATAL: --journal needs a value — refusing to start. See --help.
 ```
 
-`--help` on either binary prints every flag it accepts, generated from the same
-table the check uses. A flag always wins over its environment variable.
+`--help` prints every flag it accepts, generated from the same table the check
+uses. A flag always wins over its environment variable.
 
-Both binaries write progress lines to stdout without flushing and FATAL lines
-to stderr. Under systemd or with stdout redirected to a file, stdout is block
+`OrderEngine` writes progress lines to stdout without flushing (the order
+port's `listening` line is the exception) and FATAL lines to stderr. Under systemd or with stdout redirected to a file, stdout is block
 buffered, so progress lines can arrive late; the commands below run
 `OrderEngine` under `stdbuf -oL` (coreutils) to get them line by line.
 
 The commands below assume the binaries are on `PATH`. A CMake build puts
-`OrderEngine`, `GatewayServer` and `MdSubscriber` in the build directory and
+`OrderEngine` and `MdSubscriber` in the build directory and
 `JournalReplayCLI` in its `tools/` subdirectory.
 
 ---
@@ -87,7 +85,7 @@ Builds before `cdd45ac` seeded up to 200 synthetic Limit orders
 per symbol, as participants 1 and 2, at startup, and journaled them. A journal
 whose lineage began with such a build carries content epoch 0 in its header;
 journals this build creates carry 1, and a checkpoint keeps the epoch of the
-journal it was taken from. Both binaries refuse to replay an epoch-0 journal
+journal it was taken from. `OrderEngine` refuses to replay an epoch-0 journal
 that holds entries:
 
 <!-- runbook-smoke: skip — sample output, not a command -->
@@ -124,7 +122,7 @@ sweep's low and high print, and they run after the triggering order is final
 ([MatchingRules.md](MatchingRules.md) §5-6). To carry the book across rather
 than re-run its history, stop the old `OrderEngine` with `SIGTERM`, which
 checkpoints (§5), so the new build restores the resting orders instead of
-replaying the trades (`GatewayServer` does not checkpoint at shutdown). A
+replaying the trades. A
 resting order the new rules refuse is still dropped by that restore: cancel or
 replace it before the upgrade.
 
@@ -133,12 +131,16 @@ replace it before the upgrade.
 ## 3. Starting OrderEngine
 
 `OrderEngine` refuses to start without an admin token (or an explicit
-`--admin-no-auth`). Without `--journal` it keeps no journal, and a restart loses
-every resting order.
+`--admin-no-auth`) and without participant credentials for its order port (or
+an explicit `--no-participant-auth`, §8). Without `--journal` it keeps no
+journal, and a restart loses every resting order.
 
 ```bash
 mkdir -p /var/lib/orderengine /etc/orderengine
+install -m 600 /dev/null /etc/orderengine/participants.conf
+echo 'firm-a:replace-with-a-secret:100,101' > /etc/orderengine/participants.conf
 export OB_ADMIN_TOKEN=replace-with-a-long-random-secret
+export OB_PARTICIPANT_CREDENTIALS=/etc/orderengine/participants.conf
 stdbuf -oL OrderEngine --threads 2 --symbols 2 --port 8080 \
     --journal /var/lib/orderengine/journal.wal \
     > /var/lib/orderengine/engine.log 2>&1 &
@@ -146,6 +148,7 @@ echo $! > /var/lib/orderengine/engine.pid
 # The admin port opens only after the journal is replayed; retry until it answers.
 curl -sf --retry 50 --retry-delay 1 --retry-connrefused http://127.0.0.1:8080/readyz
 grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
+grep -F "Order Gateway listening on 0.0.0.0:9001" /var/lib/orderengine/engine.log
 ```
 
 ### Flags
@@ -158,6 +161,10 @@ grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
 | `--admin-bind ADDR` | `OB_ADMIN_BIND` | 127.0.0.1 | Admin listen address (IPv4). The Docker image sets 0.0.0.0. |
 | `--admin-token TOKEN` | `OB_ADMIN_TOKEN` | — | Bearer token for every endpoint except `/health` and `/readyz` |
 | `--admin-no-auth` | `OB_ADMIN_NO_AUTH=1` | off | Run the admin port without a token, on purpose |
+| `--gateway-port P` | `OB_GATEWAY_PORT` | 9001 | Order-entry port (§8); 0 picks a free one. Also `gateway_port` in the config file |
+| `--gateway-bind ADDR` | `OB_GATEWAY_BIND` | 0.0.0.0 | Order-entry listen address (IPv4). Also `gateway_bind` |
+| `--participant-credentials FILE` | `OB_PARTICIPANT_CREDENTIALS` | — | Order-port credentials, one per line as `user:secret:id[,id...]` (§8). Also `participant_credentials` |
+| `--no-participant-auth` | `OB_NO_PARTICIPANT_AUTH=1` | off | Accept every claimed participant id on the order port, on purpose |
 | `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6). With one, every symbol needs a price band |
 | `--journal PATH` | `OB_JOURNAL_PATH` | — | Journal file; replayed at boot (§7) |
 | `--journal-max-mb MB` | `OB_JOURNAL_MAX_SIZE_MB` | off | Checkpoint once the journal reaches MB megabytes |
@@ -167,8 +174,7 @@ grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
 | `--help` | — | — | Print the flags and exit |
 
 Other environment variables `OrderEngine` reads: `OB_CHAOS_INJECT` and
-`OB_CHAOS_TOKEN` (arm `/chaos/order`, §4), every config key as `OB_<KEY>` (§6),
-and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
+`OB_CHAOS_TOKEN` (arm `/chaos/order`, §4) and every config key as `OB_<KEY>` (§6).
 
 ### What happens at boot, in order
 
@@ -181,6 +187,9 @@ and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
    path's parent directory, and a replication role (§10). Any failure prints
    `[Config] FATAL: startup configuration is invalid` with one line per
    problem and exits 1.
+   Then the order port's settings: a gateway port that is not a number is
+   fatal, and so are no credentials without `--no-participant-auth`, an
+   unreadable credentials file and one that holds none (`[Auth] FATAL`).
 4. With a config file, each symbol's price band is set from
    `instrument.<s>.min_price` / `max_price` (§6), before any order exists.
    A symbol with no band prints `[Config] FATAL: symbol <s> has no price band`
@@ -192,13 +201,18 @@ and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
 6. The alert webhook is set up if `alert_webhook_url` is set (§6). An
    `https://` URL is refused: the dispatcher has no TLS client, so point it at
    a local TLS terminator on `http://127.0.0.1`.
-7. Worker threads, the GTD/DAY expiry timer and, with `--session-schedule`,
-   the session scheduler start.
+7. The market-data segment `/orderbook_md` opens and every book publishes to
+   it (a failure is a `[MarketData] WARNING` and no feed). Then the worker
+   threads, the GTD/DAY expiry timer and, with `--session-schedule`, the
+   session scheduler start.
 8. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
    is a failed bind.
-9. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
+9. The order port binds: `[Gateway] Order Gateway listening on ADDR:PORT`. A
+   failed bind is fatal.
+10. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
 
-Because the admin port opens only at step 8, a probe during replay gets
+Because the admin port opens only at step 8, and the order port at step 9,
+a probe during replay gets
 connection refused rather than 503. Give a liveness probe enough initial delay
 for your replay time.
 
@@ -240,9 +254,8 @@ test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/metrics)" =
 Prometheus series `OrderEngine` can export (each appears once it is first
 used): `orders_accepted_total`, `orders_rejected_total`,
 `journal_entries_committed_total`, `order_pool_utilization_percent{symbol="N"}`.
-`pendingOrders` and the latency percentiles are in `/metrics` JSON only. `GatewayServer` keeps
-`gateway_connections_total` and `gateway_disconnects_total` but has no port to
-read them from.
+`pendingOrders` and the latency percentiles are in `/metrics` JSON only. The
+order port adds `gateway_connections_total` and `gateway_disconnects_total`.
 
 <!-- runbook-smoke: skip — Prometheus configuration, not a command -->
 ```yaml
@@ -259,8 +272,8 @@ scrape_configs:
 
 ## 5. Stopping and restarting
 
-`SIGTERM` or `SIGINT` shuts `OrderEngine` down cleanly: the admin port closes,
-new orders are refused, the queues drain, and with a journal the engine
+`SIGTERM` or `SIGINT` shuts `OrderEngine` down cleanly: the order port and the
+admin port close, new orders are refused, the queues drain, and with a journal the engine
 checkpoints every resting order, DAY orders included (§7). `SIGHUP` reloads the
 config (§6). No other signal is handled; anything else takes its default
 action, which for most signals ends the process without the checkpoint.
@@ -311,12 +324,12 @@ file. Keys `OrderEngine` reads:
 | `instruments`, `instrument.<id>.{tick_size,lot_size}` | startup | Validated only (with `min_price` / `max_price`, for each id listed in `instruments`) |
 | `participants`, `participant.<id>.{position_limit,otr_limit}` | startup | Validated only |
 | `journal_path` | startup | Validated only; the journal is `--journal` / `OB_JOURNAL_PATH` |
+| `gateway_port`, `gateway_bind`, `participant_credentials` | startup | The order port (§8), when the flag is not given |
 | `rate_limit.default_rate`, `rate_limit.default_burst` | `SIGHUP` only | Default rate limit for every participant, applied when the rate is above 0 |
 | `worker_cores` | startup | The CPU each async worker pins itself to, in worker order, numbered as `taskset -c` numbers them (`2,3,4,5`). Unset, worker i takes the i-th CPU the process may run on (its `taskset`, systemd `CPUAffinity=` or cpuset mask), which is CPU i when every CPU is allowed. The `engine_start` log line names each worker's CPU (`worker_cores`, `-` = unpinned). A non-number, a repeat, a CPU outside the process's mask, fewer entries than `--threads`, or any list on macOS (no affinity mask) is fatal |
 | `order_pool_capacity`, `trade_history_capacity` | book creation | Book sizing. Read from the file named by `OB_CONFIG_PATH` and from `OB_<KEY>`, **not** from `--config` |
 
-Nothing else in `config/engine.conf.example` is read by either binary.
-`GatewayServer` reads no config file.
+Nothing else in `config/engine.conf.example` is read.
 
 `SIGHUP` re-reads the `--config` file and applies only the rate limit. The main
 loop checks for it every 100 ms:
@@ -338,9 +351,11 @@ restart.
 
 Each accepted order, cancel, modify and trading-state change is appended as a
 fixed-size record.
-`OrderEngine` uses group commit: appends are batched and synced together.
-`GatewayServer` syncs each append before returning, and holds every event a
-client can see (acks, fills, market data) until the entry behind it is on disk.
+Each append is synced before it returns (`Immediate`), and the order port
+answers a request only after the worker has run it, so an Ack means its entry is
+on disk and survives `kill -9`. That costs one fsync per order. Market data is
+not held back: a fill can reach `/orderbook_md` before its order's entry is
+synced (roadmap 1.4-D7).
 
 ### Checkpoints
 
@@ -376,17 +391,15 @@ hierarchical risk manager's tier positions.
 
 Checkpoints run:
 
-- automatically at 250,000 entries or 64 MiB, in both binaries (compiled in;
-  no key changes it);
+- automatically at 250,000 entries or 64 MiB (compiled in; no key changes it);
 - in `OrderEngine`, when `--journal-max-mb` is set and the journal reaches it;
-- on every clean `OrderEngine` shutdown (§5). `GatewayServer` does not
-  checkpoint at shutdown.
+- on every clean `OrderEngine` shutdown (§5).
 
 There is no other way to trigger one.
 
 ### Inspecting a journal
 
-`JournalReplayCLI` reads a journal without starting either binary. Point it at
+`JournalReplayCLI` reads a journal without starting the engine. Point it at
 a copy, never at the file a running engine is writing:
 
 ```bash
@@ -403,8 +416,7 @@ copy in memory and prints the resulting book.
 
 ### What boot does with it
 
-Both binaries run the same sequence (`include/JournalBoot.h`) and print the
-result: `[Engine] Replayed X of Y recoverable journal entries`.
+Boot runs `include/JournalBoot.h` and prints the result: `[Engine] Replayed X of Y recoverable journal entries`.
 
 - **Torn final write.** Less than one record after the last whole record, which
   is what a crash partway through a write leaves, is cut at boot and appended
@@ -444,76 +456,39 @@ grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
 
 ---
 
-## 8. GatewayServer
+## 8. Order entry
 
-### Flags
-
-`GatewayServer [PORT] [options]`. `PORT` is the listen port (default 9876) and
-is read only as the first argument.
+`OrderEngine` takes orders on one TCP port, in the native binary protocol
+(`include/TcpGateway.h`): length-prefixed frames, a bare V1 `OrderRequest` or a
+V2 frame with a 24-byte header. Each request gets one answer, Ack or Error;
+nothing else is sent (no fill or cancel reports yet, roadmap 1.9-I7).
 
 | Flag | Environment | Meaning |
 |---|---|---|
+| `--gateway-port P` | `OB_GATEWAY_PORT` | Listen port, default 9001 |
+| `--gateway-bind ADDR` | `OB_GATEWAY_BIND` | Listen address, default `0.0.0.0` |
 | `--participant-credentials FILE` | `OB_PARTICIPANT_CREDENTIALS` | Credentials, one per line as `user:secret:id[,id...]` |
 | `--no-participant-auth` | `OB_NO_PARTICIPANT_AUTH=1` | Accept every claimed participant id, on purpose |
-| `--journal PATH` | `OB_JOURNAL_PATH` | Journal every accepted order and replay it at start |
-| `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | Replay an epoch-0 journal (§2) |
-| `--help`, `-h` | — | Print the flags and exit |
-
-`OB_ENGINE_HOST` and `OB_ENGINE_PORT`, both set and non-empty, switch to
-forwarding mode (below).
 
 It refuses to start with no credentials and no `--no-participant-auth`, and
 with a credentials file that is unreadable or holds no credentials. A file
-readable by group or other draws a warning.
+readable by group or other draws a warning. A client sends a login frame
+(`GATEWAY_FLAG_LOGIN`) before its first order and may then act only as the
+participants its credential covers; a failed login closes the connection.
 
-```bash
-install -m 600 /dev/null /etc/orderengine/participants.conf
-echo 'firm-a:replace-with-a-secret:100,101' > /etc/orderengine/participants.conf
-GatewayServer 9876 --participant-credentials /etc/orderengine/participants.conf \
-    --journal /var/lib/orderengine/gateway.wal \
-    > /var/lib/orderengine/gateway.log 2>&1 &
-echo $! > /var/lib/orderengine/gateway.pid
-for _ in $(seq 50); do grep -qF "Order Gateway listening" /var/lib/orderengine/gateway.log && break; sleep 0.2; done
-grep -F "Order Gateway listening on port 9876" /var/lib/orderengine/gateway.log
-```
-
-Once a second, between orders, it runs order expiry and publishes a 5-level
-snapshot of each symbol to the shared-memory feed. It logs every trade to
-stdout.
+**What an Ack means.** With a journal, the request's entry is on disk (§7). It
+does not mean the book took the order: a reject decided while matching
+(post-only, FOK, a duplicate id, a cancel of an unknown id) still answers Ack.
+Read `/book` to see where an order stands.
 
 A participant's `KillSwitch` message (type 5) cancels all of that
 participant's resting orders. Each cancel is journaled. It is a one-shot sweep,
 not a halt: the participant can send new orders straight away.
 
-### Forwarding mode
-
-With `OB_ENGINE_HOST` and `OB_ENGINE_PORT` set, `GatewayServer` runs no engine:
-it relays each request frame to that host and port and relays the response
-back. The only binary that speaks this protocol on a port is another
-`GatewayServer`. The proxy does not check credentials and ignores
-`--participant-credentials` and `--journal`; the gateway it forwards to does
-both.
-
-```bash
-OB_ENGINE_HOST=127.0.0.1 OB_ENGINE_PORT=9876 GatewayServer 9877 \
-    > /var/lib/orderengine/proxy.log 2>&1 &
-PROXY=$!
-for _ in $(seq 50); do grep -qF "Proxy listening" /var/lib/orderengine/proxy.log && break; sleep 0.2; done
-grep -F "Proxy listening on port 9877 -> 127.0.0.1:9876" /var/lib/orderengine/proxy.log
-kill -TERM "$PROXY"
-```
-
-### Stopping
-
-`SIGTERM` or `SIGINT` stops the listener, the market-data publisher and the
-engine. There is no checkpoint, so the next start replays the whole journal.
-
-```bash
-PID=$(cat /var/lib/orderengine/gateway.pid)
-kill -TERM "$PID"
-while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
-grep -F "Shutting down..." /var/lib/orderengine/gateway.log
-```
+Market data goes to the shared-memory segment `orderbook_md`, written by each
+book's worker. There are no L2 snapshots on it, so a subscriber that falls a
+lap behind (`[GAP]` in `MdSubscriber`) has nothing to resync from until it
+restarts.
 
 ---
 
@@ -521,7 +496,8 @@ grep -F "Shutting down..." /var/lib/orderengine/gateway.log
 
 | Symptom | Where to look | Action |
 |---|---|---|
-| Process exits at start | The `FATAL` line on stderr | Each names its cause and the fix: §3 for `OrderEngine`, §8 for `GatewayServer`, §7 for the journal |
+| Process exits at start | The `FATAL` line on stderr | Each names its cause and the fix: §3 for flags and config, §8 for the order port, §7 for the journal |
+| An acked order is not on `/book` | The order's type and price | A reject decided while matching still answers Ack (§8) |
 | `OrderEngine` probes refused for a long time after a restart | Journal size | Replay runs before the admin port opens; check `JournalReplayCLI --stats` on a copy |
 | `[Journal] FATAL: ... failed` and an abort | Disk space, I/O errors | §7 "Write failures" |
 | `[Journal] REFUSING TO APPEND` | The repair line in the message | §7; keep a copy of the file before truncating |

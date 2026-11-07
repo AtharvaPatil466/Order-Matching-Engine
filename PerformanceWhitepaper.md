@@ -34,7 +34,7 @@ All three paths process the **identical** deterministic order stream (seed=42):
 
 ### 2.2 What is NOT Measured
 
-- Network I/O (FIX parsing, TCP/UDP framing)
+- Network I/O (TCP framing)
 - Async queue delay (all paths are synchronous on the hot path)
 - OS scheduling jitter (no `isolcpus`, no core pinning)
 - Memory allocator contention (single-threaded, no malloc on hot path)

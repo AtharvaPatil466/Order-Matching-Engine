@@ -7,12 +7,10 @@
 
 **Per-deployment values you MUST fill in** (placeholders below use `<...>`):
 - `<matching_core>` — physical core the worker/matching thread is pinned to.
-- `<dpdk_poll_core>` — busy-poll lcore for the F-Stack/DPDK receiver (in `dpdk_aws.sh`
-  this is core 2, `lcore_mask=0x4`).
 - `<housekeeping_mask>` — hex bitmask of the NON-isolated cores that absorb OS work,
   IRQs, and RCU callbacks (e.g. `0x1` = core 0).
 - `<nic_dev>` — kernel name of the trading NIC (e.g. `ens1`; NOT `eth0` on c6in.metal —
-  detect it, do not assume). See `dpdk_aws.sh` for the detection pattern.
+  detect it, do not assume; `ip -br link` lists them).
 
 Pick the isolated cores and the NIC device **on the same NUMA node** — see §4.
 
@@ -44,17 +42,17 @@ The rest of this guide closes each gap. Sections §2 and §4 are one-time host s
 
 ## 2. CPU Isolation (Kernel Boot Parameters) — P2-12
 
-Isolate the matching + DPDK-poll cores from the kernel scheduler, the timer tick, and
+Isolate the matching cores from the kernel scheduler, the timer tick, and
 RCU callback processing. Edit `GRUB_CMDLINE_LINUX` in `/etc/default/grub`:
 
 ```bash
 # /etc/default/grub  — append to GRUB_CMDLINE_LINUX (keep existing values)
-GRUB_CMDLINE_LINUX="... isolcpus=<matching_core>,<dpdk_poll_core> nohz_full=<matching_core>,<dpdk_poll_core> rcu_nocbs=<matching_core>,<dpdk_poll_core> irqaffinity=<housekeeping_mask>"
+GRUB_CMDLINE_LINUX="... isolcpus=<matching_core> nohz_full=<matching_core> rcu_nocbs=<matching_core> irqaffinity=<housekeeping_mask>"
 ```
 
 | Parameter | Effect | Why it matters here |
 |-----------|--------|---------------------|
-| `isolcpus=<cores>` | Removes cores from the scheduler's general load-balancing | Nothing else gets scheduled onto the matching/DPDK cores |
+| `isolcpus=<cores>` | Removes cores from the scheduler's general load-balancing | Nothing else gets scheduled onto the matching cores |
 | `nohz_full=<cores>` | Full dynticks — stops the periodic scheduler tick on those cores while ≤1 task is runnable | Kills the 1–4 ms tick jitter |
 | `rcu_nocbs=<cores>` | Offloads RCU callback invocation to housekeeping cores (`rcuoc/rcuog` kthreads) | RCU callbacks no longer batch-and-dump on the hot core |
 | `irqaffinity=<mask>` | Default IRQ affinity mask applied at boot | Steers IRQs off the isolated cores from boot (belt-and-suspenders with §3) |
@@ -75,7 +73,7 @@ sudo update-grub          # Ubuntu/Debian; on RHEL: grub2-mkconfig -o /boot/grub
 sudo reboot
 # After reboot, confirm the kernel accepted them:
 cat /proc/cmdline                              # shows the flags you set
-cat /sys/devices/system/cpu/isolated           # should list <matching_core>,<dpdk_poll_core>
+cat /sys/devices/system/cpu/isolated           # should list <matching_core>
 cat /sys/devices/system/cpu/nohz_full          # should list the same cores
 ```
 
@@ -121,7 +119,7 @@ watch -n1 "grep <nic_dev> /proc/interrupts"
 ## 4. NIC ↔ Core NUMA Affinity — P2-14
 
 On a multi-socket box the NIC's PCIe root is attached to exactly one NUMA node. If the
-matching + DPDK cores live on a **different** node than the NIC, every packet DMA
+matching cores live on a **different** node than the NIC, every packet DMA
 descriptor, RX buffer, and MMIO doorbell crosses the inter-socket link (Intel **UPI**).
 That adds ~100–300 ns per remote access **plus** queuing under contention, and shows up
 as elevated *and variable* wire-to-wire latency that no amount of core isolation fixes.
@@ -137,17 +135,16 @@ lstopo --no-io            # visual topology (hwloc)
 ```
 
 **Requirement:** `numa_node` of `<nic_dev>` **must equal** the node hosting
-`<matching_core>` and `<dpdk_poll_core>`.
+`<matching_core>`.
 
 - A value of **`-1`** means the kernel couldn't determine the node (common inside VMs).
   On c6in.metal bare metal it should report a real node — if it reads `-1` there,
   investigate before trusting latency numbers.
 
 **Remediation if they don't match:**
-1. **Preferred — move the cores to the NIC's node.** Re-pick `<matching_core>` /
-   `<dpdk_poll_core>` on the NIC's node, update `isolcpus`/`nohz_full`/`rcu_nocbs` (§2),
-   and update the F-Stack `lcore_mask` / `cpu_mask` in `/etc/f-stack.conf` (`dpdk_aws.sh`)
-   and any `numactl --membind` to that node.
+1. **Preferred — move the cores to the NIC's node.** Re-pick `<matching_core>` on the
+   NIC's node, update `isolcpus`/`nohz_full`/`rcu_nocbs` (§2) and any `numactl --membind`
+   to that node.
 2. **If the NIC can't be moved and no local cores are free** — change the host /
    instance so the trading NIC and your budgeted cores land on the same node.
 
@@ -155,7 +152,7 @@ lstopo --no-io            # visual topology (hwloc)
 
 ## 5. C-States & Frequency Scaling — P2-16
 
-A busy-poll core (DPDK poll loop, matching thread) is rarely idle *under load* — but any
+A busy-poll core (a spinning matching worker) is rarely idle *under load* — but any
 gap (overnight lull, warmup, a quiet symbol) lets the core drop into a deep C-state or
 down-clock. The **next** order after the gap then pays:
 - **C-state exit latency** — waking a core from a deep package C-state (C6) costs tens of
@@ -296,14 +293,13 @@ One-time host setup (survives reboot):
 - [ ] §6 — instance has **local NVMe instance-store** (or tmpfs) for the journal; journal path is **not** on EBS/PD/SAN/NFS.
 - [ ] §7 — `vm.nr_hugepages` reserved for the working set (persisted in `/etc/sysctl.d` or on the kernel command line).
 
-Every engine start (before launching `OrderEngine` / the F-Stack receiver):
+Every engine start (before launching `OrderEngine`):
 - [ ] §6 — journal path verified on local NVMe / tmpfs ([Runbook.md](./Runbook.md) §1 pre-flight).
 - [ ] §7 — Transparent Huge Pages set to `never` (`cat /sys/kernel/mm/transparent_hugepage/enabled`).
 - [ ] §7 — `HugePages_Free` in `/proc/meminfo` covers the working set (no startup `[hugepages] WARNING`).
 - [ ] §3 — `sudo scripts/set_irq_affinity.sh <nic_dev> <housekeeping_mask>`
 - [ ] §5 — `sudo scripts/set_cpu_perf.sh`
-- [ ] Start the engine pinned to the isolated cores (`taskset -c <matching_core> ...` /
-      F-Stack `lcore_mask`), per [Runbook.md](./Runbook.md) §1. Worker i pins itself to
+- [ ] Start the engine pinned to the isolated cores (`taskset -c <matching_core> ...`), per [Runbook.md](./Runbook.md) §1. Worker i pins itself to
       the i-th CPU of that mask; `worker_cores` in engine.conf names them explicitly
       ([Runbook.md](./Runbook.md) §6). The `engine_start` log line shows where they went.
 

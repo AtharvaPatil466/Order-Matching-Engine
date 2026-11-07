@@ -134,8 +134,8 @@ prices in one fixed range of at most that width. The range is set once:
   `instrument.<id>.min_price` / `max_price` before it replays the journal, and refuses to boot
   when a symbol has no range.
 - **Anchored.** A book with no configured range centres one on the first price that rests, and
-  never moves it. This is what a book gets in `OrderEngine` without `--config`, in
-  `GatewayServer`, and in the library unless the owner calls `setPriceRange`.
+  never moves it. This is what a book gets in `OrderEngine` without `--config`, and in the
+  library unless the owner calls `setPriceRange`.
 
 With a configured range, an order priced outside it is rejected with `OutOfPriceRange` at
 admission, before the ack: `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg`, `Hidden` and `LOC` on
@@ -1038,7 +1038,7 @@ auctioned, so a crossing replace cannot print out of band either (roadmap 1.8-H3
 The dwell runs on the engine's expiry clock and starts at the first expiry tick after the book
 entered the state, so it can run up to one tick (1 s) long. The engine's periodic expiry hook
 drives it on the book's owning thread: the `ExpireCheck` sweep in async mode, `expireOrders()`
-— `GatewayServer`'s tick — in sync mode. The reopen is an ordinary journaled
+in sync mode. The reopen is an ordinary journaled
 `TradingStateChange` to `Continuous`, which runs the uncross and re-anchors `referencePrice_`
 to the reopening print. `resumeVolatilityAuction()` reopens at once.
 
@@ -1152,9 +1152,8 @@ The mechanism end to end:
 
 1. `startExpiryTimer(intervalMs)` spawns a thread that sleeps, wakes, and calls
    `expireOrdersFromClock()`. **Default interval: 1000 ms.** `OrderEngine` starts it after
-   `startAsync()`. `GatewayServer` does not — its engine is synchronous, so it calls
-   `expireOrdersFromClock()` once a second from the gateway's event thread instead, between
-   orders. `expiryTime` is **Unix-epoch nanoseconds, wall clock** (`system_clock`).
+   `startAsync()`. A synchronous engine must not use it (the sweep would race the thread that
+   runs orders); its owner calls `expireOrdersFromClock()` from that thread instead. `expiryTime` is **Unix-epoch nanoseconds, wall clock** (`system_clock`).
    > `include/MatchingEngine.h:194`, `src/MatchingEngine.cpp:461-484`
 2. In async mode the sweep is posted as an `ExpireCheck` control message to every worker; in
    sync mode it runs inline.
@@ -1232,7 +1231,7 @@ PRIOR-7): `MatchingEngine::submitOrder` rejects, with `MissingRequiredField`, a 
 with `expiryTime == 0`, and a `DAY` order with `expiryTime == 0` while no session end is
 scheduled. Both used to be accepted and rest as `GTC` while the client believed them
 time-bounded. `MatchingEngine::setSessionEndScheduled` says whether a session end is
-scheduled: `OrderEngine` and `GatewayServer` set it false at startup, a `SessionScheduler`
+scheduled: `OrderEngine` sets it false at startup, a `SessionScheduler`
 sets it true, and the library default is true, for an in-process owner that ends its sessions
 itself. The check is in `submitOrder`, so it covers every ingress; journal replay
 calls the book directly and does not apply it. Pinned by
@@ -1258,9 +1257,8 @@ every `DAY` order on them, and only them. `SessionScheduler`'s close calls it (r
 started with `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` (HH:MM UTC, or
 `OB_SESSION_SCHEDULE`, or `session_schedule` in the `--config` file), and runs it Monday to
 Friday by UTC date; without it, which is the default, nothing ends a session, so a `DAY`
-order must carry an `expiryTime` or it is refused (above). `GatewayServer` never runs one, so
-the same holds there. Both binaries run the expiry sweep (Rule 8.1), so a `DAY` order that
-carries an `expiryTime` expires like `GTD` either way.
+order must carry an `expiryTime` or it is refused (above). `OrderEngine` runs the expiry sweep
+(Rule 8.1), so a `DAY` order that carries an `expiryTime` expires like `GTD` either way.
 
 **How venues specify it.** Every venue publishes DAY as "cancelled at the end of the trading
 session", and deriving the session-end timestamp from the session calendar is how I would
@@ -1302,13 +1300,13 @@ can see (`src/OrderBook.cpp:1936-1952`).
 
 ### Rule 9.2 — `cancelReplace` loses priority on a price change or a same-size re-add, keeps it on a shrink
 
-First, what `newQty` means. It is the order's new **total** (FIX `OrderQty`), shares already
+First, what `newQty` means. It is the order's new **total** (as FIX `OrderQty` is), shares already
 executed included, not its new leaves (roadmap 1.5-E1, MATCH-4). Every order records what it
 executed in `cumQty`, and `cumQty + remainingQty == initialQty` holds on every live order.
 
 | `newQty` against `cumQty` | Result |
 |---|---|
-| `newQty <= cumQty` | Refused with `InvalidQuantity` (FIX OrdRejReason 13, OUCH invalid-quantity reject). Nothing is left to work; the order is untouched |
+| `newQty <= cumQty` | Refused with `InvalidQuantity`. Nothing is left to work; the order is untouched |
 | `newQty > cumQty` | Accepted. `initialQty = newQty`, `remainingQty = newQty - cumQty`. Growth and shrink both work on a partially filled order |
 
 So an order for 100 with 60 filled, replaced "to 100", has 40 left and executes 100 in all.
@@ -1318,8 +1316,7 @@ its cancel. Roadmap 0.11 had stopped that by refusing any quantity change on a p
 filled order and any growth; that restriction is gone. Risk limits judge the new total, as
 they would a new order of that size (rule 9.3).
 
-Every ingress passes the client's quantity through unchanged: FIX `OrderQty` (38) on a `G`,
-OUCH `Shares` on a Replace, and the native gateway's `newQty`. Journal replay passes the
+The order port passes the client's `newQty` through unchanged. Journal replay passes the
 recorded `newQty` back through the same contract. A `CancelReplace` record says which meaning
 it carries: those written since journal format v3 are flagged as totals, and an older unflagged
 one meant the new leaves, so replay restates it as `cumQty + newQty` at that point
@@ -1597,7 +1594,7 @@ Deliberately out of scope, so their absence is not mistaken for "the engine has 
 - **Fees, rebates and clearing.** See `include/FeeEngine.h`.
 - **Risk limits, position limits, kill switch and rate limiting.** Admission-side controls;
   see `docs/Compliance.md` and `include/HierarchicalRiskManager.h`.
-- **Market-data encoding.** ITCH/MoldUDP64/SBE wire formats and sequencing; see
+- **Market-data encoding.** ITCH/MoldUDP64 wire formats and sequencing; see
   `Architecture.md`.
 - **Journalling and replay determinism.** See `docs/Verification.md`.
 - **Session scheduling.** `SessionScheduler` drives the trading-state transitions that §7

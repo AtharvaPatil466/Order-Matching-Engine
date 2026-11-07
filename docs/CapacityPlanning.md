@@ -52,7 +52,7 @@ for 2,000, before any other overhead.
 | Thread | Count | CPU Affinity |
 |--------|-------|-------------|
 | Worker (matching) | 1 per partition | Pin to isolated core |
-| Gateway (FIX I/O) | 1 | Pin to core |
+| Gateway (order-port I/O) | 1 | Pin to core |
 | Admin HTTP | 1 | Shared core OK |
 | Journal flush | 1 (background) | Shared core OK |
 | **Total** | **N + 3** | |
@@ -132,11 +132,11 @@ first.
 ### Disk IOPS Requirements
 | Sync Policy | IOPS Needed | Latency Impact |
 |-------------|-------------|----------------|
-| `GroupCommit` (OrderEngine) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the ~1-5 µs this table used to give |
-| `Immediate` (GatewayServer) | 10K-100K | one `fdatasync` per entry |
+| `GroupCommit` (library default) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the ~1-5 µs this table used to give |
+| `Immediate` (OrderEngine) | 10K-100K | one `fdatasync` per entry |
 
 There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
-`{Immediate, GroupCommit}`, and each binary hard-codes its choice.
+`{Immediate, GroupCommit}`, and `OrderEngine` hard-codes `Immediate`: its order port acks only once an entry is synced.
 
 ### Recommended Disk
 - **Development**: Any SSD
@@ -185,18 +185,18 @@ something else is, and there is no replication.
 ### Bandwidth per Protocol
 | Protocol | Message Size | At 10K msg/s | At 100K msg/s |
 |----------|-------------|-------------|--------------|
-| FIX 4.4 inbound | 200-400 bytes | 4 MB/s | 40 MB/s |
-| FIX 4.4 outbound | 300-600 bytes | 6 MB/s | 60 MB/s |
+| Order entry inbound (V2 frame) | 150 bytes | 1.5 MB/s | 15 MB/s |
+| Order entry outbound (V2 answer) | 332 bytes | 3.3 MB/s | 33 MB/s |
 | Market data (SHM) | sizeof(ShmEntry) ≈ 300 bytes | 3 MB/s | 30 MB/s |
 | Admin HTTP | ~500 bytes/req | negligible | negligible |
-| **Total** | | **~13 MB/s** | **~130 MB/s** |
+| **Total** | | **~8 MB/s** | **~78 MB/s** |
 
 ### Network Requirements
 | Scenario | NIC | Latency |
 |----------|-----|---------|
 | Development | 1 GbE | ~50-100μs |
 | Production | 10 GbE | ~5-10μs |
-| HFT | 25 GbE + kernel bypass (DPDK/Solarflare) | ~1-2μs |
+| HFT | 25 GbE + kernel bypass (none in this repo) | ~1-2μs |
 
 ---
 

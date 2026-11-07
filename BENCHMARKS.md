@@ -21,8 +21,6 @@
 | Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack; journal at `/tmp/honest_benchmark.journal` — whether that host's `/tmp` was EBS or tmpfs is not recorded | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
 | Safety invariants | TLC: 2,726,157 distinct states, 0 violations (`MatchingEngine.cfg`, MaxOrders=3; small bounds, see docs/Verification.md) | ✅ Model-checked |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
-| **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
-| **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |
 | Coordinated omission is corrected, not ignored | `CoordinatedOmissionBenchmark` runs open-loop at a fixed offered rate and reports CO-naive *and* CO-corrected | ✅ Measured (ARM only) |
 | Cold-path cost ≈ 10× warm at P50 | `ColdCacheBenchmark`, working set evicted before each timed op | ✅ Measured (ARM only) |
 | Sustained per-window latency | `SustainedLoadTest` latency columns are cumulative, not per-window — harness defect | ❌ Unmeasured |
@@ -144,7 +142,7 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 ### What is NOT Measured
 
-- Network I/O (FIX parsing, TCP/UDP)
+- Network I/O (TCP framing)
 - Async queue delay (all paths are synchronous)
 - OS scheduling jitter (no `isolcpus`, no core pinning)
 - Memory allocator contention (single-threaded)
@@ -526,25 +524,13 @@ The comparator catches both trade count and counterparty divergence.
 
 ## Binary Codec Microbenchmark
 
-`./bin/BinaryCodecBenchmark` — single-threaded encode/decode rates for the three binary order-entry / market-data protocols. No engine, no transport — isolates the codec cost. 2M iterations per row, M3 Pro / Clang `-O3 -march=native`.
+`./bin/BinaryCodecBenchmark` — single-threaded ITCH encode rate. No engine, no transport — isolates the codec cost. 2M iterations, M3 Pro / Clang `-O3 -march=native`. The OUCH and SBE rows went with those codecs (roadmap 1.2).
 
 | Protocol | Operation | Wire size | ns/op | M ops/s | GB/s |
 |----------|-----------|----------:|------:|--------:|-----:|
-| OUCH 4.2 | EnterOrder encode | 49 B | 112.0 | 8.93 | 0.44 |
-| OUCH 4.2 | EnterOrder decode | 49 B | 10.2 | 98.48 | 4.83 |
 | ITCH 5.0 | AddOrder encode | 36 B | 34.1 | 29.36 | 1.06 |
-| **SBE** | **NewOrderV1 encode** | **32 B** | **1.0** | **1015** | **32.49** |
-| **SBE** | **NewOrderV1 decode** | **32 B** | **0.5** | **2128** | **68.10** |
 
-### Why the gap
-
-The 110× difference between OUCH and SBE encode reflects what each protocol asks the CPU to do:
-
-- **OUCH 4.2** carries ASCII-decimal text in 8 of its fixed slots (order token, stock, firm) — every encode runs `snprintf`-equivalent integer formatting. That's hundreds of cycles per field.
-- **ITCH 5.0** has one ASCII slot (stock); the rest are big-endian binary. Faster than OUCH but still pays byte-swap on a little-endian host.
-- **SBE** is little-endian binary (native to x86/ARM), every field is a plain integer write. The codec compiles down to ~24 bytes of moves — at the limit of the timer's resolution.
-
-The 1.0 ns/op SBE encode number is approaching the floor of what's measurable on a 24 MHz TSC. Real impact depends on whether the codec is the bottleneck (it's usually not — the engine dominates), but for venues moving billions of messages per day the difference is real.
+ITCH has one ASCII slot (stock); the rest are big-endian binary, so it pays a byte swap per field on a little-endian host.
 
 ## Sharding
 

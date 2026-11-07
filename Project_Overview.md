@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-This is a C++20 low-latency order matching engine drawing on exchange design principles. It implements O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire protocols (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) over both real TCP and UDP transports, MoldUDP64 multicast with gap-recovery retransmission service, TLA+-verified safety invariants, and an operational stack including config management, Prometheus metrics, and Docker deployment. (Webhook alerting is implemented but **cannot deliver**: `AlertDispatcher` has no TLS client, so `addWebhook()` refuses any `https://` URL — which is every endpoint worth configuring. See §11.)
+This is a C++20 low-latency order matching engine drawing on exchange design principles. It implements O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, one binary (`OrderEngine`) with one order-entry protocol (the native binary protocol over TCP), an ITCH 5.0 / MoldUDP64 market-data library with a gap-recovery retransmission service, TLA+-verified safety invariants, and an operational stack including config management, Prometheus metrics, and Docker deployment. (Webhook alerting is implemented but **cannot deliver**: `AlertDispatcher` has no TLS client, so `addWebhook()` refuses any `https://` URL — which is every endpoint worth configuring. See §11.)
 
 ### Codebase Statistics
 
@@ -28,45 +28,18 @@ This is a C++20 low-latency order matching engine drawing on exchange design pri
 ### System Topology
 
 ```
-        ORDER ENTRY                                MARKET DATA
-        ───────────                                ───────────
-
-  ┌──────────────┐   ┌──────────────┐         ┌──────────────────┐
-  │ FIX 4.2/4.4  │   │   OUCH 4.2   │         │   ITCH 5.0       │
-  │   (text)     │   │   (binary)   │         │   (binary)       │
-  └──────┬───────┘   └──────┬───────┘         └────────▲─────────┘
-         │                  │                          │
-         │            ┌─────▼──────┐                   │
-         │            │ SoupBinTCP │             ┌─────┴──────┐
-         │            │  session   │             │ MoldUDP64  │
-         │            └─────┬──────┘             │ multicast  │
-         │                  │                    └─────▲──────┘
-   ┌─────▼──────┐    ┌──────▼─────┐    ┌────────────┐  │
-   │ FixSession │    │ OuchSession│    │ SbeSession │  │ ItchPublisher
-   └─────┬──────┘    └──────┬─────┘    └─────┬──────┘  │  (per book)
-         │                  │                │         │
-         └──────────────────┼────────────────┘         │
-                            ▼                          │
-                  ┌───────────────────┐                │
-   Admin :8080 ──▶│   MatchingEngine  │────events─────┘
-                  │   (order router)  │
-                  └─┬───┬───┬───┬─────┘
-                    │   │   │   │
-                ┌───▼─┐ │ ┌─▼───▼──┐
-                │ Q[0]│ │ │ Q[1..N]│   MpscQueue per thread
-                └──┬──┘ │ └──┬─────┘
-                   │    │    │
-              ┌────▼──┐ │ ┌──▼────┐
-              │Thread0│ │ │Thread1│    Worker threads
-              │ BTC,  │ │ │ SOL,  │    (symbol affinity)
-              │ ETH   │ │ │ AVAX  │
-              └───────┘ │ └───────┘
+   clients ──TCP──▶ TcpGateway (login, then orders)          OrderEngine (one process)
                         │
-                 ┌──────▼──────┐    ┌──────────────┐    ┌─────────────────┐
-                 │  OrderBook  │───▶│ MoldPacket   │◀───│ ItchRetransmit  │
-                 │  ObjectPool │    │   Journal    │    │  Service (TCP)  │
-                 │  Journal    │    └──────────────┘    └─────────────────┘
-                 └─────────────┘     gap recovery        re-request replay
+   Admin :8080 ──▶ MatchingEngine (order router) ──▶ Q[0] .. Q[N]   MpscQueue per worker
+                                                        │
+                                       Worker threads (symbol affinity)
+                                                        │
+                                OrderBook ─ Journal (replayed at boot, synced per ack)
+                                    │
+                                    └─▶ market data: /orderbook_md (shared memory)
+
+   Library only, not served: ItchPublisher ─▶ MoldUDP64 multicast,
+                             MoldPacketJournal ◀─ ItchRetransmissionService (SoupBinTCP)
 ```
 
 ### Order Types Supported
@@ -99,24 +72,17 @@ Two qualifications, because the sentence above used to read "eliminating cross-t
 - **Durability reserialises everything.** Every worker appends to one journal behind one `journalMutex_`, with the `fdatasync` inside the critical section. With journalling on, N workers funnel through a single lock and a single fsync stream — measured at roughly 165–190k appends/s on x86 CI regardless of worker count (§11). Contention-free matching and a serialised durability path are both true at once.
 - **Hash routing distributes symbols uniformly, not load.** Real order flow is Zipf: one instrument can carry orders of magnitude more traffic than the long tail, and `hash(symbolId) % numThreads` will happily put it on a worker that then saturates while others idle. There is no migration path for a hot symbol short of a drain. The scaling curve in §8 is measured with **uniform** symbol load, which is the shape that hides this, and it is not a claim about venue-shaped flow.
 
-### Multi-Protocol Order Entry
-All four protocols dispatch into the same `MatchingEngine`. 
-- **FIX 4.2 / 4.4**: ASCII text + checksum, full session-layer state machine. `TransactTime` validation and version negotiation per accepted `BeginString`.
-- **OUCH 4.2**: NASDAQ binary order entry, big-endian fixed-width.
-- **SBE (Simple Binary Encoding)**: FIX-TG schema-driven binary (CME / ICE style). Forward and backward compatibility. Encode speed of ~1 ns/op.
-- **SoupBinTCP**: TCP envelope wrapping OUCH on the wire.
+### Order Entry
+One binary, one protocol: `OrderEngine` serves the native binary protocol (`TcpGateway`) on its order port, with a login frame checked against a credentials file. FIX, OUCH, SBE, the DPDK path and the separate `GatewayServer` binary were deleted (roadmap 1.2): no binary served the protocols, and they carried open findings.
 
 ### Market Data Stack
 - **ITCH 5.0 Publisher**: Converts engine events to ITCH 5.0 frames.
 - **MoldUDP64 Multicast**: Batched publisher with MTU auto-flush + gap-detecting subscriber.
 - **Gap Recovery**: Bounded ring of journaled MoldUDP64 messages backing a SoupBinTCP-over-TCP retransmission service.
-- **Shared Memory IPC**: L2 market data distribution to co-located consumers via `shm_open`.
-
-### Kernel-Bypass Ingestion (DPDK / F-Stack)
-Optional kernel-bypass order-entry path behind `#ifdef OB_HAVE_DPDK` (CMake `-DENABLE_DPDK=ON`): `DpdkGateway` runs F-Stack (DPDK userspace TCP over the AWS ENA PMD) on a dedicated **secondary ENI**, leaving the primary interface kernel-managed so SSH is never lost. A **single RX queue / single busy-poll lcore** preserves FIFO submit order (RSS splitting one connection across lcores would reorder and break price-time priority). F-Stack owns the NIC and runs FreeBSD's TCP stack internally; the gateway consumes its BSD-socket API (`ff_recv`), so ordered TCP payload flows straight into `OuchSession::feed()` and the engine submit path **unchanged** — DPDK replaces only how bytes arrive from the NIC, not how they are parsed. When `OB_HAVE_DPDK` is undefined (the default, and every non-Linux build) the kernel `TcpGateway` is the only ingestion path and the binary is byte-for-byte identical. **Status: written, never executed.** No part of this path has run. The "local verification" is only that macOS builds cleanly with the DPDK path `#ifdef`'d out and the kernel-gateway tests stay green — that exercises the *absence* of the path, not the path itself. There is no measurement, and no evidence that kernel bypass improves latency on this system; treat it as unvalidated code until `scripts/dpdk_aws.sh` produces a DPDK-vs-kernel-TCP comparison on identical hardware and workload (**Session 2**). The kernel-TCP wire-to-wire baseline below is measured and stands on its own; nothing in it depends on this path.
+- **Shared Memory IPC**: incremental market data to co-located consumers via `shm_open`, the only feed `OrderEngine` publishes.
 
 ### Wire-to-Wire Latency Measurement
-A two-host OUCH-over-TCP harness — `tools/WireLatencySender` (instance A) and `tools/WireLatencyReceiver` (instance B) — measures NIC-to-NIC order-entry latency. On Linux it captures NIC **hardware** timestamps via `SO_TIMESTAMPING` (TX from the socket error queue, RX from the `recvmsg` cmsg), with a `CLOCK_MONOTONIC` **software fallback** on non-Linux / non-HW hosts (each CSV row records which source it used). One-way latency is estimated as **round-trip / 2**, which sidesteps clock synchronisation entirely — both timestamps are on the sender's own clock, so no PTP is needed for a first-pass number. The receiver also supports the F-Stack path (`--conf`) so the DPDK and kernel sessions emit directly comparable CSV, and a `--software-timestamps` flag forces both onto an identical CLOCK_MONOTONIC basis. **Implemented and baseline-validated on AWS**: a two-instance run (two `c6in.metal`, same AZ, kernel TCP, 10,000 OUCH orders, software timestamps on `CLOCK_MONOTONIC`) measured **P50 RTT 48.2 µs / P99 RTT 55.3 µs**, i.e. a **P50 one-way estimate of 24.1 µs** (round-trip / 2). The DPDK-vs-kernel-TCP comparison (Session 2) is the next step, via `scripts/wire_latency_aws.sh`.
+**Historical: the harness below was deleted with OUCH (roadmap 1.2), so this number can no longer be reproduced from the tree.** A two-host OUCH-over-TCP harness — `tools/WireLatencySender` (instance A) and `tools/WireLatencyReceiver` (instance B) — measured NIC-to-NIC order-entry latency. On Linux it captures NIC **hardware** timestamps via `SO_TIMESTAMPING` (TX from the socket error queue, RX from the `recvmsg` cmsg), with a `CLOCK_MONOTONIC` **software fallback** on non-Linux / non-HW hosts (each CSV row records which source it used). One-way latency is estimated as **round-trip / 2**, which sidesteps clock synchronisation entirely — both timestamps are on the sender's own clock, so no PTP is needed for a first-pass number. The receiver also supports the F-Stack path (`--conf`) so the DPDK and kernel sessions emit directly comparable CSV, and a `--software-timestamps` flag forces both onto an identical CLOCK_MONOTONIC basis. **Implemented and baseline-validated on AWS**: a two-instance run (two `c6in.metal`, same AZ, kernel TCP, 10,000 OUCH orders, software timestamps on `CLOCK_MONOTONIC`) measured **P50 RTT 48.2 µs / P99 RTT 55.3 µs**, i.e. a **P50 one-way estimate of 24.1 µs** (round-trip / 2).
 
 ---
 
@@ -143,8 +109,8 @@ another participant's kill switch.
 | Layer | Implementation |
 |-------|---------------|
 | **Credential store** | `ParticipantAuth` — constant-time secret comparison, one credential may cover several participant ids (a firm running multiple desks). Loaded from a dedicated file, not `engine.conf`, so secrets do not travel with a config that gets pasted into tickets. A malformed line fails the whole load rather than silently dropping a firm's credential |
-| **Per-protocol logon** | FIX at Logon (tags 553/554), OUCH at SoupBinTCP Login, and the binary gateway via a login frame carried in the V2 header's previously-reserved `flags` word — so existing clients, which always sent zero, are unaffected and no version bump was needed. Unknown flag bits are rejected rather than ignored |
-| **Required by default** | `GatewayServer` refuses to start unless credentials are configured or `--no-participant-auth` / `OB_NO_PARTICIPANT_AUTH=1` is passed deliberately, matching the bar `AdminServer` already held. The check runs before the engine, publisher or listen socket exist |
+| **Logon** | A login frame carried in the V2 header's previously-reserved `flags` word — so existing clients, which always sent zero, are unaffected and no version bump was needed. Unknown flag bits are rejected rather than ignored |
+| **Required by default** | `OrderEngine` refuses to start unless credentials are configured or `--no-participant-auth` / `OB_NO_PARTICIPANT_AUTH=1` is passed deliberately, matching the bar `AdminServer` already held. The check runs before the journal is replayed or any port is bound |
 | **Authorisation** | A session may only act as a participant its credential covers — including `KillSwitch`, which acts directly on the participant id in the request |
 | **Order ownership** | Cancel/Modify/CancelReplace are checked against the resting order's owner inside the book lock. The denial is reported to the client as `OrderNotFound`, deliberately indistinguishable from a missing order: a distinct code would turn cancel into an order-id oracle |
 
@@ -608,25 +574,15 @@ Confirmed **0 ns delta** on this workload: `-O2` vs `-O3`, `Order` field reorder
 
 | Codec | Message | ns/op | M ops/s |
 | :--- | :--- | --: | --: |
-| OUCH 4.2 | EnterOrder encode (49B) | 112.0 | 8.9 |
 | ITCH 5.0 | AddOrder encode (36B) | 34.1 | 29.4 |
-| **SBE** | **NewOrderV1 encode (32B)** | **1.0** | **1015** |
-| **SBE** | **NewOrderV1 decode (32B)** | **0.5** | **2128** |
 
-**Read these as throughput ceilings, not per-message costs.** 0.5 ns is ~1.45
-cycles at 2.9 GHz, which is not the latency of decoding a message — it is what
-a tight loop achieves over an L1-resident buffer when the CPU can overlap
+**Read this as a throughput ceiling, not a per-message cost.** It is what a
+tight loop achieves over an L1-resident buffer when the CPU can overlap
 successive iterations. The work is real (`benchmarks/BinaryCodecBenchmark.cpp`
 applies `doNotOptimize`/`clobber` inside every loop, so nothing is eliminated),
 but a decode of a message that just arrived from the network — cold line,
 unpredictable branch — will not hit this figure.
 
-The OUCH row is ~325 cycles for 49 bytes and looks anomalous next to the
-others. It is not: OUCH carries **ASCII-decimal** fields on the wire, so its
-encode cost includes integer-to-string formatting, while SBE uses native-endian
-binary and does none. The benchmark prints this in its own notes. The table
-compares three protocols doing genuinely different work, not one implementation
-outperforming another.
 
 ---
 
@@ -639,7 +595,7 @@ The testing infrastructure includes Unit, Functional, Integration, Chaos, Proper
 **The count is not the claim, and it should not be read as one.** There are no line- or branch-coverage figures here and no mutation testing, so the number measures how many test binaries exist, not how much behaviour they pin. This project has repeated evidence that the two diverge: every journal test was single-symbol, which is precisely how the cancel-routing defect survived; a comparator checked 6 of 16 order fields, so a fix that dropped ten of them would have gone green; the checkpoint soak ran 90 rewrites that all *grew* the file, never once producing the shape a real checkpoint makes; and eight test functions were defined and never called. All four are fixed, and all four were inside that count while it was being quoted. Key mechanisms:
 - **Shadow Mode**: Dual-book divergence detection, validating FIFO compliance.
 - **Fault Injection**: 10+ injection points (short-writes, pool exhaustion, EAGAIN injection) with zero-cost overhead in production.
-- **Coverage-Guided Fuzzing**: libFuzzer targets for the FIX parser, framer and round trip, and one (`fuzz_gateway_engine`) that drives client bytes through `TcpGateway` into `MatchingEngine::submitOrder` and checks `validateIntegrity` on every book; CI fuzzes it for 10 minutes on every push and PR.
+- **Coverage-Guided Fuzzing**: a libFuzzer target (`fuzz_gateway_engine`) that drives client bytes through `TcpGateway` into `MatchingEngine::submitOrder` and checks `validateIntegrity` on every book; CI fuzzes it for 10 minutes on every push and PR.
 - **Sanitizers**: ASan, UBSan, and TSan checks integrated into CI/CD.
 - **Multi-symbol journal coverage**: replay equivalence is swept over 20 seeds × 250 ops across three symbols. Every journal test was previously single-symbol — the one shape in which cross-book routing cannot be wrong — which is how the cancel-routing defect above survived.
 - **Journal contention measurement**: `JournalContentionBenchmark` reports append throughput against worker count with journaling on and off, and against batch size so the durability barrier can be amortised away and the lock itself becomes visible. Run on x86 via the `Journal Contention (H6)` workflow, which records CPU, filesystem and measured `fdatasync` latency first, because every number is relative to those.
@@ -673,19 +629,18 @@ docs/                 Runbooks, CapacityPlanning, ProductionReadiness
 
 ## 11. Remaining Work
 
-The system is architecturally complete. The remaining items are AWS validation steps for capabilities already implemented and locally verified (nothing is hardware-blocked — the kernel-bypass path runs on commodity AWS ENA hardware):
+The system is architecturally complete. The remaining items are AWS validation steps for capabilities already implemented and locally verified:
 - **x86 Bare Metal Benchmarks**: ✅ done — validated on AWS c6in.metal (dual Xeon 8375C, `nosmt`, NUMA-pinned); see §8. Core matching 261 ns P50, confirming the structural-bottleneck analysis (pointer-chasing L1 misses + data-dependent branch mispredicts + Spectre eIBRS). The prior four micro-optimizations moved x86 latency 0 ns; this cycle's branchless price-cross shaved 10 ns while next-order prefetch and the arena allocator were both reverted as net-negative — confirming the P50 is structurally bound.
 - **Journal Async I/O (io_uring)**: ✅ done — validated on x86 Linux (AWS c6in.metal). The async ack (`onDurable` fires on the completion-reaper thread, not on submit) cut Path C P99 **32.8%** (5,312 → 3,568 ns) at the cost of +167 ns P50. io_uring is a generic Linux async-I/O interface and needs no special NIC — only `liburing` on a modern kernel; the seam stays behind `#ifdef __linux__` with an `fdatasync`/`F_FULLFSYNC` fallback elsewhere.
-- **Kernel Bypass Networking (DPDK / F-Stack)**: ⏳ **written but never executed** — no run, no measurement, no demonstrated benefit. `DpdkGateway` integrates F-Stack (DPDK userspace TCP over the AWS ENA PMD) on a secondary ENI behind `#ifdef OB_HAVE_DPDK`, feeding `OuchSession::feed()` unchanged (see §3). The integration is written and the tree builds with the path `#ifdef`'d out — which verifies only that the code is *absent* cleanly, not that it works; `scripts/dpdk_aws.sh` provisions the receiver (hugepages, DPDK + F-Stack install, vfio-pci bind, F-Stack config). It runs on **commodity AWS ENA** hardware — no Solarflare/Onload — needing only a secondary ENI, hugepages, and the DPDK/F-Stack toolchain; with the kernel-TCP wire-to-wire baseline now measured (see below), the two-instance c6in.metal run — **Session 2**, the DPDK-vs-kernel-TCP comparison — is the next step.
 - **BCS Study — Market-Maker Enrichment**: ⏳ open. The environment calibration (§5) is complete and the full experimental grid has been re-run at fitted parameters, but the model still has a single market maker. That is why the calibrated rent is reported as an upper bound rather than an estimate, and adding competing makers with heterogeneous latencies is the single change that would most improve the study's external validity. A second open item is the Hawkes diagnostic's real-data leg, which needs a depth-depletion gap definition for books that never empty.
-- **Wire-to-Wire Latency Validation**: 🟡 partially complete — baseline measured, DPDK comparison pending. The `WireLatencySender`/`WireLatencyReceiver` harness (`SO_TIMESTAMPING` hardware timestamps with `CLOCK_MONOTONIC` software fallback, round-trip/2 one-way estimate — see §3) is validated on AWS: a two-instance run (two `c6in.metal`, same AZ, kernel TCP, 10,000 OUCH orders, software timestamps on `CLOCK_MONOTONIC`) measured **P50 RTT 48.2 µs / P99 RTT 55.3 µs**, i.e. a **P50 one-way estimate of 24.1 µs**. The remaining step is the DPDK-vs-kernel-TCP comparison (**Session 2**) via `scripts/wire_latency_aws.sh`.
+- **Wire-to-Wire Latency Validation**: ⏹ withdrawn — the OUCH harness that measured the kernel-TCP baseline (§3) was deleted with OUCH (roadmap 1.2). A measurement of the native order port would need a new harness.
 
 ### Open engineering items
 
 Distinct from the AWS validation steps above: these came out of an adversarial
 audit of the codebase and are tracked as code work.
 
-- **Durable client acknowledgements on the async path** — open, and documented rather than built. On the sync path an order is matched before it is acknowledged, and with `enableDurableClientAcks` the resulting fills are withheld until the journal entry behind them is fsync-durable. On the **async** path `submitOrder` returns at enqueue: the order has been QUEUED, nothing has matched, nothing is journalled. `enableDurableClientAcks` refuses in async mode rather than gating the fills while leaving that ack as undurable as it was — advertising a guarantee that is not there would be worse than declining to offer it. This is stated on `SubmitResult` itself so a caller meets it where they use it.
+- **Durable client acknowledgements on the async path** — open, and documented rather than built. On the sync path an order is matched before it is acknowledged, and with `enableDurableClientAcks` the resulting fills are withheld until the journal entry behind them is fsync-durable. On the **async** path `submitOrder` returns at enqueue: the order has been QUEUED, nothing has matched, nothing is journalled. `OrderEngine`'s order port closes the gap for its acks the expensive way — an `Immediate` journal and an answer only after the worker has run the request — so an ack there is durable, at one fsync per order; fills reach market data ungated. `enableDurableClientAcks` refuses in async mode rather than gating the fills while leaving that ack as undurable as it was — advertising a guarantee that is not there would be worse than declining to offer it. This is stated on `SubmitResult` itself so a caller meets it where they use it.
 
   It is not, as previously recorded here, a protocol decision. Closing it needs one `DurabilityGate` per concurrently-processing thread — the gate's capture model holds a single in-flight order, so N workers overwrite each other's groups and a lock serialises that rather than preventing it — plus a drain that runs when the engine is idle, because durability becomes true at moments when no order is being processed (an explicit flush, a later order filling the batch, a checkpoint). That is a few hundred lines touching the event-dispatch path on every book, and it is worth doing only if real order flow runs through the async path; the sync path is already correct for a venue that needs the guarantee.
 - **Checkpoint as a log record** — open, and scoped to *don't build*. The checkpoint replaces the journal rather than appending to it, so an entry committed between the snapshot gather and the swap is discarded. The append-counter check added above narrows this to a detected, logged fallback rather than a silent loss, but closing it properly means writing the snapshot as a record *in* the log and replaying forward from it, the way a WAL checkpoint works. That is a format change, not a locking change.

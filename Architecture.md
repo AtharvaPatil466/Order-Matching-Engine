@@ -26,11 +26,8 @@ Using `std::list` or `std::vector` for orders at a price level requires dynamic 
 
 ```mermaid
 graph TD
-    subgraph "Order Entry — Four Protocols, One Engine"
-        FIX[FIX 4.2 / 4.4 Session]
-        OUCH[OUCH 4.2 + SoupBinTCP]
-        SBE[SBE Schema-Driven]
-        OuchGW[OuchTcpGateway - real TCP]
+    subgraph "Order Entry — One Binary, One Protocol"
+        GW[TcpGateway - native binary over TCP, login per connection]
     end
 
     subgraph "Ingress Layer"
@@ -65,9 +62,7 @@ graph TD
         Admin[Admin Server :8080]
     end
 
-    FIX --> RL
-    OUCH --> OuchGW --> RL
-    SBE --> RL
+    GW --> RL
     RL --> BR --> Hash
     Hash -->|BTC/ETH| Q1
     Hash -->|SOL/AVAX| Q2
@@ -84,12 +79,12 @@ graph TD
 ### The Component Lifecycle
 
 **Order entry**:
-1. **Wire framing**: bytes arrive on TCP. The connection's session class (`FixSession` for FIX 4.2/4.4 text, `OuchSession` for NASDAQ OUCH binary, `SbeSession` for FIX-TG SBE) handles framing. OUCH is additionally wrapped in `SoupBinTcpSession` (3-byte length+type envelope, login/heartbeat/logout).
-2. **Ingress checks**: `MatchingEngine::submitOrder`, which every protocol calls, refuses a participant id or an enum field (side, order type, time in force, peg type) outside its range (`InvalidFieldValue`) and a GTD order, or a DAY order where no session end is scheduled, without an `expiryTime` (`MissingRequiredField`). Then the `RateLimiter` (off by default) and the pre-trade risk gate (fat-finger, position, order-to-trade; skipped entirely while none is configured).
+1. **Wire framing**: bytes arrive on `OrderEngine`'s order port. `TcpGateway` frames them (a 4-byte length, then a bare V1 `OrderRequest` or a V2 header and payload), requires a login frame before the first order when credentials are configured, and checks the claimed participant against the credential.
+2. **Ingress checks**: `MatchingEngine::submitOrder`, which every ingress calls, refuses a participant id or an enum field (side, order type, time in force, peg type) outside its range (`InvalidFieldValue`) and a GTD order, or a DAY order where no session end is scheduled, without an `expiryTime` (`MissingRequiredField`). Then the `RateLimiter` (off by default) and the pre-trade risk gate (fat-finger, position, order-to-trade; skipped entirely while none is configured).
 3. **Routing**: `MatchingEngine` hashes `SymbolId` and pushes the order into the appropriate thread's `MpscQueue`.
 4. **Dequeue & admit**: the worker thread pops the order and `OrderBook::addOrder` admits it: trading state, price, quantity and trigger fields, the configured price range, pool pressure, risk limits, the percentage price band, PostOnly, peg placement and parked-list capacity.
 5. **Matching**: `OrderBook` matches against resting liquidity, applying self-trade prevention (`SelfTradeProtection`) as the sweep reaches each of the participant's own orders.
-6. **Persistence**: the order is appended to the `Journal` after the book has applied it, so the journal is not write-ahead (see the README).
+6. **Persistence**: the order is appended to the `Journal` after the book has applied it, so the journal is not write-ahead (see the README). `OrderEngine` syncs each append (`Immediate`), and `TcpGateway` answers the client only once the worker has run the request (`waitForDrain`), so an Ack means the entry is on disk.
 
 **Market data egress** (parallel to order entry):
 7. **Fan-out**: every engine event reaches `MultiplexListener`, which dispatches to all registered `EventListener`s simultaneously.
@@ -149,24 +144,17 @@ The engine emits structured events through the `StructuredSink` interface define
 
 ### 3.6 Wire Protocol Stack
 
-Four wire protocols dispatch into the same `MatchingEngine`. The session class is the only thing that changes between them; the engine doesn't know which codec it's driving.
+One order-entry protocol, served by the one binary: the native binary protocol
+in `TcpGateway.h`. FIX, OUCH, SBE and the DPDK path were deleted (roadmap 1.2):
+no binary served them, and they carried open findings.
 
-| Protocol | Spec family | Wire format | Endianness | Session layer | Used by |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **FIX 4.2 / 4.4** | FIX Trading Community | ASCII tag=value with SOH delimiter + checksum | n/a (text) | `FixSession.h` — Logon/Heartbeat/ResendRequest state machine, OrdRejReason mapping, TransactTime validation on 4.4 inbound | Most B-Ds and retail brokers |
-| **OUCH 4.2** | NASDAQ | Fixed-width binary, big-endian, ASCII-decimal slots | BE | `OuchSession.h` + `SoupBinTcpSession.h` (3-byte envelope, login, heartbeat, logout) | NASDAQ direct order entry |
-| **ITCH 5.0** | NASDAQ | Fixed-width binary, big-endian | BE | One-way feed (publish only) — `ItchPublisher.h` + `ItchUdpTransport.h` wrapping `MoldUDP64.h` for multicast | NASDAQ market data |
-| **SBE** | FIX-TG | Schema-driven binary, length-prefixed blocks, **forward-compatible** | LE (native) | `SbeSession.h` — versioned `MessageHeader`, `templateId` dispatch | CME, ICE, several modern venues |
+| Protocol | Direction | Wire format | Session layer | Served by `OrderEngine` |
+| :--- | :--- | :--- | :--- | :--- |
+| **Native binary** | Order entry | 4-byte big-endian length, then a bare V1 `OrderRequest` or a 24-byte V2 header (`OBGW` magic, version, flags, client request id) and its payload | `TcpGateway` — login frame (`GATEWAY_FLAG_LOGIN`) checked against `ParticipantAuth`, one Ack or Error per request | Yes, `--gateway-port` |
+| **ITCH 5.0** | Market data | Fixed-width binary, big-endian | One-way feed (publish only) — `ItchPublisher.h` + `ItchUdpTransport.h` wrapping `MoldUDP64.h` for multicast; SoupBinTCP retransmission | No (library) |
 
-**SBE forward-compatibility, in detail**: every SBE message starts with an 8-byte `MessageHeader` that includes the `blockLength` of the fixed-size block that follows. When a v2 schema adds a field at the end of a block:
-- v2 publishers emit `blockLength=v2_size`. Their messages include the new field.
-- v1 readers ignore the unknown trailing bytes (they only read up to `v1_size`).
-- v1 readers see the original fields **byte-identically** because the v1 block IS a prefix of the v2 block. No codec branch, no version dispatch — just `read up to my known size`.
-- v2 readers handle a v1 message by using `blockLength=v1_size` from the header to skip the absent new fields; they fill in documented defaults.
-
-This is proven byte-exactly via test in `SbeProtocolTest`: encoding a struct with the v2 codec, then byte-comparing the first `v1_size` bytes against the v1 encoding of the same field set, asserts equality. This is the property that makes SBE viable for incremental schema evolution at production scale.
-
-**Wire versioning**: `ProtocolVersion.h` provides a single source-of-truth for wire format version numbers. Backward and forward compatibility are asserted by `ProtocolVersioningTest` — every version bump triggers a compile-time check that both an old decoder and a new decoder can round-trip each other's messages without data loss.
+An unknown V2 version or flag bit is refused rather than ignored, so a frame can
+never be downgraded into one the gateway reads differently.
 
 **Gap-recovery flow** (market data side):
 1. `MoldUDP64Publisher` assigns a sequence number to each ITCH frame as it enters the batch.
@@ -190,13 +178,12 @@ Before sending execution reports to the client, the engine writes the state muta
 - `Checkpointing`: Periodically, the engine writes a compressed snapshot of the entire resting book to disk and prunes the old journal to bound recovery time.
 
 ### 4.2 Formal Verification
-Concurrency is notoriously difficult to test. We rely on **9 TLA+ Specifications**:
+Concurrency is notoriously difficult to test. We rely on **8 TLA+ Specifications**:
 - `MatchingEngine.tla`: price-time matching with STP, modify and replace; 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. Properties and scope: [docs/Verification.md](docs/Verification.md).
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
 - `EngineConsumer.tla`: Verifies worker thread shutdown safety.
 - `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.
 - `Auction.tla`: the session state machine through the enforced transition table (Rule 7.7), order admission per state, and the uncross. It models no price collar. `NoReopenAfterClose` holds: a halt resumes only to the state it paused (see docs/Verification.md).
-- `FixSession.tla`: FIX session state machine safety (logon/heartbeat/gap-fill).
 - `Oco.tla`: OCO one-cancels-other atomicity.
 - `Risk.tla`: Hierarchical risk limit enforcement.
 

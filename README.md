@@ -3,24 +3,24 @@
 > [!WARNING]
 > **Single node. Not production-ready.** There is no replication or failover: a
 > node recovers from its journal, and `--role` / `OB_NODE_ROLE` refuse to boot. <!-- claim:repl-refuses-role -->
-> **Acks are durable only from `GatewayServer` started with `--journal`**, which
-> syncs each order to disk before acknowledging it. <!-- claim:gw-durable-ack --> `OrderEngine` acknowledges
-> at enqueue and group-commits its journal, so an acknowledged order can be
-> lost. FIX, SBE, ITCH and MoldUDP64 are library code that neither binary
-> serves, OUCH is served only by an `OrderEngine` built with `ENABLE_DPDK`
-> (off by default), and most risk and compliance controls below are library code that
-> neither binary enables — see [docs/Compliance.md](./docs/Compliance.md).
+> **One binary, one protocol.** `OrderEngine` is the only binary, and the native
+> binary protocol over TCP (`TcpGateway`) is its only order-entry protocol.
+> Started with `--journal`, it syncs each order to disk before acknowledging it. <!-- claim:gw-durable-ack -->
+> An ack says the order is durable, not that the book took it: a reject decided
+> while matching (post-only, FOK, a cancel of an unknown id) still answers Ack.
+> ITCH and MoldUDP64 are library code it does not serve, and most risk and
+> compliance controls below are library code it does not enable — see
+> [docs/Compliance.md](./docs/Compliance.md).
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![CI](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml)
 [![Latency](https://img.shields.io/badge/Matching_P50_PGO-237ns-green.svg)](#performance)
 [![Throughput](https://img.shields.io/badge/Throughput-3.10M_ops/s-blue.svg)](#performance)
-[![Codec](https://img.shields.io/badge/SBE_encode-1ns/op-orange.svg)](#binary-codec-performance)
 [![Tests](https://img.shields.io/badge/Tests-CTest_suite-brightgreen.svg)](#verification)
-[![TLA+](https://img.shields.io/badge/TLA%2B-9_specs-blueviolet.svg)](#formal-verification)
-[![Protocols](https://img.shields.io/badge/Wire_Protocol_codecs_(library)-FIX_OUCH_ITCH_SBE-blueviolet.svg)](#multi-protocol-order-entry)
+[![TLA+](https://img.shields.io/badge/TLA%2B-8_specs-blueviolet.svg)](#formal-verification)
+[![Order entry](https://img.shields.io/badge/Order_entry-native_binary_over_TCP-blueviolet.svg)](#order-entry)
 
-A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, four wire-protocol codecs (FIX 4.2/4.4, OUCH 4.2, ITCH 5.0, SBE) with TCP and UDP transports and MoldUDP64 gap recovery — library code with tests, served by no shipped binary (`GatewayServer` speaks only its native binary protocol), TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **39.4K LOC (engine) / 73.5K with tests, 9 TLA+ specifications.**
+A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, one binary (`OrderEngine`) speaking one order-entry protocol (the native binary protocol over TCP), an ITCH 5.0 / MoldUDP64 market-data codec with gap recovery that is library code with tests, TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **8 TLA+ specifications.**
 
 ## 🔬 Research
 
@@ -38,28 +38,24 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 
 ### Concurrency & Networking
 - **Thread-Per-Symbol Partitioning**: N worker threads with independent lock-free `MpscQueue` ring buffers, routed by `hash(symbolId) % numThreads`
-- **TCP Gateway**: the native binary protocol (`TcpGateway.h`) with non-blocking I/O via `epoll`/`kqueue` — the only order-entry protocol a shipped binary serves. FIX 4.4 session management (version negotiation, numeric `OrdRejReason` mapping, `TransactTime` enforcement) lives in the library-only `FixSession`/`FixTcpGateway`
-- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer (GatewayServer publishes updates and its once-a-second L2 snapshots from the event thread); each slot is a seqlock, so a lapped reader never takes a torn entry. <!-- claim:md-shm-no-torn-read --> `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). <!-- claim:md-shm-gap-reset --> The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
+- **TCP Gateway**: the native binary protocol (`TcpGateway.h`) with non-blocking I/O via `epoll`/`kqueue` — the only order-entry protocol, served by `OrderEngine` on `--gateway-port` (default 9001)
+- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer at a time: `OrderEngine` publishes each book's updates from the worker that owns it, and a lock hands the ring between workers. It publishes no L2 snapshots, so a subscriber that gaps has no snapshot to resync from until one is added (roadmap 1.10). Each slot is a seqlock, so a lapped reader never takes a torn entry. <!-- claim:md-shm-no-torn-read --> `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). <!-- claim:md-shm-gap-reset --> The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
 - **Binary Protocol Versioning**: `TcpGateway.h` — a bare V1 `OrderRequest` frame or a V2 frame with a 24-byte header, answered in the same framing; a version the gateway does not know is refused <!-- claim:gw-proto-compat -->
 
-### Multi-Protocol Order Entry
-**Library code.** The default build serves none of FIX, OUCH, SBE or SoupBinTCP; `GatewayServer` runs only `TcpGateway`, and only an `OrderEngine` built with `ENABLE_DPDK` (off by default) ingests OUCH. In the library and its tests, all four protocols dispatch into the same `MatchingEngine`, whose `submitOrder` range-checks side, order type, time in force and peg type for every one of them (`InvalidFieldValue`). <!-- claim:submit-field-validation --> Drop a different session class in front of the gateway loop, and you've changed the wire format without touching the engine.
-
-- **FIX 4.2 / 4.4** (`FixSession.h`): ASCII text + checksum, full session-layer state machine (Logon/Logout/Heartbeat/TestRequest/ResendRequest with `SequenceReset-GapFill`), numeric `OrdRejReason` mapped from internal `RejectReason`, `TransactTime` validation on 4.4 inbound. Version negotiation per accepted `BeginString`. Known limitation: `StopPx` (99) is not parsed and `FixSession` submits every order with stop price 0, so `OrdType` 3 (Stop) and 4 (StopLimit) are rejected with `InvalidPrice`.
-- **OUCH 4.2** (`OuchSession.h`, `OuchProtocol.h`): NASDAQ binary order entry. Inbound `O`/`X`/`U` (Enter/Cancel/Replace) → outbound `A`/`J`/`C`/`E`/`U` (Accepted/Rejected/Canceled/Executed/Replaced). Token ↔ engine-orderId reverse-map preserves identity across `submitCancelReplace`. Big-endian fixed-width.
-- **SoupBinTCP** (`SoupBinTcpSession.h`): the Nasdaq TCP envelope that wraps OUCH on the wire. 3-byte length+type framing, login negotiation, configurable heartbeat / peer-idle (spec defaults 1s/15s), logout handshake. Tested end-to-end with OUCH payload through real TCP loopback (`OuchTcpGatewayTest`).
+### Order Entry
+One protocol: the native binary protocol above, on `OrderEngine`'s order port. `MatchingEngine::submitOrder` range-checks side, order type, time in force and peg type for every ingress, the gateway and the admin port alike (`InvalidFieldValue`). <!-- claim:submit-field-validation --> FIX, OUCH, SBE, the DPDK path and the separate `GatewayServer` binary were deleted (roadmap 1.2): no binary served the protocols, and they carried open findings.
 
 ### Market Data Stack
-**Library code.** Neither binary publishes ITCH or MoldUDP64 or runs the retransmission service; `GatewayServer` publishes to shared memory (`MarketDataPublisher`), and `OrderEngine` publishes no market data.
+**Library code.** `OrderEngine` does not publish ITCH or MoldUDP64 or run the retransmission service; it publishes to shared memory (`MarketDataPublisher`).
 - **ITCH 5.0 publisher** (`ItchPublisher.h`): 10 message types — `S` SystemEvent, `R` Stock Directory, `H` Trading Action (engine `TradingState` → wire halt/resume), `A` AddOrder, `E`/`C` Executed, `X` Cancel, `D` Delete, `P` Trade, `Q` Cross Trade. An auction uncross goes out as non-printable `C` executions at the cross price plus one `Q` with the cross's price and volume, so its volume is counted once. A book with a publisher attached rejects at admission any price outside [0, 2^32) or quantity of 2^32 or more (`InvalidPrice` / `InvalidQuantity`), since ITCH carries both in 32 bits. <!-- claim:itch-32bit-admission --> In async mode an event that finds the publisher's ring full is dropped, and the feed then says so: an `S` with the non-standard code `R` (resync), a `D` for every order it had announced, and an `A` for every displayed order in priority order. <!-- claim:itch-ring-drop-resync --> Per-`OrderBook` `EventListener` that looks up resting orders via `book.getOrder()` to populate side/price fields the listener path doesn't carry.
 - **MoldUDP64 multicast** (`MoldUDP64.h`): batched publisher with MTU auto-flush (default bound 1472 bytes, so a full packet fits one Ethernet frame unfragmented) + gap-detecting subscriber. The subscriber delivers messages in arrival order: after a gap, later messages arrive before the retransmitted ones, so a consumer that needs sequence order (an order book) buffers by sequence number and applies up to `nextExpectedSequence()`. Heartbeat with `nextExpectedSeq` lets subscribers detect silent gaps even during quiet markets. Session-ID mismatch reported separately from gap. <!-- claim:mold-gap-detection -->
 - **Real UDP transport** (`ItchUdpTransport.h`): `ItchUdpPublisher` writes via `sendto`, `ItchUdpSubscriber` joins multicast group via `IP_ADD_MEMBERSHIP` and runs a recv thread feeding `MoldUDP64Subscriber`. Tested over real 127.0.0.1 sockets (`ItchUdpTransportTest`).
 - **Integrated publish pipeline** (`ItchMarketDataFeed.h`): engine event → ITCH frame → [UDP datagram + journal record]. One per-frame `flush()` so each event lands as its own datagram with a deterministic sequence number.
 - **Gap recovery** (`MoldPacketJournal.h` + `ItchRetransmissionService.h`): bounded ring of journaled MoldUDP64 messages backs a SoupBinTCP-over-TCP retransmission service. End-to-end test exercises: publisher records → subscriber gap → SoupBinTCP login + re-request → byte-exact replay. <!-- claim:itch-gap-recovery -->
-- **Fan-out adapter** (`MultiplexListener.h`): `OrderBook` exposes a single `EventListener` slot; this composes N of them so OUCH + ITCH + structured-log can coexist on the same book.
+- **Fan-out adapter** (`MultiplexListener.h`): `OrderBook` exposes a single `EventListener` slot; this composes N of them so ITCH + structured-log can coexist on the same book.
 
 ### Regulatory & Risk
-In the shipped binaries, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
+In `OrderEngine`, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy <!-- claim:stp-default-cancel-incoming -->
 - **Volatility Circuit Breakers**: a fixed 5% threshold on the price an order's first fill would print at; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing <!-- claim:circuit-breaker -->
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant <!-- claim:otr -->
@@ -67,7 +63,7 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first <!-- claim:prorata-lmm-floor -->
 - **Pre-Trade Risk Limits**: Max order size, notional, and position limits per participant <!-- claim:risk-limits -->
 - **Per-Participant Rate Limiting**: Token-bucket throttling at ingress (configurable rate + burst), off by default <!-- claim:rate-limit -->
-- **Queue-Depth Backpressure** (library only: neither binary sets a threshold): `setBackpressureThreshold` makes ingress refuse an order with `QueueBackpressure` once its worker's queue is past that fraction of capacity. No test drives a queue past the threshold, so nothing here bounds queuing delay
+- **Queue-Depth Backpressure** (library only: `OrderEngine` sets no threshold): `setBackpressureThreshold` makes ingress refuse an order with `QueueBackpressure` once its worker's queue is past that fraction of capacity. No test drives a queue past the threshold, so nothing here bounds queuing delay
 - **Admin HTTP Server**: Real-time `GET /metrics`, `GET /otr`, `GET /book` JSON endpoints on port 8080; `/health` liveness probe; `/readyz` k8s readiness probe (the admin port opens only after journal replay completes, so during replay both probes get connection refused; `/readyz` is 200 once the engine is up) <!-- claim:admin-readyz -->
 
 ### Microstructure Research Infrastructure
@@ -80,7 +76,7 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Calibration & Backtesting**: `CalibrationPipeline` (Nelder-Mead minimization of spread decomposition residuals), `BacktestEngine` (replay historical tape against research models), `ResearchDashboard` and `ResearchSerializer` for result persistence
 
 ### Reliability & Observability
-- **CRC-32 Journaling**: a journal replayed on boot <!-- claim:journal-replay-on-boot --> (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind <!-- claim:journal-torn-tail -->), atomic checkpoint <!-- claim:checkpoint-atomic -->, and deterministic replay via virtual clock <!-- claim:gtd-replay -->. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `GatewayServer` holds acks, fills and order updates until the entry is synced <!-- claim:gw-durable-events -->; `OrderEngine` acks at enqueue and group-commits. A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
+- **CRC-32 Journaling**: a journal replayed on boot <!-- claim:journal-replay-on-boot --> (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind <!-- claim:journal-torn-tail -->), atomic checkpoint <!-- claim:checkpoint-atomic -->, and deterministic replay via virtual clock <!-- claim:gtd-replay -->. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `OrderEngine` syncs every entry and answers its order port only after the worker has written it, though a fill on its market-data feed can precede its order's entry; the library's synchronous mode with durable client acks holds fills and order updates until the entry is synced. <!-- claim:gw-durable-events --> A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
 - **Single Node, Journal Recovery**: one `OrderEngine` and no replication or failover; a restart replays the journal. Replication was deleted rather than finished, and `--role` / `OB_NODE_ROLE` refuse to boot, saying so. <!-- claim:repl-refuses-role -->
 - **Deterministic Sequencing**: a book's `MarketDataUpdate` events carry strictly increasing `sequenceNumber`s, and a subscriber that applies only them holds the book's depth <!-- claim:md-l2-sequence -->. `Trade` and `OrderUpdate` carry one too; no test holds either to an order
 - **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically <!-- claim:gtd-replay -->
@@ -93,10 +89,10 @@ In the shipped binaries, only self-match prevention (cancel-incoming), the 5% ci
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for a single node with health checks and a journal volume; `.dockerignore` excludes host build artifacts
 
 ### Formal Verification & Fault Injection
-- **TLA+ Specifications**: 9 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `FixSession`, `Oco`, `Risk`.
+- **TLA+ Specifications**: 8 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `Oco`, `Risk`.
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison <!-- claim:shadow-mode -->
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; compiled out unless built with `ENABLE_FAULT_INJECTION` (`OB_ENABLE_FAULT_INJECTION`)
-- **Coverage-Guided Fuzzing**: libFuzzer targets for the FIX parser, framer and round trip, and `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
+- **Coverage-Guided Fuzzing**: a libFuzzer target, `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
 
 ## 📊 Performance Benchmarks
 
@@ -150,63 +146,30 @@ Four benchmarks characterize the engine and are complementary rather than compet
 
 ### Binary Codec Performance
 
-`./bin/BinaryCodecBenchmark` — pure encode/decode microbench, no engine, no transport. 2M iterations per row, Apple M3 Pro, Clang `-O3 -march=native`.
+`./bin/BinaryCodecBenchmark` — pure encode microbench, no engine, no transport. 2M iterations, Apple M3 Pro, Clang `-O3 -march=native`.
 
 | Codec | Message | ns/op | M ops/s |
 | :--- | :--- | --: | --: |
-| OUCH 4.2 | EnterOrder encode (49B) | 112.0 | 8.9 |
-| OUCH 4.2 | EnterOrder decode (49B) | 10.2 | 98.5 |
 | ITCH 5.0 | AddOrder encode (36B) | 34.1 | 29.4 |
-| **SBE** | **NewOrderV1 encode (32B)** | **1.0** | **1015** |
-| **SBE** | **NewOrderV1 decode (32B)** | **0.5** | **2128** |
-
-The 110× gap between SBE encode and OUCH encode is the cost of OUCH's ASCII-decimal field formatting (`snprintf`-equivalent per integer). SBE's native-endian binary writes are the limit of what's measurable.
 
 ## 🏗️ Architecture
 
 ```
-        ORDER ENTRY                                MARKET DATA
-        ───────────                                ───────────
-
-  ┌──────────────┐   ┌──────────────┐         ┌──────────────────┐
-  │ FIX 4.2/4.4  │   │   OUCH 4.2   │         │   ITCH 5.0       │
-  │   (text)     │   │   (binary)   │         │   (binary)       │
-  └──────┬───────┘   └──────┬───────┘         └────────▲─────────┘
-         │                  │                          │
-         │            ┌─────▼──────┐                   │
-         │            │ SoupBinTCP │             ┌─────┴──────┐
-         │            │  session   │             │ MoldUDP64  │
-         │            └─────┬──────┘             │ multicast  │
-         │                  │                    └─────▲──────┘
-   ┌─────▼──────┐    ┌──────▼─────┐    ┌────────────┐  │
-   │ FixSession │    │ OuchSession│    │ SbeSession │  │ ItchPublisher
-   └─────┬──────┘    └──────┬─────┘    └─────┬──────┘  │  (per book)
-         │                  │                │         │
-         └──────────────────┼────────────────┘         │
-                            ▼                          │
-                  ┌───────────────────┐                │
-   Admin :8080 ──▶│   MatchingEngine  │────events─────┘
-                  │   (order router)  │
-                  └─┬───┬───┬───┬─────┘
-                    │   │   │   │
-                ┌───▼─┐ │ ┌─▼───▼──┐
-                │ Q[0]│ │ │ Q[1..N]│   MpscQueue per thread
-                └──┬──┘ │ └──┬─────┘
-                   │    │    │
-              ┌────▼──┐ │ ┌──▼────┐
-              │Thread0│ │ │Thread1│    Worker threads
-              │ BTC,  │ │ │ SOL,  │    (symbol affinity)
-              │ ETH   │ │ │ AVAX  │
-              └───────┘ │ └───────┘
+   clients ──TCP──▶ TcpGateway (login, then orders)          OrderEngine (one process)
                         │
-                 ┌──────▼──────┐    ┌──────────────┐    ┌─────────────────┐
-                 │  OrderBook  │───▶│ MoldPacket   │◀───│ ItchRetransmit  │
-                 │  ObjectPool │    │   Journal    │    │  Service (TCP)  │
-                 │  Journal    │    └──────────────┘    └─────────────────┘
-                 └─────────────┘     gap recovery        re-request replay
+   Admin :8080 ──▶ MatchingEngine (order router) ──▶ Q[0] .. Q[N]   MpscQueue per worker
+                                                        │
+                                       Worker threads (symbol affinity)
+                                                        │
+                                OrderBook ─ Journal (replayed at boot, synced per ack)
+                                    │
+                                    └─▶ market data: /orderbook_md (shared memory)
+
+   Library only, not served: ItchPublisher ─▶ MoldUDP64 multicast,
+                             MoldPacketJournal ◀─ ItchRetransmissionService (SoupBinTCP)
 ```
 
-**Four protocols, one engine.** Drop in a different session class to change the wire format; the engine doesn't know which codec it's driving. The market data side runs in parallel: ITCH frames flow out via MoldUDP64 over UDP multicast, with a SoupBinTCP-based retransmission service backing gap recovery from a bounded packet journal.
+**One binary, one protocol.** `OrderEngine` takes orders on its TCP port, matches them on per-symbol workers and journals them; nothing else takes orders. The ITCH side is library code: frames can flow out via MoldUDP64 over UDP multicast, with a SoupBinTCP-based retransmission service backing gap recovery from a bounded packet journal, but `OrderEngine` wires none of it.
 
 See [Architecture.md](./Architecture.md) for the full technical deep-dive.
 See [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) for the remaining work required before treating this as a production exchange component.
@@ -224,36 +187,33 @@ See [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) for the remaini
 # Build lean mode (risk/stats compiled out; no lean latency has been published)
 ./build.sh --lean
 
-# Run the engine (4 threads, admin on port 8080). It refuses to start without
-# an admin token (OB_ADMIN_TOKEN / --admin-token, or --admin-no-auth), and
-# keeps no journal unless given --journal / OB_JOURNAL_PATH.
-OB_ADMIN_TOKEN=... ./bin/OrderEngine --threads 4 --port 8080 --symbols 4
+# Run the engine (4 threads, admin on port 8080, orders on 9001). It refuses to
+# start without an admin token (OB_ADMIN_TOKEN / --admin-token, or
+# --admin-no-auth) and without participant credentials (--participant-credentials
+# FILE, or --no-participant-auth), and keeps no journal unless given --journal.
+OB_ADMIN_TOKEN=... ./bin/OrderEngine --threads 4 --port 8080 --symbols 4 \
+    --participant-credentials /etc/orderbook/participants.conf --journal /var/lib/orderbook/engine.wal
 
 # Run tests
 ./bin/ManualTest              # Functional tests
 ./bin/StressTest              # Multi-threaded stress tests
 ./bin/PropertyTest            # Randomized invariant checks
 ./bin/JournalCrashTest        # Crash recovery validation
-./bin/GatewayProtocolTest     # Internal binary protocol schema evolution
 ./bin/GTDReplayTest           # Deterministic expiry replay
 ./bin/MdFeedSchemaCompatTest  # Market data feed compatibility
 
-# Wire protocols
-./bin/OuchSessionTest         # OUCH 4.2 codec + session (25 cases)
-./bin/SoupBinTcpTest          # SoupBinTCP envelope, framer, session (19 cases)
-./bin/OuchTcpGatewayTest      # OUCH + SoupBinTCP over real TCP loopback
+# Market data (library)
+./bin/SoupBinTcpTest          # SoupBinTCP envelope, framer, session
 ./bin/ItchPublisherTest       # ITCH 5.0 codec + publisher (17 cases)
 ./bin/MoldUDP64Test           # MoldUDP64 multicast wrapper + gap detection
 ./bin/ItchUdpTransportTest    # ITCH over real UDP loopback
 ./bin/ItchRetransmissionTest  # Journal + SoupBinTCP-based gap recovery
 ./bin/ItchMarketDataFeedTest  # End-to-end engine → ITCH → UDP + retransmit
-./bin/SbeProtocolTest         # SBE codec, schema versioning, forward-compat
-./bin/SbeSessionTest          # SBE NewOrder → engine + OrderAck
 
 # Benchmarks
 ./bin/HonestBenchmark         # Per-order latency: book, engine, engine + journal
 ./bin/E2EBenchmark            # End-to-end latency (includes queue delay)
-./bin/BinaryCodecBenchmark    # OUCH / ITCH / SBE encode-rate comparison
+./bin/BinaryCodecBenchmark    # ITCH AddOrder encode rate
 ```
 
 ### CI / Hardening
@@ -309,30 +269,34 @@ curl -H "X-Chaos-Token: $TOK" \
 
 ### Order Entry Journal
 
-`GatewayServer` journals every order it accepts when given `--journal PATH` (or
-`OB_JOURNAL_PATH`), and replays that journal before it starts listening — the
-same boot sequence as `OrderEngine`, including its refusal of unreadable and
-legacy journals. Without one it warns at startup: every acknowledged order lives
-only in memory and is lost on any restart.
+`OrderEngine` journals every order it accepts when given `--journal PATH` (or
+`OB_JOURNAL_PATH`), and replays that journal before its order port opens,
+refusing unreadable and legacy journals. Without one it warns at startup: every
+acknowledged order lives only in memory and is lost on any restart.
 
 ```bash
-GatewayServer 9876 --participant-credentials /etc/orderbook/participants.conf \
-                   --journal /var/lib/orderbook/gateway.wal
+OrderEngine --participant-credentials /etc/orderbook/participants.conf \
+            --journal /var/lib/orderbook/engine.wal
 ```
 
-With a journal, **acks are durable**: every order is synced to the journal before
-it is acknowledged, so an order the client was told it has survives `kill -9`
-sent the moment the ack arrives — the scenario `GatewayJournalRestartTest` runs
-against the real binary. <!-- claim:gw-durable-ack --> Fills and order updates are held until durable too. <!-- claim:gw-durable-events -->
+With a journal, **acks are durable**: the journal syncs every entry as it is
+written, and the order port answers only after the worker has run the request,
+so an order the client was told it has survives `kill -9` sent the moment the ack
+arrives — the scenario `GatewayJournalRestartTest`, `CrashRecoveryE2ETest` and
+`OrderEngineGatewayTest` run against the real binary. <!-- claim:gw-durable-ack -->
+In the library's synchronous mode with durable client acks on, fills and order
+updates are held until durable too. <!-- claim:gw-durable-events --> `OrderEngine`
+runs async, where that gate is refused, so its market-data feed can show a fill
+up to one order before that order's entry is on disk (roadmap 1.4-D7).
 
-The cost is one fsync per order, serialised on the gateway's single event
-thread, so order-entry throughput is bounded by your disk's fsync latency.
+The cost is one fsync per order, and the order port's single event thread waits
+it out, so order-entry throughput is bounded by your disk's fsync latency.
 Measure it on the hardware you deploy to; this repository's published
 throughput figures do not apply to this configuration.
 
 ### Order Entry Authentication
 
-`GatewayServer` refuses to start unless participant credentials are configured
+`OrderEngine` refuses to start unless participant credentials are configured
 or authentication is explicitly turned off — the same bar the admin port has
 held for a while, applied to the port that moves money. <!-- claim:gw-auth-required -->
 
@@ -345,30 +309,24 @@ firm-b:0th3r:200
 EOF
 chmod 600 /etc/orderbook/participants.conf    # warned about if group/other-readable
 
-GatewayServer 9876 --participant-credentials /etc/orderbook/participants.conf
-# or: OB_PARTICIPANT_CREDENTIALS=/etc/orderbook/participants.conf GatewayServer 9876
+OrderEngine --participant-credentials /etc/orderbook/participants.conf
+# or: OB_PARTICIPANT_CREDENTIALS=/etc/orderbook/participants.conf OrderEngine
 
 # Deliberately unauthenticated (dev, or a port already isolated some other way)
-GatewayServer 9876 --no-participant-auth
+OrderEngine --no-participant-auth
 ```
+
+The order port listens on `--gateway-port` (default 9001; `OB_GATEWAY_PORT`, or
+`gateway_port` in the config file) at `--gateway-bind` (default `0.0.0.0`).
 
 A malformed line fails the whole load rather than being skipped: a typo that
 silently dropped a firm's credential would surface as that firm being unable to
 trade, at the worst possible moment. <!-- claim:gw-credentials-malformed -->
 
-Clients authenticate per connection. On the binary protocol that is a login
-frame — the V2 header's `flags` word with `GATEWAY_FLAG_LOGIN` set, carrying
-`user`/`secret` — sent before the first order. (The library's FIX and OUCH
-sessions check credentials at Logon, tags 553/554, and at SoupBinTCP Login, but
-no shipped binary serves either protocol.) A session may then only submit as a
-participant its credential covers, which includes the kill switch. A failed
-login closes the connection. <!-- claim:gw-login -->
-
-The forwarding proxy (`OB_ENGINE_HOST`/`OB_ENGINE_PORT`) relays frames it does
-not interpret, over **one** upstream connection shared by all of its clients.
-The gateway it forwards to authenticates that shared connection, not each
-client, so treat the proxy as unauthenticated. (`OrderEngine` has no order
-port, so the only thing it can forward to is another `GatewayServer`.)
+Clients authenticate per connection: a login frame — the V2 header's `flags`
+word with `GATEWAY_FLAG_LOGIN` set, carrying `user`/`secret` — sent before the
+first order. A session may then only submit as a participant its credential
+covers, which includes the kill switch. A failed login closes the connection. <!-- claim:gw-login -->
 
 ### Replication: removed
 `OrderEngine` runs as a single node and recovers from its journal. Primary/backup replication had no fencing, a promoted backup kept applying the old primary's stream, its send blocked the journal commit path and resync only added orders, so it was deleted rather than finished. `--role` / `OB_NODE_ROLE` still refuse to boot, so a deployment that sets one finds out at startup. <!-- claim:repl-refuses-role -->
@@ -383,19 +341,19 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 | **Stress** | StressTest, SustainedLoadTest | 5 multi-threaded scenarios, 4 concurrent producers, sustained load degradation detection |
 | **Property** | PropertyTest, JournalReplayPropertyTest, SnapshotConsistencyTest | Randomized invariant checks, replay determinism |
 | **Chaos** | FaultInjectorTest, PoolExhaustionTest, JournalChaosTest, JournalCorruptionTest, GatewayChaosTest, QueueChaosTest, CheckpointChaosTest, CombinedChaosTest | 10+ fault-injection points, short-writes, bit-flips, EAGAIN |
-| **Integration** | GatewayIntegrationTest, FixTcpGatewayTest, AdminServerEndpointsTest, OuchTcpGatewayTest, ItchUdpTransportTest, ItchMarketDataFeedTest | Real-loopback TCP/UDP round-trip, FIX/OUCH/ITCH session, HTTP endpoints |
-| **Protocol — text** | GatewayProtocolTest, MarketDataSchemaTest, MdFeedSchemaCompatTest, RejectReasonContractTest, SubmitResultTest | Binary wire format evolution, ShmHeader compat |
-| **Protocol — binary** | OuchSessionTest, ItchPublisherTest, SoupBinTcpTest, MoldUDP64Test, SbeProtocolTest, SbeSessionTest | OUCH/ITCH/SBE codec + session layers, SoupBinTCP login/heartbeat, MoldUDP64 gap detection, SBE forward-compat |
+| **Integration** | OrderEngineGatewayTest, GatewayIntegrationTest, AdminServerEndpointsTest, ItchUdpTransportTest, ItchMarketDataFeedTest | The real binary over its order port, real-loopback TCP/UDP round-trip, HTTP endpoints |
+| **Protocol** | GatewayIntegrationTest, MarketDataSchemaTest, MdFeedSchemaCompatTest, RejectReasonContractTest, SubmitResultTest | V1/V2 gateway frames, ShmHeader compat, reject strings |
+| **Market data (library)** | ItchPublisherTest, ItchByteLayoutTest, SoupBinTcpTest, MoldUDP64Test | ITCH codec + publisher, SoupBinTCP login/heartbeat, MoldUDP64 gap detection |
 | **Recovery** | JournalCrashTest, GTDReplayTest, ItchRetransmissionTest | Crash recovery, virtual-clock replay, **gap-recovery via SoupBinTCP re-request** |
 | **Ops** | ConfigTest, AlertDispatcherTest | Config loader, webhook alerts |
 | **Shadow** | ShadowModeTest | Dual-book divergence detection, FIFO violation catching |
-| **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, OUCH/ITCH/SBE encode-rate comparison |
+| **Benchmark** | BenchmarkRegression (GTest), BinaryCodecBenchmark | P99 latency regression gates, ITCH encode rate |
 
-[^1]: *A CTest target is a test executable or a single GTest case, and one executable can run many internal cases (`OuchSessionTest` alone runs over twenty).*
+[^1]: *A CTest target is a test executable or a single GTest case, and one executable can run many internal cases (`ItchPublisherTest` alone runs seventeen).*
 
 ### Formal Verification (TLA+)
 
-**9 TLA+ specifications**, model-checked with TLC:
+**8 TLA+ specifications**, model-checked with TLC:
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
@@ -404,7 +362,6 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 | `EngineConsumer.tla` | 252 distinct | Worker loop: no item invented or duplicated, every item eventually consumed <!-- claim:tla-concurrency-specs --> |
 | `Snapshot.tla` / `SnapshotLocked.tla` | 515,380 / 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) <!-- claim:tla-concurrency-specs --> |
 | `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail, and one that never reopens a volatility auction; see [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-auction --> |
-| `FixSession.tla` | 4 distinct | FIX inbound sequence recovery: in-order delivery across gaps (no logon or heartbeat modelled) <!-- claim:tla-small-specs --> |
 | `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity <!-- claim:tla-small-specs --> |
 | `Risk.tla` | 8 distinct | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. <!-- claim:tla-small-specs --> |
 
@@ -431,13 +388,12 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 
 ## 🔮 Remaining Work
 
-The wire-protocol codecs (FIX 4.4, OUCH, ITCH, SBE, SoupBinTCP, MoldUDP64, retransmission) exist as library code with tests, but the default build serves none of them (an `OrderEngine` built with `ENABLE_DPDK` ingests OUCH). The honest list of what's still NOT done:
+The market-data codecs (ITCH, SoupBinTCP, MoldUDP64, retransmission) exist as library code with tests, but `OrderEngine` serves none of them. The honest list of what's still NOT done:
 
 | Item | Status | Blocker |
 |------|--------|---------|
 | x86 Bare Metal Benchmarks | E2E bench exists | Multi-socket EC2 c5.metal instance |
 | io_uring async journal writes | Implemented behind `#ifdef __linux__` (`fdatasync`/`F_FULLFSYNC` fallback elsewhere); the `Ubuntu io_uring Journal` CI lane builds it and runs the suite on it (with a runtime probe, so a silent fallback cannot pass); latency not yet measured on x86 | Linux + `liburing` — **no special NIC** |
-| DPDK kernel bypass | **Written, never executed** — no run, no measurement, no demonstrated benefit. Not hardware-blocked: it targets commodity AWS ENA | Linux + a secondary ENI + hugepages + the DPDK/F-Stack toolchain |
 | Solarflare/Onload | Architecture ready | Solarflare hardware |
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
 | Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified <!-- claim:auction-uncross --> | Volume-maximization algorithm: max-qty uncross implemented |

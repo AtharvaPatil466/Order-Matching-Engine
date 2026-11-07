@@ -6,10 +6,13 @@ This project is a low-latency matching-engine implementation for research and po
 
 - Public submit semantics now distinguish ingress acceptance from final order-book outcome in async mode:
   `SubmitResult::Accepted` means the request passed ingress validation and was queued, while order-level
-  rejects that occur on the worker are delivered through order-update/event channels.
+  rejects that occur on the worker are delivered through order-update/event channels. On `OrderEngine`'s
+  order port an Ack is sent once the worker has run the request and its journal entry is synced, so it
+  means durable; it still does not carry a worker-side reject (post-only, FOK, a cancel of an unknown id),
+  and no session hears about its fills yet (roadmap 1.9-I7).
 - Self-match prevention policy variants: cancel taker, cancel maker, decrement-and-cancel, and participant hierarchy rules.
 - Cancel/replace priority rules for every amendment type, including hidden and iceberg orders.
-- Market order protection, price collars, auction states, halt/resume transitions. What the binaries run:
+- Market order protection, price collars, auction states, halt/resume transitions. What `OrderEngine` runs:
   a 5% circuit breaker on an arriving order's first fill that puts the symbol into a timed volatility
   auction (`tripBreakerOnFirstFill` in `src/OrderBook.cpp`; `VolatilityBreakerTest`) <!-- claim:circuit-breaker -->, in OrderEngine with
   a config file each symbol's static price range (`instrument.<s>.min_price` / `max_price`, enforced at
@@ -74,4 +77,3 @@ README latency tables should be updated only from saved artifacts, preferably us
 ## Architectural Gaps Worth Documenting
 
 - **No high availability.** A single node recovers by replaying its journal; a host loss is an outage. Replication was removed rather than finished (roadmap 1.1).
-- **`GatewayServer` runs its own embedded `MatchingEngine`**, not `OrderEngine`. `/chaos/order` calls `engine.submitOrder` directly on `OrderEngine`, and `FixTcpGatewayTest` exercises the library's FIX gateway; neither says anything about `GatewayServer`.

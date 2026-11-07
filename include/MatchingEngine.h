@@ -847,6 +847,12 @@ private:
     // Drain a book's observer after a request: OCO sibling cancels, then the
     // trade-driven consumers (fees / risk accrual / audit).
     void driveOco(SymbolId symbolId, OrderBook* book);
+    // P2-10's notional cap for an order valued off the book (OrderBook::
+    // notionalPrice): the submit-time check cannot read a worker-owned book, so
+    // this runs on the book's thread, on both paths (STP-12).
+    RejectReason checkBookValuedNotional(const OrderBook& book, SymbolId sym, ParticipantId pid,
+                                         Side side, OrderType type, Price price, Quantity qty,
+                                         Price stopPrice, Price stopLimitPrice, Price trailAmount);
     // Pre-trade hierarchical risk gate; true = admit. No-op (true) when risk
     // is not configured. Runs on the worker thread, where book reads are safe.
     bool preTradeRiskCheck(ParticipantId trader, Side side, Price price,

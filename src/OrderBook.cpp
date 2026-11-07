@@ -347,8 +347,9 @@ bool OrderBook::checkRiskLimits(ParticipantId participantId, Price price, Quanti
 
     if (state->maxOrderSize > 0 && qty > state->maxOrderSize) return false;
 
+    // price == 0: a market order with no touch and no reference to value it at.
     if (state->maxOrderNotional > 0) {
-        if (orderNotional(price, qty) > static_cast<__int128>(state->maxOrderNotional))
+        if (price == 0 || orderNotional(price, qty) > static_cast<__int128>(state->maxOrderNotional))
             return false;
     }
 
@@ -370,6 +371,42 @@ void OrderBook::setRiskLimits(ParticipantId participantId, const RiskLimits& lim
     state.maxOrderSize = limits.maxOrderSize;
     state.maxOrderNotional = limits.maxOrderNotional;
     state.maxPositionSize = limits.maxPositionSize;
+}
+
+// A buy is valued at the collar, the top of what it can reach; a sell at the
+// touch, since the collar only takes it lower. A stop or MIT elects a Market
+// order about where the print meets its trigger, so its trigger stands in for the
+// touch. A trailing stop elects a limit at its trigger, which starts here and
+// ratchets: a sell's can rise later, and this does not see that (ponytail:
+// valued as parked; re-check at election if a venue needs it bounded).
+// Called before validation on the engine's path, so garbage fields value at 0.
+Price OrderBook::notionalPriceLocked(Side side, OrderType type, Price price, Price stopPrice,
+                                     Price stopLimitPrice, Price trailAmount) const {
+    const bool isBuy = side == Side::Buy;
+    const bool collarOn = marketProtectionPct_ > 0.0;
+    switch (type) {
+    case OrderType::StopLimit:
+        return std::max<Price>(stopLimitPrice, 0);
+    case OrderType::Stop:
+    case OrderType::MIT:
+        if (stopPrice <= 0) return 0;
+        return isBuy && collarOn ? collarAbove(stopPrice) : stopPrice;
+    case OrderType::TrailingStop: {
+        const Price reference = lastTradePrice_ > 0 ? lastTradePrice_ : price;  // as parked
+        if (trailAmount <= 0 || trailAmount >= reference) return 0;
+        if (!isBuy) return reference - trailAmount;
+        return trailAmount > std::numeric_limits<Price>::max() - reference
+                   ? std::numeric_limits<Price>::max() : reference + trailAmount;
+    }
+    case OrderType::Market:
+    case OrderType::MOC: {
+        const FlatPriceMap& opposite = isBuy ? asks_ : bids_;
+        if (!collarOn || opposite.empty()) return referencePrice_;
+        return isBuy ? marketCollar(opposite, true) : opposite.bestPrice();
+    }
+    default:
+        return price;
+    }
 }
 
 bool OrderBook::checkCircuitBreaker(Price price) {
@@ -1228,7 +1265,10 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     // --- Pre-trade risk checks ---
 #ifndef OB_LEAN_MODE
-    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty)) [[unlikely]] {
+    const Price riskPrice = valuedOffTheBook(type) ? notionalPriceLocked(side, type, price, stopPrice,
+                                                                         stopLimitPrice, trailAmount)
+                                                   : price;
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, riskPrice, qty)) [[unlikely]] {
         const RejectReason reason =
             rejectOrder(orderId, participantId, qty, RejectReason::RiskLimitBreached);
         obSink().log(logOrderRejected(orderId, participantId, "risk_limit_breached"));

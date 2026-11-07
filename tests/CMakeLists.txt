@@ -706,6 +706,15 @@ gtest_discover_tests(MarketCollarTest
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
 
+# Notional caps value Market and stop orders off the collar (1.9 I4, STP-12).
+add_executable(MarketNotionalTest MarketNotionalTest.cpp)
+target_link_libraries(MarketNotionalTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(MarketNotionalTest)
+gtest_discover_tests(MarketNotionalTest
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;risk")
+
 # GTD, and DAY with no session end, must carry an expiry (1.6-F6, PRIOR-7).
 add_executable(ExpiryAdmissionTest ExpiryAdmissionTest.cpp)
 target_link_libraries(ExpiryAdmissionTest PRIVATE OrderMatcher)

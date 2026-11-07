@@ -530,6 +530,22 @@ public:
     // it before traffic and to the value the journal was written under.
     void setMarketProtectionPct(double pct) { marketProtectionPct_ = pct < 0 ? 0 : pct; }
     double getMarketProtectionPct() const   { return marketProtectionPct_; }
+    // The price a notional cap values an order at (STP-12). A limit-priced order
+    // is worth its limit; a Market or trigger order has none, so it is valued at
+    // the highest price it can trade at. 0 if there is no price to value it at,
+    // which a cap refuses. Takes bookLock_ only for those orders, as a sync
+    // engine's caller is not the only thread on the book.
+    static constexpr bool valuedOffTheBook(OrderType t) {
+        return t == OrderType::Market || t == OrderType::MOC || t == OrderType::Stop ||
+               t == OrderType::MIT || t == OrderType::StopLimit || t == OrderType::TrailingStop;
+    }
+    Price notionalPrice(Side side, OrderType type, Price price, Price stopPrice,
+                        Price stopLimitPrice, Price trailAmount) const {
+        if (!valuedOffTheBook(type)) [[likely]] return price;
+        std::lock_guard<std::mutex> lock(bookLock_);
+        return notionalPriceLocked(side, type, price, stopPrice, stopLimitPrice, trailAmount);
+    }
+
     // Takes bookLock_: the admin /otr endpoint calls this from its own thread
     // while the owning worker inserts into participantRisk_ under that lock.
     ParticipantStats getParticipantStats(ParticipantId id) const {
@@ -939,11 +955,18 @@ private:
     // from the opposite touch. Callers check it is on and the side is not empty.
     Price marketCollar(const FlatPriceMap& opposite, bool isBuy) const {
         const Price touch = opposite.bestPrice();
-        const Price band = static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
-        if (!isBuy) return touch - band;
+        return isBuy ? collarAbove(touch) : touch - collarBand(touch);
+    }
+    Price collarBand(Price touch) const {
+        return static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
+    }
+    Price collarAbove(Price touch) const {
+        const Price band = collarBand(touch);
         return band > std::numeric_limits<Price>::max() - touch
                    ? std::numeric_limits<Price>::max() : touch + band;
     }
+    Price notionalPriceLocked(Side side, OrderType type, Price price, Price stopPrice,
+                              Price stopLimitPrice, Price trailAmount) const;
 
     void runTriggerSweeps(Price firstPrint);
     void checkStopOrders(Price lowPrint, Price highPrint);

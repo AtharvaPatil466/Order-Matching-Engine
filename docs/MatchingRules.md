@@ -60,6 +60,18 @@ cap rather than failing it.
 
 > `include/Types.h:213-215` — `constexpr __int128 orderNotional(Price, Quantity)`
 
+An order with no limit is valued at the highest price it can trade at (STP-12): a `Market` or
+`MOC` buy at the collar (Rule 9.5), a sell at the opposite touch; a `Stop` or `MIT` from its
+trigger the same way; a `StopLimit` at its limit; a `TrailingStop` at its trigger as parked. With
+the collar off, or nothing on the opposite side, a market order is valued at the reference price,
+and the engine's fat-finger cap falls back to its own reference (`setReferencePrice` or the last
+trade). An order with no price at all is refused by a notional cap rather than valued at 0, which
+is what every cap used to read for it. The engine's fat-finger cap for these orders runs on the
+book's thread, so on the async path the order is acknowledged and then rejected by the worker.
+
+> `OrderBook::notionalPrice`, `MatchingEngine::checkBookValuedNotional`; pinned by
+> `tests/MarketNotionalTest.cpp`
+
 **Status: Deliberate — commented and pinned.** The `__int128` widening carries its own
 rationale comment and the tick-grid choice is load-bearing across the wire protocols.
 

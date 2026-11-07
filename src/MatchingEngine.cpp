@@ -1021,11 +1021,23 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             break;
         }
 
+        if (const RejectReason rr = checkBookValuedNotional(
+                *book, req.symbolId, req.participantId, req.side, req.orderType, req.price,
+                req.qty, req.stopPrice, req.stopLimitPrice, req.trailAmount);
+            rr != RejectReason::None) [[unlikely]] {
+            book->emitReject(req.orderId, req.qty, rr);
+            break;
+        }
+
         // Hierarchical pre-trade risk gate (no-op unless configured). Market
         // orders have no limit price, so they skip the fat-finger reference
         // check (pass 0); limit-priced orders use the book mid as an NBBO
         // proxy. Reading book state here is safe — one writer per book.
-        if (!preTradeRiskCheck(req.participantId, req.side, req.price, req.qty,
+        if (!preTradeRiskCheck(req.participantId, req.side,
+                               book->notionalPrice(req.side, req.orderType, req.price,
+                                                   req.stopPrice, req.stopLimitPrice,
+                                                   req.trailAmount),
+                               req.qty,
                                req.orderType == OrderType::Market ? 0 : book->getMidPrice())) {
             book->emitReject(req.orderId, req.qty, RejectReason::RiskLimitBreached);
             break;
@@ -1688,6 +1700,26 @@ RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, 
     return RejectReason::None;
 }
 
+RejectReason MatchingEngine::checkBookValuedNotional(const OrderBook& book, SymbolId sym,
+                                                     ParticipantId pid, Side side, OrderType type,
+                                                     Price price, Quantity qty, Price stopPrice,
+                                                     Price stopLimitPrice, Price trailAmount) {
+    if (!OrderBook::valuedOffTheBook(type) || sym >= MAX_RISK_SYMBOLS ||
+        !fatFingerActive_.load(std::memory_order_relaxed))
+        return RejectReason::None;
+    const int64_t maxNotional = ffMaxNotional_[sym].load(std::memory_order_relaxed);
+    if (maxNotional == 0) return RejectReason::None;
+
+    Price px = book.notionalPrice(side, type, price, stopPrice, stopLimitPrice, trailAmount);
+    if (px == 0) px = refPrice_[sym].load(std::memory_order_relaxed);
+    if (px > 0 && orderNotional(px, qty) <= static_cast<__int128>(maxNotional))
+        return RejectReason::None;
+
+    fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
+    logRiskReject("fat_finger_notional", sym, pid, RejectReason::FatFingerReject);
+    return RejectReason::FatFingerReject;
+}
+
 void MatchingEngine::onRiskFill(const Trade& t) {
     // Called inline from OcoBookListener::onTrade on every fill (both engine
     // modes), gated upstream by anyRiskActive_. All updates are atomic.
@@ -1909,6 +1941,12 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     auto* book = getOrderBook(symbolId);
     if (!book) {
         return rejectedAsync(RejectReason::SymbolNotFound);
+    }
+    if (const RejectReason rr = checkBookValuedNotional(*book, symbolId, participantId, side, type,
+                                                        price, qty, stopPrice, stopLimitPrice,
+                                                        trailAmount);
+        rr != RejectReason::None) [[unlikely]] {
+        return rejectedAsync(rr);
     }
 
     // Capture everything this order emits so none of it reaches the client

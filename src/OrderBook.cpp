@@ -1054,7 +1054,7 @@ void OrderBook::restPeggedOrder(Order* order, OrderId orderId, Side side, Price 
     (void)peggedOrders_.push_back(order);  // slot checked by admitParkCapacity
     if (!addToBook(order)) {
         notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-        peggedOrders_.erase_value(order);
+        untrackOrder(order);
         orderLookup_.erase(orderId);
         orderPool_.deallocate(order);
         return;
@@ -1146,7 +1146,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
     if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
         if (sweepFillQty(*order) < minQty) {
             if (type == OrderType::IOC || type == OrderType::Market) {
-                releaseWorking(*order, order->remainingQty);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
@@ -1172,7 +1172,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
                 ? (!asks_.empty() && price >= asks_.bestPrice())
                 : (!bids_.empty() && price <= bids_.bestPrice());
             if (wouldCross) [[unlikely]] {
-                releaseWorking(*order, order->remainingQty);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
@@ -1180,7 +1180,7 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
             }
             if (!addToBook(order)) {
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, 0);
-                releaseWorking(*order, order->remainingQty);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else if (!order->isHidden) {
@@ -1204,7 +1204,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             // with nothing left said "still working" and closed nothing
             // downstream (GTDIFF-4).
             notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
-            releaseWorking(*order, order->remainingQty);
+            untrackOrder(order);
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
         } else {
@@ -1212,7 +1212,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             if (!addToBook(order)) {
                 // Depth limit or price range exceeded — cancel the order
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
-                releaseWorking(*order, order->remainingQty);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else {
@@ -1405,9 +1405,11 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
 // Returns true when the resting order reached zero and must be cancelled.
 bool OrderBook::stpDecreaseBoth(Order* incoming, Order* resting) {
     const Quantity dec = std::min(incoming->remainingQty, resting->remainingQty);
+    releaseWorking(*incoming, dec);
     incoming->remainingQty -= dec;
     incoming->initialQty   -= dec;
-    if (dec == resting->remainingQty) return true;
+    if (dec == resting->remainingQty) return true;  // its cancel releases the rest
+    releaseWorking(*resting, dec);
     resting->remainingQty -= dec;
     resting->initialQty   -= dec;
     // Keep visibleQty <= remainingQty or a later fill underflows
@@ -1425,7 +1427,7 @@ bool OrderBook::finalizeIfStpCancelled(Order* order) {
     // genuinely traded still wins its group. This used to report
     // PartiallyFilled with nothing left, a status that never closes.
     notifyOrderUpdate(order->id, OrderStatus::CancelledBySTP, order->cumQty, 0);
-    releaseWorking(*order, order->remainingQty);
+    untrackOrder(order);
     orderLookup_.erase(order->id);
     orderPool_.deallocate(order);
     return true;
@@ -2344,6 +2346,10 @@ bool OrderBook::validateIntegrity(std::string* err) const {
 
 void OrderBook::untrackOrder(Order* order) {
     if (!order) return;
+    // Whatever it still had working leaves with it (STP-10): cancel, kill,
+    // expiry, DAY and on-close sweeps, STP cuts, IOC/FOK/market remainders.
+    // A full fill reaches here at zero.
+    releaseWorking(*order, order->remainingQty);
     switch (order->type) {
         case OrderType::Stop:
         case OrderType::StopLimit:
@@ -2656,6 +2662,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
                 if (!order->isHidden)
                     notifyMarketData(MarketDataUpdate::Action::Delete, order->side, order->price);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 return true;
@@ -2952,7 +2959,7 @@ void OrderBook::updatePeggedOrders() {
                 // Off the book at its old price and not on it at the new one:
                 // finish it rather than leave it live in no level (MATCH-11).
                 notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
-                peggedOrders_.erase_swap(i);
+                untrackOrder(order);  // erases slot i, as erase_swap(i) did
                 orderLookup_.erase(order->id);
                 orderPool_.deallocate(order);
                 continue;
@@ -3126,6 +3133,7 @@ void OrderBook::uncrossLocked() {
                 if (lvl) { stpCancelRestingOrder(o, lvl, bk); return; }
                 notifyOrderUpdate(o->id, OrderStatus::CancelledBySTP,
                                   o->initialQty - o->remainingQty, 0);
+                releaseWorking(*o, o->remainingQty);
                 releaseParked(cur);
                 orderLookup_.erase(o->id);
                 orderPool_.deallocate(o);
@@ -3147,6 +3155,7 @@ void OrderBook::uncrossLocked() {
                 if (stp.decreaseAmount >= older->remainingQty) {
                     stpCancel(older, olderLvl, olderBk, olderCur);
                 } else {
+                    releaseWorking(*older, stp.decreaseAmount);
                     older->remainingQty -= stp.decreaseAmount;
                     older->initialQty   -= stp.decreaseAmount;  // not a fill
                     // Keep visibleQty <= remainingQty or a later fill
@@ -3256,6 +3265,7 @@ void OrderBook::uncrossLocked() {
         if (!m) continue;
         Quantity filled = m->initialQty - m->remainingQty;
         notifyOrderUpdate(m->id, OrderStatus::Cancelled, filled, 0);
+        releaseWorking(*m, m->remainingQty);  // the list is cleared below
         orderLookup_.erase(m->id);
         orderPool_.deallocate(m);
     }
@@ -3299,6 +3309,7 @@ void OrderBook::releaseOnCloseOrders() {
         }
         Quantity filled = o->initialQty - o->remainingQty;
         notifyOrderUpdate(o->id, OrderStatus::Cancelled, filled, 0);
+        releaseWorking(*o, o->remainingQty);  // the list is cleared below
         orderLookup_.erase(o->id);
         orderPool_.deallocate(o);
     }

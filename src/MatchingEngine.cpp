@@ -1085,15 +1085,10 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book || !book->getOrder(req.orderId)) {
             return;
         }
-        // P2-9: release working exposure before the order leaves the book.
-        // H1: read the exposure inside cancelOrderReleasing's own critical
-        // section. The previous form dereferenced an UNLOCKED getOrder()
-        // pointer into orderPool_, with no guarantee the order was still
-        // alive — a concurrent fill or a shutdown sweep frees that slot.
         // req.participantId is the requester here, not the order's owner: for
         // a Cancel it is whoever asked, and kAnyParticipant when the caller is
-        // internal. A denied cancel must not journal or release exposure, so
-        // bail before either.
+        // internal. A denied cancel must not journal, so bail first. The
+        // order's working quantity goes back inside the book (untrackOrder).
         const auto exposure =
             book->cancelOrderReleasing(req.orderId, req.participantId);
         if (exposure.denied) [[unlikely]] {
@@ -1102,9 +1097,6 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                              .kv("symbol_id", (long long)req.symbolId)
                              .kv("requester", (unsigned long long)req.participantId));
             return;
-        }
-        if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-            releasePosition(exposure);
         }
         if (journal_) {
             {
@@ -1183,15 +1175,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                 if (everyone || o.participantId == req.participantId) ids.push_back(o.id);
             });
             for (OrderId id : ids) {
-                // H1: read the exposure inside cancelOrderReleasing's own critical
-                // section. The previous form dereferenced an UNLOCKED getOrder()
-                // pointer into orderPool_, with no guarantee the order was still
-                // alive — a concurrent fill or a shutdown sweep frees that slot.
-                if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                    releasePosition(book->cancelOrderReleasing(id));
-                } else {
-                    book->cancelOrder(id);
-                }
+                book->cancelOrder(id);  // its working quantity goes back in the book
                 if (journal_) {
                     std::lock_guard<std::mutex> lock(journalMutex_);
                     journal_->logCancelOrder(id, book->getSymbolId());
@@ -1445,15 +1429,7 @@ uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
         });
         cancelled += ids.size();
         for (OrderId id : ids) {
-            // H1: read the exposure inside cancelOrderReleasing's own critical
-            // section. The previous form dereferenced an UNLOCKED getOrder()
-            // pointer into orderPool_, with no guarantee the order was still
-            // alive — a concurrent fill or a shutdown sweep frees that slot.
-            if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                releasePosition(book->cancelOrderReleasing(id));
-            } else {
-                book->cancelOrder(id);
-            }
+            book->cancelOrder(id);  // its working quantity goes back in the book
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
                 journal_->logCancelOrder(id, book->getSymbolId());
@@ -1504,15 +1480,7 @@ size_t MatchingEngine::cancelDayOrders(const std::vector<SymbolId>& symbols) {
             if (o.timeInForce == TimeInForce::DAY) dayIds.push_back(o.id);
         });
         for (OrderId id : dayIds) {
-            // H1: read the exposure inside cancelOrderReleasing's own critical
-            // section. The previous form dereferenced an UNLOCKED getOrder()
-            // pointer into orderPool_, with no guarantee the order was still
-            // alive — a concurrent fill or a shutdown sweep frees that slot.
-            if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                releasePosition(book->cancelOrderReleasing(id));
-            } else {
-                book->cancelOrder(id);
-            }
+            book->cancelOrder(id);  // its working quantity goes back in the book
             if (journal_) {
                 std::lock_guard<std::mutex> jl(journalMutex_);
                 journal_->logCancelOrder(id, book->getSymbolId());
@@ -1650,9 +1618,6 @@ void MatchingEngine::settleFill(ParticipantId pid, Side side, Quantity qty) {
     working_[pid][sideIndex(side)].fetch_sub(q, std::memory_order_release);
 }
 
-void MatchingEngine::releasePosition(const OrderBook::OrderExposure& e) {
-    if (e.found) releaseWorking(e.participantId, e.side, e.remainingQty);
-}
 
 void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
                                         double maxDeviationPct, int64_t maxNotional) {
@@ -2108,12 +2073,8 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     // OrderExposure already reports `found` from inside the critical section,
     // so the pre-check was both racy and redundant — and dropping it removes a
     // lookup from the cancel path rather than adding one.
-    // P2-9: release the cancelled order's working exposure before it leaves the
-    // book (read remaining qty while the order still exists).
-    // H1: read the exposure inside cancelOrderReleasing's own critical
-    // section. The previous form dereferenced an UNLOCKED getOrder()
-    // pointer into orderPool_, with no guarantee the order was still
-    // alive — a concurrent fill or a shutdown sweep frees that slot.
+    // The order's working quantity goes back to the ledger inside the book
+    // (OrderBook::untrackOrder), on this path and every other way out.
     // One lock acquisition either way: cancelOrderReleasing() does the same
     // work as cancelOrder() plus reading three fields, which is cheaper than
     // taking bookLock_ a second time to ask about ownership separately.
@@ -2129,9 +2090,6 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     if (!exposure.found) [[unlikely]] {
         holdUntilDurable(0);
         return rejectedAsync(RejectReason::OrderNotFound);
-    }
-    if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-        releasePosition(exposure);
     }
     uint64_t appendOrdinal = 0;
     if (journal_) {

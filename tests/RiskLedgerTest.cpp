@@ -171,3 +171,398 @@ TEST_P(RiskPath, ConcurrentAdmissionsNeverExceedALimit) {
     EXPECT_LE(aFilled + static_cast<int64_t>(aResting), kLimit);
     EXPECT_LE(static_cast<int64_t>(bResting) - bFilled, kLimit);
 }
+
+// ─── STP-10: every removal path releases ────────────────────────────────────
+
+TEST_P(RiskPath, ExpiryReleases) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(engine.submitOrder(kSym, 1, kA, Side::Buy, kPx, 80, OrderType::Limit, 0, 0,
+                                   TimeInForce::GTD, /*expiry=*/1000).isAccepted());
+    drain();
+    ASSERT_EQ(engine.getPosition(kA), 80);
+    if (async()) {
+        engine.stopAsync();   // the sync expiry entry point is the one under test
+    }
+    engine.expireOrders(2000);
+    EXPECT_EQ(leaves(1), 0u);
+    EXPECT_EQ(engine.getPosition(kA), 0);
+}
+
+TEST_P(RiskPath, StpCutOfARestingOrderReleases) {
+    engine.setPositionLimit(kA, 100);
+    book().setSTPMode(kA, STPMode::CancelResting);
+    ASSERT_TRUE(add(1, kA, Side::Sell, kPx, 50).isAccepted());
+    ASSERT_TRUE(add(2, kA, Side::Buy, kPx, 30).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 0u);
+    EXPECT_EQ(leaves(2), 30u);
+    EXPECT_EQ(engine.getPosition(kA), 30);
+}
+
+TEST_P(RiskPath, StpDecreaseShrinksBothReservations) {
+    engine.setPositionLimit(kA, 100);
+    book().setSTPMode(kA, STPMode::DecreaseAndCancel);
+    ASSERT_TRUE(add(1, kA, Side::Sell, kPx, 50).isAccepted());
+    ASSERT_TRUE(add(2, kA, Side::Buy, kPx, 20).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 30u);
+    EXPECT_EQ(leaves(2), 0u);
+    EXPECT_EQ(engine.getPosition(kA), -30);
+}
+
+TEST_P(RiskPath, IocRemainderReleases) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kB, Side::Sell, kPx, 30).isAccepted());
+    ASSERT_TRUE(add(2, kA, Side::Buy, kPx, 100, OrderType::IOC).isAccepted());
+    drain();
+    EXPECT_EQ(engine.getPosition(kA), 30);
+    EXPECT_TRUE(add(3, kA, Side::Buy, kPx - 100, 70).isAccepted());
+    drain();
+    EXPECT_EQ(engine.getPosition(kA), 100);
+}
+
+TEST_P(RiskPath, RejectedFokRollsBack) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kB, Side::Sell, kPx, 30).isAccepted());
+    (void)add(2, kA, Side::Buy, kPx, 100, OrderType::FOK);
+    drain();
+    EXPECT_EQ(engine.getPosition(kA), 0);
+    EXPECT_TRUE(add(3, kA, Side::Buy, kPx - 100, 100).isAccepted());
+}
+
+// A parked order holds its reservation; electing it must not count it twice.
+TEST_P(RiskPath, ElectedStopDoesNotCountTwice) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(engine.submitOrder(kSym, 1, kA, Side::Buy, 0, 10, OrderType::Stop,
+                                   /*stopPrice=*/kPx).isAccepted());
+    drain();
+    ASSERT_EQ(engine.getPosition(kA), 10);
+    // Liquidity for the stop, then the print at kPx that elects it.
+    ASSERT_TRUE(add(2, kB, Side::Sell, kPx, 15).isAccepted());
+    ASSERT_TRUE(add(3, kB + 1, Side::Buy, kPx, 5).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 0u);
+    EXPECT_EQ(engine.getPosition(kA), 10);
+}
+
+TEST_P(RiskPath, ElectedStopRemainderReleases) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(engine.submitOrder(kSym, 1, kA, Side::Buy, 0, 50, OrderType::Stop,
+                                   /*stopPrice=*/kPx).isAccepted());
+    ASSERT_TRUE(add(2, kB, Side::Sell, kPx, 15).isAccepted());
+    ASSERT_TRUE(add(3, kB + 1, Side::Buy, kPx, 5).isAccepted());
+    drain();
+    // 10 of the 15 were left for the stop; the rest of it cancels as a market order.
+    EXPECT_EQ(leaves(1), 0u);
+    EXPECT_EQ(engine.getPosition(kA), 10);
+}
+
+TEST_P(RiskPath, AuctionRemainderReleases) {
+    engine.setPositionLimit(kA, 100);
+    engine.setPositionLimit(kB, 100);
+    ASSERT_EQ(engine.setTradingStateBatch({kSym}, TradingState::AuctionOpen), 1u);
+    ASSERT_TRUE(add(1, kA, Side::Buy, 0, 40, OrderType::Market).isAccepted());
+    ASSERT_TRUE(add(2, kB, Side::Sell, kPx, 15).isAccepted());
+    drain();
+    ASSERT_EQ(engine.getPosition(kA), 40);
+    ASSERT_EQ(engine.setTradingStateBatch({kSym}, TradingState::Continuous), 1u);
+    // 15 crossed; the parked market order's other 25 cancelled.
+    EXPECT_EQ(engine.getPosition(kA), 15);
+    EXPECT_EQ(engine.getPosition(kB), -15);
+}
+
+TEST_P(RiskPath, OnCloseOrderDroppedAtSessionEndReleases) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx, 40, OrderType::LOC).isAccepted());
+    drain();
+    ASSERT_EQ(engine.getPosition(kA), 40);
+    ASSERT_EQ(engine.setTradingStateBatch({kSym}, TradingState::PostClose), 1u);
+    EXPECT_EQ(leaves(1), 0u);
+    EXPECT_EQ(engine.getPosition(kA), 0);
+}
+
+// OCO cancels the sibling through a path that never reported the exposure.
+TEST(RiskLedgerOco, SiblingCancelReleases) {
+    MatchingEngine engine;
+    engine.addSymbol(kSym);
+    engine.getOrderBook(kSym)->setCircuitBreakerThreshold(1e9);
+    engine.setPositionLimit(kA, 100);
+    engine.startAsync(1, 1024);
+    engine.processOrder(kSym, 1, kA, Side::Sell, kPx + 100, 10, OrderType::Limit);
+    engine.processOrder(kSym, 2, kA, Side::Sell, kPx, 10, OrderType::Limit);
+    engine.waitForDrain();
+    engine.registerOco(kSym, 1, 2);
+    engine.processOrder(kSym, 3, kB, Side::Buy, kPx, 10, OrderType::Limit);
+    engine.waitForDrain();
+    EXPECT_EQ(engine.getOrderBook(kSym)->getOrder(1), nullptr);
+    EXPECT_EQ(engine.getPosition(kA), -10);
+    engine.stopAsync();
+}
+
+// ─── STP-10 property: ledger == live working quantity at every step ─────────
+
+namespace {
+
+// The ground truth: what the books hold right now, and what they say each
+// participant has executed. Compared with the ledger after every operation.
+void expectLedgerMatchesBooks(MatchingEngine& engine, const std::vector<ParticipantId>& pids,
+                              const std::string& where) {
+    std::map<std::pair<ParticipantId, Side>, int64_t> working;
+    for (SymbolId s : {SymbolId{1}, SymbolId{2}}) {
+        engine.getOrderBook(s)->forEachOrderLocked([&](const Order& o) {
+            working[{o.participantId, o.side}] += static_cast<int64_t>(o.remainingQty);
+        });
+    }
+    for (ParticipantId p : pids) {
+        int64_t filled = 0;
+        for (SymbolId s : {SymbolId{1}, SymbolId{2}})
+            filled += engine.getOrderBook(s)->getParticipantStats(p).netPosition;
+        ASSERT_EQ(engine.getWorkingQty(p, Side::Buy), (working[{p, Side::Buy}])) << "buys of " << p << " " << where;
+        ASSERT_EQ(engine.getWorkingQty(p, Side::Sell), (working[{p, Side::Sell}])) << "sells of " << p << " " << where;
+        ASSERT_EQ(engine.getFilledPosition(p), filled) << "filled of " << p << " " << where;
+    }
+}
+
+// Random flow over every order type, every removal path and every session
+// transition. Rejects, refused transitions and misses are all fine: only the
+// ledger is under test.
+class LedgerFlow {
+public:
+    LedgerFlow(MatchingEngine& engine, uint32_t seed, bool canExpire)
+        : engine_(engine), rng_(seed), canExpire_(canExpire) {}
+
+    void step(std::string* what) {
+        const int roll = pick(0, 99);
+        if (roll < 50) { add(what); return; }
+        if (roll < 65) { cancel(what); return; }
+        if (roll < 85) return;  // replace and modify arrive with their fix
+        if (roll < 88) {
+            const ParticipantId p = pid();
+            *what = "kill " + std::to_string(p);
+            engine_.killSwitch(p);
+            return;
+        }
+        if (roll == 88) {
+            *what = "kill all";
+            engine_.setKillSwitch(true);
+            engine_.setKillSwitch(false);
+            return;
+        }
+        if (roll < 92) {
+            if (!canExpire_) return;
+            clock_ += 5;
+            *what = "expire";
+            engine_.expireOrders(clock_);
+            return;
+        }
+        if (roll < 96) { oco(what); return; }
+        session(what);
+    }
+
+private:
+    int pick(int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng_); }
+    ParticipantId pid() { return static_cast<ParticipantId>(pick(1, 3)); }
+    SymbolId sym() { return static_cast<SymbolId>(pick(1, 2)); }
+    Price px() { return kPx + 100 * pick(-4, 4); }
+    Quantity qty() { return static_cast<Quantity>(pick(1, 40)); }
+    OrderId known() {
+        return nextId_ == 1 ? 1 : static_cast<OrderId>(pick(std::max<int>(1, static_cast<int>(nextId_) - 60),
+                                                            static_cast<int>(nextId_) - 1));
+    }
+
+    void add(std::string* what) {
+        const OrderId id = nextId_++;
+        const SymbolId s = sym();
+        const ParticipantId p = pid();
+        const Side side = pick(0, 1) ? Side::Buy : Side::Sell;
+        Price price = px();
+        const Quantity q = qty();
+        OrderType type = OrderType::Limit;
+        Price stop = 0, stopLimit = 0, trail = 0, pegOffset = 0;
+        Quantity display = 0, minQty = 0;
+        PegType peg = PegType::None;
+        TimeInForce tif = TimeInForce::GTC;
+        uint64_t expiry = 0;
+        switch (pick(0, 15)) {
+        case 0: type = OrderType::IOC; break;
+        case 1: type = OrderType::FOK; break;
+        case 2: type = OrderType::Market; price = 0; break;
+        case 3: type = OrderType::PostOnly; break;
+        case 4: type = OrderType::Iceberg; display = std::max<Quantity>(1, q / 4); break;
+        case 5: type = OrderType::Hidden; break;
+        case 6: type = OrderType::Stop; price = 0; stop = px(); break;
+        case 7: type = OrderType::StopLimit; price = 0; stop = px(); stopLimit = px(); break;
+        case 8: type = OrderType::MIT; price = 0; stop = px(); break;
+        case 9: type = OrderType::TrailingStop; trail = 200; break;
+        case 10: type = OrderType::Pegged; peg = pick(0, 1) ? PegType::MidPeg : PegType::PrimaryPeg; break;
+        case 11: type = OrderType::MOC; price = 0; break;
+        case 12: type = OrderType::LOC; break;
+        case 13: minQty = std::max<Quantity>(1, q / 2); if (pick(0, 1)) type = OrderType::IOC; break;
+        case 14: tif = TimeInForce::GTD; expiry = clock_ + static_cast<uint64_t>(pick(1, 20)); break;
+        default: tif = TimeInForce::DAY; break;
+        }
+        *what = "add " + std::to_string(id) + " type " + std::to_string(static_cast<int>(type));
+        (void)engine_.submitOrder(s, id, p, side, price, q, type, stop, display, tif, expiry,
+                                  stopLimit, peg, pegOffset, trail, minQty);
+        symbolOf_[id] = s;
+    }
+
+    void cancel(std::string* what) {
+        const OrderId id = known();
+        *what = "cancel " + std::to_string(id);
+        (void)engine_.submitCancel(symbolOf_[id], id);
+    }
+
+    void oco(std::string* what) {
+        const OrderId a = known(), b = known();
+        if (a == b || symbolOf_[a] != symbolOf_[b]) return;
+        *what = "oco";
+        engine_.registerOco(symbolOf_[a], a, b);
+    }
+
+    void session(std::string* what) {
+        const SymbolId s = sym();
+        static constexpr TradingState kStates[] = {
+            TradingState::AuctionOpen, TradingState::AuctionClose, TradingState::Continuous,
+            TradingState::VolatilityAuction, TradingState::Halted, TradingState::PostClose};
+        switch (pick(0, 8)) {
+        case 0:
+            *what = "uncross";
+            engine_.uncross(s);
+            break;
+        case 1:
+            *what = "end session";
+            (void)engine_.endTradingSession({s});
+            break;
+        case 2:
+            *what = "begin session";
+            (void)engine_.beginTradingSession({s}, ++tradingDate_);
+            break;
+        default: {
+            const TradingState next = kStates[pick(0, 5)];
+            *what = "state " + std::to_string(static_cast<int>(next));
+            (void)engine_.setTradingStateBatch({s}, next);
+            // Halted resumes only where it came from.
+            if (next == TradingState::Halted && pick(0, 1))
+                (void)engine_.setTradingStateBatch({s}, engine_.getOrderBook(s)->preHaltState());
+        }
+        }
+    }
+
+    MatchingEngine& engine_;
+    std::mt19937 rng_;
+    bool canExpire_;
+    OrderId nextId_ = 1;
+    std::map<OrderId, SymbolId> symbolOf_;
+    uint64_t clock_ = 1000;
+    uint32_t tradingDate_ = 20000;
+};
+
+void configureLedgerEngine(MatchingEngine& engine, uint32_t seed) {
+    engine.addSymbol(1);
+    engine.addSymbol(2, MatchAlgorithm::ProRata);
+    static constexpr STPMode kModes[] = {STPMode::DefaultCancelIncoming, STPMode::CancelResting,
+                                         STPMode::CancelBoth, STPMode::DecreaseAndCancel};
+    for (SymbolId s : {SymbolId{1}, SymbolId{2}}) {
+        OrderBook& book = *engine.getOrderBook(s);
+        book.setCircuitBreakerThreshold(1e9);
+        for (ParticipantId p : {ParticipantId{1}, ParticipantId{2}, ParticipantId{3}})
+            book.setSTPMode(p, kModes[(seed + p + s) % 4]);
+    }
+    // A tight limit, a wide one, and none: reservation refusals are in the flow.
+    engine.setPositionLimit(1, 60);
+    engine.setPositionLimit(2, 400);
+    engine.setPositionLimit(3, 0);
+}
+
+constexpr int kFlowSeeds = 4;
+constexpr int kFlowSteps = 1500;
+
+}  // namespace
+
+TEST(RiskLedgerProperty, SyncLedgerEqualsLiveWorkingQuantityAtEveryStep) {
+    for (uint32_t seed = 1; seed <= kFlowSeeds; ++seed) {
+        MatchingEngine engine;
+        configureLedgerEngine(engine, seed);
+        engine.start();
+        LedgerFlow flow(engine, seed, /*canExpire=*/true);
+        for (int i = 0; i < kFlowSteps; ++i) {
+            std::string what = "(nothing)";
+            flow.step(&what);
+            expectLedgerMatchesBooks(engine, {1, 2, 3},
+                                     "seed " + std::to_string(seed) + " step " + std::to_string(i) +
+                                         " after " + what);
+            if (::testing::Test::HasFatalFailure()) return;
+        }
+        // Not vacuous: the tight limit refused something and orders traded.
+        EXPECT_GT(engine.getPositionRejectCount(), 0u) << "seed " << seed;
+        EXPECT_NE(engine.getFilledPosition(1) | engine.getFilledPosition(2), 0) << "seed " << seed;
+    }
+}
+
+TEST(RiskLedgerProperty, AsyncLedgerEqualsLiveWorkingQuantityAtEveryStep) {
+    for (uint32_t seed = 1; seed <= kFlowSeeds; ++seed) {
+        MatchingEngine engine;
+        configureLedgerEngine(engine, seed);
+        engine.startAsync(2, 4096);
+        LedgerFlow flow(engine, seed, /*canExpire=*/true);
+        for (int i = 0; i < kFlowSteps; ++i) {
+            std::string what = "(nothing)";
+            flow.step(&what);
+            engine.waitForDrain();
+            expectLedgerMatchesBooks(engine, {1, 2, 3},
+                                     "seed " + std::to_string(seed) + " step " + std::to_string(i) +
+                                         " after " + what);
+            if (::testing::Test::HasFatalFailure()) return;
+        }
+        // Not vacuous: the tight limit refused something and orders traded.
+        EXPECT_GT(engine.getPositionRejectCount(), 0u) << "seed " << seed;
+        EXPECT_NE(engine.getFilledPosition(1) | engine.getFilledPosition(2), 0) << "seed " << seed;
+    }
+}
+
+// Replay and a checkpoint both drive the books directly, so the ledger is
+// rebuilt from them: each restored order reserved exactly once, and removing
+// it gives back exactly that.
+TEST(RiskLedgerProperty, RestartRebuildsTheLedgerAndCancellingEmptiesIt) {
+    for (const bool checkpoint : {false, true}) {
+        const std::string path = uniqueTempPath(std::string("risk_ledger_") +
+                                                (checkpoint ? "ckpt" : "plain") + ".wal");
+        std::remove(path.c_str());
+        std::map<std::pair<ParticipantId, Side>, int64_t> before;
+        {
+            MatchingEngine engine;
+            configureLedgerEngine(engine, 7);
+            ASSERT_TRUE(engine.enableJournal(path, Journal::SyncPolicy::Immediate));
+            engine.start();
+            LedgerFlow flow(engine, 7, /*canExpire=*/true);
+            std::string what;
+            for (int i = 0; i < 800; ++i) flow.step(&what);
+            expectLedgerMatchesBooks(engine, {1, 2, 3}, "before restart");
+            for (ParticipantId p : {ParticipantId{1}, ParticipantId{2}, ParticipantId{3}})
+                for (Side side : {Side::Buy, Side::Sell})
+                    before[{p, side}] = engine.getWorkingQty(p, side);
+            if (checkpoint) engine.checkpoint();
+            engine.stop();
+        }
+        MatchingEngine restarted;
+        configureLedgerEngine(restarted, 7);
+        ASSERT_TRUE(restarted.enableJournal(path, Journal::SyncPolicy::Immediate));
+        restarted.start();
+        restarted.replayJournal();
+        expectLedgerMatchesBooks(restarted, {1, 2, 3}, "after restart");
+        for (ParticipantId p : {ParticipantId{1}, ParticipantId{2}, ParticipantId{3}})
+            for (Side side : {Side::Buy, Side::Sell})
+                EXPECT_EQ(restarted.getWorkingQty(p, side), (before[{p, side}]))
+                    << "participant " << p << (checkpoint ? " checkpoint" : " plain");
+
+        for (ParticipantId p : {ParticipantId{1}, ParticipantId{2}, ParticipantId{3}})
+            restarted.killSwitch(p);
+        for (ParticipantId p : {ParticipantId{1}, ParticipantId{2}, ParticipantId{3}}) {
+            EXPECT_EQ(restarted.getWorkingQty(p, Side::Buy), 0);
+            EXPECT_EQ(restarted.getWorkingQty(p, Side::Sell), 0);
+        }
+        restarted.stop();
+        std::remove(path.c_str());
+    }
+}

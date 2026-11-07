@@ -947,15 +947,6 @@ private:
     void releaseWorking(ParticipantId pid, Side side, Quantity qty);
     // A fill turns qty of a participant's working quantity into position.
     void settleFill(ParticipantId pid, Side side, Quantity qty);
-    // Only the OrderExposure overload exists. The Order* one was removed: it
-    // had no callers, and it dereferenced a pooled Order — the exact hazard
-    // (H1) that OrderExposure was introduced to avoid by copying the fields it
-    // needs while the book lock is held. A dead function that reintroduces a
-    // fixed bug the moment someone reaches for it is worse than no function.
-    // H1 overload: takes the exposure BY VALUE, read under bookLock_ by
-    // OrderBook::cancelOrderReleasing(), so no Order* is dereferenced outside
-    // the lock. Prefer this at every cancel/sweep site.
-    void releasePosition(const OrderBook::OrderExposure& e);
     // Recompute every position from the books after they were restored from
     // journal state, which drives them directly: neither the reservations above
     // nor the fill accrual below ran. Caller holds bookMutex_.

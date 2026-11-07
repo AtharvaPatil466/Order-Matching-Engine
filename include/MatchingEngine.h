@@ -346,8 +346,8 @@ public:
     // reopening cross and return it to continuous trading. Returns the
     // count of books reopened. The engine also reopens each one by itself
     // once it has run its dwell (OrderBook::volatilityAuctionDue), from the
-    // expiry hook: the ExpireCheck sweep in async mode, expireOrders() —
-    // GatewayServer's tick — in sync mode.
+    // expiry hook: the ExpireCheck sweep in async mode, expireOrders() in
+    // sync mode.
     size_t resumeVolatilityAuctions();
 
     // End the trading session for `symbols`: move them to PostClose (which
@@ -361,8 +361,8 @@ public:
     // A DAY order with no expiryTime ends with the session, here. With no
     // session end scheduled nothing would end it — it rested as GTC — so
     // while this is false submitOrder refuses one (PRIOR-7). True by default,
-    // for an in-process owner that ends sessions itself; OrderEngine and
-    // GatewayServer set it false, and a SessionScheduler sets it true.
+    // for an in-process owner that ends sessions itself; OrderEngine sets it
+    // false, and a SessionScheduler sets it true.
     void setSessionEndScheduled(bool scheduled) {
         sessionEndScheduled_.store(scheduled, std::memory_order_release);
     }

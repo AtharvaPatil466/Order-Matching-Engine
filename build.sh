@@ -54,10 +54,7 @@ $CXX $FLAGS -c src/FaultInjector.cpp -o bin/FaultInjector.o
 LIB_OBJS="bin/OrderBook.o bin/MatchingEngine.o bin/FaultInjector.o"
 
 echo "Compiling main executable..."
-$CXX $FLAGS src/main.cpp $LIB_OBJS bin/AdminServer.o -o bin/OrderEngine
-
-echo "Compiling gateway server..."
-$CXX $FLAGS src/gateway_main.cpp $LIB_OBJS bin/TcpGateway.o -o bin/GatewayServer
+$CXX $FLAGS src/main.cpp $LIB_OBJS bin/AdminServer.o bin/TcpGateway.o -o bin/OrderEngine
 
 echo "Compiling market data subscriber..."
 $CXX $FLAGS src/md_subscriber.cpp $LIB_OBJS -o bin/MdSubscriber
@@ -116,7 +113,6 @@ $CXX $FLAGS tests/ItchMarketDataFeedTest.cpp $LIB_OBJS -o bin/ItchMarketDataFeed
 
 echo "Build successful!"
 echo "To run Engine:           ./bin/OrderEngine"
-echo "To run Gateway:          ./bin/GatewayServer [port]"
 echo "To run MD Subscriber:    ./bin/MdSubscriber [shm_name]"
 echo "To run Tests:            ./bin/ManualTest"
 echo "To run Stress Tests:     ./bin/StressTest"

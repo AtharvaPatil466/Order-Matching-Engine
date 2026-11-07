@@ -50,7 +50,6 @@ WORKDIR /app
 
 # Copy binaries
 COPY --from=builder /src/build/OrderEngine /app/
-COPY --from=builder /src/build/GatewayServer /app/
 COPY --from=builder /src/build/MdSubscriber /app/
 
 # Copy config template

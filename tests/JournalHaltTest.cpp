@@ -127,7 +127,7 @@ int inChild(const char* name, const std::function<int()>& body) {
     return WEXITSTATUS(status);
 }
 
-// Sync engine, as GatewayServer runs it: Immediate, durable acks on.
+// Sync engine: Immediate, durable acks on.
 void testSyncPathRejectsAndHolds() {
     const std::string path = uniqueTempPath("journal_halt_sync.wal");
     std::filesystem::remove(path);

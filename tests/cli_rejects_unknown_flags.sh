@@ -1,7 +1,7 @@
 #!/bin/sh
-# Both binaries must refuse an argument they do not understand.
+# The binary must refuse an argument it does not understand.
 #
-# WHAT WAS WRONG (DOC-3). OrderEngine and GatewayServer looked each flag up by
+# WHAT WAS WRONG (DOC-3). OrderEngine looked each flag up by
 # name and skipped everything else, so a misspelt or retired flag was dropped
 # without a word and the process started without it. The Runbook told operators
 # to pass `--lean` and `--replay-only`, neither of which exists: `--replay-only`
@@ -11,17 +11,16 @@
 # A refusal is checked with a deadline, because the failure being pinned is
 # "it started anyway", and a started binary never exits.
 #
-# Usage: cli_rejects_unknown_flags.sh <OrderEngine> <GatewayServer>
+# Usage: cli_rejects_unknown_flags.sh <OrderEngine>
 
 set -u
 unset OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_ADMIN_BIND OB_JOURNAL_PATH OB_CONFIG_PATH \
       OB_NODE_ROLE OB_PARTICIPANT_CREDENTIALS OB_NO_PARTICIPANT_AUTH \
-      OB_ENGINE_HOST OB_ENGINE_PORT OB_SESSION_SCHEDULE
+      OB_SESSION_SCHEDULE
 # The order port is not what this test is about: no credentials, any free port.
 export OB_NO_PARTICIPANT_AUTH=1 OB_GATEWAY_PORT=0
 
 ENGINE="$1"
-GATEWAY="$2"
 TMP="${TMPDIR:-/tmp}/ob_cli_flags_$$"
 mkdir -p "$TMP" || exit 1
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -81,7 +80,6 @@ must_start() {
 engine_ready() {
     python3 -c "import urllib.request as u; assert b'ready' in u.urlopen('http://127.0.0.1:29332/readyz', timeout=1).read()" 2>/dev/null
 }
-gateway_ready() { grep -qF "Order Gateway listening" "$LOG"; }
 
 must_refuse "OrderEngine --lean" "unknown argument '--lean'" \
     "$ENGINE" --admin-no-auth --port 29330 --lean
@@ -91,21 +89,16 @@ must_refuse "OrderEngine stray positional" "unknown argument '8080'" \
     "$ENGINE" --admin-no-auth 8080
 must_refuse "OrderEngine --journal with no value" "--journal needs a value" \
     "$ENGINE" --admin-no-auth --port 29330 --journal
-must_refuse "GatewayServer --bogus" "unknown argument '--bogus'" \
-    "$GATEWAY" 29331 --no-participant-auth --bogus
-must_refuse "GatewayServer PORT after a flag" "unknown argument '29331'" \
-    "$GATEWAY" --no-participant-auth 29331
+must_refuse "OrderEngine --gateway-port with no value" "--gateway-port needs a value" \
+    "$ENGINE" --admin-no-auth --port 29330 --gateway-port
 
 # A check that refuses everything is not a fix: every documented flag still works.
 must_start "OrderEngine, known flags" engine_ready \
-    "$ENGINE" --threads 1 --symbols 1 --port 29332 --admin-bind 127.0.0.1 --admin-no-auth
-must_start "GatewayServer, known flags" gateway_ready \
-    "$GATEWAY" 29333 --no-participant-auth
+    "$ENGINE" --threads 1 --symbols 1 --port 29332 --admin-bind 127.0.0.1 --admin-no-auth \
+    --gateway-port 0 --gateway-bind 127.0.0.1 --no-participant-auth
 run "$ENGINE" --help
 [ "$rc" = 0 ] && grep -qF -- "--journal PATH" "$LOG" && echo "  ok  OrderEngine --help" \
     || fail "OrderEngine --help: rc=$rc, or --journal missing from it"
-run "$GATEWAY" --help
-[ "$rc" = 0 ] && echo "  ok  GatewayServer --help" || fail "GatewayServer --help: rc=$rc"
 
 if [ "$fails" -ne 0 ]; then
     echo "FAIL: $fails case(s)"

@@ -261,10 +261,6 @@ target_link_libraries(OrderMatcherResearch PUBLIC OrderMatcher)
 add_executable(OrderEngine src/main.cpp)
 target_link_libraries(OrderEngine PRIVATE OrderMatcher)
 
-# Gateway Server
-add_executable(GatewayServer src/gateway_main.cpp)
-target_link_libraries(GatewayServer PRIVATE OrderMatcher)
-
 # Market Data Subscriber
 add_executable(MdSubscriber src/md_subscriber.cpp)
 target_link_libraries(MdSubscriber PRIVATE OrderMatcher)

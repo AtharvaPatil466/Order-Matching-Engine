@@ -151,20 +151,14 @@ set_tests_properties(ShutdownWatchdogTest PROPERTIES TIMEOUT 60 LABELS "project;
 
 # The order-entry port must refuse to serve unauthenticated (H7, GW-6), and must
 # still start when it is configured or when the opt-out is explicit. Driven
-# against the real binary because the decision lives in src/gateway_main.cpp.
-#
-# This REPLACES a pure-CMake `add_test(... COMMAND GatewayServer 0)` with
-# WILL_FAIL TRUE. That test rotted: once gateway_main learned to validate its
-# port argument, "0" was rejected with "PORT must be 1-65535" and the process
-# exited 1 before reaching the credentials check at all. WILL_FAIL cannot tell a
-# refusal from an argument error, so it stayed green while testing nothing.
+# against the real binary because the decision lives in src/main.cpp.
 #
 # The script pins WHY each case exits, and runs the refusing cases with a
-# deadline — a gateway that decides to serve never exits, so an exit-code
+# deadline — an engine that decides to serve never exits, so an exit-code
 # assertion cannot observe that failure and a command substitution would hang.
 add_test(NAME GatewayRequiresCredentialsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/gateway_requires_credentials.sh
-                 $<TARGET_FILE:GatewayServer>)
+                 $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayRequiresCredentialsTest PROPERTIES
     TIMEOUT 180
     LABELS "project;security")
@@ -309,12 +303,12 @@ set_tests_properties(EngineRefusesUnreadableJournalTest PROPERTIES
     TIMEOUT 60
     LABELS "project;recovery")
 
-# An argument neither binary understands is fatal (DOC-3). Both skipped unknown
-# flags, so the Runbook's `--lean` and `--replay-only` were dropped silently and
+# An argument the binary does not understand is fatal (DOC-3). It used to skip
+# unknown flags, so the Runbook's `--lean` and `--replay-only` were dropped silently and
 # the process started without them. Deadline-driven: the defect is "it started".
 add_test(NAME CliRejectsUnknownFlagsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cli_rejects_unknown_flags.sh
-                 $<TARGET_FILE:OrderEngine> $<TARGET_FILE:GatewayServer>)
+                 $<TARGET_FILE:OrderEngine>)
 set_tests_properties(CliRejectsUnknownFlagsTest PROPERTIES
     TIMEOUT 120
     LABELS "project;lifecycle")
@@ -853,16 +847,15 @@ enable_assertions(JournalIdCountersTest)
 add_test(NAME JournalIdCountersTest COMMAND JournalIdCountersTest)
 set_tests_properties(JournalIdCountersTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
-# The order-entry port must journal what it acknowledges: GatewayServer had no
-# journal at all, so a restart lost every order it had accepted. Driven against
-# the real binary through the order port — acknowledge, restart, then cancel the
-# order (Ack = it survived) and cancel it again (must be refused, so the probe
-# can tell the two apart).
+# The order-entry port must journal what it acknowledges. Driven against the real
+# binary through the order port — acknowledge, restart, then cancel the order and
+# read /book (a level changes = it survived), and cancel it again (nothing changes,
+# so the probe can tell the two apart). Ports 31520-31539.
 add_executable(GatewayJournalRestartTest GatewayJournalRestartTest.cpp)
 target_link_libraries(GatewayJournalRestartTest PRIVATE OrderMatcher)
 enable_assertions(GatewayJournalRestartTest)
 add_test(NAME GatewayJournalRestartTest
-         COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
+         COMMAND GatewayJournalRestartTest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
 # Roadmap 1.2-B2: OrderEngine is the binary clients trade through. A client logs
@@ -877,35 +870,34 @@ add_test(NAME OrderEngineGatewayTest
 set_tests_properties(OrderEngineGatewayTest PROPERTIES TIMEOUT 120
                      LABELS "project;recovery;security;integration")
 
-# Roadmap 1.3-C4 (2.8): kill -9 GatewayServer at a random point in a stream of
+# Roadmap 1.3-C4 (2.8): kill -9 OrderEngine at a random point in a stream of
 # adds and cancels, restart on the same journal, and require every acknowledged
-# order present and every acknowledged cancel still applied.
+# order present and every acknowledged cancel still applied. Ports 31540-31559.
 add_executable(CrashRecoveryE2ETest CrashRecoveryE2ETest.cpp)
 target_link_libraries(CrashRecoveryE2ETest PRIVATE OrderMatcher)
 enable_assertions(CrashRecoveryE2ETest)
 add_test(NAME CrashRecoveryE2ETest
-         COMMAND CrashRecoveryE2ETest $<TARGET_FILE:GatewayServer>)
+         COMMAND CrashRecoveryE2ETest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(CrashRecoveryE2ETest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
-# A GTD order must be gone once its time passes. Neither binary ran the expiry
-# sweep, so GatewayServer let GTD orders rest and trade forever. Black-box: a GTD
-# due in 1 s, a GTD due in 1 h and a GTC; after the wait, a cancel for each —
-# OrderNotFound for the first, Ack for the other two.
+# A GTD order entered on the order port must be gone once its time passes.
+# Black-box: a GTD due in 1 s, a GTD due in 1 h and a GTC; after the wait, /book
+# holds the last two only. Ports 31560-31564 and 31570-31574.
 add_executable(GatewayExpiresGtdTest GatewayExpiresGtdTest.cpp)
 target_link_libraries(GatewayExpiresGtdTest PRIVATE OrderMatcher)
 enable_assertions(GatewayExpiresGtdTest)
 add_test(NAME GatewayExpiresGtdTest
-         COMMAND GatewayExpiresGtdTest $<TARGET_FILE:GatewayServer>)
+         COMMAND GatewayExpiresGtdTest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayExpiresGtdTest PROPERTIES TIMEOUT 120 LABELS "project;lifecycle")
 
-# GatewayServer's market-data ring must have one writer (LF-2): snapshots were
-# published, and the book read, from main() while the event thread published
-# updates. Black-box; the race shows as a non-zero exit under ThreadSanitizer.
+# OrderEngine's market-data ring takes one writer at a time (LF-2) though every
+# worker publishes. Black-box; a race shows as a non-zero exit under
+# ThreadSanitizer. Ports 31565-31569 and 31575-31579.
 add_executable(GatewayMarketDataThreadTest GatewayMarketDataThreadTest.cpp)
 target_link_libraries(GatewayMarketDataThreadTest PRIVATE OrderMatcher)
 enable_assertions(GatewayMarketDataThreadTest)
 add_test(NAME GatewayMarketDataThreadTest
-         COMMAND GatewayMarketDataThreadTest $<TARGET_FILE:GatewayServer>)
+         COMMAND GatewayMarketDataThreadTest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayMarketDataThreadTest PROPERTIES TIMEOUT 120
                      LABELS "project;concurrency")
 
@@ -1448,8 +1440,7 @@ gtest_discover_tests(SimulationTest
 # shipped binary. Labelled project so every lane checks its own build.
 add_test(NAME NoResearchInEngineTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_research_in_engine.sh
-                 $<TARGET_FILE:OrderMatcher> $<TARGET_FILE:OrderEngine>
-                 $<TARGET_FILE:GatewayServer>)
+                 $<TARGET_FILE:OrderMatcher> $<TARGET_FILE:OrderEngine>)
 set_tests_properties(NoResearchInEngineTest PROPERTIES TIMEOUT 60 LABELS "project")
 
 # Roadmap 2.4: every guarantee marked in README, Compliance, Verification and

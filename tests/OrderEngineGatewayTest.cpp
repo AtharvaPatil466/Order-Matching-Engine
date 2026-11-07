@@ -1,9 +1,9 @@
 // OrderEngineGatewayTest — OrderEngine is the binary clients trade through
 // (roadmap 1.2-B2: DOC-7, THR-11).
 //
-// WHAT WAS WRONG. OrderEngine had a journal and no order-entry port, and the
-// separate GatewayServer had the port, a second engine, and only symbols 0 and 1.
-// No client order could reach the engine the operator was looking at.
+// WHAT WAS WRONG. OrderEngine had a journal and no order-entry port, and a separate
+// binary had the port, a second engine, and only symbols 0 and 1. No client order
+// could reach the engine the operator was looking at.
 //
 // THE FLOW. Against the real binary: log in on the order port, rest an order and
 // cross it on symbol 1, read the fill off /book, rest another, and SIGKILL the

@@ -1,10 +1,7 @@
 #pragma once
 
-// Command-line and environment lookup shared by the engine and gateway
-// binaries. Both follow the same precedence — an explicit flag wins, then the
-// environment variable, then the default — and both now have a security
-// default that refuses to start, so the two had better agree on what "the
-// operator opted out" looks like.
+// Command-line and environment lookup for OrderEngine. An explicit flag wins,
+// then the environment variable, then the default.
 
 #include <cstdlib>
 #include <cstring>
@@ -50,11 +47,11 @@ struct CliFlag {
 // What is wrong with argv[first..], or "" when every argument is a known flag
 // followed by its value if it takes one.
 //
-// Both binaries used to look each flag up by name and skip everything else, so
+// The binary used to look each flag up by name and skip everything else, so
 // a misspelt or retired flag was dropped without a word and the process started
 // without it (DOC-3: the Runbook's `--lean` and `--replay-only` did nothing). An
-// ignored flag looks exactly like one that took effect, so neither binary may
-// start on an argument it does not understand.
+// ignored flag looks exactly like one that took effect, so nothing may start on
+// an argument it does not understand.
 inline std::string cliArgsError(int argc, char** argv, std::span<const CliFlag> known,
                                 int first = 1) {
     for (int i = first; i < argc; ++i) {

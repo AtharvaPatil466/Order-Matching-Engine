@@ -1,8 +1,9 @@
 #pragma once
 
-// Drive a real GatewayServer process: fork/exec it on a port with a journal,
-// talk to it over the length-prefixed framing, stop it cleanly. Shared by the
-// tests that can only observe the binary from outside.
+// Drive a real OrderEngine process: fork/exec it with a journal, talk to its
+// order port over the length-prefixed framing, read its book from the admin
+// port, stop it cleanly. Shared by the tests that can only observe the binary
+// from outside.
 
 #include "MatchingEngine.h"
 #include "TempPath.h"
@@ -96,35 +97,6 @@ private:
     int fd_{-1};
 };
 
-// Start GatewayServer on `port` with `journal`, or return -1 if it exited
-// before listening (a taken port, or a refusal to boot).
-inline pid_t startGateway(const char* bin, uint16_t port, const std::string& journal) {
-    const pid_t pid = fork();
-    if (pid == 0) {
-        // Unset, not blank: a set-but-empty OB_ENGINE_HOST sends the gateway
-        // down the forwarding path, and inherited credentials would change
-        // which boot this is.
-        for (const char* v : {"OB_ENGINE_HOST", "OB_ENGINE_PORT", "OB_JOURNAL_PATH",
-                              "OB_PARTICIPANT_CREDENTIALS", "OB_NO_PARTICIPANT_AUTH",
-                              "OB_REPLAY_LEGACY_JOURNAL"})
-            unsetenv(v);
-        const std::string p = std::to_string(port);
-        execl(bin, bin, p.c_str(), "--journal", journal.c_str(), "--no-participant-auth",
-              static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    for (int i = 0; i < 200; ++i) {                 // up to 10 s
-        int status = 0;
-        if (waitpid(pid, &status, WNOHANG) == pid) return -1;
-        Client probe;
-        if (probe.connect(port)) return pid;
-        usleep(50 * 1000);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, nullptr, 0);
-    return -1;
-}
-
 // Start OrderEngine with its order port on `gatewayPort` and `args` as the rest
 // of its command line, or return -1 if it exited before that port answered (a
 // taken port, or a refusal to boot). Nothing is inherited that would change
@@ -171,12 +143,47 @@ inline std::string httpGet(uint16_t port, const std::string& path) {
     return body == std::string::npos ? std::string{} : reply.substr(body + 4);
 }
 
+// A process in these tests has its admin port this far above its order port.
+inline constexpr uint16_t kAdminPortOffset = 10;
+
+// OrderEngine with `journal`, no order-port credentials and two workers, on the
+// first free port from `port` up (which it updates); the admin port follows it
+// at kAdminPortOffset.
 inline pid_t startOnFreePort(const char* bin, uint16_t& port, const std::string& journal) {
     for (int attempt = 0; attempt < 10; ++attempt, ++port) {
-        const pid_t pid = startGateway(bin, port, journal);
+        const pid_t pid = startEngine(bin, port,
+                                      {"--journal", journal, "--no-participant-auth",
+                                       "--admin-no-auth",
+                                       "--port", std::to_string(port + kAdminPortOffset),
+                                       "--symbols", "2", "--threads", "2"});
         if (pid > 0) return pid;
     }
     return -1;
+}
+
+// The orders resting on `symbol`, summed over the levels of /book, which lists ten
+// a side: a test counting with this keeps its orders within ten levels. -1 if
+// /book did not answer.
+inline int restingOrders(uint16_t adminPort, SymbolId symbol) {
+    const std::string body = httpGet(adminPort, "/book?symbolId=" + std::to_string(symbol));
+    if (body.empty()) return -1;
+    static const std::string kField = "\"orders\":";
+    int total = 0;
+    for (size_t at = body.find(kField); at != std::string::npos; at = body.find(kField, at + 1)) {
+        total += std::atoi(body.c_str() + at + kField.size());
+    }
+    return total;
+}
+
+// Cancel `id` and report whether /book lost an order for it. The answer alone
+// cannot say: on the async engine a cancel of an unknown id also answers Ack,
+// because the worker decides that (roadmap 1.9-I7), and the ack comes after the
+// worker ran, so /book is settled by then.
+inline bool cancelRemoved(Client& c, uint16_t adminPort, const OrderRequest& cancel) {
+    const int before = restingOrders(adminPort, cancel.symbolId);
+    GatewayResponse r{};
+    if (!c.send(cancel) || !c.answerFor(cancel.orderId, r)) return false;
+    return before >= 0 && restingOrders(adminPort, cancel.symbolId) == before - 1;
 }
 
 // SIGTERM and wait for a clean exit — the path that flushes the journal.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run docs/Runbook.md: every ```bash block, top to bottom, in one shell, inside
-# ubuntu:24.04 against OrderEngine / GatewayServer / JournalReplayCLI built from
+# ubuntu:24.04 against OrderEngine / JournalReplayCLI built from
 # this tree (roadmap 1.12-L1, DOC-3).
 #
 # WHY. The Runbook used to cite flags, signals, endpoints and scripts that did
@@ -14,12 +14,11 @@
 #     directly above its fence. Skipped blocks are listed with their reason.
 #   * A non-bash block (config, sample output) without that marker is an error,
 #     so nothing is skipped silently.
-#   * Every flag in the first column of a Runbook table must appear in the
-#     --help of the binary that section describes (GatewayServer under a
-#     heading naming it, OrderEngine otherwise).
+#   * Every flag in the first column of a Runbook table must appear in
+#     OrderEngine's --help.
 #
 # The source is mounted read-only and built inside the container. Ports bound
-# here (8080, 9876, 9877) live in the container's own network namespace.
+# here (8080, 9001) live in the container's own network namespace.
 #
 # Usage: scripts/runbook_smoke.sh
 
@@ -46,11 +45,11 @@ DOCKERFILE
 fi
 
 # ── Inside the container ─────────────────────────────────────────────────────
-echo "==> building OrderEngine GatewayServer MdSubscriber JournalReplayCLI"
+echo "==> building OrderEngine MdSubscriber JournalReplayCLI"
 cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
       -DBUILD_BENCHMARKS=OFF > /build.log 2>&1 || { cat /build.log; exit 1; }
 cmake --build /build --parallel 2 \
-      --target OrderEngine GatewayServer MdSubscriber JournalReplayCLI \
+      --target OrderEngine MdSubscriber JournalReplayCLI \
       >> /build.log 2>&1 || { tail -50 /build.log; exit 1; }
 export PATH="/build:/build/tools:$PATH"
 
@@ -61,16 +60,13 @@ src, out = sys.argv[1], sys.argv[2]
 lines = open(src, encoding="utf-8").read().split("\n")
 skip_re = re.compile(r"^<!-- runbook-smoke: skip — (.+) -->$")
 errors, blocks, skipped, flags = [], [], [], []
-heading, i = "", 0
+i = 0
 while i < len(lines):
     line = lines[i]
-    if line.startswith("## "):
-        heading = line
     if line.startswith("|") and not line.startswith("|---"):
         first = line.split("|")[1]
-        binary = "GatewayServer" if "GatewayServer" in heading else "OrderEngine"
         for tok in re.findall(r"`(-[^`\s]+)", first):
-            flags.append((tok, binary, i + 1))
+            flags.append((tok, i + 1))
     if line.startswith("```"):
         lang, start = line[3:].strip(), i + 1
         j = i + 1
@@ -90,11 +86,10 @@ while i < len(lines):
         i = j
     i += 1
 
-helps = {b: subprocess.run([b, "--help"], capture_output=True, text=True).stdout
-         for b in ("OrderEngine", "GatewayServer")}
-for tok, binary, ln in flags:
-    if not re.search(r"^\s+" + re.escape(tok) + r"(\s|$)", helps[binary], re.M):
-        errors.append(f"Runbook.md:{ln}: table lists {tok}, which `{binary} --help` does not")
+help_text = subprocess.run(["OrderEngine", "--help"], capture_output=True, text=True).stdout
+for tok, ln in flags:
+    if not re.search(r"^\s+" + re.escape(tok) + r"(\s|$)", help_text, re.M):
+        errors.append(f"Runbook.md:{ln}: table lists {tok}, which `OrderEngine --help` does not")
 
 for ln, lang, why in skipped:
     print(f"SKIP  Runbook.md:{ln} ```{lang} — {why}")

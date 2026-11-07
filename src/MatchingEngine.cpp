@@ -1644,7 +1644,8 @@ void MatchingEngine::setOtrLimit(double maxRatio, uint64_t windowMs, uint64_t mi
 }
 
 RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
-                                               Price price, Quantity qty, OrderType type) {
+                                               Price price, Quantity qty, OrderType type,
+                                               Quantity reserve) {
     // ── P2-10 FAT-FINGER (per instrument) ───────────────────────────────────
     if (fatFingerActive_.load(std::memory_order_relaxed) && sym < MAX_RISK_SYMBOLS) {
         const uint64_t maxQty = ffMaxQty_[sym].load(std::memory_order_relaxed);
@@ -1677,9 +1678,9 @@ RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, 
     }
 
     // ── P2-9 POSITION LIMIT (per participant, per side, reserved here) ──────
-    const bool reserving =
+    const bool reserving = reserve != 0 &&
         positionLimitsActive_.load(std::memory_order_relaxed) && pid < MAX_PARTICIPANTS;
-    if (reserving && !tryReserveWorking(pid, side, qty)) {
+    if (reserving && !tryReserveWorking(pid, side, reserve)) {
         positionRejects_.fetch_add(1, std::memory_order_relaxed);
         logRiskReject("position_limit", sym, pid, RejectReason::PositionLimitExceeded);
         return RejectReason::PositionLimitExceeded;
@@ -1704,7 +1705,7 @@ RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, 
         // Integer form of orders/trades > maxRatio (trades == 0 ⇒ any orders trip).
         if (orders >= otrMinOrders_ &&
             static_cast<double>(orders) > otrMaxRatio_ * static_cast<double>(trades)) {
-            if (reserving) releaseWorking(pid, side, qty);
+            if (reserving) releaseWorking(pid, side, reserve);
             otrRejects_.fetch_add(1, std::memory_order_relaxed);
             logRiskReject("otr", sym, pid, RejectReason::OrderToTradeRatioExceeded);
             return RejectReason::OrderToTradeRatioExceeded;
@@ -1732,6 +1733,21 @@ RejectReason MatchingEngine::checkBookValuedNotional(const OrderBook& book, Symb
     fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
     logRiskReject("fat_finger_notional", sym, pid, RejectReason::FatFingerReject);
     return RejectReason::FatFingerReject;
+}
+
+// Runs under the book lock, from cancelReplace / modifyOrder once the book's own
+// checks passed. Growth in leaves is reserved like a new order; a shrink is
+// released by the book after this returns None. Kill and halt are I6's.
+RejectReason MatchingEngine::admitAmend(const Order& o, Price newPrice, Quantity newTotal,
+                                        Quantity newLeaves) {
+    if (!anyRiskActive_.load(std::memory_order_relaxed)) return RejectReason::None;
+    const Quantity growth = newLeaves > o.remainingQty ? newLeaves - o.remainingQty : 0;
+    // A shrink at the same price is a partial cancel: it moves no price and
+    // adds no notional, so the band and the notional cap are not asked. The
+    // size cap still is — it may have been tightened since the order arrived.
+    const bool reduceOnly = growth == 0 && newPrice == o.price;
+    return checkRiskControls(o.symbolId, o.participantId, o.side, reduceOnly ? 0 : newPrice,
+                             newTotal, o.type, growth);
 }
 
 void MatchingEngine::onRiskFill(const Trade& t) {
@@ -1915,7 +1931,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     // the submitOrder entry point in BOTH sync and async modes, before the order
     // is enqueued or booked. Skipped entirely (one atomic load) when unconfigured.
     if (anyRiskActive_.load(std::memory_order_relaxed)) {
-        RejectReason rr = checkRiskControls(symbolId, participantId, side, price, qty, type);
+        RejectReason rr = checkRiskControls(symbolId, participantId, side, price, qty, type, qty);
         if (rr != RejectReason::None) [[unlikely]] {
             return rejectedAsync(rr);
         }

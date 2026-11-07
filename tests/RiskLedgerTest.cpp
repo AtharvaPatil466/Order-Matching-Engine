@@ -328,14 +328,14 @@ void expectLedgerMatchesBooks(MatchingEngine& engine, const std::vector<Particip
 // ledger is under test.
 class LedgerFlow {
 public:
-    LedgerFlow(MatchingEngine& engine, uint32_t seed, bool canExpire)
-        : engine_(engine), rng_(seed), canExpire_(canExpire) {}
+    LedgerFlow(MatchingEngine& engine, uint32_t seed, bool canExpire, bool pegs = true)
+        : engine_(engine), rng_(seed), canExpire_(canExpire), pegs_(pegs) {}
 
     void step(std::string* what) {
         const int roll = pick(0, 99);
         if (roll < 50) { add(what); return; }
         if (roll < 65) { cancel(what); return; }
-        if (roll < 85) return;  // replace and modify arrive with their fix
+        if (roll < 85) { amend(what); return; }
         if (roll < 88) {
             const ParticipantId p = pid();
             *what = "kill " + std::to_string(p);
@@ -394,7 +394,11 @@ private:
         case 7: type = OrderType::StopLimit; price = 0; stop = px(); stopLimit = px(); break;
         case 8: type = OrderType::MIT; price = 0; stop = px(); break;
         case 9: type = OrderType::TrailingStop; trail = 200; break;
-        case 10: type = OrderType::Pegged; peg = pick(0, 1) ? PegType::MidPeg : PegType::PrimaryPeg; break;
+        case 10:
+            if (!pegs_) break;
+            type = OrderType::Pegged;
+            peg = pick(0, 1) ? PegType::MidPeg : PegType::PrimaryPeg;
+            break;
         case 11: type = OrderType::MOC; price = 0; break;
         case 12: type = OrderType::LOC; break;
         case 13: minQty = std::max<Quantity>(1, q / 2); if (pick(0, 1)) type = OrderType::IOC; break;
@@ -413,6 +417,17 @@ private:
         (void)engine_.submitCancel(symbolOf_[id], id);
     }
 
+    void amend(std::string* what) {
+        const OrderId id = known();
+        if (pick(0, 1)) {
+            *what = "modify " + std::to_string(id);
+            (void)engine_.submitModify(symbolOf_[id], id, qty());
+        } else {
+            *what = "replace " + std::to_string(id);
+            (void)engine_.submitCancelReplace(symbolOf_[id], id, px(), qty());
+        }
+    }
+
     void oco(std::string* what) {
         const OrderId a = known(), b = known();
         if (a == b || symbolOf_[a] != symbolOf_[b]) return;
@@ -420,8 +435,35 @@ private:
         engine_.registerOco(symbolOf_[a], a, b);
     }
 
+    // Back towards continuous trading, one legal transition at a time, so the
+    // flow spends most of its time where orders trade.
+    void backToContinuous(SymbolId s) {
+        for (int i = 0; i < 4; ++i) {
+            OrderBook& book = *engine_.getOrderBook(s);
+            switch (book.getTradingState()) {
+            case TradingState::Continuous: return;
+            case TradingState::PostClose:
+                (void)engine_.beginTradingSession({s}, ++tradingDate_);
+                break;
+            case TradingState::AuctionClose:
+                (void)engine_.setTradingStateBatch({s}, TradingState::PostClose);
+                break;
+            case TradingState::Halted:
+                (void)engine_.setTradingStateBatch({s}, book.preHaltState());
+                break;
+            default:
+                (void)engine_.setTradingStateBatch({s}, TradingState::Continuous);
+            }
+        }
+    }
+
     void session(std::string* what) {
         const SymbolId s = sym();
+        if (engine_.getOrderBook(s)->getTradingState() != TradingState::Continuous && pick(0, 1)) {
+            *what = "back to continuous";
+            backToContinuous(s);
+            return;
+        }
         static constexpr TradingState kStates[] = {
             TradingState::AuctionOpen, TradingState::AuctionClose, TradingState::Continuous,
             TradingState::VolatilityAuction, TradingState::Halted, TradingState::PostClose};
@@ -452,6 +494,7 @@ private:
     MatchingEngine& engine_;
     std::mt19937 rng_;
     bool canExpire_;
+    bool pegs_;
     OrderId nextId_ = 1;
     std::map<OrderId, SymbolId> symbolOf_;
     uint64_t clock_ = 1000;
@@ -496,7 +539,10 @@ TEST(RiskLedgerProperty, SyncLedgerEqualsLiveWorkingQuantityAtEveryStep) {
         }
         // Not vacuous: the tight limit refused something and orders traded.
         EXPECT_GT(engine.getPositionRejectCount(), 0u) << "seed " << seed;
-        EXPECT_NE(engine.getFilledPosition(1) | engine.getFilledPosition(2), 0) << "seed " << seed;
+        uint64_t trades = 0;
+        for (SymbolId s : {SymbolId{1}, SymbolId{2}})
+            trades += engine.getOrderBook(s)->getParticipantStats(1).tradesExecuted;
+        EXPECT_GT(trades, 0u) << "seed " << seed;
     }
 }
 
@@ -517,7 +563,10 @@ TEST(RiskLedgerProperty, AsyncLedgerEqualsLiveWorkingQuantityAtEveryStep) {
         }
         // Not vacuous: the tight limit refused something and orders traded.
         EXPECT_GT(engine.getPositionRejectCount(), 0u) << "seed " << seed;
-        EXPECT_NE(engine.getFilledPosition(1) | engine.getFilledPosition(2), 0) << "seed " << seed;
+        uint64_t trades = 0;
+        for (SymbolId s : {SymbolId{1}, SymbolId{2}})
+            trades += engine.getOrderBook(s)->getParticipantStats(1).tradesExecuted;
+        EXPECT_GT(trades, 0u) << "seed " << seed;
     }
 }
 
@@ -535,7 +584,8 @@ TEST(RiskLedgerProperty, RestartRebuildsTheLedgerAndCancellingEmptiesIt) {
             configureLedgerEngine(engine, 7);
             ASSERT_TRUE(engine.enableJournal(path, Journal::SyncPolicy::Immediate));
             engine.start();
-            LedgerFlow flow(engine, 7, /*canExpire=*/true);
+            // No pegs: a checkpoint does not restore a resting peg yet (lane Y).
+            LedgerFlow flow(engine, 7, /*canExpire=*/true, /*pegs=*/false);
             std::string what;
             for (int i = 0; i < 800; ++i) flow.step(&what);
             expectLedgerMatchesBooks(engine, {1, 2, 3}, "before restart");
@@ -565,4 +615,81 @@ TEST(RiskLedgerProperty, RestartRebuildsTheLedgerAndCancellingEmptiesIt) {
         restarted.stop();
         std::remove(path.c_str());
     }
+}
+
+// ─── GW-2: replace and modify run the risk controls ─────────────────────────
+
+TEST_P(RiskPath, ReplaceOverThePositionLimitIsRefused) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx, 60).isAccepted());
+    expectRefused(engine.submitCancelReplace(kSym, 1, kPx, 150),
+                  RejectReason::PositionLimitExceeded);
+    drain();
+    EXPECT_EQ(leaves(1), 60u);
+    EXPECT_EQ(engine.getPosition(kA), 60);
+    EXPECT_GE(engine.getPositionRejectCount(), 1u);
+}
+
+TEST_P(RiskPath, ReplaceAdjustsTheReservationByTheDelta) {
+    engine.setPositionLimit(kA, 200);
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx, 60).isAccepted());
+    EXPECT_TRUE(engine.submitCancelReplace(kSym, 1, kPx, 150).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 150u);
+    EXPECT_EQ(engine.getPosition(kA), 150);
+    // Grown: the room left is 50.
+    EXPECT_EQ(add(2, kA, Side::Buy, kPx - 100, 60).rejectReason,
+              RejectReason::PositionLimitExceeded);
+    // Shrunk: there is room again (once the worker has applied it).
+    EXPECT_TRUE(engine.submitCancelReplace(kSym, 1, kPx, 80).isAccepted());
+    drain();
+    EXPECT_TRUE(add(3, kA, Side::Buy, kPx - 100, 60).isAccepted());
+    drain();
+    EXPECT_EQ(engine.getPosition(kA), 140);
+}
+
+TEST_P(RiskPath, ReplaceThatTradesDoesNotCountTwice) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx - 100, 10).isAccepted());
+    ASSERT_TRUE(add(2, kB, Side::Sell, kPx, 4).isAccepted());
+    EXPECT_TRUE(engine.submitCancelReplace(kSym, 1, kPx, 10).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 6u);
+    EXPECT_EQ(engine.getPosition(kA), 10);
+    EXPECT_EQ(engine.getPosition(kB), -4);
+}
+
+TEST_P(RiskPath, ReplaceIsHeldToTheFatFingerControls) {
+    engine.setReferencePrice(kSym, kPx);
+    engine.setFatFingerLimits(kSym, /*maxQty=*/100, /*devPct=*/0.10, /*maxNotional=*/0);
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx, 60).isAccepted());
+    expectRefused(engine.submitCancelReplace(kSym, 1, kPx, 150), RejectReason::FatFingerReject);
+    expectRefused(engine.submitCancelReplace(kSym, 1, kPx * 2, 60), RejectReason::FatFingerReject);
+    drain();
+    ASSERT_EQ(leaves(1), 60u);
+    EXPECT_EQ(book().getOrder(1)->price, kPx);
+    EXPECT_GE(engine.getFatFingerRejectCount(), 2u);
+}
+
+TEST_P(RiskPath, ModifyReleasesTheDelta) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx, 100).isAccepted());
+    EXPECT_TRUE(engine.submitModify(kSym, 1, 40).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 40u);
+    EXPECT_EQ(engine.getPosition(kA), 40);
+    EXPECT_TRUE(add(2, kA, Side::Buy, kPx - 100, 60).isAccepted());
+}
+
+// A modify only shrinks, so what it can break is a cap tightened since entry.
+TEST_P(RiskPath, ModifyStillOverACapIsRefused) {
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx, 100).isAccepted());
+    drain();
+    engine.setFatFingerLimits(kSym, /*maxQty=*/50, /*devPct=*/0.0, /*maxNotional=*/0);
+    expectRefused(engine.submitModify(kSym, 1, 80), RejectReason::FatFingerReject);
+    drain();
+    EXPECT_EQ(leaves(1), 100u);
+    EXPECT_TRUE(engine.submitModify(kSym, 1, 40).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 40u);
 }

@@ -2455,6 +2455,13 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
     if (newQty == 0) [[unlikely]] { reason = RejectReason::InvalidQuantity; return false; }
 
     if (newQty < order->remainingQty) {
+        const Quantity cut = order->remainingQty - newQty;
+        if (const RejectReason r = admitAmend(*order, order->price, order->initialQty - cut, newQty);
+            r != RejectReason::None) [[unlikely]] {
+            reason = r;
+            return false;
+        }
+        releaseWorking(*order, cut);
         const Quantity displayBefore = displayQuantity(*order);
         // newQty is the new LEAVES; the total drops by the same cut. Leaving
         // initialQty alone used to report the cut as a fill (GTDIFF-1).
@@ -2585,9 +2592,15 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         reason = admit;
         return false;
     }
+    const Quantity newLeaves = newQty - order->cumQty;
+    if (const RejectReason r = admitAmend(*order, newPrice, newQty, newLeaves);
+        r != RejectReason::None) [[unlikely]] {
+        reason = r;
+        return false;
+    }
+    if (newLeaves < order->remainingQty) releaseWorking(*order, order->remainingQty - newLeaves);
 
     reason = RejectReason::None;
-    const Quantity newLeaves = newQty - order->cumQty;
     order->initialQty = newQty;
     Price oldPrice = order->price;
     bool priceChanged = (newPrice != oldPrice);

@@ -855,6 +855,11 @@ private:
         void onWorkingReleased(ParticipantId p, Side side, Quantity qty) override {
             if (engine) engine->releaseWorking(p, side, qty);
         }
+        RejectReason onAmend(const Order& o, Price newPrice, Quantity newTotal,
+                             Quantity newLeaves) override {
+            return engine ? engine->admitAmend(o, newPrice, newTotal, newLeaves)
+                          : RejectReason::None;
+        }
     };
     // Drain a book's observer after a request: OCO sibling cancels, then the
     // trade-driven consumers (fees / risk accrual / audit).
@@ -936,10 +941,16 @@ private:
         std::numeric_limits<ParticipantId>::max();
 
     // Combined pre-trade risk gate (fat-finger, position, OTR). Returns
-    // RejectReason::None to admit, with qty reserved in the ledger: every later
-    // refusal owes a releaseWorking. Kill switch is checked separately (first).
+    // RejectReason::None to admit, with `reserve` added to the ledger: every
+    // later refusal owes a releaseWorking. A new order reserves its qty, an
+    // amendment its growth. Kill switch is checked separately (first).
     RejectReason checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
-                                   Price price, Quantity qty, OrderType type);
+                                   Price price, Quantity qty, OrderType type,
+                                   Quantity reserve);
+    // GW-2: the engine's admission controls for a replace or modify, from
+    // inside the book (OcoBookListener::onAmend).
+    RejectReason admitAmend(const Order& o, Price newPrice, Quantity newTotal,
+                            Quantity newLeaves);
     // Reserve qty against the limit in one atomic step (THR-3); false, reserving
     // nothing, if that would breach it.
     bool tryReserveWorking(ParticipantId pid, Side side, Quantity qty);

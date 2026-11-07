@@ -314,6 +314,13 @@ private:
         if (qty != 0 && !replayMode_)
             engineListener_->onWorkingReleased(order.participantId, order.side, qty);
     }
+    // GW-2: a replace or modify is an admission decision for the engine's
+    // controls too, not only the book's. See EventListener::onAmend.
+    RejectReason admitAmend(const Order& order, Price newPrice, Quantity newTotal,
+                            Quantity newLeaves) {
+        return replayMode_ ? RejectReason::None
+                           : engineListener_->onAmend(order, newPrice, newTotal, newLeaves);
+    }
 
     // Drop `order` from every special-order tracking list that can hold a raw
     // pointer to it. MUST run before the order is returned to the pool: those

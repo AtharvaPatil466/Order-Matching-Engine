@@ -122,9 +122,10 @@ sweep's low and high print, and they run after the triggering order is final
 ([MatchingRules.md](MatchingRules.md) §5-6). To carry the book across rather
 than re-run its history, stop the old `OrderEngine` with `SIGTERM`, which
 checkpoints (§5), so the new build restores the resting orders instead of
-replaying the trades. A
-resting order the new rules refuse is still dropped by that restore: cancel or
-replace it before the upgrade.
+replaying the trades. The
+restore puts each order back as it rested, without judging it again under the
+new rules; one the new build cannot hold at all (a price outside its band, a
+smaller order pool) stops the boot (§5).
 
 ---
 
@@ -285,7 +286,13 @@ while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
 grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
 ```
 
-A restart on the same journal replays it before the admin port opens. This one
+A restart on the same journal replays it before the admin port opens, and the
+book comes back in the state it was stopped in, halted or closed included, with
+every resting and parked order. A checkpoint order the restart cannot put back
+(a price outside a band narrowed since, a smaller order pool) is logged as
+`checkpoint_restore_refused` and the engine refuses to start (`FATAL: ...
+could not be restored`), leaving the journal as it was: start it with the
+configuration that wrote the checkpoint. This one
 also names a config file, used in §6. A config file must give every symbol a
 price band, or the engine refuses to start:
 

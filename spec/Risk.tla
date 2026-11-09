@@ -1,55 +1,47 @@
 ---- MODULE Risk ----
 (***************************************************************************)
-(* Safety of MULTI-TIER (hierarchical) pre-trade risk aggregation.         *)
+(* Safety of MULTI-TIER (hierarchical) pre-trade risk with a RESERVATION   *)
+(* LEDGER: what src/HierarchicalRiskManager.cpp and the engine's position  *)
+(* ledger (MatchingEngine::tryReserveWorking) do since roadmap 1.9 I2.     *)
 (*                                                                         *)
-(* Models the pre-trade RiskManager being built alongside the C++ matching *)
-(* engine. Risk limits are arranged in a TWO-TIER hierarchy: a Firm sits   *)
-(* above its Traders, and an order must clear EVERY tier of caps on its    *)
-(* path to the root before it is admitted. The engine is a deterministic   *)
-(* single writer, so checking the caps and booking the fill is one atomic  *)
-(* step.                                                                   *)
+(* Each tier entity keeps a net position and, per side, the working        *)
+(* quantity of its live orders. An order must clear EVERY tier on its path *)
+(* to the root before it is admitted, and admission RESERVES its quantity  *)
+(* as working at every tier in the same step (checkAndReserve under        *)
+(* riskMutex_; a CAS for the engine-wide limit), so no admission can pass  *)
+(* against a figure another one is about to change (THR-3).                *)
 (*                                                                         *)
-(* NOTE ON SCOPE: this spec models a reduced TWO-TIER (Firm over           *)
-(* Trader) abstraction, chosen so the state space stays exhaustively       *)
-(* checkable. The production C++ HierarchicalRiskManager implements FOUR   *)
-(* tiers: Trader -> Strategy -> Account -> Firm (RiskTier, kNumTiers=4).   *)
-(* The two-tier model captures the same per-tier cap-check and             *)
-(* aggregation safety argument; the extra Strategy/Account tiers are       *)
-(* additional instances of the same check and are not modelled here.       *)
+(* What an entity could hold is per side, working orders included (TLA-5):*)
+(*   buy reach  = net + working buys                                       *)
+(*   sell reach = working sells - net                                      *)
+(* Opposite sides do not net: either can fill alone.                       *)
 (*                                                                         *)
-(* Hierarchy modelled (kept tiny for exhaustive checking):                 *)
-(*   - One Firm with two Traders, T1 and T2, beneath it.                   *)
-(*   - pos[e] is the net (long) position currently booked to entity e, for *)
-(*     every leaf trader AND the firm aggregate node.                      *)
-(*   - Buys only (sizes drawn from Qtys, e.g. {1,2}); positions are        *)
-(*     monotone non-decreasing, which keeps the reachable space finite     *)
-(*     without an explicit event counter (every pos[t] is bounded by the   *)
-(*     trader cap, so pos[Firm] is bounded by the sum of trader caps).     *)
+(* After admission:                                                        *)
+(*   Fill    — q of an order trades: working -> net, at every tier.        *)
+(*   Release — q leaves without trading (cancel, IOC/FOK remainder, STP,   *)
+(*             kill, expiry, DAY close, a replace that shrinks): working   *)
+(*             shrinks at every tier (OrderBook::untrackOrder).            *)
+(* A replace that grows is a Submit of the growth.                         *)
 (*                                                                         *)
-(* Admission rule modelled (src RiskManager::checkOrder, the multi-tier    *)
-(* walk):                                                                   *)
-(*   Submit(t, q) is admitted ONLY when BOTH                               *)
-(*     (a) the trader's projected position stays within TraderCap[t], AND  *)
-(*     (b) the FIRM's projected AGGREGATE position stays within FirmCap.   *)
-(*   On admit, the fill is booked to BOTH tiers atomically: pos[t] += q    *)
-(*   and pos[Firm] += q. A single order that would breach EITHER tier is   *)
-(*   rejected outright (no partial booking).                               *)
+(* An earlier version booked position at admission, which the code never   *)
+(* did: the code checked net position only and ignored working orders.     *)
+(*                                                                         *)
+(* NOTE ON SCOPE: TWO tiers (Firm over Traders), kept tiny for exhaustive  *)
+(* checking. The C++ manager has four (Trader -> Strategy -> Account ->    *)
+(* Firm); the middle two are more instances of the same check.             *)
 (*                                                                         *)
 (* Invariants proved:                                                      *)
 (*   - TypeOK                                                               *)
-(*   - FirmWithinCap        : pos[Firm] <= FirmCap in every reachable state *)
-(*   - TradersWithinCap     : pos[t]    <= TraderCap[t] for every trader t  *)
-(*   - FirmIsSumOfTraders   : pos[Firm] = pos[T1] + pos[T2] (the aggregate  *)
-(*                            node is always the exact sum of its leaves —  *)
-(*                            tier-aggregation consistency).                *)
+(*   - FirmWithinCap        : neither side of the firm can reach past       *)
+(*                            FirmCap, working orders included              *)
+(*   - TradersWithinCap     : the same for every trader and its own cap     *)
+(*   - FirmIsSumOfTraders   : the firm's net and working are the exact sums *)
+(*                            of its traders' (tier-aggregation consistency)*)
 (*                                                                         *)
-(* Non-vacuity: with CONSTANT BROKEN_NO_FIRM_AGG = TRUE, Submit's guard     *)
-(* consults ONLY the trader cap and SKIPS the firm-aggregate check (tier b *)
-(* is dropped), while still booking the fill to both tiers. TLC then        *)
-(* reaches a state where the two traders, each individually within its own  *)
-(* cap, together drive pos[Firm] above FirmCap — a counterexample to        *)
-(* FirmWithinCap. This proves the firm-aggregate guard is what carries the  *)
-(* safety weight, i.e. the invariant has teeth.                            *)
+(* Non-vacuity: with BROKEN_NO_FIRM_AGG = TRUE, Submit consults only the    *)
+(* trader cap and still reserves at both tiers. Two traders, each within    *)
+(* its own cap, then reach past FirmCap together — a counterexample to      *)
+(* FirmWithinCap (RiskBroken.cfg, run by tla.yml).                          *)
 (***************************************************************************)
 
 EXTENDS Integers, FiniteSets, TLC
@@ -57,126 +49,99 @@ EXTENDS Integers, FiniteSets, TLC
 CONSTANTS
     Traders,             \* Set of leaf trader IDs beneath the firm, e.g. {T1, T2}
     Firm,                \* The single firm-tier aggregate node ID
-    FirmCap,             \* Firm-level net-position cap (the aggregate limit)
-    PerTraderCap,        \* Per-trader net-position cap (one tier below the firm)
-    Qtys,                \* Set of admissible order sizes (buys), e.g. {1, 2}
+    FirmCap,             \* Firm-level position cap (the aggregate limit)
+    PerTraderCap,        \* Per-trader position cap (one tier below the firm)
+    Qtys,                \* Set of admissible order sizes, e.g. {1, 2}
     BROKEN_NO_FIRM_AGG   \* Bug toggle: when TRUE, Submit skips the firm-tier check
 
-\* Per-trader cap, indexed by trader. Each leaf trader carries its OWN cap
-\* entry (here a uniform PerTraderCap, kept as a function so the lower tier is
-\* genuinely per-entity and the spec generalizes to non-uniform caps).
 TraderCap == [t \in Traders |-> PerTraderCap]
 
-\* Every entity that carries a tracked position: the leaf traders plus the
-\* firm aggregate node. (Firm is assumed distinct from every trader.)
 Entities == Traders \cup {Firm}
+Sides == {"Buy", "Sell"}
 
 VARIABLES
-    pos                  \* Map: entity -> net position currently booked to it
+    net,                 \* entity -> net filled position (buys - sells)
+    work                 \* entity -> side -> working quantity reserved
 
-vars == <<pos>>
+vars == <<net, work>>
 
-(* ─── Init ───────────────────────────────────────────────────────────── *)
-(* Flat book: every tier starts at zero net position.                      *)
+\* What entity e could hold on side s if everything working there filled.
+Reach(e, s) == IF s = "Buy" THEN net[e] + work[e][s] ELSE work[e][s] - net[e]
+
+Cap(e) == IF e = Firm THEN FirmCap ELSE TraderCap[e]
 
 Init ==
-    /\ pos = [e \in Entities |-> 0]
+    /\ net = [e \in Entities |-> 0]
+    /\ work = [e \in Entities |-> [s \in Sides |-> 0]]
 
-(* ─── Submit ─────────────────────────────────────────────────────────── *)
-(* CORRECT RiskManager: a trader t submits a buy of size q. Admission walks *)
-(* the hierarchy and requires the projected position to stay within the cap *)
-(* at EVERY tier — the trader's own cap AND the firm aggregate cap. Only    *)
-(* then is the fill booked, and it is booked to BOTH tiers atomically.      *)
-(*                                                                         *)
-(* The firm-aggregate guard (pos[Firm] + q <= FirmCap) is THE mechanism    *)
-(* that bounds the firm position: each trader stays under its own cap, but  *)
-(* only the aggregate check stops their COMBINED flow from breaching the    *)
-(* firm cap. We deliberately do not add any redundant guard, so that        *)
-(* removing the aggregate check (the bug) genuinely breaks the property.    *)
-(*                                                                         *)
-(* BUG (BROKEN_NO_FIRM_AGG = TRUE): the firm tier is not consulted — Submit *)
-(* checks ONLY the trader cap and books to both tiers anyway. Two traders,  *)
-(* each within its own cap, can then drive pos[Firm] past FirmCap.          *)
+(* ─── Submit: check every tier and reserve, in one step ─────────────── *)
+CanAdmit(t, s, q) ==
+    /\ Reach(t, s) + q <= TraderCap[t]                   \* trader tier (always)
+    /\ \/ BROKEN_NO_FIRM_AGG                             \* BUG: firm tier skipped
+       \/ Reach(Firm, s) + q <= FirmCap                  \* CORRECT: firm tier
 
-\* Multi-tier admission predicate. The trader-tier cap is ALWAYS enforced;
-\* the firm-tier (aggregate) cap is enforced only in the correct model. Under
-\* the bug toggle the firm disjunct is satisfied vacuously, so the aggregate
-\* tier is effectively skipped.
-CanAdmit(t, q) ==
-    /\ pos[t] + q <= TraderCap[t]                        \* trader-tier check (always)
-    /\ \/ BROKEN_NO_FIRM_AGG                              \* BUG: firm tier skipped
-       \/ pos[Firm] + q <= FirmCap                        \* CORRECT: firm-tier check
+Submit(t, s, q) ==
+    /\ CanAdmit(t, s, q)
+    /\ work' = [work EXCEPT ![t][s] = @ + q, ![Firm][s] = @ + q]
+    /\ UNCHANGED net
 
-Submit(t, q) ==
-    /\ t \in Traders
-    /\ q \in Qtys
-    /\ CanAdmit(t, q)
-    /\ pos' = [pos EXCEPT ![t] = @ + q,                  \* book to leaf tier ...
-                          ![Firm] = @ + q]               \* ... and to firm aggregate
+(* ─── Fill: q of t's working quantity on s trades ───────────────────── *)
+Signed(s, q) == IF s = "Buy" THEN q ELSE -q
 
-(* ─── Terminal stutter ───────────────────────────────────────────────── *)
-(* Buys only, so positions never decrease. When no trader can admit any     *)
-(* further size at every tier the system is saturated — a legal quiescent   *)
-(* state, not a stuck one. An explicit self-loop keeps TLC's deadlock check  *)
-(* from flagging these terminal states.                                     *)
+Fill(t, s, q) ==
+    /\ q <= work[t][s]
+    /\ net' = [net EXCEPT ![t] = @ + Signed(s, q), ![Firm] = @ + Signed(s, q)]
+    /\ work' = [work EXCEPT ![t][s] = @ - q, ![Firm][s] = @ - q]
 
-Done ==
-    /\ \A t \in Traders : \A q \in Qtys : ~CanAdmit(t, q)
-    /\ UNCHANGED vars
-
-(* ─── Next + Spec ────────────────────────────────────────────────────── *)
+(* ─── Release: q of t's working quantity leaves without trading ─────── *)
+Release(t, s, q) ==
+    /\ q <= work[t][s]
+    /\ work' = [work EXCEPT ![t][s] = @ - q, ![Firm][s] = @ - q]
+    /\ UNCHANGED net
 
 Next ==
-    \/ \E t \in Traders : \E q \in Qtys : Submit(t, q)
-    \/ Done
+    \E t \in Traders, s \in Sides, q \in Qtys :
+        \/ Submit(t, s, q)
+        \/ Fill(t, s, q)
+        \/ Release(t, s, q)
 
 Spec == Init /\ [][Next]_vars
 
 (* ─── Invariants ─────────────────────────────────────────────────────── *)
 
-\* Sum of pos[.] over a set of trader IDs (recursive fold over the subset).
-\* Used to express the firm aggregate as the exact sum of its leaf traders
-\* without hard-coding individual trader names.
-SumPos(S) == LET f[T \in SUBSET Traders] ==
-                   IF T = {} THEN 0
-                   ELSE LET x == CHOOSE e \in T : TRUE
-                        IN pos[x] + f[T \ {x}]
-             IN f[S]
+SumOver(f(_), S) == LET g[T \in SUBSET S] ==
+                          IF T = {} THEN 0
+                          ELSE LET x == CHOOSE e \in T : TRUE
+                               IN f(x) + g[T \ {x}]
+                    IN g[S]
 
-\* The sum of all per-trader caps — the true upper bound on the firm position
-\* in either model (the broken model can reach it; the correct one cannot
-\* exceed FirmCap). Used only to give TypeOK a finite, model-independent
-\* bound on pos[Firm]: each trader is always capped by its own TraderCap, so
-\* the firm aggregate can never exceed this sum.
-SumTraderCaps == LET f[T \in SUBSET Traders] ==
-                       IF T = {} THEN 0
-                       ELSE LET x == CHOOSE e \in T : TRUE
-                            IN TraderCap[x] + f[T \ {x}]
-                 IN f[Traders]
+SumTraderCaps == SumOver(LAMBDA t : TraderCap[t], Traders)
 
+\* Working on a side is bounded by the cap plus a position held the other way:
+\* long 2 under a cap of 2 may work sells of 4.
 TypeOK ==
-    /\ DOMAIN pos = Entities
-    /\ \A t \in Traders : pos[t] \in 0..TraderCap[t]
-    /\ pos[Firm] \in 0..SumTraderCaps
+    /\ DOMAIN net = Entities
+    /\ DOMAIN work = Entities
+    /\ \A t \in Traders :
+          /\ net[t] \in -TraderCap[t]..TraderCap[t]
+          /\ \A s \in Sides : work[t][s] \in 0..(2 * TraderCap[t])
+    /\ net[Firm] \in -SumTraderCaps..SumTraderCaps
+    /\ \A s \in Sides : work[Firm][s] \in 0..(2 * SumTraderCaps)
 
-\* SAFETY (primary): the firm aggregate position never exceeds the firm cap.
-\* This is the core multi-tier guarantee — it holds ONLY because Submit
-\* enforces the firm-aggregate guard. Dropping that guard (the bug) violates
-\* it: this is the invariant the non-vacuity config makes TLC refute.
+\* SAFETY (primary): the firm cannot reach past its cap on either side, with
+\* every working order counted. Holds only because Submit checks and reserves
+\* at the firm tier; RiskBroken.cfg refutes it.
 FirmWithinCap ==
-    pos[Firm] <= FirmCap
+    \A s \in Sides : Reach(Firm, s) <= FirmCap
 
-\* SAFETY: every leaf trader stays within its own per-tier cap. (Holds in
-\* both models — the trader-tier guard is never removed — so it documents the
-\* lower tier of the hierarchy and stays true even under the injected bug.)
+\* SAFETY: the same for every trader against its own cap.
 TradersWithinCap ==
-    \A t \in Traders : pos[t] <= TraderCap[t]
+    \A t \in Traders : \A s \in Sides : Reach(t, s) <= TraderCap[t]
 
-\* SAFETY: tier-aggregation consistency. The firm aggregate node always
-\* equals the exact sum of its leaf traders' positions. Every admit books to
-\* both tiers in lock-step, so the aggregate can never drift from its leaves;
-\* a bug that updated one tier without the other would break this.
+\* SAFETY: every step moves both tiers in lock-step, so the firm's net and
+\* working are always the sums of its traders'.
 FirmIsSumOfTraders ==
-    pos[Firm] = SumPos(Traders)
+    /\ net[Firm] = SumOver(LAMBDA t : net[t], Traders)
+    /\ \A s \in Sides : work[Firm][s] = SumOver(LAMBDA t : work[t][s], Traders)
 
 ====

@@ -11,12 +11,25 @@
 //   Kill:         Terminate process after writing checkpoint.
 //
 // Each level has a distinct admin endpoint and alert severity.
+//
+// Wired (roadmap 1.9 I6, GW-9): MatchingEngine consults it on every new order
+// and every replace that grows or reprices — one relaxed load (engaged()) while
+// it is at Normal — and installs the halt function, so a symbol or global halt
+// halts the books themselves and reset() / unhaltSymbol() resume the ones it
+// halted. Cancels and modifies down are always accepted. It was a library
+// nothing read: no level stopped an order.
+//
+// The levels only rise on their own. A throttle under a global halt leaves the
+// halt in force; clearThrottle and unhaltSymbol drop back to the highest level
+// still in use, never below a global halt (reset() is the way out of that).
 
 #include "Types.h"
 #include "AlertDispatcher.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,15 +69,26 @@ class GraduatedKillSwitch {
 public:
     using CheckpointFn = std::function<void()>;
     using ShutdownFn   = std::function<void()>;
+    // Called, outside the switch's lock, after any halt changes: the engine
+    // brings each book in line with isSymbolHalted().
+    using HaltFn       = std::function<void()>;
 
     GraduatedKillSwitch() = default;
 
     // ─── Level 1: Throttle ─────────────────────────────────────────────
-    // Reduce a participant's rate to throttleFraction (default 10%).
+    // Reduce a participant's rate to throttleFraction (default 10%): of its
+    // orders, that fraction is admitted, evenly. 0 refuses every order and
+    // replace it sends — a killed participant — until clearThrottle or reset.
+    // (MatchingEngine::killSwitch(pid) cancels what it has resting.)
     void throttle(ParticipantId participant, double throttleFraction = 0.10) {
-        throttledParticipants_.push_back({participant, throttleFraction});
-        currentLevel_.store(static_cast<uint8_t>(KillSwitchLevel::Throttle),
-                            std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = std::find_if(throttledParticipants_.begin(), throttledParticipants_.end(),
+                                   [&](const ThrottleEntry& e) { return e.participant == participant; });
+            if (it != throttledParticipants_.end()) *it = {participant, throttleFraction, 0.0};
+            else throttledParticipants_.push_back({participant, throttleFraction, 0.0});
+            raiseLevel(KillSwitchLevel::Throttle);
+        }
         if (alertDispatcher_) {
             alertDispatcher_->fire(AlertLevel::Warning, "kill_switch",
                 "Throttle activated for participant " +
@@ -75,6 +99,7 @@ public:
 
     // Check if a participant is throttled. Returns the rate fraction (1.0 = normal).
     double getThrottleFraction(ParticipantId participant) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& t : throttledParticipants_) {
             if (t.participant == participant) {
                 return t.fraction;
@@ -89,12 +114,14 @@ public:
 
     // ─── Level 2: Symbol Halt ──────────────────────────────────────────
     void haltSymbol(SymbolId symbol) {
-        haltedSymbols_.push_back(symbol);
-        auto level = currentLevel_.load(std::memory_order_acquire);
-        if (level < static_cast<uint8_t>(KillSwitchLevel::SymbolHalt)) {
-            currentLevel_.store(static_cast<uint8_t>(KillSwitchLevel::SymbolHalt),
-                                std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (std::find(haltedSymbols_.begin(), haltedSymbols_.end(), symbol) ==
+                haltedSymbols_.end())
+                haltedSymbols_.push_back(symbol);
+            raiseLevel(KillSwitchLevel::SymbolHalt);
         }
+        if (haltFn_) haltFn_();
         if (alertDispatcher_) {
             alertDispatcher_->fire(AlertLevel::Warning, "kill_switch",
                 "Symbol halt: " + std::to_string(symbol));
@@ -106,6 +133,7 @@ public:
             static_cast<uint8_t>(KillSwitchLevel::GlobalHalt)) {
             return true;  // Everything halted
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         for (SymbolId s : haltedSymbols_) {
             if (s == symbol) return true;
         }
@@ -114,8 +142,11 @@ public:
 
     // ─── Level 3: Global Halt ──────────────────────────────────────────
     void globalHalt() {
-        currentLevel_.store(static_cast<uint8_t>(KillSwitchLevel::GlobalHalt),
-                            std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            raiseLevel(KillSwitchLevel::GlobalHalt);
+        }
+        if (haltFn_) haltFn_();
         if (alertDispatcher_) {
             alertDispatcher_->fire(AlertLevel::Critical, "kill_switch",
                 "GLOBAL HALT activated — all matching stopped");
@@ -146,13 +177,18 @@ public:
 
     // ─── Reset ─────────────────────────────────────────────────────────
     void reset() {
-        currentLevel_.store(static_cast<uint8_t>(KillSwitchLevel::Normal),
-                            std::memory_order_release);
-        throttledParticipants_.clear();
-        haltedSymbols_.clear();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            currentLevel_.store(static_cast<uint8_t>(KillSwitchLevel::Normal),
+                                std::memory_order_release);
+            throttledParticipants_.clear();
+            haltedSymbols_.clear();
+        }
+        if (haltFn_) haltFn_();
     }
 
     void clearThrottle(ParticipantId participant) {
+        std::lock_guard<std::mutex> lock(mutex_);
         throttledParticipants_.erase(
             std::remove_if(throttledParticipants_.begin(),
                            throttledParticipants_.end(),
@@ -160,12 +196,18 @@ public:
                                return e.participant == participant;
                            }),
             throttledParticipants_.end());
+        lowerLevel();
     }
 
     void unhaltSymbol(SymbolId symbol) {
-        haltedSymbols_.erase(
-            std::remove(haltedSymbols_.begin(), haltedSymbols_.end(), symbol),
-            haltedSymbols_.end());
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            haltedSymbols_.erase(
+                std::remove(haltedSymbols_.begin(), haltedSymbols_.end(), symbol),
+                haltedSymbols_.end());
+            lowerLevel();
+        }
+        if (haltFn_) haltFn_();
     }
 
     // ─── Configuration ─────────────────────────────────────────────────
@@ -179,6 +221,11 @@ public:
 
     void setShutdownFunction(ShutdownFn fn) {
         shutdownFn_ = std::move(fn);
+    }
+
+    // Set by MatchingEngine's constructor; see HaltFn.
+    void setHaltFunction(HaltFn fn) {
+        haltFn_ = std::move(fn);
     }
 
     // ─── State ─────────────────────────────────────────────────────────
@@ -206,19 +253,74 @@ public:
         return level < KillSwitchLevel::Kill;
     }
 
+    // ─── Admission (MatchingEngine) ────────────────────────────────────
+    // The hot-path test: anything to consult at all? One relaxed load.
+    bool engaged() const {
+        return currentLevel_.load(std::memory_order_relaxed) !=
+               static_cast<uint8_t>(KillSwitchLevel::Normal);
+    }
+
+    // A new order: KillSwitchActive while its symbol or everything is halted
+    // or the participant is throttled to 0, RateLimitExceeded for a throttled
+    // participant's order beyond its fraction, None to admit. Spends throttle
+    // credit, so call once per order.
+    RejectReason admit(SymbolId symbol, ParticipantId participant) {
+        if (blocks(symbol, participant)) return RejectReason::KillSwitchActive;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& t : throttledParticipants_) {
+            if (t.participant != participant) continue;
+            t.credit += t.fraction;
+            if (t.credit < 1.0) return RejectReason::RateLimitExceeded;
+            t.credit -= 1.0;
+        }
+        return RejectReason::None;
+    }
+
+    // Whether the switch refuses this symbol or participant outright: the
+    // worker's re-check of a queued order and a replace's check. Spends nothing.
+    bool blocks(SymbolId symbol, ParticipantId participant) const {
+        if (!canAcceptOrder(symbol)) return true;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& t : throttledParticipants_)
+            if (t.participant == participant && t.fraction <= 0.0) return true;
+        return false;
+    }
+
 private:
     struct ThrottleEntry {
         ParticipantId participant;
         double fraction;
+        double credit;   // admit() spends 1.0 of it per admitted order
     };
+
+    // Caller holds mutex_. Levels rise only here.
+    void raiseLevel(KillSwitchLevel level) {
+        if (currentLevel_.load(std::memory_order_relaxed) < static_cast<uint8_t>(level))
+            currentLevel_.store(static_cast<uint8_t>(level), std::memory_order_release);
+    }
+    // Caller holds mutex_. Back to the highest level still in use, never out
+    // of a global halt or a kill.
+    void lowerLevel() {
+        if (currentLevel_.load(std::memory_order_relaxed) >=
+            static_cast<uint8_t>(KillSwitchLevel::GlobalHalt))
+            return;
+        const KillSwitchLevel level = !haltedSymbols_.empty() ? KillSwitchLevel::SymbolHalt
+                                    : !throttledParticipants_.empty() ? KillSwitchLevel::Throttle
+                                    : KillSwitchLevel::Normal;
+        currentLevel_.store(static_cast<uint8_t>(level), std::memory_order_release);
+    }
 
     std::atomic<uint8_t> currentLevel_{
         static_cast<uint8_t>(KillSwitchLevel::Normal)};
+    // Guards the two lists. Taken only when engaged(), and never while
+    // calling out (alerts, halt, checkpoint, shutdown).
+    mutable std::mutex mutex_;
     std::vector<ThrottleEntry> throttledParticipants_;
     std::vector<SymbolId> haltedSymbols_;
     AlertDispatcher* alertDispatcher_{nullptr};
     CheckpointFn checkpointFn_;
     ShutdownFn shutdownFn_;
+    HaltFn haltFn_;
 };
 
 }  // namespace OrderMatcher

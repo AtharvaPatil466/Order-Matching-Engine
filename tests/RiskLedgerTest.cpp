@@ -766,3 +766,101 @@ TEST_P(RiskPath, HierarchicalNetPositionAccruesFills) {
     drain();
     EXPECT_EQ(leaves(3), 0u);
 }
+
+// ─── GW-9: the graduated kill switch stops orders and matching ──────────────
+
+TEST_P(RiskPath, GlobalHaltRefusesOrdersAndReplacesButNotCancels) {
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx - 100, 10).isAccepted());
+    ASSERT_TRUE(engine.submitOrder(kSym2, 2, kA, Side::Buy, kPx - 100, 10, OrderType::Limit).isAccepted());
+    drain();
+
+    engine.getKillSwitch().globalHalt();
+
+    // Every book, not only the admission gate: matching has stopped.
+    EXPECT_EQ(book(kSym).getTradingState(), TradingState::Halted);
+    EXPECT_EQ(book(kSym2).getTradingState(), TradingState::Halted);
+    EXPECT_EQ(add(3, kB, Side::Sell, kPx - 100, 10).rejectReason, RejectReason::KillSwitchActive);
+    EXPECT_EQ(engine.submitCancelReplace(kSym, 1, kPx - 200, 10).rejectReason,
+              RejectReason::KillSwitchActive);
+    // A modify down is a partial cancel.
+    EXPECT_TRUE(engine.submitModify(kSym2, 2, 5).isAccepted());
+    drain();
+    ASSERT_EQ(leaves(1), 10u);
+    EXPECT_EQ(book(kSym).getOrder(1)->price, kPx - 100);
+    EXPECT_EQ(leaves(3), 0u);
+    EXPECT_EQ(leaves(2, kSym2), 5u);
+    EXPECT_TRUE(engine.submitCancel(kSym, 1).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 0u);
+
+    engine.getKillSwitch().reset();
+    EXPECT_EQ(book(kSym).getTradingState(), TradingState::Continuous);
+    EXPECT_EQ(book(kSym2).getTradingState(), TradingState::Continuous);
+    EXPECT_TRUE(add(4, kB, Side::Sell, kPx - 100, 10).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(2, kSym2), 5u);
+}
+
+// A book an operator halted is the operator's: the switch neither halts it
+// again nor resumes it.
+TEST_P(RiskPath, KillSwitchResumesOnlyTheBooksItHalted) {
+    ASSERT_EQ(engine.setTradingStateBatch({kSym2}, TradingState::Halted), 1u);
+    engine.getKillSwitch().globalHalt();
+    engine.getKillSwitch().reset();
+    EXPECT_EQ(book(kSym).getTradingState(), TradingState::Continuous);
+    EXPECT_EQ(book(kSym2).getTradingState(), TradingState::Halted);
+}
+
+TEST_P(RiskPath, SymbolHaltStopsOnlyThatSymbol) {
+    engine.getKillSwitch().haltSymbol(kSym);
+    EXPECT_EQ(book(kSym).getTradingState(), TradingState::Halted);
+    EXPECT_EQ(book(kSym2).getTradingState(), TradingState::Continuous);
+    EXPECT_EQ(add(1, kA, Side::Buy, kPx, 10).rejectReason, RejectReason::KillSwitchActive);
+    EXPECT_TRUE(engine.submitOrder(kSym2, 2, kA, Side::Buy, kPx, 10, OrderType::Limit).isAccepted());
+    engine.getKillSwitch().unhaltSymbol(kSym);
+    EXPECT_EQ(book(kSym).getTradingState(), TradingState::Continuous);
+    EXPECT_TRUE(add(3, kA, Side::Buy, kPx, 10).isAccepted());
+    EXPECT_FALSE(engine.getKillSwitch().engaged());
+}
+
+// A participant throttled to zero is a killed participant: every order and
+// every replace it sends is refused; its cancels still go through.
+TEST_P(RiskPath, ParticipantThrottledToZeroIsRefused) {
+    ASSERT_TRUE(add(1, kA, Side::Buy, kPx - 100, 10).isAccepted());
+    drain();
+    engine.getKillSwitch().throttle(kA, 0.0);
+    EXPECT_EQ(add(2, kA, Side::Buy, kPx - 100, 10).rejectReason, RejectReason::KillSwitchActive);
+    EXPECT_TRUE(add(3, kB, Side::Buy, kPx - 100, 10).isAccepted());
+    // The requester's id is not the owner's: the book checks the owner.
+    (void)engine.submitCancelReplace(kSym, 1, kPx - 200, 10);
+    drain();
+    ASSERT_EQ(leaves(1), 10u);
+    EXPECT_EQ(book().getOrder(1)->price, kPx - 100);
+    EXPECT_TRUE(engine.submitCancel(kSym, 1, kA).isAccepted());
+    drain();
+    EXPECT_EQ(leaves(1), 0u);
+}
+
+TEST_P(RiskPath, ThrottleAdmitsItsFractionOfOrders) {
+    engine.getKillSwitch().throttle(kA, 0.25);
+    int accepted = 0;
+    for (OrderId id = 1; id <= 100; ++id)
+        accepted += add(id, kA, Side::Buy, kPx - 100, 1).isAccepted();
+    EXPECT_EQ(accepted, 25);
+    engine.getKillSwitch().clearThrottle(kA);
+    EXPECT_FALSE(engine.getKillSwitch().engaged());
+    EXPECT_TRUE(add(101, kA, Side::Buy, kPx - 100, 1).isAccepted());
+}
+
+// A throttle under a global halt does not lift it.
+TEST(GraduatedKillSwitchLevels, AThrottleDoesNotLowerAGlobalHalt) {
+    GraduatedKillSwitch ks;
+    ks.globalHalt();
+    ks.throttle(kA, 0.5);
+    EXPECT_TRUE(ks.isGloballyHalted());
+    ks.clearThrottle(kA);
+    EXPECT_TRUE(ks.isGloballyHalted());
+    ks.reset();
+    EXPECT_FALSE(ks.engaged());
+}
+

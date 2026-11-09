@@ -778,6 +778,9 @@ private:
 
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     GraduatedKillSwitch killSwitch_;
+    // Books the kill switch halted, so it resumes only those. Under bookMutex_.
+    std::vector<SymbolId> killHalted_;
+    void syncKillSwitchHalts();
     IncidentLogger incidentLogger_;
     CapacityMonitor capacityMonitor_;
 

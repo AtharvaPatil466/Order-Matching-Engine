@@ -162,6 +162,36 @@ void lowerCurrentThreadPriority() {
 
 MatchingEngine::MatchingEngine() {
     ensureDefaultSymbol();
+    killSwitch_.setHaltFunction([this] { syncKillSwitchHalts(); });
+}
+
+// GW-9: make the books say what the graduated kill switch says. A book it
+// halts goes to Halted — journaled, on its worker — and one it no longer halts,
+// that it halted, goes back to the state it left. A book halted for any other
+// reason is left alone either way. Control plane: waits for the workers.
+void MatchingEngine::syncKillSwitchHalts() {
+    std::vector<SymbolId> toHalt;
+    std::vector<std::pair<SymbolId, TradingState>> toResume;
+    {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        for (SymbolId s : symbolIds_) {
+            const OrderBook* book = getOrderBook(s);
+            if (!book) continue;
+            const auto mine = std::find(killHalted_.begin(), killHalted_.end(), s);
+            if (killSwitch_.isSymbolHalted(s)) {
+                if (mine == killHalted_.end() &&
+                    book->getTradingState() != TradingState::Halted) {
+                    toHalt.push_back(s);
+                    killHalted_.push_back(s);
+                }
+            } else if (mine != killHalted_.end()) {
+                toResume.emplace_back(s, book->preHaltState());
+                killHalted_.erase(mine);
+            }
+        }
+    }
+    if (!toHalt.empty()) (void)setTradingStateBatch(toHalt, TradingState::Halted);
+    for (const auto& [s, state] : toResume) (void)setTradingStateBatch({s}, state);
 }
 
 MatchingEngine::~MatchingEngine() {
@@ -1015,6 +1045,14 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             book->emitReject(req.orderId, req.qty, RejectReason::KillSwitchActive);
             break;
         }
+        // GW-9, the same way: a halt or a participant kill since the submit.
+        if (killSwitch_.engaged() && killSwitch_.blocks(req.symbolId, req.participantId))
+            [[unlikely]] {
+            killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+            releaseWorking(req.participantId, req.side, req.qty);
+            book->emitReject(req.orderId, req.qty, RejectReason::KillSwitchActive);
+            break;
+        }
         // D4, the same way: an order queued before the journal halted must
         // not match now. It could never be made durable.
         if (journalHalted()) [[unlikely]] {
@@ -1763,14 +1801,23 @@ RejectReason MatchingEngine::checkBookValuedNotional(const OrderBook& book, Symb
 // released by the book after this returns None. Kill and halt are I6's.
 RejectReason MatchingEngine::admitAmend(const Order& o, Price newPrice, Quantity newTotal,
                                         Quantity newLeaves) {
-    if (!anyRiskActive_.load(std::memory_order_relaxed) &&
-        !riskActive_.load(std::memory_order_relaxed))
-        return RejectReason::None;
     const Quantity growth = newLeaves > o.remainingQty ? newLeaves - o.remainingQty : 0;
     // A shrink at the same price is a partial cancel: it moves no price and
     // adds no notional, so the band and the notional cap are not asked. The
     // size cap still is — it may have been tightened since the order arrived.
     const bool reduceOnly = growth == 0 && newPrice == o.price;
+    // GW-9: anything else is an admission, which a kill switch refuses. Here,
+    // against the order's owner; submitCancelReplace could only ask about the
+    // requester.
+    if (!reduceOnly && (killSwitchActive_.load(std::memory_order_acquire) ||
+                        (killSwitch_.engaged() && killSwitch_.blocks(o.symbolId, o.participantId))))
+        [[unlikely]] {
+        killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+        return RejectReason::KillSwitchActive;
+    }
+    if (!anyRiskActive_.load(std::memory_order_relaxed) &&
+        !riskActive_.load(std::memory_order_relaxed))
+        return RejectReason::None;
     const Price checkedPrice = reduceOnly ? 0 : newPrice;
     const RejectReason r = checkRiskControls(o.symbolId, o.participantId, o.side, checkedPrice,
                                              newTotal, o.type, growth);
@@ -1926,6 +1973,16 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
         logRiskReject("kill_switch", symbolId, participantId, RejectReason::KillSwitchActive);
         return rejectedAsync(RejectReason::KillSwitchActive);
+    }
+    // GW-9: the graduated kill switch. One relaxed load while it is at Normal.
+    if (killSwitch_.engaged()) [[unlikely]] {
+        if (const RejectReason r = killSwitch_.admit(symbolId, participantId);
+            r != RejectReason::None) {
+            (r == RejectReason::KillSwitchActive ? killSwitchRejects_ : rateLimitedCount_)
+                .fetch_add(1, std::memory_order_relaxed);
+            logRiskReject("graduated_kill_switch", symbolId, participantId, r);
+            return rejectedAsync(r);
+        }
     }
 
     if (!running_.load(std::memory_order_acquire)) {
@@ -2333,6 +2390,13 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
     }
     if (journalHalted()) [[unlikely]] {
         return rejectedAsync(RejectReason::JournalHalted);
+    }
+    // GW-9 and P2-8: a replace is an admission. Refused here, on both paths,
+    // from the requester's id; admitAmend re-checks against the order's owner.
+    if (killSwitchActive_.load(std::memory_order_acquire) ||
+        (killSwitch_.engaged() && killSwitch_.blocks(symbolId, requester))) [[unlikely]] {
+        killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+        return rejectedAsync(RejectReason::KillSwitchActive);
     }
 
     uint64_t sequenceId = nextSequenceId();

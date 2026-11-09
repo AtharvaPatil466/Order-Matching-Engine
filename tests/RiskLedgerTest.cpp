@@ -91,7 +91,9 @@ protected:
     // The async path acks at the queue, so only the sync path can answer here;
     // both end with the book unchanged, which each case checks after a drain.
     void expectRefused(const SubmitResult& r, RejectReason reason) {
-        if (!async()) EXPECT_EQ(r.rejectReason, reason);
+        if (!async()) {
+            EXPECT_EQ(r.rejectReason, reason);
+        }
     }
 };
 

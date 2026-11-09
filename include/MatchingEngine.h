@@ -299,6 +299,7 @@ public:
                         uint64_t accountId, uint64_t firmId);
     void setRiskTierLimits(RiskTier tier, uint64_t entityId, const TierLimits& limits);
     int64_t riskNetPosition(RiskTier tier, uint64_t entityId) const;
+    int64_t riskWorkingQty(RiskTier tier, uint64_t entityId, Side side) const;
     // Maker-taker fees: configure schedules; query accrued net fees.
     void setDefaultFeeSchedule(const FeeSchedule& s);
     void setParticipantFeeSchedule(ParticipantId p, const FeeSchedule& s);
@@ -853,7 +854,9 @@ private:
         void onOrderUpdate(const OrderUpdate& u) override;
         void onTrade(const Trade& t) override;
         void onWorkingReleased(ParticipantId p, Side side, Quantity qty) override {
-            if (engine) engine->releaseWorking(p, side, qty);
+            if (!engine) return;
+            engine->releaseWorking(p, side, qty);
+            engine->releaseHierarchical(p, side, qty);
         }
         RejectReason onAmend(const Order& o, Price newPrice, Quantity newTotal,
                              Quantity newLeaves) override {
@@ -874,11 +877,15 @@ private:
     // the journal ordinal its events wait behind: past any sibling cancel the
     // drain journaled, if the request journaled at all.
     uint64_t driveOcoSync(SymbolId symbolId, OrderBook* book, uint64_t appendOrdinal);
-    // Pre-trade hierarchical risk gate; true = admit. No-op (true) when risk
-    // is not configured. Both paths: the worker at apply time, the sync path
-    // before the book.
-    bool preTradeRiskCheck(ParticipantId trader, Side side, Price price,
-                           Quantity qty, OrderType type, const OrderBook& book);
+    // Pre-trade hierarchical risk gate; true = admit, with `reserve` added to
+    // the working quantity at every tier (TLA-5). No-op (true) when risk is
+    // not configured. Both paths: the worker at apply time, the sync path
+    // before the book, and an amendment from inside the book.
+    // `referencePrice` is the mid (an NBBO proxy) or 0 to skip the band.
+    bool preTradeRiskCheck(ParticipantId trader, Side side, Price price, Quantity qty,
+                           Price referencePrice, Quantity reserve);
+    // Give back hierarchical working quantity. No-op until risk is configured.
+    void releaseHierarchical(ParticipantId pid, Side side, Quantity qty);
 
     ContingencyManager contingency_;
     std::mutex contingencyMutex_;

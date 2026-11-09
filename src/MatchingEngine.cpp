@@ -1031,9 +1031,12 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             break;
         }
 
-        // Hierarchical pre-trade risk gate (no-op unless configured).
+        // Hierarchical pre-trade risk gate (no-op unless configured). Market
+        // orders have no limit price, so they skip the band (0); the rest
+        // measure from the mid. This thread owns the book, so no lock.
         if (!preTradeRiskCheck(req.participantId, req.side, req.price, req.qty,
-                               req.orderType, *book)) {
+                               req.orderType == OrderType::Market ? 0 : book->getMidPrice(),
+                               req.qty)) {
             releaseWorking(req.participantId, req.side, req.qty);
             book->emitReject(req.orderId, req.qty, RejectReason::RiskLimitBreached);
             break;
@@ -1048,8 +1051,10 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                                                req.minQty, req.hidden);
         // Refused: no order lives, nothing traded. Admitted, the book answers
         // for the reservation from here.
-        if (!std::holds_alternative<OrderId>(result))
+        if (!std::holds_alternative<OrderId>(result)) {
             releaseWorking(req.participantId, req.side, req.qty);
+            releaseHierarchical(req.participantId, req.side, req.qty);
+        }
         if (journal_ && std::holds_alternative<OrderId>(result)) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
@@ -1338,8 +1343,11 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
             }
             if (riskActive_.load(std::memory_order_relaxed)) {
                 std::lock_guard<std::mutex> lock(riskMutex_);
+                // Out of each side's working quantity, into its position.
                 riskManager_.onFill(t.buyerId, Side::Buy, t.price, t.quantity);
+                riskManager_.release(t.buyerId, Side::Buy, t.quantity);
                 riskManager_.onFill(t.sellerId, Side::Sell, t.price, t.quantity);
+                riskManager_.release(t.sellerId, Side::Sell, t.quantity);
             }
             if (catActive_.load(std::memory_order_relaxed)) {
                 std::lock_guard<std::mutex> lock(catMutex_);
@@ -1352,15 +1360,17 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
 }
 
 bool MatchingEngine::preTradeRiskCheck(ParticipantId trader, Side side, Price price,
-                                       Quantity qty, OrderType type, const OrderBook& book) {
+                                       Quantity qty, Price referencePrice, Quantity reserve) {
     if (!riskActive_.load(std::memory_order_relaxed)) return true;
-    // Market orders have no limit price, so they skip the fat-finger reference
-    // check (0); the rest use the book mid as an NBBO proxy. Read under the
-    // book lock: on the sync path another caller may be matching on it.
-    Price referencePrice = 0;
-    if (type != OrderType::Market) book.withBookLock([&] { referencePrice = book.getMidPrice(); });
     std::lock_guard<std::mutex> lock(riskMutex_);
-    return riskManager_.check(trader, side, price, qty, referencePrice).allowed;
+    return riskManager_.checkAndReserve(trader, side, price, qty, referencePrice, reserve)
+        .allowed;
+}
+
+void MatchingEngine::releaseHierarchical(ParticipantId pid, Side side, Quantity qty) {
+    if (!riskActive_.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(riskMutex_);
+    riskManager_.release(pid, side, qty);
 }
 
 // ponytail: the observer's buffers have one drainer per book; the sync path
@@ -1753,14 +1763,27 @@ RejectReason MatchingEngine::checkBookValuedNotional(const OrderBook& book, Symb
 // released by the book after this returns None. Kill and halt are I6's.
 RejectReason MatchingEngine::admitAmend(const Order& o, Price newPrice, Quantity newTotal,
                                         Quantity newLeaves) {
-    if (!anyRiskActive_.load(std::memory_order_relaxed)) return RejectReason::None;
+    if (!anyRiskActive_.load(std::memory_order_relaxed) &&
+        !riskActive_.load(std::memory_order_relaxed))
+        return RejectReason::None;
     const Quantity growth = newLeaves > o.remainingQty ? newLeaves - o.remainingQty : 0;
     // A shrink at the same price is a partial cancel: it moves no price and
     // adds no notional, so the band and the notional cap are not asked. The
     // size cap still is — it may have been tightened since the order arrived.
     const bool reduceOnly = growth == 0 && newPrice == o.price;
-    return checkRiskControls(o.symbolId, o.participantId, o.side, reduceOnly ? 0 : newPrice,
-                             newTotal, o.type, growth);
+    const Price checkedPrice = reduceOnly ? 0 : newPrice;
+    const RejectReason r = checkRiskControls(o.symbolId, o.participantId, o.side, checkedPrice,
+                                             newTotal, o.type, growth);
+    if (r != RejectReason::None) return r;
+    // The hierarchy too, growth reserved at every tier. The book's lock is
+    // held here, so its mid is read directly.
+    const OrderBook* book = getOrderBook(o.symbolId);
+    const Price mid = (reduceOnly || !book) ? 0 : book->getMidPrice();
+    if (!preTradeRiskCheck(o.participantId, o.side, checkedPrice, newTotal, mid, growth)) {
+        releaseWorking(o.participantId, o.side, growth);
+        return RejectReason::RiskLimitBreached;
+    }
+    return RejectReason::None;
 }
 
 void MatchingEngine::onRiskFill(const Trade& t) {
@@ -1792,6 +1815,9 @@ void MatchingEngine::onRiskFill(const Trade& t) {
     }
 }
 
+// A new mapping puts the trader's resting orders and fills under its tiers:
+// re-book every tier from the books, or the first cancel releases what was
+// never reserved. So does the first configuration of any kind.
 void MatchingEngine::mapParticipant(ParticipantId trader, uint64_t strategyId,
                                     uint64_t accountId, uint64_t firmId) {
     {
@@ -1800,6 +1826,8 @@ void MatchingEngine::mapParticipant(ParticipantId trader, uint64_t strategyId,
     }
     riskActive_.store(true, std::memory_order_relaxed);
     observersActive_.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(bookMutex_);
+    rebuildPositionsLocked();
 }
 
 void MatchingEngine::setRiskTierLimits(RiskTier tier, uint64_t entityId, const TierLimits& limits) {
@@ -1807,13 +1835,21 @@ void MatchingEngine::setRiskTierLimits(RiskTier tier, uint64_t entityId, const T
         std::lock_guard<std::mutex> lock(riskMutex_);
         riskManager_.setLimits(tier, entityId, limits);
     }
-    riskActive_.store(true, std::memory_order_relaxed);
     observersActive_.store(true, std::memory_order_relaxed);
+    if (!riskActive_.exchange(true, std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        rebuildPositionsLocked();
+    }
 }
 
 int64_t MatchingEngine::riskNetPosition(RiskTier tier, uint64_t entityId) const {
     std::lock_guard<std::mutex> lock(riskMutex_);
     return riskManager_.netPosition(tier, entityId);
+}
+
+int64_t MatchingEngine::riskWorkingQty(RiskTier tier, uint64_t entityId, Side side) const {
+    std::lock_guard<std::mutex> lock(riskMutex_);
+    return riskManager_.workingQty(tier, entityId, side);
 }
 
 void MatchingEngine::setDefaultFeeSchedule(const FeeSchedule& s) {
@@ -1988,9 +2024,14 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
 
     // GW-4: the hierarchical gate, which the async worker runs at apply time,
     // ran on this path not at all.
-    if (!preTradeRiskCheck(participantId, side, price, qty, type, *book)) [[unlikely]] {
-        releaseWorking(participantId, side, qty);
-        return rejectedAsync(RejectReason::RiskLimitBreached);
+    if (riskActive_.load(std::memory_order_relaxed)) [[unlikely]] {
+        // The mid under the book lock: another sync caller may be matching.
+        Price mid = 0;
+        if (type != OrderType::Market) book->withBookLock([&] { mid = book->getMidPrice(); });
+        if (!preTradeRiskCheck(participantId, side, price, qty, mid, qty)) {
+            releaseWorking(participantId, side, qty);
+            return rejectedAsync(RejectReason::RiskLimitBreached);
+        }
     }
 
     // Capture everything this order emits so none of it reaches the client
@@ -2004,7 +2045,10 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     // Refused: no order lives, nothing traded. Admitted, the book answers for
     // the reservation from here.
     const bool admitted = std::holds_alternative<OrderId>(result);
-    if (!admitted) releaseWorking(participantId, side, qty);
+    if (!admitted) {
+        releaseWorking(participantId, side, qty);
+        releaseHierarchical(participantId, side, qty);
+    }
     uint64_t appendOrdinal = 0;
     if (journal_ && admitted) {
         std::lock_guard<std::mutex> lock(journalMutex_);
@@ -2775,6 +2819,27 @@ void MatchingEngine::rebuildPositionsLocked() {
             if (o.participantId < MAX_PARTICIPANTS)
                 working_[o.participantId][sideIndex(o.side)].fetch_add(
                     static_cast<int64_t>(o.remainingQty), std::memory_order_relaxed);
+        });
+    }
+    // The hierarchy the same way (TLA-5): each tier's net position and working
+    // quantity, from the same books. riskMutex_ per call, inside each book's
+    // lock, the order every other path takes them in.
+    {
+        std::lock_guard<std::mutex> lock(riskMutex_);
+        riskManager_.clearPositions();
+    }
+    for (SymbolId symbolId : symbolIds_) {
+        const OrderBook* book = getOrderBook(symbolId);
+        if (!book) continue;
+        book->forEachPositionLocked([this](const OrderBook::ParticipantPosition& p) {
+            std::lock_guard<std::mutex> lock(riskMutex_);
+            const bool longPos = p.netPosition >= 0;
+            riskManager_.onFill(p.participant, longPos ? Side::Buy : Side::Sell, 0,
+                                static_cast<Quantity>(longPos ? p.netPosition : -p.netPosition));
+        });
+        book->forEachOrderLocked([this](const Order& o) {
+            std::lock_guard<std::mutex> lock(riskMutex_);
+            riskManager_.reserve(o.participantId, o.side, o.remainingQty);
         });
     }
 }

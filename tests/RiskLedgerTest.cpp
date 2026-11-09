@@ -303,6 +303,8 @@ TEST(RiskLedgerOco, SiblingCancelReleases) {
 
 namespace {
 
+constexpr uint64_t kLedgerFirm = 77;
+
 // The ground truth: what the books hold right now, and what they say each
 // participant has executed. Compared with the ledger after every operation.
 void expectLedgerMatchesBooks(MatchingEngine& engine, const std::vector<ParticipantId>& pids,
@@ -320,6 +322,20 @@ void expectLedgerMatchesBooks(MatchingEngine& engine, const std::vector<Particip
         ASSERT_EQ(engine.getWorkingQty(p, Side::Buy), (working[{p, Side::Buy}])) << "buys of " << p << " " << where;
         ASSERT_EQ(engine.getWorkingQty(p, Side::Sell), (working[{p, Side::Sell}])) << "sells of " << p << " " << where;
         ASSERT_EQ(engine.getFilledPosition(p), filled) << "filled of " << p << " " << where;
+        // The hierarchy keeps the same books at the trader tier (TLA-5).
+        ASSERT_EQ(engine.riskWorkingQty(RiskTier::Trader, p, Side::Buy), (working[{p, Side::Buy}]))
+            << "trader-tier buys of " << p << " " << where;
+        ASSERT_EQ(engine.riskWorkingQty(RiskTier::Trader, p, Side::Sell), (working[{p, Side::Sell}]))
+            << "trader-tier sells of " << p << " " << where;
+        ASSERT_EQ(engine.riskNetPosition(RiskTier::Trader, p), filled)
+            << "trader-tier net of " << p << " " << where;
+    }
+    // And their firm is their sum.
+    for (Side side : {Side::Buy, Side::Sell}) {
+        int64_t sum = 0;
+        for (ParticipantId p : pids) sum += working[{p, side}];
+        ASSERT_EQ(engine.riskWorkingQty(RiskTier::Firm, kLedgerFirm, side), sum)
+            << "firm working " << where;
     }
 }
 
@@ -516,6 +532,10 @@ void configureLedgerEngine(MatchingEngine& engine, uint32_t seed) {
     engine.setPositionLimit(1, 60);
     engine.setPositionLimit(2, 400);
     engine.setPositionLimit(3, 0);
+    // All three under one firm, whose limit binds too.
+    for (ParticipantId p : {ParticipantId{1}, ParticipantId{2}, ParticipantId{3}})
+        engine.mapParticipant(p, 10 + p, 20 + p, kLedgerFirm);
+    engine.setRiskTierLimits(RiskTier::Firm, kLedgerFirm, TierLimits{0, 0, 300, 0.0});
 }
 
 constexpr int kFlowSeeds = 4;
@@ -699,6 +719,31 @@ TEST_P(RiskPath, ModifyStillOverACapIsRefused) {
 namespace {
 constexpr uint64_t kFirm = 1000;
 }  // namespace
+
+// ─── TLA-5: working quantity counts toward the hierarchical net limit ───────
+
+TEST_P(RiskPath, HierarchicalNetLimitCountsWorkingQuantity) {
+    engine.mapParticipant(kA, 10, 100, kFirm);
+    engine.mapParticipant(kB, 11, 101, kFirm);
+    engine.setRiskTierLimits(RiskTier::Firm, kFirm, TierLimits{0, 0, /*maxNetPosition=*/100, 0.0});
+    (void)add(1, kA, Side::Buy, kPx - 100, 60);
+    (void)add(2, kB, Side::Buy, kPx - 200, 60);   // nothing filled, but 120 would be working
+    drain();
+    EXPECT_EQ(leaves(1), 60u);
+    EXPECT_EQ(leaves(2), 0u);
+    EXPECT_EQ(engine.riskWorkingQty(RiskTier::Firm, kFirm, Side::Buy), 60);
+    // A sell is its own side; cancelling gives the room back.
+    EXPECT_TRUE(add(3, kB, Side::Sell, kPx + 100, 100).isAccepted());
+    EXPECT_TRUE(engine.submitCancel(kSym, 1).isAccepted());
+    drain();
+    EXPECT_EQ(engine.riskWorkingQty(RiskTier::Firm, kFirm, Side::Buy), 0);
+    EXPECT_TRUE(add(4, kB, Side::Buy, kPx - 200, 100).isAccepted());
+    // A replace that grows past the firm limit is refused, the order unchanged.
+    expectRefused(engine.submitCancelReplace(kSym, 4, kPx - 200, 120), RejectReason::RiskLimitBreached);
+    drain();
+    EXPECT_EQ(leaves(4), 100u);
+    EXPECT_EQ(engine.riskWorkingQty(RiskTier::Firm, kFirm, Side::Buy), 100);
+}
 
 TEST_P(RiskPath, HierarchicalOrderCapIsEnforced) {
     engine.mapParticipant(kA, 10, 100, kFirm);

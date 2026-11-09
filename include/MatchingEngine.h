@@ -528,7 +528,8 @@ public:
     // can fill alone. 0 = unlimited, and the ledger still keeps count once any
     // limit is set. Set one before traffic; see rebuildPositionsLocked.
     void setPositionLimit(ParticipantId pid, int64_t maxAbsPosition);
-    // Filled net position ± working quantity. 0 until a limit is set.
+    // Filled net position ± working quantity. Kept once a limit is set, and
+    // rebuilt from the books after a replay whether or not one is.
     int64_t getPosition(ParticipantId pid) const;
     // The ledger behind it. Working on a side is the sum of the remaining
     // quantity of that participant's live orders on that side, queued ones

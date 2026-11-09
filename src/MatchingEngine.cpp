@@ -1065,14 +1065,20 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                 *book, req.symbolId, req.participantId, req.side, req.orderType, req.price,
                 req.qty, req.stopPrice, req.stopLimitPrice, req.trailAmount);
             rr != RejectReason::None) [[unlikely]] {
+            releaseWorking(req.participantId, req.side, req.qty);
             book->emitReject(req.orderId, req.qty, rr);
             break;
         }
 
-        // Hierarchical pre-trade risk gate (no-op unless configured). Market
-        // orders have no limit price, so they skip the band (0); the rest
-        // measure from the mid. This thread owns the book, so no lock.
-        if (!preTradeRiskCheck(req.participantId, req.side, req.price, req.qty,
+        // Hierarchical pre-trade risk gate (no-op unless configured). A Market
+        // or stop order is valued at the price it can reach (STP-12); Market
+        // orders skip the band (0), the rest measure from the mid. This thread
+        // owns the book, so no lock.
+        if (!preTradeRiskCheck(req.participantId, req.side,
+                               book->notionalPrice(req.side, req.orderType, req.price,
+                                                   req.stopPrice, req.stopLimitPrice,
+                                                   req.trailAmount),
+                               req.qty,
                                req.orderType == OrderType::Market ? 0 : book->getMidPrice(),
                                req.qty)) {
             releaseWorking(req.participantId, req.side, req.qty);
@@ -2085,7 +2091,9 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         // The mid under the book lock: another sync caller may be matching.
         Price mid = 0;
         if (type != OrderType::Market) book->withBookLock([&] { mid = book->getMidPrice(); });
-        if (!preTradeRiskCheck(participantId, side, price, qty, mid, qty)) {
+        const Price valued =
+            book->notionalPrice(side, type, price, stopPrice, stopLimitPrice, trailAmount);
+        if (!preTradeRiskCheck(participantId, side, valued, qty, mid, qty)) {
             releaseWorking(participantId, side, qty);
             return rejectedAsync(RejectReason::RiskLimitBreached);
         }

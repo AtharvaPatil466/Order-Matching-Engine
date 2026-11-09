@@ -223,6 +223,19 @@ TEST_P(RiskPath, IocRemainderReleases) {
     EXPECT_EQ(engine.getPosition(kA), 100);
 }
 
+// The book-valued notional cap (STP-12) refuses a Market order on the book's
+// thread, after admission reserved it (THR-3): the refusal gives it back.
+TEST_P(RiskPath, NotionalCapRefusalReleases) {
+    engine.setPositionLimit(kA, 100);
+    ASSERT_TRUE(add(1, kB, Side::Sell, kPx, 30).isAccepted());
+    drain();
+    engine.setFatFingerLimits(kSym, 0, 0.0, 1);  // every real notional is over
+    (void)add(2, kA, Side::Buy, 0, 50, OrderType::Market);
+    drain();
+    EXPECT_EQ(leaves(1), 30u) << "it traded";
+    EXPECT_EQ(engine.getWorkingQty(kA, Side::Buy), 0);
+}
+
 TEST_P(RiskPath, RejectedFokRollsBack) {
     engine.setPositionLimit(kA, 100);
     ASSERT_TRUE(add(1, kB, Side::Sell, kPx, 30).isAccepted());

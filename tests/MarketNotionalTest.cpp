@@ -147,13 +147,17 @@ protected:
     // Refused at submit on the sync path; the async path answers at enqueue and
     // the worker refuses it.
     void expectRefused(const SubmitResult& r, OrderId id, RejectReason reason) {
-        if (!async()) EXPECT_EQ(r.rejectReason, reason);
+        if (!async()) {
+            EXPECT_EQ(r.rejectReason, reason);
+        }
         engine.waitForDrain();
         EXPECT_EQ(engine.getOrderBook(kSym)->getOrder(id), nullptr);
         EXPECT_EQ(engine.getOrderBook(kSym)->getOrder(1)->remainingQty, kQty) << "it traded";
     }
     void expectRefusedEmpty(const SubmitResult& r) {
-        if (!async()) EXPECT_EQ(r.rejectReason, RejectReason::FatFingerReject);
+        if (!async()) {
+            EXPECT_EQ(r.rejectReason, RejectReason::FatFingerReject);
+        }
         engine.waitForDrain();
     }
     SubmitResult marketBuy(OrderId id) {
@@ -202,7 +206,9 @@ TEST_P(EngineNotional, FatFingerCapFallsBackToTheEnginesReferencePrice) {
 TEST_P(EngineNotional, FatFingerCapRefusesWhatItCannotValue) {
     engine.setFatFingerLimits(kSym, 0, 0.0, 1'000'000);
     const SubmitResult r = marketBuy(2);
-    if (!async()) EXPECT_EQ(r.rejectReason, RejectReason::FatFingerReject);
+    if (!async()) {
+        EXPECT_EQ(r.rejectReason, RejectReason::FatFingerReject);
+    }
     engine.waitForDrain();
     EXPECT_EQ(engine.getFatFingerRejectCount(), 1u);
 }

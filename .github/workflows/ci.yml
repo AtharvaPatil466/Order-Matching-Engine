@@ -332,3 +332,27 @@ jobs:
 
       - name: Check every OB_* macro against ci.yml
         run: sh scripts/check_feature_macro_lanes.sh
+
+  docker-image:
+    name: Docker image
+    # Non-required. chaos.yml was the only job that built the image, and it went
+    # with replication (roadmap 1.1), so nothing else checks that the image
+    # builds, refuses a replication role and boots.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t ob-engine:ci .
+
+      - name: A replication role is refused
+        run: |
+          rc=0; docker run --rm ob-engine:ci --role primary || rc=$?
+          [ "$rc" -eq 1 ] || { echo "::error::--role primary exited $rc, want 1"; exit 1; }
+
+      - name: Boots and answers /health
+        run: |
+          docker run -d --name ob -p 8080:8080 \
+            -e OB_ADMIN_TOKEN=ci -e OB_NO_PARTICIPANT_AUTH=1 ob-engine:ci
+          for _ in $(seq 1 30); do curl -sf localhost:8080/health && exit 0; sleep 1; done
+          docker logs ob; exit 1

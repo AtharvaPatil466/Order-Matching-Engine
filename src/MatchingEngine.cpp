@@ -2683,12 +2683,22 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
                 book->restorePegQueue(entry.orderId);
             } else if (book && !book->getOrder(entry.orderId)) {
                 // Put back, not re-admitted: see OrderBook::restoreOrder.
-                (void)book->restoreOrder(entry.orderId, entry.participantId, entry.side,
-                                         entry.price, entry.quantity, entry.orderType,
-                                         entry.stopPrice, entry.displayQty, entry.timeInForce,
-                                         entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                                         entry.pegOffset, entry.trailAmount, entry.minQty,
-                                         entry.hidden);
+                const RejectReason why =
+                    book->restoreOrder(entry.orderId, entry.participantId, entry.side,
+                                       entry.price, entry.quantity, entry.orderType,
+                                       entry.stopPrice, entry.displayQty, entry.timeInForce,
+                                       entry.expiryTime, entry.stopLimitPrice, entry.pegType,
+                                       entry.pegOffset, entry.trailAmount, entry.minQty,
+                                       entry.hidden);
+                if (why != RejectReason::None) {
+                    ++restoreRefusals_;
+                    obSink().log(obEvent("checkpoint_restore_refused", LogSeverity::Error)
+                                     .kv("symbol", (long long)entry.symbolId)
+                                     .kv("order", (unsigned long long)entry.orderId)
+                                     .kv("price", (long long)entry.price)
+                                     .kv("reason", (long long)static_cast<int>(why)));
+                    break;
+                }
                 if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                     book->restoreStopElection(entry.orderId, entry.stopPrice);
                 else

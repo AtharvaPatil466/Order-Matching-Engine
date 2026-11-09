@@ -118,6 +118,19 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
 
     const size_t replayed = engine.replayJournal();
 
+    // A checkpoint order replay could not put back has no other record: the
+    // checkpoint replaced the journal that held its history. Serving the book
+    // without it, the next checkpoint would erase it for good.
+    if (const size_t refused = engine.restoreRefusals(); refused > 0) {
+        std::cerr << "[Engine] FATAL: " << refused << " resting order(s) in the checkpoint in "
+                  << journalPath << " could not be\n"
+                  << "        restored (checkpoint_restore_refused in the log names each one\n"
+                  << "        and why: a price outside the instrument band, a pool smaller\n"
+                  << "        than the one that wrote it). Refusing to start without them.\n"
+                  << "        Start with the configuration that wrote the checkpoint.\n";
+        return 1;
+    }
+
     if (recoverable > 0 && replayed == 0) {
         std::cerr << "[Engine] FATAL: journal holds " << recoverable
                   << " recoverable entries but replay applied none.\n"
@@ -135,8 +148,9 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
     }
 
     // WHAT THIS STILL DOES NOT CATCH, so nobody reads the line above as more than
-    // it is: replayJournal counts entries CONSUMED, not entries applied. The
-    // dispatch discards every return value (addOrder and modifyOrder in
+    // it is: replayJournal counts entries CONSUMED, not entries applied. Apart
+    // from a checkpoint's orders (restoreRefusals, above), the dispatch discards
+    // every return value (addOrder and modifyOrder in
     // MatchingEngine::replayJournal), so an entry that replayed and was REFUSED —
     // a duplicate order id, an exhausted pool, or a quantity that a newer guard
     // now rejects — is counted as replayed and silently dropped.

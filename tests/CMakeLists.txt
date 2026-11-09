@@ -404,6 +404,14 @@ enable_assertions(CheckpointTradingStateTest)
 add_test(NAME CheckpointTradingStateTest COMMAND CheckpointTradingStateTest)
 set_tests_properties(CheckpointTradingStateTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
+# A checkpoint order the restart cannot put back stops the boot: replay used to
+# discard the refusal and boot without it.
+add_executable(CheckpointRestoreRefusedTest CheckpointRestoreRefusedTest.cpp)
+target_link_libraries(CheckpointRestoreRefusedTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointRestoreRefusedTest)
+add_test(NAME CheckpointRestoreRefusedTest COMMAND CheckpointRestoreRefusedTest)
+set_tests_properties(CheckpointRestoreRefusedTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
 add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)

@@ -428,6 +428,10 @@ public:
 
     // Replay journal to rebuild order book state (crash recovery)
     size_t replayJournal();
+    // Checkpoint orders replay could not put back, each logged as
+    // checkpoint_restore_refused. A checkpoint is their only record, so
+    // bootJournal refuses to start on any.
+    size_t restoreRefusals() const { return restoreRefusals_; }
 
     // The replay itself, over records already read: what replayJournal runs on
     // this engine's journal, and TimeMachine on a prefix of a journal file.
@@ -611,6 +615,7 @@ private:
     uint64_t nextSequenceId();
     void leaseSequenceIds(uint64_t through);
     std::atomic<uint64_t> sequenceLease_{0};   // highest id a record covers
+    size_t restoreRefusals_ = 0;               // see restoreRefusals()
     // Tags this engine's id blocks: a thread's block is only used by the
     // engine whose lease covers it, never by the next engine on that thread.
     inline static std::atomic<uint64_t> seqOwnerTags_{0};

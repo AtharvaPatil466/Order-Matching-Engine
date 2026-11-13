@@ -371,6 +371,12 @@ leaves only once its entries are synced, and never if the journal halted
 (`gateway_reports_undelivered_total` counts reports for a participant with no
 session; they are not replayed on reconnect).
 
+A write or sync error halts the journal (`journal_write_failures_total`, a
+`journal.halted` log line). From then on the books are frozen: every request,
+the kill switch included, is answered `JournalHalted`, and expiry, DAY and
+session sweeps do not run. Fix the disk and restart; replay restores what was
+acknowledged (MatchingRules Rule 2.7).
+
 ### Checkpoints
 
 A checkpoint **replaces the journal** with what it takes to rebuild the books;

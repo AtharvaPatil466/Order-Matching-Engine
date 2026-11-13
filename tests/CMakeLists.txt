@@ -870,6 +870,14 @@ enable_assertions(JournalHaltTest)
 add_test(NAME JournalHaltTest COMMAND JournalHaltTest)
 set_tests_properties(JournalHaltTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# JOURNAL-6, DA-1, DA-2: once the journal halts no path moves a book — the kill
+# switch (engine and TcpGateway), expiry, DAY and session sweeps, sync and async.
+add_executable(JournalHaltFreezeTest JournalHaltFreezeTest.cpp)
+target_link_libraries(JournalHaltFreezeTest PRIVATE OrderMatcher)
+enable_assertions(JournalHaltFreezeTest)
+add_test(NAME JournalHaltFreezeTest COMMAND JournalHaltFreezeTest)
+set_tests_properties(JournalHaltFreezeTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # JRN-11: a refused io_uring_submit halts the journal instead of leaving the
 # writer waiting forever on a chain the kernel never saw, and the refused SQEs
 # never reach the disk. Fault-injection build on Linux with liburing; skips

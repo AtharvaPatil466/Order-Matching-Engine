@@ -263,6 +263,30 @@ be stale after a modify).
 **Status: Deliberate — pinned** by `tests/GatewayExecutionReportTest.cpp` and the crossing
 rounds of `tests/CrashRecoveryE2ETest.cpp`. Sync-mode `TcpGateway` sends no reports.
 
+### Rule 2.7 — Once the journal halts, no book changes
+
+A journal halts on a real write or sync error (a full disk, `EFBIG`, `EIO`) and writes nothing
+more. From then on nothing changes any book, because nothing could be recorded and a restart
+would undo it:
+
+- new orders, cancels, modifies and replaces are refused with `JournalHalted`, at admission and
+  again on the worker for anything queued before the halt;
+- the kill switch is refused as well: it cancels nothing, and the order port answers it
+  `JournalHalted` rather than Ack. Since nothing can trade while halted, it is not needed;
+- expiry sweeps, the DAY sweep at session end, session transitions, uncrosses and the
+  volatility-auction reopening cross are suspended;
+- an engine-initiated cancel (kill, DAY, OCO sibling) is journaled before it is applied, so a
+  sweep the halt interrupts stops with the book still matching the disk.
+
+One request is the exception: the one whose own record failed. The book applies an order before
+its record is written (not write-ahead; Rule 2.6), so that request's effect is in memory. It
+is answered `JournalHalted`, nothing it produced is shown, nothing can trade against it, and a
+restart drops it. An expiry sweep that halts partway also finishes cancelling its expired orders
+in memory; their cancels are never shown and a restart's next sweep expires them again.
+
+**Status: Deliberate — pinned** by `tests/JournalHaltTest.cpp` and
+`tests/JournalHaltFreezeTest.cpp`. Recovery is a restart.
+
 ---
 
 ## 3. Iceberg orders

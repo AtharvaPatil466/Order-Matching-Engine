@@ -765,8 +765,10 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
     // ponytail: this thread waits out one fsync per request, and every worker's
     // queue with it. Roadmap D7 (a per-worker gate releasing acks at the durable
     // ordinal) is the upgrade path once 0.4 has measured what it buys.
-    if (engine_.isAsync() && result.isAccepted()) {
-        engine_.waitForDrain();
+    // The halt check runs on a sync engine too: its kill switch has no result
+    // of its own, and on a halted journal it cancels nothing (DA-1).
+    if (result.isAccepted()) {
+        if (engine_.isAsync()) engine_.waitForDrain();
         if (const Journal* j = engine_.getJournal(); j && j->halted()) {
             result = SubmitResult::rejected(RejectReason::JournalHalted);
         }

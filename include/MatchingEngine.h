@@ -912,6 +912,10 @@ private:
     // Drain a book's observer after a request: OCO sibling cancels, then the
     // trade-driven consumers (fees / risk accrual / audit).
     void driveOco(SymbolId symbolId, OrderBook* book);
+    // An engine-initiated cancel (kill, DAY, OCO sibling): journaled FIRST,
+    // then applied, as the expiry sweep does. False, book untouched, when the
+    // journal is or has just become halted. `appendOrdinal` takes the entry's.
+    bool cancelJournaledFirst(OrderBook& book, OrderId id, uint64_t& appendOrdinal);
     // P2-10's notional cap for an order valued off the book (OrderBook::
     // notionalPrice): the submit-time check cannot read a worker-owned book, so
     // this runs on the book's thread, on both paths (STP-12).

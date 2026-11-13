@@ -338,6 +338,8 @@ size_t MatchingEngine::sweepAndVerify(ParticipantId pid) {
     // switch; the retry exists so a participant kill racing an in-flight submit
     // still converges, and so the guarantee is VERIFIED rather than asserted.
     constexpr int kMaxSweeps = 3;
+    // Halted, the workers refuse the sweep (JOURNAL-6): nothing to retry.
+    if (journalHalted()) return countResting(pid);
     size_t survivors = 0;
     for (int attempt = 0; attempt < kMaxSweeps; ++attempt) {
         OrderRequest req{};
@@ -1034,6 +1036,12 @@ void MatchingEngine::holdForCut() {
 }
 
 void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req) {
+    // A halted journal writes nothing more, so nothing may move a book either:
+    // a cancel, modify, replace, kill, session change or expiry queued before
+    // the halt (or posted by the timer after it) would change the live book
+    // with no record, and a restart would undo it (JOURNAL-6, DA-1). A new
+    // order is refused below, where its client hears JournalHalted.
+    if (req.type != OrderRequest::Type::NewOrder && journalHalted()) [[unlikely]] return;
     switch (req.type) {
     case OrderRequest::Type::NewOrder: {
         auto* book = getOrderBook(req.symbolId);
@@ -1223,13 +1231,9 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             book->forEachOrder([&](const Order& o) {
                 if (everyone || o.participantId == req.participantId) ids.push_back(o.id);
             });
-            for (OrderId id : ids) {
-                book->cancelOrder(id);  // its working quantity goes back in the book
-                if (journal_) {
-                    std::lock_guard<std::mutex> lock(journalMutex_);
-                    journal_->logCancelOrder(id, book->getSymbolId());
-                }
-            }
+            uint64_t unused = 0;
+            for (OrderId id : ids)
+                if (!cancelJournaledFirst(*book, id, unused)) return;
         }
         break;
     }
@@ -1244,6 +1248,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         // Built inside the loop: the callback receives only an OrderId, so
         // the symbol has to be captured per book rather than hoisted.
         for (SymbolId symbolId : symbolsByThread_[threadIndex]) {
+            if (journalHalted()) [[unlikely]] return;   // halted by a book before this one
             std::function<void(OrderId)> onExpire;
             if (journal_) {
                 onExpire = [this, symbolId](OrderId id) {
@@ -1376,13 +1381,11 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
                 if (!ev.executed) { obs->oco.onCanceled(ev.id); continue; }
                 siblings = obs->oco.onExecuted(ev.id);
             }
+            uint64_t unused = 0;
             for (OrderId sib : siblings) {
                 if (!book->getOrder(sib)) continue;   // already gone
-                book->cancelOrder(sib);
-                if (journal_) {
-                    std::lock_guard<std::mutex> jl(journalMutex_);
-                    journal_->logCancelOrder(sib, book->getSymbolId());  // replay reproduces the OCO cancel
-                }
+                // Journaled, so replay reproduces the OCO cancel.
+                if (!cancelJournaledFirst(*book, sib, unused)) break;
             }
         }
         obs->firedScratch.clear();   // retain capacity for the next drain cycle
@@ -1444,6 +1447,22 @@ uint64_t MatchingEngine::driveOcoSync(SymbolId symbolId, OrderBook* book,
     if (!journal_ || appendOrdinal == 0) return appendOrdinal;
     std::lock_guard<std::mutex> lock(journalMutex_);
     return journal_->entriesAppended();
+}
+
+// Record first, as the expiry sweep does: an entry the disk refuses halts the
+// journal, and then this cancel never happens, so a sweep stops at the halt
+// with the book still matching the disk (DA-1). Applied first, the order was
+// gone from memory and back after a restart.
+bool MatchingEngine::cancelJournaledFirst(OrderBook& book, OrderId id, uint64_t& appendOrdinal) {
+    if (journal_) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        if (journal_->halted()) return false;
+        journal_->logCancelOrder(id, book.getSymbolId());
+        appendOrdinal = journal_->entriesAppended();
+        if (journal_->halted()) return false;
+    }
+    book.cancelOrder(id);  // its working quantity goes back in the book
+    return true;
 }
 
 // ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ────────────────────────
@@ -1513,14 +1532,9 @@ uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
         book->forEachOrderLocked([&](const Order& o) {
             if (everyone || o.participantId == pid) ids.push_back(o.id);
         });
-        cancelled += ids.size();
         for (OrderId id : ids) {
-            book->cancelOrder(id);  // its working quantity goes back in the book
-            if (journal_) {
-                std::lock_guard<std::mutex> jl(journalMutex_);
-                journal_->logCancelOrder(id, book->getSymbolId());
-                appendOrdinal = journal_->entriesAppended();
-            }
+            if (!cancelJournaledFirst(*book, id, appendOrdinal)) break;
+            ++cancelled;
         }
     }
     holdUntilDurable(appendOrdinal);
@@ -1566,12 +1580,7 @@ size_t MatchingEngine::cancelDayOrders(const std::vector<SymbolId>& symbols) {
             if (o.timeInForce == TimeInForce::DAY) dayIds.push_back(o.id);
         });
         for (OrderId id : dayIds) {
-            book->cancelOrder(id);  // its working quantity goes back in the book
-            if (journal_) {
-                std::lock_guard<std::mutex> jl(journalMutex_);
-                journal_->logCancelOrder(id, book->getSymbolId());
-                appendOrdinal = journal_->entriesAppended();
-            }
+            if (!cancelJournaledFirst(*book, id, appendOrdinal)) break;
             ++cancelled;
             // "log at session end" — durable, per-order audit line.
             obSink().log(obEvent("day_order_cancelled_at_shutdown")
@@ -2552,7 +2561,9 @@ void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
 // that book's order flow, not as one instant across books.
 uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
     auto* book = getOrderBook(req.symbolId);
-    if (!book) return 0;
+    // Halted: the transition could not be recorded, so it does not happen —
+    // nor does a reopening cross (JOURNAL-6).
+    if (!book || journalHalted()) return 0;
     const auto state = static_cast<TradingState>(req.newQty);
     const auto tradingDate = static_cast<uint32_t>(req.expiryTime);
     if (req.type == OrderRequest::Type::TradingState) {
@@ -2669,6 +2680,7 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     // journalMutex_ (the onExpire callback logs under journalMutex_); sync-mode
     // only, where no async worker runs, so it cannot deadlock the worker path.
     std::lock_guard<std::mutex> lock(bookMutex_);
+    if (journalHalted()) return;   // suspended with the journal (JOURNAL-6)
 
     // If the journal is enabled, log each expiration as a CancelOrder
     // BEFORE the cancel actually runs. Replay then reproduces these
@@ -2677,6 +2689,7 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     durabilityGate_.beginOrder();
     uint64_t appendOrdinal = 0;
     for (SymbolId symbolId : symbolIds_) {
+        if (journalHalted()) break;
         std::function<void(OrderId)> onExpire;
         if (journal_) {
             onExpire = [this, symbolId, &appendOrdinal](OrderId id) {

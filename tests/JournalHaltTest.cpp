@@ -315,6 +315,37 @@ void testCheckpointDirectorySyncFailureHalts() {
     assert(resting == static_cast<size_t>(kOrders));
 }
 
+// DA-5: a NEW journal file is a new directory entry, durable only once the
+// directory is synced; a power cut before that can drop the file with every
+// order acked into it. Same 0300 directory as above: the sync must happen, and
+// when it cannot, the journal halts before anything is acknowledged.
+void testNewJournalDirectorySyncFailureHalts() {
+    if (::geteuid() == 0) {
+        std::puts("  new journal directory sync: SKIP (root opens a 0300 directory)");
+        return;
+    }
+    const std::string dir = uniqueTempPath("journal_halt_newdir");
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directory(dir);
+    const std::string path = dir + "/fresh.wal";
+    assert(::chmod(dir.c_str(), 0300) == 0);
+    RejectReason first = RejectReason::None;
+    {
+        MatchingEngine engine;
+        engine.addSymbol(kSym);
+        engine.enableJournal(path, Journal::SyncPolicy::Immediate);
+        engine.start();
+        first = restingBuy(engine, 1).rejectReason;
+        engine.stop();
+    }
+    assert(::chmod(dir.c_str(), 0700) == 0);
+    std::filesystem::remove_all(dir);
+    std::printf("  new journal directory sync: first order %s\n",
+                first == RejectReason::JournalHalted ? "rejected JournalHalted" : "acknowledged");
+    assert(first == RejectReason::JournalHalted &&
+           "an order was acked into a journal whose directory entry was never synced");
+}
+
 }  // namespace
 
 int main() {
@@ -323,6 +354,7 @@ int main() {
     testAsyncGatewayDoesNotAckAFailedWrite();
     testCheckpointFailureKeepsTheJournal();
     testCheckpointDirectorySyncFailureHalts();
+    testNewJournalDirectorySyncFailureHalts();
     std::puts("JournalHaltTest passed");
     return 0;
 }

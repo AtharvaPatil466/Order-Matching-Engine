@@ -339,6 +339,10 @@ public:
         // that is about to create a .tmp and therefore the only place that
         // has any business removing a stale one.
 
+        // A file this open creates is a new directory entry: synced before
+        // its first record (writePendingHeader), not here, so a reader that
+        // creates an empty file by opening it syncs nothing (DA-5).
+        dirSyncPending_ = ::access(filePath_.c_str(), F_OK) != 0;
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
         checkRecoverable();
@@ -685,6 +689,8 @@ public:
             // the synthetic orders into a file marked trusted, and the next boot
             // replayed them with no flag and no refusal.
             temp.contentEpoch_ = contentEpoch_;
+            // Its entry only matters once renamed, and the rename syncs it.
+            temp.dirSyncPending_ = false;
             writer(temp);
             temp.flush();
             // The snapshot is about to REPLACE the live journal, so publishing
@@ -1608,6 +1614,16 @@ private:
         cutTornTail();   // never write behind a torn record
         upgradeOldHeader();
         if (halted() || !pendingHeader_ || !file_) return;
+        // A file this journal created is not durable until its directory
+        // entry is: a power cut could otherwise drop it with every record
+        // acked into it (DA-5). Unsyncable, nothing is written or acked.
+        if (dirSyncPending_) {
+            if (!syncDirOf(filePath_)) {
+                halt("syncing the directory of the new journal file", errno);
+                return;
+            }
+            dirSyncPending_ = false;
+        }
         // makeHeader() stamps this journal's own epoch: NO_SEEDING for a file
         // this build created, since it seeds no synthetic orders. A checkpoint
         // rewrite comes through
@@ -2101,6 +2117,7 @@ private:
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().
     bool   pendingHeader_{false};
+    bool   dirSyncPending_{false};   // created by this journal, directory not yet synced
     // The existing header is v1 or v2; upgradeOldHeader() marks it before a write.
     bool   headerIsOld_{false};
     // A torn final write still to cut: tornBytes_ bytes from offset tornFrom_.

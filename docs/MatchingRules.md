@@ -135,7 +135,11 @@ prices in one fixed range of at most that width. The range is set once:
   when a symbol has no range.
 - **Anchored.** A book with no configured range centres one on the first price that rests, and
   never moves it. This is what a book gets in `OrderEngine` without `--config`, and in the
-  library unless the owner calls `setPriceRange`.
+  library unless the owner calls `setPriceRange`. The anchor outlives the orders that set it,
+  and a checkpoint carries it (in the book's `Counters` record, written before the orders), so a
+  restart restores it before putting any order back. It used to re-anchor on the first order
+  restored — the best bid — and an order the live range held no longer fitted (JOURNAL-2). A
+  range configured at the restart wins over a carried anchor.
 
 With a configured range, an order priced outside it is rejected with `OutOfPriceRange` at
 admission, before the ack: `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg`, `Hidden` and `LOC` on

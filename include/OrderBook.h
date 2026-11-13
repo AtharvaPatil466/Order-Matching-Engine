@@ -826,6 +826,23 @@ public:
         std::lock_guard<std::mutex> lock(bookLock_);
         if (next > nextArrival_) nextArrival_ = next;
     }
+    // And the band a book with no configured range (setPriceRange) anchored
+    // on its first resting price (ensurePriceRange). Restored before any
+    // order, or the first one put back re-anchors it and orders the live band
+    // held no longer fit (JOURNAL-2). False: configured, or not anchored yet.
+    bool anchoredRangeLocked(Price& minPrice) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (priceRangeConfigured_ || !bids_.rangeSet()) return false;
+        minPrice = bids_.minPrice();
+        return true;
+    }
+    // A band already set (configured at boot, or anchored) is kept.
+    void restoreAnchoredRange(Price minPrice) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (bids_.rangeSet()) return;
+        bids_.setRange(minPrice);
+        asks_.setRange(minPrice);
+    }
     // So are the prices the dropped trades left: the last trade (a market-vs-
     // market auction crosses at it) and the breaker's reference, which a book
     // without one re-seeds from its next order; and the last trade's quantity,

@@ -382,6 +382,8 @@ history. What it keeps:
   auction's self-cross resolution compares;
 - each book's session: a begun session's `PreOpen` with its trading date (0 when
   undated), a halted book's pre-halt state, and any state but `Continuous`;
+- per book, before its orders, the price band it anchored on its first resting
+  order when no band is configured (so a restart without `--config` keeps it);
 - per book, the trade-id and arrival counters, the last trade's price and quantity and the
   reference price (the circuit breaker's), so a restored book trips and crosses
   as the one that wrote it would have;

@@ -240,6 +240,14 @@ inline uint64_t snapshotArrivalSeq(const JournalEntry& e) {
 // restored one by the same margin as live.
 inline uint64_t countersNextArrival(const JournalEntry& e) { return e.expiryTime; }
 
+// And, when hidden is set, the low end of the price band the book anchored
+// on its first resting order (no configured band) in stopPrice (JOURNAL-2).
+inline bool countersAnchoredRange(const JournalEntry& e, Price& minPrice) {
+    if (!e.hidden) return false;
+    minPrice = e.stopPrice;
+    return true;
+}
+
 // An iceberg Snapshot's remaining slice; 0 restores nothing (see ICEBERG_SLICE).
 inline Quantity snapshotIcebergSlice(const JournalEntry& e) {
     return (e.newQty & SNAPSHOT_ICEBERG_SLICE) ? static_cast<Quantity>(e.stopLimitPrice) : 0;
@@ -481,10 +489,13 @@ public:
 
     void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease,
                      Price lastTradePrice = 0, Price referencePrice = 0,
-                     Quantity lastTradeQty = 0, uint64_t nextArrival = 0) {
+                     Quantity lastTradeQty = 0, uint64_t nextArrival = 0,
+                     bool anchored = false, Price anchoredMin = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Counters;
         entry.expiryTime = nextArrival;  // see countersNextArrival
+        entry.hidden = anchored;         // see countersAnchoredRange
+        entry.stopPrice = anchoredMin;
         entry.timestamp = now();
         entry.symbolId = symbolId;
         entry.orderId = nextTradeId;

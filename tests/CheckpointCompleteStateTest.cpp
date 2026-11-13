@@ -119,11 +119,47 @@ bool auctionSelfCrossKeepsAge() {
         [](MatchingEngine& e) { e.uncrossBatch({S}); });
 }
 
+// JOURNAL-2. With no configured band, the book anchors a ±100,000-tick range
+// on its first resting price (150000 here: [50000, 250000]). A restore
+// re-anchored it on the first order put back, the best bid at 60000, so the
+// ask at 240000 no longer fitted and the boot was refused; and an order the
+// live range takes after the restart (245000) must still rest.
+bool anchoredRangeSurvives() {
+    return sameAfterRestart(
+        "anchored_range", [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 1, 1, Side::Sell, 150000, 10, OrderType::Limit);  // anchors
+            e.submitOrder(S, 2, 2, Side::Buy, 60000, 10, OrderType::Limit);
+            e.submitOrder(S, 3, 1, Side::Sell, 240000, 10, OrderType::Limit);
+        },
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 4, 1, Side::Sell, 245000, 10, OrderType::Limit);
+            e.submitOrder(S, 5, 2, Side::Buy, 55000, 10, OrderType::Limit);
+        });
+}
+
+// The anchor outlives the orders that set it: an emptied book keeps its range
+// live, so a restart must too, or the next order re-anchors somewhere else.
+bool anchoredRangeOfEmptyBookSurvives() {
+    return sameAfterRestart(
+        "anchored_range_empty_book", [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 1, 1, Side::Sell, 150000, 10, OrderType::Limit);  // anchors
+            e.cancelOrder(S, 1);
+        },
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 2, 2, Side::Buy, 60000, 10, OrderType::Limit);
+            e.submitOrder(S, 3, 1, Side::Sell, 240000, 10, OrderType::Limit);
+        });
+}
+
 }  // namespace
 
 int main() {
     bool ok = true;
     ok &= auctionSelfCrossKeepsAge();
+    ok &= anchoredRangeSurvives();
+    ok &= anchoredRangeOfEmptyBookSurvives();
     if (!ok) {
         std::puts("CheckpointCompleteStateTest FAILED: a restart from a checkpoint decided "
                   "differently from the engine that wrote it");

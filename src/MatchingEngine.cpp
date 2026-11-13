@@ -964,6 +964,8 @@ void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
     if (book && e.orderId != 0) {
         book->restoreNextTradeId(e.orderId);
         book->restoreNextArrival(countersNextArrival(e));
+        if (Price minPrice = 0; countersAnchoredRange(e, minPrice))
+            book->restoreAnchoredRange(minPrice);
         book->restorePrices({e.price, e.newPrice, e.newQty});
     }
     if (e.quantity == 0) return;
@@ -3047,7 +3049,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // carries the counters they would have restored, and the prices.
         struct BookCounters {
             SymbolId symbolId; uint64_t nextTradeId; OrderBook::CheckpointPrices prices;
-            uint64_t nextArrival;
+            uint64_t nextArrival; bool anchored; Price anchoredMin;
         };
         std::vector<BookCounters> counters;
         std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
@@ -3073,8 +3075,12 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 const uint64_t next = book->nextTradeIdLocked();
                 const OrderBook::CheckpointPrices prices = book->checkpointPricesLocked();
                 const uint64_t nextArrival = book->nextArrivalLocked();
-                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0 || nextArrival > 1)
-                    counters.push_back({symbolId, next, prices, nextArrival});   // books used
+                Price anchoredMin = 0;
+                const bool anchored = book->anchoredRangeLocked(anchoredMin);
+                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0 ||
+                    nextArrival > 1 || anchored)
+                    counters.push_back({symbolId, next, prices, nextArrival, anchored,
+                                        anchoredMin});   // books that were used
                 if (book->getTradingState() != TradingState::Continuous || book->sessionBegun())
                     states.push_back({symbolId, book->getTradingState(), book->sessionBegun(),
                                       book->sessionDate(), book->preHaltState()});
@@ -3105,6 +3111,17 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (state != replayed) snapshotJournal.logTradingState(symbolId, state);
             }
             if (lease != 0) snapshotJournal.logCounters(0, 0, lease);
+            // Before the orders: the anchored band must be in place before the
+            // first one is put back, or it re-anchors on that order (JOURNAL-2).
+            // The prices may go first too, since restoreOrder puts an order
+            // back without admitting it, so nothing in it reads them; that
+            // is what made them order-sensitive when restore re-admitted.
+            for (const auto& [symbolId, nextTradeId, prices, nextArrival, anchored,
+                              anchoredMin] : counters)
+                snapshotJournal.logCounters(symbolId, nextTradeId, 0,
+                                            prices.lastTrade, prices.reference,
+                                            prices.lastTradeQty, nextArrival, anchored,
+                                            anchoredMin);
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,
@@ -3122,12 +3139,6 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
             // order each book's reprice pass moves them in.
             for (const auto& [symbolId, id] : pegQueue)
                 snapshotJournal.logPegQueue(id, symbolId);
-            // After the orders: each restored order's add sweeps stops at the
-            // last trade, which would fire them into a half-restored book.
-            for (const auto& [symbolId, nextTradeId, prices, nextArrival] : counters)
-                snapshotJournal.logCounters(symbolId, nextTradeId, 0,
-                                            prices.lastTrade, prices.reference,
-                                            prices.lastTradeQty, nextArrival);
             // After the orders too: their re-adds count as submissions again.
             for (const auto& [symbolId, p] : positions)
                 snapshotJournal.logPosition(symbolId, p.participant, p.netPosition,

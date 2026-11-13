@@ -515,7 +515,8 @@ executed and is gone (an `assert` stands in its place).
 > `src/OrderBook.cpp`
 
 **Status: Deliberate — commented and pinned** (`tests/StpSemanticsTest.cpp`, auction section;
-`tests/AuctionSelfCrossTest.cpp`; `tests/AuctionUncrossRulesTest.cpp`).
+`tests/AuctionSelfCrossTest.cpp`; `tests/AuctionUncrossRulesTest.cpp`; the reference in
+`tests/UncrossOracleTest.cpp`).
 
 ---
 
@@ -1061,6 +1062,11 @@ would: released `MOC`, `LOC` in the book and parked market orders. They used to 
 the next session (pinned by `StaleOnClose.*` in `tests/AuctionUncrossRulesTest.cpp`).
 
 > `uncross()` in `src/OrderBook.cpp` — `nextParked` and the step-3 cancel pass
+
+Price, volume, per-order fills and the self-cross set are checked against an independent
+reference written from Rules 4.4, 7.2 and 7.3 on 40,000 random books (limits and parked market
+orders over 7 prices, random STP modes, cancels before the cross, a reference price in half the
+runs): `tests/UncrossOracleTest.cpp`.
 
 **Status: Undocumented — no test pins this, may be incidental.** That the cross ignores
 `matchAlgorithm_` and is always FIFO is a real semantic choice — a pro-rata product would

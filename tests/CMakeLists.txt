@@ -1680,3 +1680,14 @@ gtest_discover_tests(AuctionUncrossRulesTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
+
+# The uncross against an independent reference written from Rules 4.4, 7.2 and
+# 7.3: price, volume, per-order fills and the STP set on random books.
+add_executable(UncrossOracleTest UncrossOracleTest.cpp)
+target_link_libraries(UncrossOracleTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(UncrossOracleTest)
+gtest_discover_tests(UncrossOracleTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")

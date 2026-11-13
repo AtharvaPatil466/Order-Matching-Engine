@@ -1628,3 +1628,10 @@ gtest_discover_tests(RestingOrderRulesTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
+# MIDS-3, MIDS-7: order ids are scoped by participant at the gateway, and an
+# out-of-range participant id (the kill-all sentinel among them) is refused.
+add_executable(GatewayParticipantIsolationTest GatewayParticipantIsolationTest.cpp)
+target_link_libraries(GatewayParticipantIsolationTest PRIVATE OrderMatcher)
+enable_assertions(GatewayParticipantIsolationTest)
+add_test(NAME GatewayParticipantIsolationTest COMMAND GatewayParticipantIsolationTest)
+set_tests_properties(GatewayParticipantIsolationTest PROPERTIES TIMEOUT 60 LABELS "project;security;integration")

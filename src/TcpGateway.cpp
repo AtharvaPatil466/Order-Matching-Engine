@@ -641,7 +641,26 @@ bool TcpGateway::handleLogin(int fd, ClientState& state,
     return true;
 }
 
-void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& req) {
+void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& wireReq) {
+    // MIDS-7: with auth off a participant id is only a claim, and the top of
+    // its range holds the engine's sentinels (kKillAllParticipants is one).
+    // No real participant is at or above kMaxParticipants, so nothing there
+    // is forwarded, whatever the request type.
+    const char* outOfRange = nullptr;
+    if (wireReq.participantId >= kMaxParticipants) {
+        outOfRange = "participant id out of range";
+    }
+    if (outOfRange) {
+        GatewayResponse refused{};
+        refused.type = GatewayResponse::Type::Error;
+        refused.orderId = wireReq.orderId;
+        refused.rejectReason = RejectReason::InvalidFieldValue;
+        std::snprintf(refused.errorMessage, sizeof(refused.errorMessage), "%s", outOfRange);
+        sendResponse(fd, refused);
+        return;
+    }
+    const OrderRequest& req = wireReq;
+
     // H7: req.participantId is a claim the client makes about itself. With a
     // credential store configured, the session has to have logged in and the
     // credential has to cover the participant being claimed — otherwise any
@@ -675,7 +694,7 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
                              .kv("request_type", (long long)static_cast<int>(req.type)));
             GatewayResponse denied{};
             denied.type = GatewayResponse::Type::Error;
-            denied.orderId = req.orderId;
+            denied.orderId = wireReq.orderId;
             denied.rejectReason = RejectReason::None;
             std::snprintf(denied.errorMessage, sizeof(denied.errorMessage), "%s", denial);
             sendResponse(fd, denied);
@@ -737,7 +756,7 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
     }
 
     GatewayResponse resp{};
-    resp.orderId = req.orderId;
+    resp.orderId = wireReq.orderId;
     // Collapse NotOrderOwner into OrderNotFound before the raw enum byte goes
     // out: this field IS the wire value, so leaking the distinction here would
     // undo the point of keeping them separate internally.

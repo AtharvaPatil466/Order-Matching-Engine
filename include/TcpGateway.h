@@ -132,6 +132,25 @@ struct GatewayResponseV2 {
 // The text a client sees after "Rejected: " for each reason.
 const char* rejectReasonToString(RejectReason reason);
 
+// Order ids on this port belong to the participant that sent them (MIDS-3).
+// The book sees (participant << 54) | clientId, so two participants' ids can
+// never meet in a book: one cannot probe which ids another has live, squat an
+// id to have the owner's order refused, or reach another's order by id. Every
+// id the gateway sends back is the client's own. A client id above
+// kMaxClientOrderId, or a participant id at or above kMaxParticipants, is
+// refused on every request type.
+constexpr unsigned kClientOrderIdBits = 54;
+constexpr OrderId kMaxClientOrderId = (OrderId{1} << kClientOrderIdBits) - 1;
+static_assert(kMaxParticipants <= (ParticipantId{1} << (64 - kClientOrderIdBits)),
+              "a participant id must fit above the client's order id");
+constexpr OrderId gatewayOrderId(ParticipantId participant, OrderId clientId) {
+    return (participant << kClientOrderIdBits) | clientId;
+}
+constexpr OrderId clientOrderId(OrderId gatewayId) { return gatewayId & kMaxClientOrderId; }
+constexpr ParticipantId gatewayOrderOwner(OrderId gatewayId) {
+    return gatewayId >> kClientOrderIdBits;
+}
+
 class TcpGateway {
 public:
     explicit TcpGateway(MatchingEngine& engine)

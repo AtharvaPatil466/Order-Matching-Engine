@@ -178,6 +178,7 @@ TEST_P(RiskPath, ConcurrentAdmissionsNeverExceedALimit) {
 
 TEST_P(RiskPath, ExpiryReleases) {
     engine.setPositionLimit(kA, 100);
+    engine.setExpiryClock([] { return uint64_t{0}; });  // virtual time (MR-6)
     ASSERT_TRUE(engine.submitOrder(kSym, 1, kA, Side::Buy, kPx, 80, OrderType::Limit, 0, 0,
                                    TimeInForce::GTD, /*expiry=*/1000).isAccepted());
     drain();

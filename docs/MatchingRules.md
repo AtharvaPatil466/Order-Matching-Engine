@@ -1324,6 +1324,13 @@ itself. The check is in `submitOrder`, so it covers every ingress; journal repla
 calls the book directly and does not apply it. Pinned by
 `tests/ExpiryAdmissionTest.cpp`.
 
+An order that never rests — `IOC`, `FOK`, or `Market` (a market order parked in an auction
+leaves at the cross) — needs no session end, so its `DAY` with `expiryTime == 0` is admitted;
+it used to be refused `MissingRequiredField` on an engine with no scheduled session end, which
+is both binaries (MR-8). An order whose `expiryTime` has already passed on the engine's expiry
+clock (`expiryNow()`) is refused with `InvalidFieldValue`; it used to be acked and live until
+the next sweep (MR-6). Pinned by `tests/AdmissionTifTest.cpp`.
+
 There is a separate session-end sweep, `cancelDayOrders()`, which cancels every `DAY` order
 regardless of `expiryTime`. It runs only from `gracefulShutdown(/*cancelDayOrders=*/true)` —
 an explicit end-of-day stop — and **no shipped binary makes that call**.

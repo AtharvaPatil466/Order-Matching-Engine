@@ -2039,11 +2039,21 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     // PRIOR-7: expireOrders skips expiryTime 0, so a GTD order without one,
     // or a DAY order without one where no session end is scheduled, rested as
     // GTC while its owner believed it time-bounded.
+    // MR-8: an IOC, FOK or market order never rests (a market order parked
+    // in an auction leaves at the cross), so its DAY needs no session end.
+    const bool neverRests =
+        type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market;
     if (expiryTime == 0 &&
         (tif == TimeInForce::GTD ||
-         (tif == TimeInForce::DAY &&
+         (tif == TimeInForce::DAY && !neverRests &&
           !sessionEndScheduled_.load(std::memory_order_acquire)))) [[unlikely]] {
         return rejectedAsync(RejectReason::MissingRequiredField);
+    }
+    // MR-6: an order already past its expiry is refused, not acked and left
+    // to the next sweep. Read only when an expiry is set (GTD, or DAY with
+    // one), so a plain order costs no clock read.
+    if (expiryTime != 0 && expiryTime <= expiryNow()) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
     }
 
     uint64_t sequenceId = nextSequenceId();

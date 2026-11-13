@@ -387,6 +387,9 @@ TEST(ExpiryReplay, DayAndGtdExpirationsAreJournaledAndReplay) {
         engine.addSymbol(kSym);
         engine.enableJournal(path.string());
         engine.start();
+        // Virtual time: the expiries below are in its units, and an expiry
+        // already past at admission is refused (MR-6).
+        engine.setExpiryClock([] { return uint64_t{0}; });
 
         auto submit = [&](OrderId id, TimeInForce tif, uint64_t expiry) {
             engine.submitOrder(kSym, id, /*pid=*/1, Side::Buy, 1000000, 50,

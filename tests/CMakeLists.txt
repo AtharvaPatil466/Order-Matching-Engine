@@ -1712,3 +1712,14 @@ gtest_discover_tests(ProRataLevelTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
+
+# Admission: an order past its expiry is refused; IOC/FOK with DAY need no
+# session end (MR-6, MR-8).
+add_executable(AdmissionTifTest AdmissionTifTest.cpp)
+target_link_libraries(AdmissionTifTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(AdmissionTifTest)
+gtest_discover_tests(AdmissionTifTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")

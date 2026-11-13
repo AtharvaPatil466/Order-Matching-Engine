@@ -130,12 +130,14 @@ prices in one fixed range of at most that width. The range is set once:
 
 - **Configured.** `OrderBook::setPriceRange(min, max)` sets it before the first order rests
   (`std::logic_error` over resting orders, `std::invalid_argument` for a range the map cannot
-  hold). `OrderEngine` started with `--config` sets every symbol's range from
-  `instrument.<id>.min_price` / `max_price` before it replays the journal, and refuses to boot
-  when a symbol has no range.
+  hold). `OrderEngine` sets every symbol's range from `instrument.<id>.min_price` / `max_price`
+  before it replays the journal, and refuses to boot when a symbol has no range unless started
+  with `--no-price-band`, or when a range is wider than the map holds (200,000 ticks of 0.0001,
+  i.e. 20.0000; the tick is fixed, there is no per-instrument tick size).
 - **Anchored.** A book with no configured range centres one on the first price that rests, and
-  never moves it. This is what a book gets in `OrderEngine` without `--config`, and in the
-  library unless the owner calls `setPriceRange`. The anchor outlives the orders that set it,
+  never moves it. This is what a book gets in `OrderEngine` only under `--no-price-band`
+  (`OB_NO_PRICE_BAND=1`) for a symbol the config gives no range, and in the library unless the
+  owner calls `setPriceRange`. The anchor outlives the orders that set it,
   and a checkpoint carries it (in the book's `Counters` record, written before the orders), so a
   restart restores it before putting any order back. It used to re-anchor on the first order
   restored — the best bid — and an order the live range held no longer fitted (JOURNAL-2). A

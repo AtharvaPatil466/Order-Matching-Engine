@@ -55,7 +55,7 @@ One protocol: the native binary protocol above, on `OrderEngine`'s order port. `
 - **Fan-out adapter** (`MultiplexListener.h`): `OrderBook` exposes a single `EventListener` slot; this composes N of them so ITCH + structured-log can coexist on the same book.
 
 ### Regulatory & Risk
-In `OrderEngine`, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
+In `OrderEngine`, self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill, OTR tracking and per-participant position limits (`participant.<id>.position_limit`, required for every participant the order port serves unless `--no-risk-limits`) are active. The other pre-trade risk limits (fat-finger, OTR throttle, hierarchical), LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy <!-- claim:stp-default-cancel-incoming -->
 - **Volatility Circuit Breakers**: a fixed 5% threshold on the price of every continuous print, elected stops and replaces included, against a reference set by the first print; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing <!-- claim:circuit-breaker -->
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant <!-- claim:otr -->
@@ -188,10 +188,16 @@ See [docs/ProductionReadiness.md](./docs/ProductionReadiness.md) for the remaini
 ./build.sh --lean
 
 # Run the engine (4 threads, admin on port 8080, orders on 9001). It refuses to
-# start without an admin token (OB_ADMIN_TOKEN / --admin-token, or
-# --admin-no-auth) and without participant credentials (--participant-credentials
-# FILE, or --no-participant-auth), and keeps no journal unless given --journal.
+# start without each of these, unless that one is waived by name:
+#   admin token (OB_ADMIN_TOKEN / --admin-token)        or --admin-no-auth
+#   participant credentials (--participant-credentials) or --no-participant-auth
+#   a journal (--journal)                               or --no-journal
+#   a price band per symbol (instrument.<s>.min_price/max_price in --config)
+#                                                       or --no-price-band
+#   a position limit per participant the port serves (participants = ...,
+#   participant.<id>.position_limit in --config)        or --no-risk-limits
 OB_ADMIN_TOKEN=... ./bin/OrderEngine --threads 4 --port 8080 --symbols 4 \
+    --config /etc/orderbook/engine.conf \
     --participant-credentials /etc/orderbook/participants.conf --journal /var/lib/orderbook/engine.wal
 
 # Run tests
@@ -271,8 +277,12 @@ curl -H "X-Chaos-Token: $TOK" \
 
 `OrderEngine` journals every order it accepts when given `--journal PATH` (or
 `OB_JOURNAL_PATH`), and replays that journal before its order port opens,
-refusing unreadable and legacy journals. Without one it warns at startup: every
-acknowledged order lives only in memory and is lost on any restart.
+refusing unreadable and legacy journals. Without one it refuses to start unless
+given `--no-journal` (`OB_NO_JOURNAL=1`), under which every acknowledged order
+lives only in memory and is lost on any restart. Likewise it refuses to start without a
+price band for every symbol (`--no-price-band`) or a position limit for every
+participant its credentials name (`--no-risk-limits`), and on a config file it
+cannot read. <!-- claim:boot-requires-controls -->
 
 ```bash
 OrderEngine --participant-credentials /etc/orderbook/participants.conf \
@@ -313,8 +323,8 @@ chmod 600 /etc/orderbook/participants.conf    # warned about if group/other-read
 OrderEngine --participant-credentials /etc/orderbook/participants.conf
 # or: OB_PARTICIPANT_CREDENTIALS=/etc/orderbook/participants.conf OrderEngine
 
-# Deliberately unauthenticated (dev, or a port already isolated some other way)
-OrderEngine --no-participant-auth
+# Deliberately unauthenticated and uncontrolled (dev only)
+OrderEngine --no-participant-auth --no-journal --no-price-band --no-risk-limits
 ```
 
 The order port listens on `--gateway-port` (default 9001; `OB_GATEWAY_PORT`, or

@@ -4,14 +4,18 @@
 # OB_CONFIG_PATH). An OB_<KEY> env var overrides a key only where code reads
 # that key (e.g. "log_sink" → OB_LOG_SINK).
 #
-# MANY KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
-# changes nothing: no risk limit, rate limit, checkpoint threshold or port is
-# taken from this file. What is read: log_sink, the
-# alert_* keys, session_schedule, worker_cores, order_pool_capacity /
-# trade_history_capacity, volatility_auction_dwell_ms, instrument.<id>.min_price
-# / max_price, and, on SIGHUP only, rate_limit.default_rate /
-# rate_limit.default_burst. journal_path, instruments and participants are
-# validated at startup but not applied.
+# SOME KEYS BELOW ARE READ BY NOTHING. They are marked "not read". Setting one
+# changes nothing. What is read: log_sink, the alert_* keys, session_schedule,
+# worker_cores, order_pool_capacity / trade_history_capacity,
+# volatility_auction_dwell_ms, instrument.<s>.min_price / max_price,
+# participants / participant.<id>.position_limit, gateway_port / gateway_bind /
+# participant_credentials, and rate_limit.default_rate /
+# rate_limit.default_burst (at startup and on SIGHUP).
+#
+# OrderEngine refuses to start without a band for every symbol, a position
+# limit for every participant its credentials name, and a journal, unless
+# --no-price-band, --no-risk-limits or --no-journal waives that one
+# (docs/Runbook.md §3).
 
 # ── Core Engine ──────────────────────────────────────────────────────────────
 # not read: use --threads / --symbols; lean mode is a build option (./build.sh --lean)
@@ -27,11 +31,12 @@ lean_mode       = false
 # worker_cores = 2,3,4,5
 
 # ── Price bands ──────────────────────────────────────────────────────────────
-# Each symbol's tradable band, in ticks (PRICE_PRECISION, 1e-4). With --config,
-# OrderEngine refuses to boot unless every symbol 0 .. --symbols-1 has both
-# keys, and an order or replace priced outside the band is rejected at
-# admission (OutOfPriceRange). The span must be under 200,001 ticks. Without
-# --config a book centres its band on its first resting order instead.
+# Each symbol's tradable band, in ticks of 0.0001 (PRICE_PRECISION). Every
+# symbol 0 .. --symbols-1 needs both keys unless --no-price-band, and an order
+# or replace priced outside the band is rejected at admission (OutOfPriceRange).
+# 0 < min_price < max_price, and the band is at most 200,000 ticks (20.0000):
+# a book is 200,001 one-tick slots and the tick is fixed. There is no
+# tick_size or lot_size key; setting one refuses to boot.
 instrument.0.min_price = 1
 instrument.0.max_price = 200000
 instrument.1.min_price = 1
@@ -40,6 +45,15 @@ instrument.2.min_price = 1
 instrument.2.max_price = 200000
 instrument.3.min_price = 1
 instrument.3.max_price = 200000
+
+# ── Position limits ──────────────────────────────────────────────────────────
+# Every participant id the credentials file names needs one (> 0) unless
+# --no-risk-limits. A limit bounds the position each side could reach if all
+# its working orders filled; an order past it is rejected
+# (PositionLimitExceeded). Ids are below 1024.
+participants = 100,101
+participant.100.position_limit = 1000000
+participant.101.position_limit = 1000000
 
 # ── Per-symbol memory ────────────────────────────────────────────────────────
 # Both are allocated AND touched when a book is created, so they are resident
@@ -73,10 +87,9 @@ gateway_port    = 9001
 # participant_credentials = /etc/orderengine/participants.cred
 
 # ── Journaling ───────────────────────────────────────────────────────────────
-# journal_path is only validated; the journal opened is --journal / OB_JOURNAL_PATH.
+# The journal is --journal / OB_JOURNAL_PATH, required unless --no-journal.
 # checkpoint_* are not read: auto-checkpoint is fixed at 250,000 entries or
 # 64 MiB, plus --journal-max-mb.
-journal_path    = /var/lib/orderengine/journal.wal
 checkpoint_entries = 100000
 checkpoint_bytes   = 104857600
 
@@ -87,8 +100,8 @@ rate_limit_msgs_per_sec = 10000
 rate_limit_burst        = 100
 queue_depth_threshold   = 0.8
 
-# ── Risk Limits ──────────────────────────────────────────────────────────────
-# not read: neither binary applies any risk limit from configuration
+# ── Other Risk Limits ────────────────────────────────────────────────────────
+# not read: only the position limits above are applied from configuration
 max_order_size   = 1000000
 max_notional     = 100000000
 max_position     = 5000000

@@ -19,7 +19,7 @@ every block it skips. It also fails if a flag listed in a table here is not in
 
 | Binary | Takes client orders | Admin HTTP port | Journal | Market data |
 |---|---|---|---|---|
-| `OrderEngine` | Yes: a TCP port (default 9001) speaking the native binary protocol in `include/TcpGateway.h` (§8). Also the admin port's `/chaos/order`, off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set | Yes (default 8080) | Optional (`--journal`), each entry synced; the order port acks once its entry is on disk | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
+| `OrderEngine` | Yes: a TCP port (default 9001) speaking the native binary protocol in `include/TcpGateway.h` (§8). Also the admin port's `/chaos/order`, off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set | Yes (default 8080) | Required (`--journal`) unless `--no-journal`, each entry synced; the order port acks once its entry is on disk | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
 
 `OrderEngine` runs a multi-threaded engine (`--threads`) over `--symbols`
 symbols numbered from 0. FIX, OUCH, SBE, the DPDK path and the separate
@@ -131,18 +131,38 @@ smaller order pool) stops the boot (§5).
 
 ## 3. Starting OrderEngine
 
-`OrderEngine` refuses to start without an admin token (or an explicit
-`--admin-no-auth`) and without participant credentials for its order port (or
-an explicit `--no-participant-auth`, §8). Without `--journal` it keeps no
-journal, and a restart loses every resting order.
+`OrderEngine` refuses to start without each control below, unless that one is
+waived by name. Each waiver is a deliberate choice that shows in the log.
+
+| Control | Set by | Waiver |
+|---|---|---|
+| Admin token | `--admin-token` / `OB_ADMIN_TOKEN` | `--admin-no-auth` |
+| Order-port credentials (§8) | `--participant-credentials` | `--no-participant-auth` |
+| Journal (§7) | `--journal` / `OB_JOURNAL_PATH` | `--no-journal`: every acked order is lost on restart |
+| A price band for every symbol | `instrument.<s>.min_price` / `max_price` (§6) | `--no-price-band`: a symbol without one centres its band on its first rest |
+| A position limit for every participant the order port serves | `participants`, `participant.<id>.position_limit` (§6) | `--no-risk-limits`: a participant without one is unlimited |
+
+With credentials, every participant id they name needs a limit. Without them
+(`--no-participant-auth`) any id can trade, so `participants` must still be set
+but only the ids it lists are limited.
 
 ```bash
 mkdir -p /var/lib/orderengine /etc/orderengine
 install -m 600 /dev/null /etc/orderengine/participants.conf
 echo 'firm-a:replace-with-a-secret:100,101' > /etc/orderengine/participants.conf
+cat > /etc/orderengine/engine.conf <<'CONF'
+instrument.0.min_price = 90000
+instrument.0.max_price = 110000
+instrument.1.min_price = 90000
+instrument.1.max_price = 110000
+participants = 100,101
+participant.100.position_limit = 1000000
+participant.101.position_limit = 1000000
+CONF
 export OB_ADMIN_TOKEN=replace-with-a-long-random-secret
 export OB_PARTICIPANT_CREDENTIALS=/etc/orderengine/participants.conf
 stdbuf -oL OrderEngine --threads 2 --symbols 2 --port 8080 \
+    --config /etc/orderengine/engine.conf \
     --journal /var/lib/orderengine/journal.wal \
     > /var/lib/orderengine/engine.log 2>&1 &
 echo $! > /var/lib/orderengine/engine.pid
@@ -166,8 +186,11 @@ grep -F "Order Gateway listening on 0.0.0.0:9001" /var/lib/orderengine/engine.lo
 | `--gateway-bind ADDR` | `OB_GATEWAY_BIND` | 0.0.0.0 | Order-entry listen address (IPv4). Also `gateway_bind` |
 | `--participant-credentials FILE` | `OB_PARTICIPANT_CREDENTIALS` | — | Order-port credentials, one per line as `user:secret:id[,id...]` (§8). Also `participant_credentials` |
 | `--no-participant-auth` | `OB_NO_PARTICIPANT_AUTH=1` | off | Accept every claimed participant id on the order port, on purpose |
-| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6). With one, every symbol needs a price band |
+| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6); one that cannot be read, or has a line that is not `key = value`, is fatal |
 | `--journal PATH` | `OB_JOURNAL_PATH` | — | Journal file; replayed at boot (§7) |
+| `--no-journal` | `OB_NO_JOURNAL=1` | off | Run with no journal, on purpose |
+| `--no-price-band` | `OB_NO_PRICE_BAND=1` | off | Let a symbol with no configured band centre it on its first rest, on purpose |
+| `--no-risk-limits` | `OB_NO_RISK_LIMITS=1` | off | Serve participants that have no position limit, on purpose |
 | `--journal-max-mb MB` | `OB_JOURNAL_MAX_SIZE_MB` | off | Checkpoint once the journal reaches MB megabytes |
 | `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | off | Replay an epoch-0 journal (§2) |
 | `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` | `OB_SESSION_SCHEDULE` | off | Session timetable, HH:MM UTC |
@@ -180,23 +203,24 @@ Other environment variables `OrderEngine` reads: `OB_CHAOS_INJECT` and
 ### What happens at boot, in order
 
 1. Arguments are checked; an unknown one is fatal.
-2. The config file is loaded, if one is named. A file that cannot be read is a
-   `[Config] WARNING`, and the engine goes on without it — and then stops at
-   step 4, which finds no price bands (unless the environment supplies them,
-   §6).
-3. Startup validation: the `instrument.*` and `participant.*` keys, the journal
-   path's parent directory, and a replication role (§10). Any failure prints
-   `[Config] FATAL: startup configuration is invalid` with one line per
-   problem and exits 1.
+2. The config file is loaded, if one is named. A file that cannot be read, or
+   that has a line that is not `key = value` (named on stderr), prints
+   `[Config] FATAL: could not load` and exits 1. Nothing is loaded around a bad
+   line.
+3. Startup validation: every symbol's band and every listed participant's
+   limit (§6), the journal (one is required unless `--no-journal`; its parent
+   directory must be writable), and a replication role (§10). Any failure
+   prints `[Config] FATAL: startup configuration is invalid` with one line per
+   problem, each naming its waiver where there is one, and exits 1.
    Then the order port's settings: a gateway port that is not a number is
    fatal, and so are no credentials without `--no-participant-auth`, an
-   unreadable credentials file and one that holds none (`[Auth] FATAL`).
-4. With a config file, each symbol's price band is set from
-   `instrument.<s>.min_price` / `max_price` (§6), before any order exists.
-   A symbol with no band prints `[Config] FATAL: symbol <s> has no price band`
-   and exits 1; a band the book cannot hold is fatal too. On success:
-   `[Config] Price bands set for <S> symbols`. Without a config file every
-   book centres its band on its first resting order instead.
+   unreadable credentials file and one that holds none (`[Auth] FATAL`), and a
+   credentialed participant id with no position limit unless `--no-risk-limits`.
+4. Each symbol's price band is set from `instrument.<s>.min_price` /
+   `max_price` (§6), before any order exists, and each listed participant's
+   position limit: `[Config] Price bands set for <B> of <S> symbols` and
+   `[Risk] Position limits set for <N> participant(s)`. Under `--no-price-band`
+   a symbol with no band centres it on its first resting order.
 5. The journal is opened, a torn final write is cut, and the journal is
    replayed (§7). The legacy-epoch and unreadable-journal refusals happen here.
 6. The alert webhook is set up if `alert_webhook_url` is set (§6). An
@@ -298,8 +322,9 @@ admits, a modify or replace it no longer applies — is logged as
 `replay_entry_refused` with its sequence number and stops the start the same
 way (`FATAL: ... could not be replayed`). Under `--replay-legacy-journal` on
 a legacy journal it is a `WARNING` instead, and the engine starts. This one
-also names a config file, used in §6. A config file must give every symbol a
-price band, or the engine refuses to start:
+also names a config file, used in §6. It gives every symbol a price band and
+every credentialed participant a position limit, or the engine refuses to start
+(§3):
 
 ```bash
 cat > /etc/orderengine/engine.conf <<'EOF'
@@ -308,6 +333,9 @@ instrument.0.min_price = 1
 instrument.0.max_price = 200000
 instrument.1.min_price = 1
 instrument.1.max_price = 200000
+participants = 100,101
+participant.100.position_limit = 1000000
+participant.101.position_limit = 1000000
 rate_limit.default_rate = 1000
 rate_limit.default_burst = 100
 EOF
@@ -332,10 +360,9 @@ file. Keys `OrderEngine` reads:
 |---|---|---|
 | `log_sink` | startup | `stderr` sends structured JSON logs to stderr; `null` (default) discards them |
 | `alert_webhook_url`, `alert_webhook_format` (`generic`/`slack`/`pagerduty`), `alert_min_level` (`info`/`warning`/`critical`/`fatal`), `alert_routing_key` | startup | Webhook alerts; an unknown format or level, or an `https://` URL, is fatal |
-| `instrument.<s>.min_price`, `instrument.<s>.max_price` | startup | Required for every symbol 0..S-1 whenever a config file is named. The symbol's price band in ticks, at most 200,000 wide, set before replay. An order or replace priced outside it is rejected with `OutOfPriceRange` before it is acked ([MatchingRules.md](MatchingRules.md) Rule 1.4) |
-| `instruments`, `instrument.<id>.{tick_size,lot_size}` | startup | Validated only (with `min_price` / `max_price`, for each id listed in `instruments`) |
-| `participants`, `participant.<id>.{position_limit,otr_limit}` | startup | Validated only |
-| `journal_path` | startup | Validated only; the journal is `--journal` / `OB_JOURNAL_PATH` |
+| `instrument.<s>.min_price`, `instrument.<s>.max_price` | startup | Required for every symbol 0..S-1 unless `--no-price-band`. The symbol's price band in ticks of 0.0001, `0 < min_price < max_price`, at most 200,000 ticks wide (a book is 200,001 one-tick slots; the tick is fixed), set before replay. An order or replace priced outside it is rejected with `OutOfPriceRange` before it is acked ([MatchingRules.md](MatchingRules.md) Rule 1.4) |
+| `participants`, `participant.<id>.position_limit` | startup | Required unless `--no-risk-limits`: the ids, each below 1024, and each one's position limit (> 0), applied before replay. An order that would take the participant's filled-plus-working position past it is rejected |
+| `instrument.<s>.tick_size`, `instrument.<s>.lot_size`, `participant.<id>.otr_limit` | startup | Refused: nothing applies them (the tick is fixed, there is no lot size, the OTR throttle is engine-wide) |
 | `gateway_port`, `gateway_bind`, `participant_credentials` | startup | The order port (§8), when the flag is not given |
 | `rate_limit.default_rate`, `rate_limit.default_burst` | `SIGHUP` only | Default rate limit for every participant, applied when the rate is above 0 |
 | `worker_cores` | startup | The CPU each async worker pins itself to, in worker order, numbered as `taskset -c` numbers them (`2,3,4,5`). Unset, worker i takes the i-th CPU the process may run on (its `taskset`, systemd `CPUAffinity=` or cpuset mask), which is CPU i when every CPU is allowed. The `engine_start` log line names each worker's CPU (`worker_cores`, `-` = unpinned). A non-number, a repeat, a CPU outside the process's mask, fewer entries than `--threads`, or any list on macOS (no affinity mask) is fatal |
@@ -574,7 +601,8 @@ After=network.target
 [Service]
 Type=simple
 Environment=OB_ADMIN_TOKEN=<token>
-ExecStart=/usr/bin/stdbuf -oL /opt/orderengine/OrderEngine --threads 4 --symbols 4 --port 8080 --journal /var/lib/orderengine/journal.wal
+Environment=OB_PARTICIPANT_CREDENTIALS=/etc/orderengine/participants.conf
+ExecStart=/usr/bin/stdbuf -oL /opt/orderengine/OrderEngine --threads 4 --symbols 4 --port 8080 --config /etc/orderengine/engine.conf --journal /var/lib/orderengine/journal.wal
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536

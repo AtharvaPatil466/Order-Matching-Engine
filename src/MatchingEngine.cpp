@@ -2755,12 +2755,32 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
 
     size_t replayed = 0;
     uint64_t lastSequence = 0;
+    // The live engine journals an order only once the book admitted it, and a
+    // modify or replace only once it applied, so replay refusing one means the
+    // recovered book is not the journaled one: a band narrowed since, a pool
+    // made smaller, a guard added since. It used to be discarded and counted
+    // as replayed. Now it is counted apart and named, and bootJournal stops.
+    // A cancel that finds no order is not one: the live engine's worker
+    // journals a cancel that found nothing as well, and an order replay lost
+    // is reported by its own refusal.
+    bool applied = true;
+    const auto refuse = [&](const JournalEntry& e, RejectReason why) {
+        applied = false;
+        ++replayRefusals_;
+        obSink().log(obEvent("replay_entry_refused", LogSeverity::Error)
+                         .kv("sequence", (unsigned long long)e.sequenceNumber)
+                         .kv("type", (long long)static_cast<int>(e.entryType))
+                         .kv("symbol", (long long)e.symbolId)
+                         .kv("order", (unsigned long long)e.orderId)
+                         .kv("reason", (long long)static_cast<int>(why)));
+    };
 
     for (const auto& entry : entries) {
         if (entry.sequenceNumber <= lastSequence) {
             continue;
         }
         lastSequence = entry.sequenceNumber;
+        applied = true;
 
         switch (entry.entryType) {
         case JournalEntry::Type::AddOrder: {
@@ -2773,12 +2793,14 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
                 }
             }
             if (book) {
-                book->addOrder(entry.orderId, entry.participantId, entry.side,
-                               entry.price, entry.quantity, entry.orderType,
-                               entry.stopPrice, entry.displayQty, entry.timeInForce,
-                               entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                               entry.pegOffset, entry.trailAmount, entry.minQty,
-                               entry.hidden);
+                const AddOrderResult result =
+                    book->addOrder(entry.orderId, entry.participantId, entry.side,
+                                   entry.price, entry.quantity, entry.orderType,
+                                   entry.stopPrice, entry.displayQty, entry.timeInForce,
+                                   entry.expiryTime, entry.stopLimitPrice, entry.pegType,
+                                   entry.pegOffset, entry.trailAmount, entry.minQty,
+                                   entry.hidden);
+                if (const auto* why = std::get_if<RejectReason>(&result)) refuse(entry, *why);
             }
             break;
         }
@@ -2789,17 +2811,20 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
             break;
         }
         case JournalEntry::Type::ModifyOrder: {
-            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-                book->modifyOrder(entry.orderId, entry.newQty);
-            }
+            RejectReason why = RejectReason::OrderNotFound;
+            auto* book = bookHoldingOrder(entry.symbolId, entry.orderId);
+            if (!book || !book->modifyOrder(entry.orderId, entry.newQty, why))
+                refuse(entry, why);
             break;
         }
         case JournalEntry::Type::CancelReplace: {
-            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-                book->cancelReplace(entry.orderId, entry.newPrice,
-                                    journaledReplaceTotal(
-                                        entry, book->getOrder(entry.orderId)->cumQty));
-            }
+            RejectReason why = RejectReason::OrderNotFound;
+            auto* book = bookHoldingOrder(entry.symbolId, entry.orderId);
+            if (!book || !book->cancelReplace(entry.orderId, entry.newPrice,
+                                              journaledReplaceTotal(
+                                                  entry, book->getOrder(entry.orderId)->cumQty),
+                                              why))
+                refuse(entry, why);
             break;
         }
         case JournalEntry::Type::TradingStateChange:
@@ -2860,6 +2885,7 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
                                        entry.pegOffset, entry.trailAmount, entry.minQty,
                                        entry.hidden, snapshotArrivalSeq(entry));
                 if (why != RejectReason::None) {
+                    applied = false;
                     ++restoreRefusals_;
                     obSink().log(obEvent("checkpoint_restore_refused", LogSeverity::Error)
                                      .kv("symbol", (long long)entry.symbolId)
@@ -2879,7 +2905,7 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
         }
         }
 
-        ++replayed;
+        if (applied) ++replayed;
     }
 
     setReplayModeAllBooks(false);

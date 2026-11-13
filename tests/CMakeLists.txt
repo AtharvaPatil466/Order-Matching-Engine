@@ -412,6 +412,13 @@ enable_assertions(CheckpointRestoreRefusedTest)
 add_test(NAME CheckpointRestoreRefusedTest COMMAND CheckpointRestoreRefusedTest)
 set_tests_properties(CheckpointRestoreRefusedTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A journal entry applied live and refused on replay stops the boot.
+add_executable(ReplayRefusedEntryTest ReplayRefusedEntryTest.cpp)
+target_link_libraries(ReplayRefusedEntryTest PRIVATE OrderMatcher)
+enable_assertions(ReplayRefusedEntryTest)
+add_test(NAME ReplayRefusedEntryTest COMMAND ReplayRefusedEntryTest)
+set_tests_properties(ReplayRefusedEntryTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A restart from a checkpoint decides as the engine that wrote it would have:
 # order age, the anchored band, the volatility dwell (round 8).
 add_executable(CheckpointCompleteStateTest CheckpointCompleteStateTest.cpp)

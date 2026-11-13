@@ -292,7 +292,12 @@ every resting and parked order. A checkpoint order the restart cannot put back
 (a price outside a band narrowed since, a smaller order pool) is logged as
 `checkpoint_restore_refused` and the engine refuses to start (`FATAL: ...
 could not be restored`), leaving the journal as it was: start it with the
-configuration that wrote the checkpoint. This one
+configuration that wrote the checkpoint. Any other journal entry the engine
+applied when it wrote it and that replay refuses — an order it no longer
+admits, a modify or replace it no longer applies — is logged as
+`replay_entry_refused` with its sequence number and stops the start the same
+way (`FATAL: ... could not be replayed`). Under `--replay-legacy-journal` on
+a legacy journal it is a `WARNING` instead, and the engine starts. This one
 also names a config file, used in §6. A config file must give every symbol a
 price band, or the engine refuses to start:
 

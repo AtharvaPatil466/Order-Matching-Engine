@@ -131,6 +131,31 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
         return 1;
     }
 
+    // The same for any other entry the live engine applied and replay refused:
+    // the book it recovered is not the one that was journaled. A legacy
+    // journal replayed on request is the exception, logged loudly: the flag
+    // already says nothing can certify that book, and older builds journaled
+    // what newer guards refuse.
+    if (const size_t refused = engine.replayRefusals(); refused > 0) {
+        if (replayLegacy && epoch == JOURNAL_EPOCH_LEGACY) {
+            std::cout << "[Engine] WARNING: " << refused << " journal entr"
+                      << (refused == 1 ? "y" : "ies") << " applied when written could not be\n"
+                      << "         replayed (replay_entry_refused in the log names each one).\n"
+                      << "         Starting anyway, under --replay-legacy-journal.\n";
+        } else {
+            std::cerr << "[Engine] FATAL: " << refused << " journal entr"
+                      << (refused == 1 ? "y" : "ies") << " in " << journalPath
+                      << " that the engine applied\n"
+                      << "        when it wrote them could not be replayed\n"
+                      << "        (replay_entry_refused in the log names each by sequence\n"
+                      << "        number and why: a price outside a band narrowed since, a\n"
+                      << "        pool smaller than the one that wrote it). The recovered book\n"
+                      << "        would not be the journaled one. Refusing to start.\n"
+                      << "        Start with the configuration that wrote the journal.\n";
+            return 1;
+        }
+    }
+
     if (recoverable > 0 && replayed == 0) {
         std::cerr << "[Engine] FATAL: journal holds " << recoverable
                   << " recoverable entries but replay applied none.\n"
@@ -147,17 +172,12 @@ inline int bootJournal(MatchingEngine& engine, int argc, char** argv,
                      "         already-seen sequence number are skipped.\n";
     }
 
-    // WHAT THIS STILL DOES NOT CATCH, so nobody reads the line above as more than
-    // it is: replayJournal counts entries CONSUMED, not entries applied. Apart
-    // from a checkpoint's orders (restoreRefusals, above), the dispatch discards
-    // every return value (addOrder and modifyOrder in
-    // MatchingEngine::replayJournal), so an entry that replayed and was REFUSED —
-    // a duplicate order id, an exhausted pool, or a quantity that a newer guard
-    // now rejects — is counted as replayed and silently dropped.
-    // `replayed == recoverable` therefore does not mean the book matches the one
-    // that was journaled. Closing that needs replay to check its own results
-    // against an integrity oracle that can see a wrong book, which
-    // validateIntegrity() currently cannot.
+    // replayJournal counts entries APPLIED: one refused (above) is not
+    // counted, and a cancel that found no order is, because the live worker
+    // journals those too. `replayed == recoverable` still does not prove the
+    // book matches the journaled one in every field: replay re-runs the
+    // matching, so it shows the entries applied, not that they matched as
+    // they did live. CheckpointEquivalenceTest is what checks that.
     return 0;
 }
 

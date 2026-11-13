@@ -22,6 +22,7 @@
 #include <functional>
 #include <string>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -203,6 +204,37 @@ void routedByParticipant() {
     std::puts("routedByParticipant passed");
 }
 
+// A session that resets its connection while reports for its orders are on
+// the way must not take the gateway with it. On Linux the direct send in
+// sendResponse had no MSG_NOSIGNAL, so the write to the reset socket raised
+// SIGPIPE and killed the process; macOS hid it behind SO_NOSIGPIPE.
+void peerResetDoesNotKillTheGateway() {
+    Venue v;
+    Session taker(v.gateway.port());
+    for (int round = 0; round < 20; ++round) {
+        const OrderId base = 1'000 * (round + 1);
+        TestClient maker;
+        assert(maker.connect(v.gateway.port()));
+        maker.setRecvTimeout(5);
+        GatewayResponse ack{};
+        assert(maker.sendOrder(limit(kMaker, base, Side::Sell, 100, 1'000)) &&
+               maker.recvResponse(ack) && ack.type == GatewayResponse::Type::Ack);
+        // Reset, not close: SO_LINGER 0 sends RST, so the gateway's next
+        // write to this session finds a dead peer.
+        const struct linger rst{1, 0};
+        setsockopt(maker.fd(), SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+        maker.disconnect();
+        // Each IOC fills against the vanished maker: a report to its session.
+        for (int i = 0; i < 50; ++i) {
+            const GatewayResponse r =
+                taker.request(limit(kTaker, base + i, Side::Buy, 100, 1, OrderType::IOC));
+            assert(r.type == GatewayResponse::Type::Ack && "the gateway stopped answering");
+        }
+        taker.reports.clear();
+    }
+    std::puts("peerResetDoesNotKillTheGateway passed");
+}
+
 // A session that stops reading is disconnected; matching and every other
 // session carry on.
 void slowConsumerIsDisconnected() {
@@ -311,6 +343,7 @@ int main(int argc, char** argv) {
     if (only.empty() || only == "fills") fillsReachBothSides();
     if (only.empty() || only == "cancels") engineCancelsAndLateRejects();
     if (only.empty() || only == "routing") routedByParticipant();
+    if (only.empty() || only == "reset") peerResetDoesNotKillTheGateway();
     if (only.empty() || only == "slow") slowConsumerIsDisconnected();
     if (only.empty() || only == "durable") nothingAheadOfTheJournal();
     std::puts("GatewayExecutionReportTest passed");

@@ -1035,8 +1035,11 @@ bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp, bool unsolici
         return true;
     }
 
-    // Try direct send first
-    ssize_t n = send(fd, buf.data(), buf.size(), MSG_DONTWAIT);
+    // Try direct send first. MSG_NOSIGNAL: a peer that has reset the
+    // connection turns this send into SIGPIPE on Linux, which kills the
+    // process — an execution report to a session that just vanished, or the
+    // second answer to a client that pipelined two requests and closed.
+    ssize_t n = send(fd, buf.data(), buf.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
     if (n == static_cast<ssize_t>(buf.size())) {
         return true; // full write succeeded
     }

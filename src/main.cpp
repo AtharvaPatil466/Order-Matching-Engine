@@ -172,6 +172,10 @@ int main(int argc, char* argv[]) {
     }
 
     // Signal handlers for graceful shutdown
+    // A write to a peer that has gone must come back as EPIPE, never as a
+    // signal that ends the engine. The sockets pass MSG_NOSIGNAL already; this
+    // covers every other descriptor (the wake pipe, a closed stdout).
+    std::signal(SIGPIPE, SIG_IGN);
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
     std::signal(SIGHUP, sighupHandler);

@@ -1691,3 +1691,14 @@ gtest_discover_tests(UncrossOracleTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
+
+# An OCO link names one live order on one symbol; the sibling cancel releases
+# its reserved position (MIDS-2, MIDS-9).
+add_executable(OcoScopeTest OcoScopeTest.cpp)
+target_link_libraries(OcoScopeTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(OcoScopeTest)
+gtest_discover_tests(OcoScopeTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")

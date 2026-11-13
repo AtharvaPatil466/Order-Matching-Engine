@@ -1160,10 +1160,6 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             std::lock_guard<std::mutex> lock(catMutex_);
             catReporter_.recordCancel(nowNs(), req.orderId);
         }
-        if (ocoActive_.load(std::memory_order_relaxed)) {
-            std::lock_guard<std::mutex> lock(contingencyMutex_);
-            contingency_.onCanceled(req.orderId);   // user-cancelled leg leaves its group
-        }
         if (ocoActive_.load(std::memory_order_relaxed) ||
             observersActive_.load(std::memory_order_relaxed)) {
             driveOco(req.symbolId, book);
@@ -1329,8 +1325,12 @@ void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
     // execution of any leg wins. Keyed on executed quantity, not status: an
     // order cut short after real fills ends Cancelled / CancelledBySTP with
     // filledQty > 0 (GTDIFF-4), and a zero-fill STP kill still cannot win (C1).
-    if (ocoActive && ocoActive->load(std::memory_order_relaxed) && u.filledQty > 0) {
-        executed.push_back(u.orderId);
+    if (!ocoActive || !ocoActive->load(std::memory_order_relaxed)) return;
+    if (u.filledQty > 0) {
+        executed.push_back({u.orderId, true});
+    } else if (u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP) {
+        // Not Rejected: a refused duplicate carries the live order's id.
+        executed.push_back({u.orderId, false});
     }
 }
 
@@ -1348,9 +1348,11 @@ void MatchingEngine::OcoBookListener::onTrade(const Trade& t) {
     }
 }
 
-void MatchingEngine::registerOco(SymbolId /*symbolId*/, OrderId a, OrderId b) {
+void MatchingEngine::registerOco(SymbolId symbolId, OrderId a, OrderId b) {
+    auto* lp = ocoListeners_.find(symbolId);
+    if (!lp || !*lp) return;  // no such symbol: nothing to link
     std::lock_guard<std::mutex> lock(contingencyMutex_);
-    contingency_.registerOco(a, b);
+    (*lp)->oco.registerOco(a, b);
     ocoActive_.store(true, std::memory_order_relaxed);
 }
 
@@ -1361,17 +1363,18 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
 
     // (1) OCO: cancel the siblings of any leg that executed. Drain first so
     // the cancels below (which re-enter the observer with Cancelled updates,
-    // ignored) cannot grow the buffer mid-iteration.
+    // drained next time as no-ops) cannot grow the buffer mid-iteration.
     if (!obs->executed.empty()) {
         // Swap into the persistent scratch (so a re-entrant push during the
         // cancels below cannot grow the buffer mid-iteration), then clear it
         // afterwards to retain its capacity for the next cycle.
         obs->firedScratch.swap(obs->executed);
-        for (OrderId id : obs->firedScratch) {
+        for (const OcoBookListener::OcoEvent& ev : obs->firedScratch) {
             std::vector<OrderId> siblings;
             {
                 std::lock_guard<std::mutex> lock(contingencyMutex_);
-                siblings = contingency_.onExecuted(id);
+                if (!ev.executed) { obs->oco.onCanceled(ev.id); continue; }
+                siblings = obs->oco.onExecuted(ev.id);
             }
             for (OrderId sib : siblings) {
                 if (!book->getOrder(sib)) continue;   // already gone

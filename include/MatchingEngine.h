@@ -289,6 +289,11 @@ public:
     // (any fill) cancels the other. The cancel runs synchronously right
     // after the triggering order is processed — thread-per-symbol makes
     // that race-free — and is journaled so replay reproduces it.
+    // A link names the order with that id on that symbol (MIDS-2), and ends
+    // when the order leaves unfilled by any path, so a later order reusing the
+    // id does not inherit it. The caller links its own orders: there is no
+    // owner argument, and while the order lives its (symbol, id) names one
+    // owner. The gateway makes ids per participant.
     void registerOco(SymbolId symbolId, OrderId a, OrderId b);
 
     // ─── Risk, fees & compliance (opt-in) ────────────────────────────
@@ -871,7 +876,15 @@ private:
         MatchingEngine* engine = nullptr;                 // for hot-path risk fill accrual
         const std::atomic<bool>* ocoActive = nullptr;     // gates the executed buffer
         const std::atomic<bool>* tradesActive = nullptr;  // gates the trades buffer
-        std::vector<OrderId> executed;
+        // This symbol's OCO links (MIDS-2): an order id is unique among a
+        // book's live orders, not across books, so a link is scoped to the
+        // book. Guarded by contingencyMutex_.
+        ContingencyManager oco;
+        // An OCO-relevant event, in book order: a leg's first execution, or a
+        // leg leaving unfilled (any cancel, expiry, STP), which ends its link
+        // so a later order reusing the id does not inherit it.
+        struct OcoEvent { OrderId id; bool executed; };
+        std::vector<OcoEvent> executed;
         std::vector<Trade>   trades;
         // Persistent drain buffers reused across driveOco cycles. The drain
         // swaps these with executed/trades and clear()s them (keeping
@@ -879,7 +892,7 @@ private:
         // into executed/trades — eliminating the per-cycle reallocation the
         // old swap-with-a-local pattern incurred. Touched only by the symbol's
         // owning worker thread (matching + drain run on the same thread).
-        std::vector<OrderId> firedScratch;
+        std::vector<OcoEvent> firedScratch;
         std::vector<Trade>   tradesScratch;
         void onOrderUpdate(const OrderUpdate& u) override;
         void onTrade(const Trade& t) override;
@@ -917,8 +930,7 @@ private:
     // Give back hierarchical working quantity. No-op until risk is configured.
     void releaseHierarchical(ParticipantId pid, Side side, Quantity qty);
 
-    ContingencyManager contingency_;
-    std::mutex contingencyMutex_;
+    std::mutex contingencyMutex_;  // guards each OcoBookListener::oco
     std::atomic<bool> ocoActive_{false};
     FlatHashMap<SymbolId, std::unique_ptr<OcoBookListener>> ocoListeners_{64};
 

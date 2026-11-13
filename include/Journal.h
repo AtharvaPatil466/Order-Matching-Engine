@@ -1158,8 +1158,12 @@ protected:
         // `durable` is false only when the fsync_fail fault skipped the sync.
         // The bytes are not on stable storage, so they must not be acked —
         // withholding the ack is what closes the ack-before-fsync hazard.
-        if (durable && onDurable_) {
-            onDurable_(toWrite);
+        // A sync covers the whole file, so it also makes durable what earlier
+        // skipped syncs wrote; those are acked now, keeping the count FIFO
+        // with the appends DurabilityGate releases against (DA-7).
+        const size_t acked = ackAfterSync(toWrite, durable);
+        if (acked > 0 && onDurable_) {
+            onDurable_(acked);
         }
 
         // Pop the persisted prefix. Anything past it stays in batch_ and
@@ -1170,6 +1174,18 @@ protected:
             e.sequenceNumber = 0;
             e.checksum = 0;
         }
+    }
+
+    // `n` entries were written; returns how many are now durable to report.
+    // Written without a sync (the fsync_fail fault), they wait for the next
+    // sync, which covers them too. Only ever touched by one committer at a
+    // time: the writer, or the reaper under ringMu_ with no chain behind it.
+    size_t ackAfterSync(size_t n, bool synced) {
+        writtenUnsynced_ += n;
+        if (!synced) return 0;
+        const size_t all = writtenUnsynced_;
+        writtenUnsynced_ = 0;
+        return all;
     }
 
     // A commit of the first `n` entries did not happen: give back the sequence
@@ -1439,6 +1455,7 @@ protected:
     // writer; then free the slot.
     void finalizeChain(uint32_t slotIdx) {
         size_t written = 0;
+        size_t acked = 0;
         bool durable = false;
         std::string failed;   // non-empty: what failed
         int failedErr = 0;
@@ -1478,6 +1495,7 @@ protected:
             } else {
                 written = slot.count;
                 durable = slot.wantAck;
+                acked = ackAfterSync(written, durable);   // DA-7, under ringMu_
             }
         }
 
@@ -1504,8 +1522,8 @@ protected:
         // Fire the ack STRICTLY after durability, on this reaper thread. The
         // slot stays active (inflightCount_ still 1) until after the callback,
         // so quiesce() returning means the callback has run.
-        if (durable && onDurable_ && written > 0) {
-            onDurable_(written);
+        if (durable && onDurable_ && acked > 0) {
+            onDurable_(acked);
         }
 
         {
@@ -2118,6 +2136,7 @@ private:
     // A header is owed to this file but not yet written. See establishHeader().
     bool   pendingHeader_{false};
     bool   dirSyncPending_{false};   // created by this journal, directory not yet synced
+    size_t writtenUnsynced_{0};      // written under fsync_fail, not yet acked (DA-7)
     // The existing header is v1 or v2; upgradeOldHeader() marks it before a write.
     bool   headerIsOld_{false};
     // A torn final write still to cut: tornBytes_ bytes from offset tornFrom_.

@@ -126,6 +126,38 @@ struct AckSink {
 
 }  // namespace
 
+// ---- DA-7: a skipped sync's entries are acked by the next real one ----------
+// fsync_fail models an fsync that has not happened YET. The entries it wrote
+// become durable with the next successful sync (which covers the whole file),
+// and must be reported then: popped and never counted, the durable count lagged
+// the appended count forever and DurabilityGate held every later group.
+[[maybe_unused]] void testSkippedSyncIsAckedByTheNext() {
+    std::printf("Running testSkippedSyncIsAckedByTheNext...\n");
+    auto& fi = FaultInjector::instance();
+    fi.reset();
+    AckSink sink;
+    std::string path = tmpJournalPath("catchup");
+    {
+        Journal j(path, Journal::SyncPolicy::Immediate, /*batchSize=*/1);
+        j.setOnDurable([&sink](size_t n) { sink(n); });
+        fi.arm("journal.commit.fsync_fail", 1.0);
+        j.logAddOrder(1, 1, 1, Side::Buy, 10000, 100, OrderType::Limit);
+        j.quiesce();
+        assert(sink.entries == 0 && "nothing is durable yet");
+        fi.disarm();
+        j.logAddOrder(2, 1, 1, Side::Buy, 9999, 100, OrderType::Limit);
+        j.flush();
+        j.quiesce();
+        std::printf("  acked %llu of %llu appended\n",
+                    static_cast<unsigned long long>(sink.entries),
+                    static_cast<unsigned long long>(j.entriesAppended()));
+        assert(sink.entries == j.entriesAppended() &&
+               "the durable count lags the appends: the gate would hold forever");
+    }
+    fs::remove(path);
+    std::printf("testSkippedSyncIsAckedByTheNext PASSED\n");
+}
+
 int main() {
 #ifndef OB_ENABLE_FAULT_INJECTION
     std::puts("JournalAckDurabilityTest: OB_ENABLE_FAULT_INJECTION not defined — "
@@ -135,6 +167,7 @@ int main() {
     std::printf("\n=== Journal Ack-Durability Tests ===\n");
     testAckFiresAfterSuccessfulSync();
     testNoAckWhenSyncFails();
+    testSkippedSyncIsAckedByTheNext();
     std::puts("\nJournalAckDurabilityTest passed");
     return 0;
 #endif

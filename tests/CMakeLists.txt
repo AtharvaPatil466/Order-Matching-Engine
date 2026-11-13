@@ -1606,3 +1606,14 @@ enable_assertions(RateLimiterReconfigureTest)
 add_test(NAME RateLimiterReconfigureTest COMMAND RateLimiterReconfigureTest)
 set_tests_properties(RateLimiterReconfigureTest PROPERTIES TIMEOUT 15
                      LABELS "project;ops;rate-limit")
+
+# One volatility check for every continuous print: fresh orders, replaces,
+# elected and latched stops; the reference comes from a print (MR-1, MR-2, FORMAL-1).
+add_executable(PrintBandTest PrintBandTest.cpp)
+target_link_libraries(PrintBandTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(PrintBandTest)
+gtest_discover_tests(PrintBandTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;auction")

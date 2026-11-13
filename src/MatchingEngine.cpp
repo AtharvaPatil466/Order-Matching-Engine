@@ -1102,12 +1102,12 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (journal_ && std::holds_alternative<OrderId>(result)) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
                 journal_->logAddOrder(req.orderId, req.participantId, req.symbolId, req.side,
                                       req.price, req.qty, req.orderType, req.tif,
                                       req.expiryTime, req.stopPrice, req.stopLimitPrice,
                                       req.displayQty, req.pegType, req.pegOffset,
                                       req.trailAmount, req.minQty, req.hidden);
+                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
             }
             maybeTriggerAutoCheckpoint();
         }
@@ -1180,11 +1180,13 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
+        const TradingState stateBefore = book->getTradingState();
         if (book->cancelReplace(req.orderId, req.newPrice, req.newQty,
                                 req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
                 journal_->logCancelReplace(req.orderId, req.symbolId, req.newPrice, req.newQty);
+                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
             }
             maybeTriggerAutoCheckpoint();
         }
@@ -2117,10 +2119,10 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     uint64_t appendOrdinal = 0;
     if (journal_ && admitted) {
         std::lock_guard<std::mutex> lock(journalMutex_);
-        logBreakerTrip(symbolId, stateBefore, book->getTradingState());
         journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
                               expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
                               pegOffset, trailAmount, minQty, hidden);
+        logBreakerTrip(symbolId, stateBefore, book->getTradingState());
         appendOrdinal = journal_->entriesAppended();
     }
     // Its fills reach OCO, fees, hierarchical risk and CAT as the worker's do.
@@ -2435,12 +2437,14 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
 
     RejectReason replaceReason = RejectReason::None;
     durabilityGate_.beginOrder();
+    const TradingState stateBefore = book->getTradingState();
     bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
                                         requester);
     uint64_t appendOrdinal = 0;
     if (replaced && journal_) {
         std::lock_guard<std::mutex> lock(journalMutex_);
         journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
+        logBreakerTrip(symbolId, stateBefore, book->getTradingState());
         appendOrdinal = journal_->entriesAppended();
     }
     if (replaced) appendOrdinal = driveOcoSync(symbolId, book, appendOrdinal);  // GTS-4
@@ -2489,12 +2493,14 @@ MarketDataSnapshot MatchingEngine::getSnapshot(SymbolId symbolId, size_t depth) 
     return {};
 }
 
-// H3: a breaker trip happens inside addOrder. It goes into the journal AHEAD
-// of the order that caused it, so replay enters the auction first and the
-// order replays as an auction arrival; replay never evaluates the breaker
-// itself, so a replaying engine with another threshold or reference — the
-// reference is not in a checkpoint — still lands in the same state. Caller
-// holds journalMutex_.
+// A breaker trip happens inside an add or a replace, at the fill whose print
+// failed the band, possibly after in-band fills and elections (MR-2). Replay
+// evaluates the breaker as live did, and stops the sweep at the same fill:
+// the reference comes only from prints, crosses, setReferencePrice and a
+// checkpoint. The record goes AFTER the operation that tripped, where it is a
+// no-op on replay; ahead, as it once was, it would make the order an auction
+// arrival and drop its in-band fills. Journals written that way still replay
+// as they did. Caller holds journalMutex_.
 void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
                                     TradingState after) {
     if (after != before) journal_->logTradingState(symbolId, after);

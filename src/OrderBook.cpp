@@ -387,7 +387,12 @@ Price OrderBook::notionalPriceLocked(Side side, OrderType type, Price price, Pri
     case OrderType::Market:
     case OrderType::MOC: {
         const FlatPriceMap& opposite = isBuy ? asks_ : bids_;
-        if (!collarOn || opposite.empty()) return referencePrice_;
+        if (!collarOn || opposite.empty()) {
+            if (referencePrice_ > 0) return referencePrice_;
+            // No print yet, so no reference (MR-1): the nearest quote stands in.
+            const FlatPriceMap& same = isBuy ? bids_ : asks_;
+            return !opposite.empty() ? opposite.bestPrice() : same.empty() ? 0 : same.bestPrice();
+        }
         return isBuy ? marketCollar(opposite, true) : opposite.bestPrice();
     }
     default:
@@ -395,10 +400,37 @@ Price OrderBook::notionalPriceLocked(Side side, OrderType type, Price price, Pri
     }
 }
 
-bool OrderBook::checkCircuitBreaker(Price price) {
-    if (referencePrice_ == 0) return true;
-    double deviation = std::abs(static_cast<double>(price - referencePrice_)) / referencePrice_;
-    return deviation <= cbThreshold_;
+// |px - reference| <= reference * cbThreshold_, in integers: the deviation is
+// a whole number of ticks, so it fits under the floor of the product.
+OrderBook::PrintBand OrderBook::printBand([[maybe_unused]] Price reference) const {
+    constexpr PrintBand kOpen{std::numeric_limits<Price>::min(), std::numeric_limits<Price>::max()};
+#ifdef OB_LEAN_MODE
+    return kOpen;
+#else
+    const double half = static_cast<double>(reference) * cbThreshold_;
+    if (reference <= 0 || !(half < 1e18)) return kOpen;  // 1e18: a breaker set out of reach
+    const Price h = static_cast<Price>(half);
+    return {reference - h, reference + h};
+#endif
+}
+
+// Only from Continuous: the sweeps that ask run only there, and an auction
+// state never trips. Evaluated in replay as live: the reference comes only
+// from prints, crosses, setReferencePrice and a checkpoint, so replay with
+// the same threshold stops the same sweep at the same fill. Logs
+// `breaker_trip` (symbol/price/ref/threshold_pct), the compliance and
+// monitoring contract, alongside the structured `risk.circuit_breaker`.
+void OrderBook::tripBreaker(Price px) {
+    if (tradingState_ != TradingState::Continuous) return;
+    if (!replayMode_) {
+        obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
+            .kv("symbol", (long long)symbolId_)
+            .kv("price", (long long)px)
+            .kv("ref", (long long)referencePrice_)
+            .kv("threshold_pct", cbThreshold_));
+        obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, px));
+    }
+    setTradingStateLocked(TradingState::VolatilityAuction);
 }
 
 // qty and riskChecksBypassed are [[maybe_unused]] because OB_LEAN_MODE compiles
@@ -447,14 +479,11 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     if ((priced || type == OrderType::LOC) && priceRangeConfigured_ && !bids_.inRange(price))
         return RejectReason::OutOfPriceRange;
 
-#ifndef OB_LEAN_MODE
-    // Circuit breaker, on the replace's LIMIT price: the 0.14 rule. A new
-    // order trips on its first fill's price instead (tripBreakerOnFirstFill);
-    // a replace is refused, never auctioned, so a crossing replace cannot
-    // print out of band either.
-    if (priced && !checkCircuitBreaker(price))
-        return RejectReason::VolatilityCircuitBreaker;
-#endif
+    // No breaker test on the limit: the breaker tests prints, in the sweep
+    // (printBand). A replace's limit used to be refused here while its print
+    // was never tested, so a replace to an in-band limit printed 50% away at
+    // the resting price (FORMAL-1), and a far passive replace that could not
+    // print was refused.
 
     // PostOnly must never cross. Without this a repriced PostOnly matched as
     // an aggressor, which is the exact inversion of what PostOnly means.
@@ -487,7 +516,8 @@ bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
 // pro-rata's STP pre-pass settles a level's own orders before it allocates,
 // so one that ends the sweep ends it before that level fills anything.
 // A Market order (Market+minQty) stops at market protection's collar, as in
-// match() and matchProRata().
+// match() and matchProRata(), and every order at the breaker's band, which a
+// first print seeds when there is no reference yet.
 Quantity OrderBook::sweepFillQty(const Order& in) const {
     const bool isBuy = (in.side == Side::Buy);
     const bool proRata = (matchAlgorithm_ == MatchAlgorithm::ProRata);
@@ -497,6 +527,8 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
     const Price collar = collared ? marketCollar(opposite, isBuy) : 0;
     const STPMode stpMode = getSTPMode(in.participantId);
     Quantity need = in.remainingQty, fills = 0;
+    PrintBand band = printBand(referencePrice_);
+    bool seeded = referencePrice_ != 0;
 
     // False: the sweep ends at this own order.
     auto passOwn = [&](const Order& own) -> bool {
@@ -518,6 +550,7 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
         if (in.type != OrderType::Market && (isBuy ? levelPrice > in.price : levelPrice < in.price))
             return false;
         if (collared && (isBuy ? levelPrice > collar : levelPrice < collar)) return false;
+        if (!band.admits(levelPrice)) return false;
         Quantity reserve = 0;  // what the level fills after this pass
         if (proRata) {
             for (const Order* o = level.front(); o; o = o->next)
@@ -541,6 +574,10 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
         const Quantity take = std::min(need, reserve);
         fills += take;
         need -= take;
+        if (!seeded && fills > 0) {
+            band = printBand(levelPrice);
+            seeded = true;
+        }
         return need > 0;
     });
     return fills;
@@ -730,12 +767,8 @@ std::optional<RejectReason> OrderBook::admitPoolPressure(OrderId orderId,
     return std::nullopt;
 }
 
-// --- Reference price + price band (LULD) admission filter ---
-// Seeds referencePrice_ from the first order carrying a meaningful limit price;
-// that seeding is what makes both the band below and the circuit breaker live,
-// so it stays attached to it.
-//
-// Then rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
+// --- Price band (LULD) admission filter ---
+// Rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
 // is configured and a reference price has been established. It rejects the
 // individual order and lets subsequent in-band orders continue trading.
 // Skipped on order types without a meaningful limit
@@ -745,12 +778,9 @@ std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
                                                       ParticipantId participantId,
                                                       Price price, Quantity qty,
                                                       OrderType type) {
-    if (referencePrice_ == 0 && type != OrderType::Market
-                 && type != OrderType::Stop && type != OrderType::StopLimit
-                 && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
-        referencePrice_ = price;
-    }
-
+    // No reference until the first print, cross or setReferencePrice: an
+    // order is not a price. Seeded from the first priced order, a rejected
+    // 1-lot FOK at 0.0001 set it and the first honest trade tripped (MR-1).
     if (priceBandPct_ > 0.0 && referencePrice_ > 0 &&
         (type == OrderType::Limit  || type == OrderType::IOC ||
          type == OrderType::FOK    || type == OrderType::PostOnly ||
@@ -766,65 +796,6 @@ std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
             return rejectOrder(orderId, participantId, qty, RejectReason::OutsidePriceBand);
     }
     return std::nullopt;
-}
-
-// --- H3: the volatility breaker trips on a print, not a quote ---
-// The breaker used to test each order's LIMIT price: a passive bid far below
-// the market, which can never execute, switched the whole symbol into
-// VolatilityAuction and nothing reopened it (PRIOR-5, AUCT-8); the 0.14
-// stop-gap then refused such orders one by one. What a breaker guards is the
-// print, so it now tests the price the order's first fill would execute at.
-//
-// ponytail: STP is approximated — an own resting order ends the walk under the
-// cancel-incoming modes and is stepped over under the others; DecreaseAndCancel
-// may leave nothing to fill and still count the next level.
-std::optional<Price> OrderBook::firstFillPrice(const Order& in) const {
-    const FlatPriceMap& opposite = (in.side == Side::Buy) ? asks_ : bids_;
-    if (opposite.empty()) return std::nullopt;
-    const bool market = in.type == OrderType::Market;
-    auto crosses = [&](Price px) {
-        return market || (in.side == Side::Buy ? px <= in.price : px >= in.price);
-    };
-    if (!crosses(opposite.bestPrice())) return std::nullopt;
-    if (stpNoneResting(in.participantId) && !makerExpired(*opposite.bestLevel()->front()))
-        return opposite.bestPrice();
-
-    const STPMode mode = getSTPMode(in.participantId);
-    const bool ownOrderStopsIncoming = mode == STPMode::DefaultCancelIncoming ||
-                                       mode == STPMode::CancelIncoming ||
-                                       mode == STPMode::CancelBoth;
-    std::optional<Price> fill;
-    opposite.forEachLevelWhile([&](Price px, const OrderList& level) -> bool {
-        if (!crosses(px)) return false;
-        for (const Order* r = level.front(); r; r = r->next) {
-            if (makerExpired(*r)) continue;   // the sweep cancels it (THR-10)
-            if (r->participantId != in.participantId) { fill = px; return false; }
-            if (ownOrderStopsIncoming) return false;
-        }
-        return true;
-    });
-    return fill;
-}
-
-// Only in Continuous: an auction state never matches on arrival, and an order
-// arriving in one never trips (H3). Not in replay either — the trip is
-// journaled as a TradingStateChange ahead of the order that caused it, so a
-// replay with a different threshold or reference still reproduces it.
-// Logs `breaker_trip` (symbol/price/ref/threshold_pct), the compliance and
-// monitoring contract, alongside the structured `risk.circuit_breaker`.
-bool OrderBook::tripBreakerOnFirstFill(const Order& in) {
-    if (replayMode_ || tradingState_ != TradingState::Continuous || referencePrice_ == 0)
-        return false;
-    const std::optional<Price> fill = firstFillPrice(in);
-    if (!fill || checkCircuitBreaker(*fill)) return false;
-    obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
-        .kv("symbol", (long long)symbolId_)
-        .kv("price", (long long)*fill)
-        .kv("ref", (long long)referencePrice_)
-        .kv("threshold_pct", cbThreshold_));
-    obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, *fill));
-    setTradingStateLocked(TradingState::VolatilityAuction);
-    return true;
 }
 
 // --- Post-Only: reject if would cross the spread ---  Precondition: bookLock_ held.
@@ -1198,6 +1169,17 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
 void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
                                      OrderType type, Quantity cumBefore) {
     if (order->remainingQty > 0) [[likely]] {
+        // The breaker stopped a market order's sweep: what is left waits for
+        // the reopening cross, as a market order arriving in the auction does.
+        // A limit rests below as an arrival would; an IOC or FOK is cancelled.
+        if (type == OrderType::Market && tradingState_ == TradingState::VolatilityAuction &&
+            auctionMarketOrders_.push_back(order)) [[unlikely]] {
+            order->status = order->cumQty > 0 ? OrderStatus::PartiallyFilled : OrderStatus::Accepted;
+            if (order->cumQty > cumBefore)
+                notifyOrderUpdate(orderId, OrderStatus::PartiallyFilled, order->cumQty,
+                                  order->remainingQty, lastTradePrice_);
+            return;
+        }
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
             // Cancelled even after fills: the remainder is gone, so the status
             // is terminal and filledQty carries what executed. PartiallyFilled
@@ -1291,15 +1273,6 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     if (auto r = screenFOK(order, orderId, qty, type)) return *r;
     if (auto id = screenMinQty(order, orderId, side, price, qty, type, minQty)) return *id;
-
-#ifndef OB_LEAN_MODE
-    // H3: a trip makes this order the volatility auction's first arrival: a
-    // market order parks for the reopening cross; any other type carries on
-    // below as an auction arrival (no match; a limit rests, IOC/FOK cancel).
-    if (tripBreakerOnFirstFill(*order))
-        if (auto id = parkNonMatchingOrder(order, orderId, side, price, qty, type,
-                                           pegType, pegOffset, trailAmount)) return *id;
-#endif
 
     // --- Match (skipped during auction / pre-open) ---
     // PreOpen / AuctionOpen / AuctionClose all accumulate without
@@ -1479,6 +1452,9 @@ Price OrderBook::match(Order* incoming) {
     // prevents too.
     const STPMode stpMode = getSTPMode(incoming->participantId);
     const bool stpClear = stpNoneResting(incoming->participantId);
+
+    // The breaker's band, asked before every fill below.
+    PrintBand band = printBand(referencePrice_);
 
     // P1-3/P1-4/P1-5: buffer per-fill side effects on the stack and flush them
     // AFTER the loop rather than firing virtual onTrade dispatches, audit logs
@@ -1663,6 +1639,13 @@ Price OrderBook::match(Order* incoming) {
             break;  // STP acted: stop matching this order
         }
 
+        // Past STP, so this fill will print: test its price. Outside the band
+        // nothing prints; the caller handles what is left as an auction arrival.
+        if (!band.admits(bestPrice)) [[unlikely]] {
+            tripBreaker(bestPrice);
+            break;
+        }
+
         Quantity available = (bookOrder->type == OrderType::Iceberg)
                              ? bookOrder->visibleQty : bookOrder->remainingQty;
         Quantity fillQty = std::min(incoming->remainingQty, available);
@@ -1678,7 +1661,10 @@ Price OrderBook::match(Order* incoming) {
         bookOrder->cumQty += fillQty;
         if (bookOrder->type == OrderType::Iceberg) [[unlikely]] bookOrder->visibleQty -= fillQty;
 
-        if (firstPrint == 0) [[unlikely]] firstPrint = bestPrice;
+        if (firstPrint == 0) [[unlikely]] {
+            firstPrint = bestPrice;
+            if (referencePrice_ == 0) band = printBand(referencePrice_ = bestPrice);
+        }
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
@@ -1792,6 +1778,7 @@ Price OrderBook::matchProRata(Order* incoming) {
     // The collar, from the arrival touch, as in match() (MATCH-16).
     const bool useMktProt = incoming->type == OrderType::Market && marketProtectionPct_ > 0.0;
     const Price mktProtBound = useMktProt && !opposite.empty() ? marketCollar(opposite, isBuy) : 0;
+    PrintBand band = printBand(referencePrice_);  // as match()
 
     while (incoming->remainingQty > 0) {
         if (opposite.empty()) break;
@@ -1878,6 +1865,12 @@ Price OrderBook::matchProRata(Order* incoming) {
             // The level may also be gone entirely, in which case this picks up
             // the next best price.
             if (levelChanged) continue;
+        }
+
+        // Past the STP pre-pass, so this level will print: test its price.
+        if (!band.admits(bestPrice)) [[unlikely]] {
+            tripBreaker(bestPrice);
+            break;
         }
 
         // Calculate total quantity at this level
@@ -2005,7 +1998,10 @@ Price OrderBook::matchProRata(Order* incoming) {
             bookOrder->cumQty += fillQty;
             if (bookOrder->type == OrderType::Iceberg) bookOrder->visibleQty -= fillQty;
 
-            if (firstPrint == 0) firstPrint = bestPrice;
+            if (firstPrint == 0) {
+                firstPrint = bestPrice;
+                if (referencePrice_ == 0) band = printBand(referencePrice_ = bestPrice);
+            }
             lastTradePrice_ = bestPrice;
             lastTradeQty_ = fillQty;
 
@@ -2631,9 +2627,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             wouldCross = !bids_.empty() && newPrice <= bids_.bestPrice();
 
         // In an auction state the repriced order rests, crossed or not, and
-        // waits for the uncross like every other order (H4, MATCH-6).
+        // waits for the uncross like every other order (H4, MATCH-6). Decided
+        // before the match: one the breaker stops still runs the sweeps
+        // below, which latch what its in-band prints elected.
+        const bool inAuction = inAuctionState();
         Price firstPrint = 0;
-        if (wouldCross && !inAuctionState()) {
+        if (wouldCross && !inAuction) {
             if (matchAlgorithm_ == MatchAlgorithm::ProRata)
                 firstPrint = matchProRata(order);
             else
@@ -2648,7 +2647,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 
         // As addOrder, and for the same reason after the tail: a replace that
         // printed through a stop's trigger never elected it (MATCH-5).
-        if (!inAuctionState()) runTriggerSweeps(firstPrint);
+        if (!inAuction) runTriggerSweeps(firstPrint);
     } else {
         // Same price
         const Quantity displayBefore = displayQuantity(*order);
@@ -2833,10 +2832,13 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
             // on it, so the deferred ones are the SAME set this print elected.
             order->isStopTriggered = true;
 
-            if (executed >= kMaxStopExecutionsPerSweep) [[unlikely]] {
-                // Out of budget: leave it parked and latched. The next sweep
-                // (every addOrder runs one once the book has traded) executes
-                // it. It stays cancellable by its owner until then.
+            if (executed >= kMaxStopExecutionsPerSweep ||
+                tradingState_ != TradingState::Continuous) [[unlikely]] {
+                // Out of budget, or an earlier election in this sweep tripped
+                // the breaker: leave it parked and latched. The next sweep in
+                // Continuous (every addOrder runs one once the book has traded)
+                // executes it, and its prints face the band then (MR-2). It
+                // stays cancellable by its owner until then.
                 ++i;
                 continue;
             }
@@ -2914,7 +2916,8 @@ void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
         if (triggered) {
             order->isStopTriggered = true;
 
-            if (executed >= kMaxStopExecutionsPerSweep) [[unlikely]] {
+            if (executed >= kMaxStopExecutionsPerSweep ||
+                tradingState_ != TradingState::Continuous) [[unlikely]] {  // as checkStopOrders
                 ++i;
                 continue;
             }
@@ -3189,6 +3192,7 @@ void OrderBook::uncrossLocked() {
         remainingVolume -= fillQty;
 
         lastTradePrice_ = bestUncrossPrice;
+        if (referencePrice_ == 0) referencePrice_ = bestUncrossPrice;  // an auction result (MR-1)
         lastTradeQty_ = fillQty;
         updateAnalytics(bestUncrossPrice, fillQty, buyer->participantId, seller->participantId);
         participantRisk_[OTRKey(buyer->participantId, symbolId_)].currentExposure += static_cast<int64_t>(fillQty);

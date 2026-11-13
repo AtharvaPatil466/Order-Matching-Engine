@@ -351,9 +351,10 @@ void testCheckpointReplay() {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        // 3 snapshot entries, the lease, the book's reference price and the
-        // two participants' order counts (from checkpoint) + 2 new orders
-        assert(replayed == 8 + kLeaseRecords);
+        // 3 snapshot entries, the lease and the two participants' order
+        // counts (from checkpoint) + 2 new orders. No price record: nothing
+        // traded, and a quote sets no reference (MR-1).
+        assert(replayed == 7 + kLeaseRecords);
 
         auto* book = engine.getOrderBook(0);
         assert(book != nullptr);

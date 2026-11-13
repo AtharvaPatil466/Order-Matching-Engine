@@ -178,6 +178,7 @@ void testCircuitBreaker() {
     TestListener listener;
     book.setEventListener(&listener);
 
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     // A bid 6% above the reference is a quote, not a print: it rests and the
     // book stays Continuous (roadmap 1.8-H3).
@@ -297,6 +298,7 @@ void testCircuitBreakerBoundaries() {
     OrderBook book;
     TestListener listener;
     book.setEventListener(&listener);
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
     // A first fill 4.9% from the reference trades.

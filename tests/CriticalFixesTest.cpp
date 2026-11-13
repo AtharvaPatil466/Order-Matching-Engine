@@ -461,6 +461,7 @@ namespace {
 // each test can arm exactly the one control it is about.
 OrderId seedReplaceTarget(OrderBook& book, Quantity qty = 100) {
     book.setCircuitBreakerThreshold(0.99);
+    book.setReferencePrice(PX);   // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, PX, qty, OrderType::Limit);
     return 1;
 }
@@ -510,15 +511,26 @@ TEST(AuditFixes, CancelReplaceHonoursPriceBand) {
     EXPECT_TRUE(book.cancelReplace(1, PX + PX / 100, 100)) << "in-band replace works";
 }
 
+// The breaker tests a replace's print, as a new order's (FORMAL-1). Its limit
+// was tested instead: a far passive replace was refused though it could not
+// print, and an in-band limit that crossed a far resting order printed there.
 TEST(AuditFixes, CancelReplaceHonoursCircuitBreaker) {
     OrderBook book(1);
-    book.addOrder(1, 1, Side::Buy, PX, 100, OrderType::Limit);  // sets reference
+    book.setReferencePrice(PX);
     book.setCircuitBreakerThreshold(0.05);                      // 5%
+    book.addOrder(1, 1, Side::Buy, PX, 100, OrderType::Limit);
 
-    EXPECT_FALSE(book.cancelReplace(1, /*newPrice=*/PX + PX / 5, 100))
-        << "a 20% reprice must trip the same breaker a new order would";
+    EXPECT_TRUE(book.cancelReplace(1, /*newPrice=*/PX - PX / 12, 100))
+        << "a passive 8% reprice prints nothing and is admitted, as a new order is";
     ASSERT_NE(book.getOrder(1), nullptr);
-    EXPECT_EQ(book.getOrder(1)->price, PX);
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
+
+    book.addOrder(2, 2, Side::Sell, PX + PX / 12, 100, OrderType::Limit);
+    EXPECT_TRUE(book.cancelReplace(1, /*newPrice=*/PX + PX / 12, 100));
+    EXPECT_EQ(book.getTradeCount(), 0u) << "the replace printed 8% from the reference";
+    EXPECT_EQ(book.getTradingState(), TradingState::VolatilityAuction)
+        << "a crossing replace must trip the same breaker a new order would";
+    ASSERT_NE(book.getOrder(1), nullptr) << "it waits for the reopening cross";
 }
 
 TEST(AuditFixes, CancelReplaceHonoursTradingState) {

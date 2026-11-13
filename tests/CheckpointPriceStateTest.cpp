@@ -2,14 +2,14 @@
 // survive a checkpoint.
 //
 // Both lived only in what the journal replays: the reference is seeded by the
-// first priced order and re-anchored by a volatility auction's reopening
-// print, the last trade price by every trade. A checkpoint keeps resting
+// first print (once by the first priced order, MR-1) and re-anchored by a
+// volatility auction's reopening print, the last trade price by every trade. A checkpoint keeps resting
 // orders, the session state and the id counters, and drops the trades, so a
 // book restarted from one had neither. The circuit breaker (5% from the
 // reference) then re-seeded from whatever order came next, and an auction
 // with only market orders on both sides, which crosses at the last trade
-// price (decision 6), cancelled them instead. A book that only quoted has a
-// reference too, and no trade id for the checkpoint to record it beside.
+// price (decision 6), cancelled them instead. A book that only quoted has no
+// reference, in any of the three lives: a quote is not a price (MR-1).
 //
 // The last trade's quantity, which a market-data snapshot and the admin /book
 // and /depth endpoints show beside its price, came back as 0.
@@ -72,7 +72,7 @@ void traded(MatchingEngine& e) {
     assert(!e.getOrderBook(kSym)->getOrder(1) && !e.getOrderBook(kSym)->getOrder(2));
 }
 
-// No trade: an order at 100.00 seeded the reference, then was cancelled.
+// No trade: an order at 100.00, then cancelled. It sets no reference.
 void quoted(MatchingEngine& e) {
     assert(e.submitOrder(kSym, 1, 1, Side::Sell, kPx, 10, OrderType::Limit).isAccepted());
     e.cancelOrder(kSym, 1);
@@ -168,7 +168,7 @@ int main() {
     failures += check("traded: breaker tripped at 120.00", traded, breakerProbe, 1);
     failures += check("traded: trades from market vs market", traded, marketCrossProbe, 1);
     failures += check("traded: last trade quantity shown", traded, lastQtyProbe, 10);
-    failures += check("quoted: breaker tripped at 120.00", quoted, breakerProbe, 1);
+    failures += check("quoted: no reference, 120.00 trades", quoted, breakerProbe, 0);
     failures += check("trailed: stop fired at 102.80", trailed, trailProbe, 1);
     if (failures != 0) {
         std::printf("CheckpointPriceStateTest FAILED: %d restarted book(s) lost price state\n", failures);

@@ -101,7 +101,8 @@ void test_breaker_trip_emits_event() {
 
     OrderBook book(7);
     book.setCircuitBreakerThreshold(0.02);
-    // Establish reference at 1,000,000.
+    // Reference 1,000,000, configured: an order does not set it (MR-1).
+    book.setReferencePrice(1000000);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     // A passive ask 3% away trips nothing; a buy that would lift it prints
     // 3% away and trips the 2% breaker (roadmap 1.8-H3).

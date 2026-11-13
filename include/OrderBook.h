@@ -535,9 +535,9 @@ public:
 
     // Price-band (LULD-style) admission filter. Distinct from the
     // volatility circuit breaker (a threshold on the same reference, tested
-    // against the price an order's FIRST fill would print at; a breach moves
-    // the book into VolatilityAuction and logs breaker_trip — see
-    // tripBreakerOnFirstFill). The band REJECTS
+    // against the price of every continuous print; a breach moves the book
+    // into VolatilityAuction and logs breaker_trip — see printBand). The band
+    // REJECTS
     // individual orders
     // priced outside [ref*(1-pct), ref*(1+pct)] without affecting market
     // state. Both can be active simultaneously.
@@ -1035,15 +1035,20 @@ private:
     void planAuctionSelfCrosses(std::vector<Order*>& victims) const;
     void stpCancelAuctionOrder(Order* o);
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
-    bool checkCircuitBreaker(Price price);
-    // H3: the price `in`'s first fill would print at, or nullopt if it would
-    // not fill on arrival. Precondition: bookLock_ held.
-    std::optional<Price> firstFillPrice(const Order& in) const;
-    // H3: in Continuous, an order whose first fill would print outside the
-    // breaker threshold moves the book into VolatilityAuction before it
-    // matches. True if it tripped. Never evaluated in replay: a trip is
-    // journaled and replayed as a state change. Precondition: bookLock_ held.
-    bool tripBreakerOnFirstFill(const Order& in);
+    // The volatility breaker's one question, asked of every continuous print
+    // (MR-2, FORMAL-1): may a print at this price happen now? The prices a
+    // print may happen at around `reference`, cbThreshold_ either side; all
+    // of them with no reference yet, or in a lean build. Integer bounds,
+    // built once per sweep, so the per-fill test is two compares.
+    struct PrintBand {
+        Price lo;
+        Price hi;
+        bool admits(Price px) const { return px >= lo && px <= hi; }
+    };
+    PrintBand printBand(Price reference) const;
+    // A print at `px` failed the band: in Continuous, the book enters
+    // VolatilityAuction and breaker_trip is logged. Precondition: bookLock_ held.
+    void tripBreaker(Price px);
 
     // H2: the PURE admission checks — no state mutation, no events, no
     // reject notifications. Returns RejectReason::None if the order may be

@@ -96,22 +96,26 @@ TEST(RejectReasonContract, OrderTypeNotAllowedInState) {
 TEST(RejectReasonContract, OutsidePriceBand) {
     OrderBook book(0);
     book.setCircuitBreakerThreshold(0.50);  // breaker out of the way
+    book.setReferencePrice(1000000);        // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
     auto r = book.addOrder(2, 2, Side::Buy, 1100000, 100, OrderType::Limit);
     EXPECT_EQ(expectReject(r), RejectReason::OutsidePriceBand);
 }
 
-// A new order never gets this reason: an out-of-band first fill moves the
-// book into a volatility auction instead (roadmap 1.8-H3). A replace to a
-// price outside the threshold is still refused with it.
+// No longer emitted, kept for the wire. The breaker tests prints, not limits
+// (roadmap 1.8-H3): an out-of-band print moves the book into a volatility
+// auction. A replace was the last path refused on its limit; it is now
+// admitted like a new order at that price, and its print is tested (FORMAL-1).
 TEST(RejectReasonContract, VolatilityCircuitBreaker) {
     OrderBook book(0);
     book.setCircuitBreakerThreshold(0.02);
+    book.setReferencePrice(1000000);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     RejectReason reason = RejectReason::None;
-    EXPECT_FALSE(book.cancelReplace(1, 1030000, 100, reason));
-    EXPECT_EQ(reason, RejectReason::VolatilityCircuitBreaker);
+    EXPECT_TRUE(book.cancelReplace(1, 1030000, 100, reason));
+    EXPECT_EQ(reason, RejectReason::None);
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
 }
 
 TEST(RejectReasonContract, PostOnlyWouldCross) {

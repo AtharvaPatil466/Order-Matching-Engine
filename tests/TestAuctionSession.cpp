@@ -104,7 +104,8 @@ void test_volatility_auction_lifecycle() {
     book.setCircuitBreakerThreshold(0.05);           // 5% band
     book.setTradingState(TradingState::Continuous);
 
-    // Establish reference at 100 (the first limit order sets referencePrice_).
+    // Reference 100: configured, since an order does not set it (MR-1).
+    book.setReferencePrice(100);
     addLimit(book, 1, 1, Side::Buy, 100, 100);
     assert(book.getTradingState() == TradingState::Continuous);
 

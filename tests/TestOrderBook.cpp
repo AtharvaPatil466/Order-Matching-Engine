@@ -124,7 +124,9 @@ TEST_F(OrderBookTest, CircuitBreaker_ConfigurableThreshold) {
     book.setCircuitBreakerThreshold(0.02); // 2% threshold
     EXPECT_DOUBLE_EQ(book.getCircuitBreakerThreshold(), 0.02);
 
-    // Set reference price at 100.0000
+    // Reference 100.0000. An order does not set it, a print or configuration
+    // does (MR-1).
+    book.setReferencePrice(1000000);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
     // Asks 1.5% and 3% away are passive: no print, nothing trips.
@@ -235,6 +237,7 @@ TEST_F(OrderBookTest, TradingState_CircuitBreakerTripsOnFirstFill) {
     // symbol (PRIOR-5). The order whose first fill would print out of band
     // trips the breaker; it waits for the reopening cross (roadmap 1.8-H3).
     book.setCircuitBreakerThreshold(0.02);
+    book.setReferencePrice(1000000);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
     auto far = book.addOrder(2, 2, Side::Sell, 1030000, 100, OrderType::Limit);
@@ -759,7 +762,8 @@ TEST_F(OrderBookTest, PriceBand_DefaultDisabled) {
 }
 
 TEST_F(OrderBookTest, PriceBand_RejectsOutsideUpperBound) {
-    // Establish a reference at 1,000,000 then arm a 5% band.
+    // A reference of 1,000,000, then a 5% band.
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
 
@@ -774,6 +778,7 @@ TEST_F(OrderBookTest, PriceBand_RejectsOutsideUpperBound) {
 }
 
 TEST_F(OrderBookTest, PriceBand_RejectsOutsideLowerBound) {
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
 
@@ -785,6 +790,7 @@ TEST_F(OrderBookTest, PriceBand_RejectsOutsideLowerBound) {
 }
 
 TEST_F(OrderBookTest, PriceBand_AcceptsInsideBand) {
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
 
@@ -795,10 +801,10 @@ TEST_F(OrderBookTest, PriceBand_AcceptsInsideBand) {
 }
 
 TEST_F(OrderBookTest, PriceBand_DoesNotApplyBeforeReference) {
-    // No reference yet — band is configured but inactive. The first order
-    // establishes the reference; it itself is not band-checked (there is
-    // no reference to check against). This matches the existing breaker
-    // semantics and avoids a chicken-and-egg deadlock at session start.
+    // No reference yet — band is configured but inactive. The first print
+    // establishes the reference (MR-1); until then nothing is band-checked
+    // (there is no reference to check against). This matches the breaker
+    // and avoids a chicken-and-egg deadlock at session start.
     book.setPriceBandPct(0.05);
     auto r = book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     EXPECT_TRUE(std::holds_alternative<OrderId>(r));
@@ -810,6 +816,7 @@ TEST_F(OrderBookTest, PriceBand_DisableRestoresAdmission) {
     // 6% move that the band rejects.
     book.setCircuitBreakerThreshold(0.50);
 
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
 
@@ -836,6 +843,7 @@ TEST_F(OrderBookTest, PriceBand_BandedOutOrderDoesNotHaltMarket) {
     // Distinct contract: an out-of-band order is rejected, but the next
     // in-band order still trades normally (no auto-halt, unlike breaker).
     book.setCircuitBreakerThreshold(0.50);  // breaker out of the way
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
 

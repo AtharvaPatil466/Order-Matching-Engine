@@ -120,7 +120,10 @@ TEST_P(LazyExpiry, FokDoesNotCountAnExpiredMaker) {
 
 // An expired maker at the touch must not hide a first fill past the breaker.
 TEST_P(LazyExpiry, BreakerJudgesTheFirstLiveMaker) {
-    submit(1, 1, Side::Sell, kPx, 10, TimeInForce::GTD, kExpiry);   // seeds the reference
+    // An order does not seed the reference (MR-1); set it before any order,
+    // so the queue orders the write ahead of the worker's reads.
+    engine.getOrderBook(kSym)->setReferencePrice(kPx);
+    submit(1, 1, Side::Sell, kPx, 10, TimeInForce::GTD, kExpiry);
     submit(2, 2, Side::Sell, kPx + 100'000, 10);                     // +10%, past the 5% breaker
     now = kExpiry;
     submit(3, 3, Side::Buy, kPx + 100'000, 10);

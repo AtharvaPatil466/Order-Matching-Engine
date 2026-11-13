@@ -100,7 +100,7 @@ constexpr ParticipantId kMaxParticipants = 1024;
 
 enum class RejectReason : uint8_t {
     None,
-    VolatilityCircuitBreaker, // A replace priced outside the breaker threshold
+    VolatilityCircuitBreaker, // No longer emitted (the breaker tests prints); kept for the wire
                               // (a new order trips the breaker instead)
     PostOnlyWouldCross,
     FOKInsufficientLiquidity,

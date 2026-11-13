@@ -91,6 +91,10 @@ TEST_P(Collar, ZeroDisablesIt) {
 // meets when it is elected: here 100.01, so a bound of 105.0105.
 TEST_P(Collar, ElectedStopIsCollared) {
     OrderBook b(1, GetParam());
+    // The collar from the elected stop's own touch reaches 1'050'105, 5.01%
+    // from the first print; an elected stop's prints face the breaker now
+    // (MR-2), so it is moved out of the way to isolate the collar.
+    b.setCircuitBreakerThreshold(0.5);
     rest(b, 1, Side::Sell, kTouch, 1);
     rest(b, 2, Side::Sell, 1'000'100, 1);
     rest(b, 3, Side::Sell, 1'050'105, 1);

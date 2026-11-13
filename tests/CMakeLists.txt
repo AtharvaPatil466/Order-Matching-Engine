@@ -878,6 +878,14 @@ enable_assertions(JournalHaltFreezeTest)
 add_test(NAME JournalHaltFreezeTest COMMAND JournalHaltFreezeTest)
 set_tests_properties(JournalHaltFreezeTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# JOURNAL-4: in OrderEngine's wiring every event the market-data feed receives
+# finds its journal record already on disk.
+add_executable(JournalRecordBeforeEventTest JournalRecordBeforeEventTest.cpp)
+target_link_libraries(JournalRecordBeforeEventTest PRIVATE OrderMatcher)
+enable_assertions(JournalRecordBeforeEventTest)
+add_test(NAME JournalRecordBeforeEventTest COMMAND JournalRecordBeforeEventTest)
+set_tests_properties(JournalRecordBeforeEventTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # JRN-11: a refused io_uring_submit halts the journal instead of leaving the
 # writer waiting forever on a chain the kernel never saw, and the refused SQEs
 # never reach the disk. Fault-injection build on Linux with liburing; skips

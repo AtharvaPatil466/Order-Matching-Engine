@@ -351,10 +351,12 @@ void testCheckpointReplay() {
         engine.start();
 
         size_t replayed = engine.replayJournal();
-        // 3 snapshot entries, the lease and the two participants' order
-        // counts (from checkpoint) + 2 new orders. No price record: nothing
-        // traded, and a quote sets no reference (MR-1).
-        assert(replayed == 7 + kLeaseRecords);
+        // From the checkpoint: the book's counters record (it carries the
+        // arrival sequence and the band anchor, so it is written whenever an
+        // order has arrived, even though nothing traded and a quote sets no
+        // reference, MR-1), 3 snapshot orders, the lease and the two
+        // participants' order counts. Then the 2 new orders.
+        assert(replayed == 8 + kLeaseRecords);
 
         auto* book = engine.getOrderBook(0);
         assert(book != nullptr);

@@ -1065,6 +1065,10 @@ private:
     // Both return the sweep's first print price, 0 if it printed nothing.
     Price match(Order* order);
     Price matchProRata(Order* order);
+    // The book's algorithm, for every aggressor: arrival, replace, elected stop.
+    Price sweep(Order* order) {
+        return matchAlgorithm_ == MatchAlgorithm::ProRata ? matchProRata(order) : match(order);
+    }
     bool checkSMP(const Order& incoming, const Order& resting) const;
     Quantity sweepFillQty(const Order& in) const;
     // Market protection's collar: the farthest price a Market order may reach
@@ -1340,6 +1344,10 @@ private:
     // price and execute against limit liquidity; any remainder is
     // cancelled at the end of the uncross.
     FixedVector<Order*, 16384> auctionMarketOrders_;
+    // matchProRata's per-level allocation scratch (MR-4); reserved up front.
+    struct ProRataAlloc { Order* order; Quantity qty; };
+    static constexpr size_t kProRataReserve = 1024;
+    std::vector<ProRataAlloc> proRataScratch_;
     // MOC/LOC orders parked before AuctionClose. Released when the book
     // transitions to AuctionClose: MOC→auctionMarketOrders_, LOC→limit book.
     FixedVector<Order*, 16384> onCloseOrders_;

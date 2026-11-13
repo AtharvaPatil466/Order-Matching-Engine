@@ -102,6 +102,7 @@ OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCap
       volatilityDwellNs_(resolveVolatilityDwellNs()),
       participantRisk_(1024),
       tradeHistory_(resolveTradeHistoryCapacity()) {
+    proRataScratch_.reserve(kProRataReserve);  // 16 KiB: a pro-rata level of 1024 allocates nothing
     // orderLookup_ is sized FROM THE POOL ITSELF — orderPool_ is declared
     // before it in OrderBook.h precisely so this read is well-defined — so it
     // holds every order the pool can hand out with room to spare (50% load
@@ -1274,10 +1275,7 @@ AddOrderResult OrderBook::addOrderLocked(OrderId orderId, ParticipantId particip
     const bool inAuction = inAuctionState();
     Price firstPrint = 0;
     if (!inAuction) {
-        if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-            firstPrint = matchProRata(order);
-        else
-            firstPrint = match(order);
+        firstPrint = sweep(order);
     }
 
     // C1: an order STP stopped must report CancelledBySTP (or the fills it
@@ -1766,8 +1764,6 @@ Price OrderBook::match(Order* incoming) {
 // Zero-allocation: uses stack-allocated arrays instead of std::vector.
 
 Price OrderBook::matchProRata(Order* incoming) {
-    struct Alloc { Order* order; Quantity qty; };
-    static constexpr size_t MAX_LEVEL_ORDERS = 1024;
     Price firstPrint = 0;  // as match(): the sweep's first print
     const bool isBuy = (incoming->side == Side::Buy);
 
@@ -1919,20 +1915,26 @@ Price OrderBook::matchProRata(Order* incoming) {
 
         Quantity toFill = std::min(incoming->remainingQty, totalLevelQty);
 
-        // Compute proportional allocations (stack-allocated)
-        Alloc allocs[MAX_LEVEL_ORDERS];
-        size_t allocCount = 0;
+        // Proportional allocations over the WHOLE level (MR-4: a fixed
+        // 1024-slot array once left order 1025 on with nothing, gave the
+        // front orders their shortfall FIFO, and lost a DMM floor past it).
+        // The scratch vector is a member, reserved at construction, so a
+        // level of up to kProRataReserve orders allocates nothing; a larger
+        // one grows it once.
+        std::vector<ProRataAlloc>& allocs = proRataScratch_;
+        allocs.clear();
         Quantity allocated = 0;
 
-        for (Order* o = level.front(); o && allocCount < MAX_LEVEL_ORDERS; o = o->next) {
+        for (Order* o = level.front(); o; o = o->next) {
             // Self-crossing orders are already resolved by the pre-pass above.
             Quantity avail = (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
             Quantity share = (totalLevelQty > 0)
                 ? static_cast<Quantity>(static_cast<double>(avail) / totalLevelQty * toFill)
                 : 0;
-            allocs[allocCount++] = {o, share};
+            allocs.push_back({o, share});
             allocated += share;
         }
+        const size_t allocCount = allocs.size();
 
         // ── LMM/DMM floor guarantee (pro-rata only) ──────────────────────────
         // DMM/LMM orders are guaranteed at least DMM_FLOOR_PCT of their available
@@ -1986,10 +1988,7 @@ Price OrderBook::matchProRata(Order* incoming) {
             remainder -= extra;
         }
 
-        // Execute fills (collect removals on stack)
-        Order* toRemove[MAX_LEVEL_ORDERS];
-        size_t removeCount = 0;
-
+        // Execute fills; filled orders are removed after the loop.
         for (size_t i = 0; i < allocCount; ++i) {
             if (allocs[i].qty == 0) continue;
             Order* bookOrder = allocs[i].order;
@@ -2037,7 +2036,6 @@ Price OrderBook::matchProRata(Order* incoming) {
             if (bookOrder->remainingQty == 0) {
                 bookOrder->status = OrderStatus::Filled;
                 notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->cumQty, 0, bestPrice);
-                toRemove[removeCount++] = bookOrder;
             } else if (bookOrder->type == OrderType::Iceberg && bookOrder->visibleQty == 0) {
                 // Pro-rata iceberg refresh: the slice is replenished in
                 // place. Pro-rata allocation is weight-by-volume (not
@@ -2061,12 +2059,14 @@ Price OrderBook::matchProRata(Order* incoming) {
             }
         }
 
-        for (size_t i = 0; i < removeCount; ++i) {
-            stpNoteRemoved(toRemove[i]);
-            untrackOrder(toRemove[i]);  // as match() does (MATCH-15)
-            level.remove(toRemove[i]);
-            orderLookup_.erase(toRemove[i]->id);
-            orderPool_.deallocate(toRemove[i]);
+        for (const ProRataAlloc& a : allocs) {
+            Order* done = a.order;
+            if (a.qty == 0 || done->remainingQty != 0) continue;
+            stpNoteRemoved(done);
+            untrackOrder(done);  // as match() does (MATCH-15)
+            level.remove(done);
+            orderLookup_.erase(done->id);
+            orderPool_.deallocate(done);
         }
 
         if (level.empty()) {
@@ -2662,12 +2662,7 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
         // below, which latch what its in-band prints elected.
         const bool inAuction = inAuctionState();
         Price firstPrint = 0;
-        if (wouldCross && !inAuction) {
-            if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-                firstPrint = matchProRata(order);
-            else
-                firstPrint = match(order);
-        }
+        if (wouldCross && !inAuction) firstPrint = sweep(order);
 
         // A repriced order acts as an aggressor, so it can self-cross too.
         // Otherwise the same tail as addOrder; addToBook re-slices an iceberg
@@ -2882,7 +2877,7 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
             }
 
             stopOrders_.erase_swap(i);
-            match(order);
+            sweep(order);
 
             // A triggered stop becomes an aggressor and can self-cross.
             // erase_swap already moved the last element here, so `continue`
@@ -2956,7 +2951,7 @@ void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
             order->type = OrderType::Limit;
             order->price = order->stopPrice;
             trailingStopOrders_.erase_swap(i);
-            match(order);
+            sweep(order);
 
             if (finalizeIfStpCancelled(order)) continue;
 

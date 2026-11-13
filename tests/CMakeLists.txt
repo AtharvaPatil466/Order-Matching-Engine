@@ -1702,3 +1702,13 @@ gtest_discover_tests(OcoScopeTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
+
+# Pro-rata allocates over the whole level and elected stops match pro-rata (MR-4).
+add_executable(ProRataLevelTest ProRataLevelTest.cpp)
+target_link_libraries(ProRataLevelTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(ProRataLevelTest)
+gtest_discover_tests(ProRataLevelTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")

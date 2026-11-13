@@ -200,9 +200,8 @@ Pro-rata at one level runs in this exact order:
 2. Sum the **available** quantity of every order at the level. Available means the displayed
    slice for an iceberg and the full leaves for everything else (`src/OrderBook.cpp:1521-1524`).
 3. `toFill = min(incoming leaves, level total)` (`src/OrderBook.cpp:1531`).
-4. For each of the **first 1024** orders at the level in list order, `share = floor(available
-   / total × toFill)` (`src/OrderBook.cpp:1538-1546`). Orders past index 1023 receive no
-   allocation on this pass — see [defect B1](#b1--pro-rata-silently-allocates-only-the-first-1024-orders-at-a-level).
+4. For **every** order at the level in list order, `share = floor(available / total × toFill)`.
+   This used to stop at the first 1024 orders — see [defect B1](#b1--pro-rata-silently-allocates-only-the-first-1024-orders-at-a-level-fixed).
 5. **DMM/LMM floor.** Any order whose owner is a Designated or Lead Market Maker is topped up
    to at least 40% of its available quantity (capped at `toFill`). The top-up is *taken from*
    Regular participants' allocations, first-come in list order, and does not create new
@@ -1527,27 +1526,16 @@ the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`,
 Behaviour that looks like a defect rather than a choice. **Nothing in this section is a rule.**
 Flagged, not fixed.
 
-### B1 — Pro-rata silently allocates only the first 1024 orders at a level
+### B1 — Pro-rata silently allocates only the first 1024 orders at a level (fixed)
 
-`matchProRata` caps its allocation array at `MAX_LEVEL_ORDERS = 1024` and stops building
-allocations at that index — but the level **total** was summed over *all* orders at the level,
-with no cap.
-
-> `src/OrderBook.cpp:1436` — `static constexpr size_t MAX_LEVEL_ORDERS = 1024;`
-> `src/OrderBook.cpp:1521-1524` — the total loop, uncapped
-> `src/OrderBook.cpp:1538` — `for (... o && allocCount < MAX_LEVEL_ORDERS; ...)`
-
-At a level holding more than 1024 orders, orders past index 1023 receive **zero** allocation on
-each pass. The algorithm still terminates and still cannot over-fill — the remainder passes cap
-each top-up at `avail − allocs[i].qty` — but the behaviour silently degenerates from "pro-rata
-across the level" to "pro-rata across the front 1024, FIFO-gated". Deep-queue participants are
-excluded from allocation entirely until the front of the queue is consumed, which is precisely
-the outcome pro-rata exists to avoid.
-
-**Severity: high for a pro-rata product.** No comment acknowledges the truncation and no test
-exercises a level deeper than 1024. Two plausible fixes — allocate in chunks, or compute the
-total over the same capped window so the ratios are at least self-consistent — but this is a
-behaviour change and out of scope here.
+Fixed in round 8 (MR-4). `matchProRata` built its allocations in a 1024-slot array while the
+level total was summed over every order, so at a deeper level the front 1024 orders took their
+shares *and* the shortfall FIFO (about twice their share), order 1025 on got nothing, and a
+DMM/LMM order past index 1023 lost its 40% floor. Allocation now runs over the whole level, in a
+scratch vector reserved at 1024 entries per book (a deeper level grows it once). Elected stops
+and trailing stops used to match price-time in a pro-rata book; every aggressor (arrival,
+replace, elected stop) now goes through the book's algorithm. Pinned by
+`tests/ProRataLevelTest.cpp`.
 
 ### B2 — `DecreaseAndCancel` never decrements the incoming order (fixed in continuous trading)
 

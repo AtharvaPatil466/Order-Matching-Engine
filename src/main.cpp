@@ -139,6 +139,12 @@ int main(int argc, char* argv[]) {
         {"--config", "PATH", "config file, re-read on SIGHUP [OB_CONFIG_PATH]"},
         {"--journal", "PATH", "journal file, replayed at boot [OB_JOURNAL_PATH]"},
         {"--journal-max-mb", "MB", "checkpoint past this size [OB_JOURNAL_MAX_SIZE_MB]"},
+        {"--no-journal", nullptr,
+         "run with no journal: every acked order is lost on restart [OB_NO_JOURNAL=1]"},
+        {"--no-price-band", nullptr,
+         "let a symbol with no configured band centre it on its first rest [OB_NO_PRICE_BAND=1]"},
+        {"--no-risk-limits", nullptr,
+         "serve participants that have no position limit [OB_NO_RISK_LIMITS=1]"},
         {"--replay-legacy-journal", nullptr,
          "replay a journal from a build that seeded orders [OB_REPLAY_LEGACY_JOURNAL=1]"},
         {"--session-schedule", "PRE,OPEN,CLOSE_AUCTION,CLOSE",
@@ -183,13 +189,23 @@ int main(int argc, char* argv[]) {
     // ── Config ───────────────────────────────────────────────────────
     Config cfg;
     const std::string configPath = flagOrEnv(argc, argv, "--config", "OB_CONFIG_PATH");
+    // A config that cannot be read is fatal: starting on defaults would drop
+    // every band and limit it names without a word.
     if (!configPath.empty()) {
-        if (cfg.loadFile(configPath)) {
-            std::cout << "[Config] Loaded from " << configPath << "\n";
-        } else {
-            std::cerr << "[Config] WARNING: could not load " << configPath << "\n";
+        if (!cfg.loadFile(configPath)) {
+            std::cerr << "[Config] FATAL: could not load " << configPath
+                      << " — refusing to start.\n";
+            return 1;
         }
+        std::cout << "[Config] Loaded from " << configPath << "\n";
     }
+
+    // Controls the order port does not run without unless each is waived by
+    // name, like --no-participant-auth (review v2 row 2, SURF-1).
+    const ControlWaivers waivers{
+        flagOrEnvBool(argc, argv, "--no-price-band", "OB_NO_PRICE_BAND"),
+        flagOrEnvBool(argc, argv, "--no-risk-limits", "OB_NO_RISK_LIMITS")};
+    const bool journalWaived = flagOrEnvBool(argc, argv, "--no-journal", "OB_NO_JOURNAL");
 
     // ── Structured logging sink ──────────────────────────────────────
     // config/engine.conf.example has documented `log_sink = stderr | null`
@@ -224,12 +240,15 @@ int main(int argc, char* argv[]) {
     // exit(1) — the engine never starts in a silently-degraded state.
     std::vector<int> workerCores;   // worker_cores, applied at startAsync
     {
-        ConfigValidationResult vr = validateStartupConfig(cfg);
+        ConfigValidationResult vr = validateStartupConfig(cfg, numSymbols, waivers);
 
-        // Also validate the journal path we will actually open (from
-        // --journal / OB_JOURNAL_PATH, which is separate from the config key).
+        // The journal we will actually open (--journal / OB_JOURNAL_PATH).
         const std::string resolvedJournal =
             flagOrEnv(argc, argv, "--journal", "OB_JOURNAL_PATH");
+        if (resolvedJournal.empty() && !journalWaived) {
+            vr.fail("no journal: set --journal PATH (OB_JOURNAL_PATH), or pass --no-journal "
+                    "(OB_NO_JOURNAL=1) to run with every acknowledged order in memory only");
+        }
         if (!resolvedJournal.empty() && !isJournalPathWritable(resolvedJournal)) {
             vr.fail("journal path '" + resolvedJournal +
                     "': parent directory does not exist or is not writable");
@@ -285,6 +304,15 @@ int main(int argc, char* argv[]) {
                              participantAuth)) {
         return 1;
     }
+    {
+        ConfigValidationResult vr;
+        validateRiskCoverage(cfg, participantAuth.participantIds(), waivers.riskLimits, vr);
+        if (!vr.ok) {
+            std::cerr << "[Config] FATAL: refusing to start:\n";
+            for (const auto& e : vr.errors) std::cerr << "  - " << e << "\n";
+            return 1;
+        }
+    }
 
     // ── Engine ────────────────────────────────────────────────────────
     // The publisher outlives the engine, whose workers call its listener.
@@ -299,29 +327,37 @@ int main(int argc, char* argv[]) {
     engine.setSessionEndScheduled(false);
     std::cout << "[Engine] Registered " << numSymbols << " symbols\n";
 
-    // STP-8: a symbol trades in the band its engine.conf entry names, set
-    // before replay so no first order can pick one (unset, a book centres its
-    // band on its first rest, and one participant's 1-tick bid made every real
-    // price unrestable). A config that leaves a symbol out refuses to boot.
-    // Without --config the books keep the anchor, for local runs and tests.
-    if (!configPath.empty()) {
-        for (size_t s = 0; s < numSymbols; ++s) {
-            const std::string key = "instrument." + std::to_string(s) + ".";
-            if (!cfg.has(key + "min_price") || !cfg.has(key + "max_price")) {
-                std::cerr << "[Config] FATAL: symbol " << s << " has no price band; set "
-                          << key << "min_price and " << key << "max_price\n";
-                return 1;
-            }
-            try {
-                engine.getOrderBook(static_cast<SymbolId>(s))
-                    ->setPriceRange(cfg.getInt64(key + "min_price"),
-                                    cfg.getInt64(key + "max_price"));
-            } catch (const std::exception& e) {
-                std::cerr << "[Config] FATAL: symbol " << s << " price band: " << e.what() << "\n";
-                return 1;
-            }
+    // STP-8: a symbol trades in the band its config names, set before replay
+    // so no first order can pick one (unset, a book centres its band on its
+    // first rest, and one participant's 1-tick bid made every real price
+    // unrestable). Validation refused a symbol without one unless
+    // --no-price-band, and a band the price map cannot hold.
+    size_t banded = 0;
+    for (size_t s = 0; s < numSymbols; ++s) {
+        const std::string key = "instrument." + std::to_string(s) + ".";
+        if (!cfg.has(key + "min_price")) continue;
+        engine.getOrderBook(static_cast<SymbolId>(s))
+            ->setPriceRange(cfg.getInt64(key + "min_price"), cfg.getInt64(key + "max_price"));
+        ++banded;
+    }
+    std::cout << "[Config] Price bands set for " << banded << " of " << numSymbols << " symbols"
+              << (banded < numSymbols ? " (--no-price-band: the rest centre on their first rest)"
+                                      : "")
+              << "\n";
+
+    // Position limits, before replay; the ledger is rebuilt from the books
+    // after it. Validation refused a participant the port serves without one
+    // unless --no-risk-limits.
+    {
+        ConfigValidationResult ignored;
+        const std::vector<ParticipantId> limited = configuredParticipants(cfg, ignored);
+        for (const ParticipantId id : limited) {
+            engine.setPositionLimit(
+                id, cfg.getInt64("participant." + std::to_string(id) + ".position_limit"));
         }
-        std::cout << "[Config] Price bands set for " << numSymbols << " symbols\n";
+        std::cout << "[Risk] Position limits set for " << limited.size() << " participant(s)"
+                  << (waivers.riskLimits ? " (--no-risk-limits: any other is unlimited)" : "")
+                  << "\n";
     }
 
     // Enable, refuse and replay the journal (JournalBoot.h). Immediate, not the
@@ -332,9 +368,8 @@ int main(int argc, char* argv[]) {
         rc != 0)
         return rc;
     if (!engine.getJournal()) {
-        std::cout << "[Engine] WARNING: no journal (--journal / OB_JOURNAL_PATH). Every\n"
-                     "         order the port acknowledges lives only in memory and is\n"
-                     "         lost on any restart.\n";
+        std::cout << "[Engine] No journal (--no-journal). Every order the port\n"
+                     "         acknowledges lives only in memory and is lost on any restart.\n";
     }
 
     const std::string maxSizeStr = flagOrEnv(argc, argv, "--journal-max-mb", "OB_JOURNAL_MAX_SIZE_MB");

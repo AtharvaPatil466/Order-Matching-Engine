@@ -285,6 +285,16 @@ set_tests_properties(EngineRequiresPriceBandTest PROPERTIES
     TIMEOUT 120
     LABELS "project;lifecycle")
 
+# Review v2 row 2 / SURF-1 / SURF-4: no order port with a price band, journal
+# or per-participant limit missing unless waived by name; an unreadable config
+# is fatal; configured position limits are applied. Admin port 29541.
+add_test(NAME EngineRequiresControlsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_requires_controls.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRequiresControlsTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;lifecycle;security")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)

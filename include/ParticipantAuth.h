@@ -219,6 +219,17 @@ public:
     bool   enabled()          const { return !credentials_.empty(); }
     size_t credentialCount()  const { return credentials_.size(); }
 
+    // Every participant id some credential may act as, ascending, once each.
+    std::vector<ParticipantId> participantIds() const {
+        std::vector<ParticipantId> ids;
+        for (const auto& [user, c] : credentials_) {
+            ids.insert(ids.end(), c.allowed.begin(), c.allowed.end());
+        }
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        return ids;
+    }
+
     // Authenticate a session. Returns an invalid identity on any failure —
     // unknown user and wrong secret are deliberately indistinguishable, so a
     // probe cannot enumerate valid users.

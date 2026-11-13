@@ -29,47 +29,48 @@ class Config {
 public:
     Config() = default;
 
-    // Load from a key=value file. Returns false if the file can't be opened.
+    // Load from a key=value file. All or nothing: false, with nothing stored,
+    // if the file can't be opened or any line is not `key = value` (the line
+    // is named on stderr). A half-read file used to load around a bad line, so
+    // a typo dropped one setting and the engine started without it.
     // Can be called multiple times; later loads override earlier keys.
     bool loadFile(const std::string& path) {
         std::ifstream in(path);
         if (!in.is_open()) return false;
 
         std::vector<std::pair<std::string, std::string>> changed;
+        std::string line;
+        int lineNum = 0;
+        while (std::getline(in, line)) {
+            ++lineNum;
+            // Strip leading/trailing whitespace
+            auto start = line.find_first_not_of(" \t\r");
+            if (start == std::string::npos) continue;
+            line = line.substr(start);
+
+            // Skip comments and blank lines
+            if (line.empty() || line[0] == '#') continue;
+
+            auto eq = line.find('=');
+            std::string key = eq == std::string::npos ? "" : trim(line.substr(0, eq));
+            if (key.empty()) {
+                std::cerr << "[Config] ERROR: line " << lineNum << " of " << path
+                          << " is not key = value: " << line << "\n";
+                return false;
+            }
+            std::string val = trim(line.substr(eq + 1));
+
+            // Strip optional quotes around value
+            if (val.size() >= 2 &&
+                ((val.front() == '"' && val.back() == '"') ||
+                 (val.front() == '\'' && val.back() == '\''))) {
+                val = val.substr(1, val.size() - 2);
+            }
+            changed.emplace_back(std::move(key), std::move(val));
+        }
         {
             std::lock_guard<std::mutex> lock(mu_);
-            std::string line;
-            int lineNum = 0;
-            while (std::getline(in, line)) {
-                ++lineNum;
-                // Strip leading/trailing whitespace
-                auto start = line.find_first_not_of(" \t");
-                if (start == std::string::npos) continue;
-                line = line.substr(start);
-
-                // Skip comments and blank lines
-                if (line.empty() || line[0] == '#') continue;
-
-                auto eq = line.find('=');
-                if (eq == std::string::npos) {
-                    std::cerr << "[Config] WARNING: no '=' on line " << lineNum
-                              << " of " << path << ": " << line << "\n";
-                    continue;
-                }
-
-                std::string key = trim(line.substr(0, eq));
-                std::string val = trim(line.substr(eq + 1));
-
-                // Strip optional quotes around value
-                if (val.size() >= 2 &&
-                    ((val.front() == '"' && val.back() == '"') ||
-                     (val.front() == '\'' && val.back() == '\''))) {
-                    val = val.substr(1, val.size() - 2);
-                }
-
-                store_[key] = val;
-                changed.emplace_back(key, val);
-            }
+            for (const auto& [k, v] : changed) store_[k] = v;
         }
         // Fire listener outside the lock so callbacks can call back into
         // Config (e.g. has()/getString()) without self-deadlocking.

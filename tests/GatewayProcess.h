@@ -118,6 +118,10 @@ inline pid_t startEngine(const char* bin, uint16_t gatewayPort,
                               "OB_PARTICIPANT_CREDENTIALS", "OB_NO_PARTICIPANT_AUTH",
                               "OB_REPLAY_LEGACY_JOURNAL"})
             unsetenv(v);
+        // Whatever `args` configures applies; what it leaves out is waived
+        // (engine_requires_controls.sh pins the refusals).
+        for (const char* v : {"OB_NO_PRICE_BAND", "OB_NO_JOURNAL", "OB_NO_RISK_LIMITS"})
+            setenv(v, "1", 1);
         const std::string port = std::to_string(gatewayPort);
         std::vector<const char*> argv{bin, "--gateway-port", port.c_str()};
         for (const std::string& a : args) argv.push_back(a.c_str());

@@ -35,6 +35,10 @@ set -u
 unset OB_PARTICIPANT_CREDENTIALS OB_NO_PARTICIPANT_AUTH OB_GATEWAY_PORT OB_GATEWAY_BIND \
       OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_ADMIN_BIND OB_JOURNAL_PATH OB_CONFIG_PATH OB_NODE_ROLE
 
+# The band, journal and position limits are not what this test is about
+# (engine_requires_controls.sh).
+export OB_NO_PRICE_BAND=1 OB_NO_JOURNAL=1 OB_NO_RISK_LIMITS=1
+
 ENGINE="$1"
 # Any free admin and order port, so a refusal is the check talking and not a bind.
 ARGS="--admin-no-auth --port 0 --threads 1 --symbols 1"

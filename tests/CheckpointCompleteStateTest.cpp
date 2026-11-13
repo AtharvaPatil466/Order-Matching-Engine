@@ -25,6 +25,7 @@ struct BookState {
     std::map<OrderId, std::pair<Price, Quantity>> resting;
     uint64_t trades = 0;
     Price lastTrade = 0;
+    TradingState state = TradingState::Continuous;
     bool operator==(const BookState&) const = default;
 };
 
@@ -34,12 +35,14 @@ BookState capture(MatchingEngine& e) {
     b->forEachOrderLocked([&](const Order& o) { s.resting[o.id] = {o.price, o.remainingQty}; });
     s.trades = b->getTradeCount();
     s.lastTrade = b->getSnapshot().lastTradePrice;
+    s.state = b->getTradingState();
     return s;
 }
 
 void print(const char* tag, const BookState& s) {
-    std::printf("    %-10s trades=%llu last=%lld resting:", tag,
-                static_cast<unsigned long long>(s.trades), static_cast<long long>(s.lastTrade));
+    std::printf("    %-10s state=%d trades=%llu last=%lld resting:", tag,
+                static_cast<int>(s.state), static_cast<unsigned long long>(s.trades),
+                static_cast<long long>(s.lastTrade));
     for (const auto& [id, pq] : s.resting)
         std::printf(" #%llu=%llu@%lld", static_cast<unsigned long long>(id),
                     static_cast<unsigned long long>(pq.second), static_cast<long long>(pq.first));
@@ -51,9 +54,9 @@ using Setup = std::function<void(MatchingEngine&)>;
 
 // `before` runs, then a checkpoint, then `after`. Live: on one engine. Restarted:
 // `before` and the checkpoint on one engine, `after` on a fresh one replayed
-// from that checkpoint.
+// from that checkpoint (or from the plain journal, without one).
 bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
-                      const Step& after) {
+                      const Step& after, bool takeCheckpoint = true) {
     const std::string path = uniqueTempPath(std::string("ckpt_complete_") + name + ".wal");
     std::remove(path.c_str());
     BookState live, restarted;
@@ -74,7 +77,7 @@ bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
         assert(e.enableJournal(path, Journal::SyncPolicy::Immediate));
         e.start();
         before(e);
-        e.checkpoint();
+        if (takeCheckpoint) e.checkpoint();
         e.stop();
     }
     {
@@ -153,6 +156,45 @@ bool anchoredRangeOfEmptyBookSurvives() {
         });
 }
 
+// JOURNAL-7. A volatility auction reopens once it has run its dwell, timed
+// from the first due-check in the auction. A restart started the dwell again.
+bool volatilityDwellSurvives() {
+    constexpr uint64_t kDwell = 1000, kStart = 5000;
+    return sameAfterRestart(
+        "volatility_dwell",
+        [](MatchingEngine& e) { e.getOrderBook(S)->setVolatilityAuctionDwellNs(kDwell); },
+        [](MatchingEngine& e) {
+            e.setTradingStateBatch({S}, TradingState::VolatilityAuction);
+            e.expireOrders(kStart);  // the dwell starts here
+        },
+        [](MatchingEngine& e) { e.expireOrders(kStart + kDwell); });
+}
+
+// JOURNAL-5. The engine-wide kill switch refuses every new order until it is
+// released. A restart released it: nothing journaled it.
+bool killSwitchSurvives(bool takeCheckpoint) {
+    return sameAfterRestart(
+        takeCheckpoint ? "kill_switch" : "kill_switch_plain_journal", [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 1, 1, Side::Buy, 100, 10, OrderType::Limit);
+            e.setKillSwitch(true);
+        },
+        [](MatchingEngine& e) { e.submitOrder(S, 2, 1, Side::Buy, 100, 10, OrderType::Limit); },
+        takeCheckpoint);
+}
+
+// Released before the restart, it stays released.
+bool releasedKillSwitchStaysReleased() {
+    return sameAfterRestart(
+        "kill_switch_released", [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.setKillSwitch(true);
+            e.setKillSwitch(false);
+        },
+        [](MatchingEngine& e) { e.submitOrder(S, 2, 1, Side::Buy, 100, 10, OrderType::Limit); },
+        false);
+}
+
 }  // namespace
 
 int main() {
@@ -160,6 +202,10 @@ int main() {
     ok &= auctionSelfCrossKeepsAge();
     ok &= anchoredRangeSurvives();
     ok &= anchoredRangeOfEmptyBookSurvives();
+    ok &= volatilityDwellSurvives();
+    ok &= killSwitchSurvives(true);
+    ok &= killSwitchSurvives(false);
+    ok &= releasedKillSwitchStaysReleased();
     if (!ok) {
         std::puts("CheckpointCompleteStateTest FAILED: a restart from a checkpoint decided "
                   "differently from the engine that wrote it");

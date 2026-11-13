@@ -387,6 +387,11 @@ history. What it keeps:
 - per book, the trade-id and arrival counters, the last trade's price and quantity and the
   reference price (the circuit breaker's), so a restored book trips and crosses
   as the one that wrote it would have;
+- per book, when a volatility auction's dwell started, so a restart reopens
+  it when the live book would have;
+- the engine-wide kill switch (`setKillSwitch`) while it is engaged. Each
+  engage and release is also journaled when it happens, so any restart, from
+  a checkpoint or from the plain journal, comes back with the switch as it was;
 - per participant per book, the net position and the orders submitted and
   trades executed (`Position` records), which `maxPositionSize` and `/otr` read.
 

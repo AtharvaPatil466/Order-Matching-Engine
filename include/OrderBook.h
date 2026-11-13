@@ -836,6 +836,21 @@ public:
         minPrice = bids_.minPrice();
         return true;
     }
+    // And when the current volatility auction's dwell started (the caller's
+    // clock at its first due-check), so a restart does not start it again
+    // (JOURNAL-7). False: not started.
+    bool volatilityClockLocked(uint64_t& start) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        start = volatilityClockStart_;
+        return volatilityClockStarted_;
+    }
+    // Replay applies it after the book's TradingStateChange records, whose
+    // entry into VolatilityAuction resets the clock.
+    void restoreVolatilityClock(uint64_t start) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        volatilityClockStarted_ = true;
+        volatilityClockStart_ = start;
+    }
     // A band already set (configured at boot, or anchored) is kept.
     void restoreAnchoredRange(Price minPrice) {
         std::lock_guard<std::mutex> lock(bookLock_);

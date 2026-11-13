@@ -240,6 +240,27 @@ inline uint64_t snapshotArrivalSeq(const JournalEntry& e) {
 // restored one by the same margin as live.
 inline uint64_t countersNextArrival(const JournalEntry& e) { return e.expiryTime; }
 
+// An engine record (orderId 0) with participantId set carries the engine-wide
+// kill switch (MatchingEngine::setKillSwitch): KILL_SWITCH_ENGAGED or
+// KILL_SWITCH_RELEASED. 0, which every lease record and every older record
+// holds, says nothing about it. Written on each change and by a checkpoint
+// while engaged, so a restart does not release it (JOURNAL-5).
+inline constexpr ParticipantId KILL_SWITCH_ENGAGED = 1;
+inline constexpr ParticipantId KILL_SWITCH_RELEASED = 2;
+inline bool countersKillSwitch(const JournalEntry& e, bool& engaged) {
+    if (e.orderId != 0 || e.participantId == 0) return false;
+    engaged = e.participantId == KILL_SWITCH_ENGAGED;
+    return true;
+}
+
+// And, in displayQty, when the book's volatility-auction dwell started, plus
+// one (0: not started), so a restart keeps the dwell's clock (JOURNAL-7).
+inline bool countersVolatilityClock(const JournalEntry& e, uint64_t& start) {
+    if (e.displayQty == 0) return false;
+    start = e.displayQty - 1;
+    return true;
+}
+
 // And, when hidden is set, the low end of the price band the book anchored
 // on its first resting order (no configured band) in stopPrice (JOURNAL-2).
 inline bool countersAnchoredRange(const JournalEntry& e, Price& minPrice) {
@@ -490,12 +511,14 @@ public:
     void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease,
                      Price lastTradePrice = 0, Price referencePrice = 0,
                      Quantity lastTradeQty = 0, uint64_t nextArrival = 0,
-                     bool anchored = false, Price anchoredMin = 0) {
+                     bool anchored = false, Price anchoredMin = 0,
+                     bool volatilityStarted = false, uint64_t volatilityStart = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Counters;
         entry.expiryTime = nextArrival;  // see countersNextArrival
         entry.hidden = anchored;         // see countersAnchoredRange
         entry.stopPrice = anchoredMin;
+        entry.displayQty = volatilityStarted ? volatilityStart + 1 : 0;  // see countersVolatilityClock
         entry.timestamp = now();
         entry.symbolId = symbolId;
         entry.orderId = nextTradeId;
@@ -503,6 +526,14 @@ public:
         entry.price = lastTradePrice;
         entry.newPrice = referencePrice;
         entry.newQty = lastTradeQty;
+        appendEntry(entry);
+    }
+
+    void logKillSwitch(bool engaged) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Counters;
+        entry.timestamp = now();
+        entry.participantId = engaged ? KILL_SWITCH_ENGAGED : KILL_SWITCH_RELEASED;
         appendEntry(entry);
     }
 

@@ -1102,8 +1102,12 @@ threshold is configuration; a replaying engine must run with the live threshold,
 the live market collar. The engine writes a `TradingStateChange(VolatilityAuction)` record
 **after** the add or replace that tripped, where replay finds the book already in the auction.
 It used to go ahead of the order, so replay made the order an auction arrival; with a trip
-mid-sweep that would drop its in-band fills. Journals written that way still replay as before. The dwell clock is not journaled:
-after a restart into a volatility auction the dwell starts again.
+mid-sweep that would drop its in-band fills. Journals written that way still replay as before.
+A checkpoint carries when the dwell started (in the book's `Counters` record), so a restart
+from one keeps the dwell's clock and reopens when the live book would have (JOURNAL-7). The
+plain journal does not carry it, because the start is the first expiry tick, which is not
+journaled: after a restart from a journal with no checkpoint since the trip, the dwell starts
+again.
 
 **A checkpoint carries the reference and the last trade price** (the per-book `Counters`
 record: `price` is the last trade, `newPrice` the reference, `newQty` the last trade's

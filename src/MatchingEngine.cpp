@@ -966,8 +966,13 @@ void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
         book->restoreNextArrival(countersNextArrival(e));
         if (Price minPrice = 0; countersAnchoredRange(e, minPrice))
             book->restoreAnchoredRange(minPrice);
+        if (uint64_t start = 0; countersVolatilityClock(e, start))
+            book->restoreVolatilityClock(start);
         book->restorePrices({e.price, e.newPrice, e.newQty});
     }
+    // The flag only: the sweep's cancels are journaled records of their own.
+    if (bool engaged = false; countersKillSwitch(e, engaged))
+        killSwitchActive_.store(engaged, std::memory_order_release);
     if (e.quantity == 0) return;
     uint64_t cur = sequenceLease_.load(std::memory_order_relaxed);
     while (cur < e.quantity &&
@@ -1467,6 +1472,11 @@ void MatchingEngine::setKillSwitch(bool engaged) {
     // Deactivation (engaged == false) only clears the flag; it does not resurrect
     // cancelled orders.
     killSwitchActive_.store(engaged, std::memory_order_release);
+    if (journal_) {   // so a restart does not release it (JOURNAL-5)
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->logKillSwitch(engaged);
+        journal_->flush();
+    }
     if (!engaged) return;
 
     if (async_) {
@@ -3050,11 +3060,13 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         struct BookCounters {
             SymbolId symbolId; uint64_t nextTradeId; OrderBook::CheckpointPrices prices;
             uint64_t nextArrival; bool anchored; Price anchoredMin;
+            bool volatilityStarted; uint64_t volatilityStart;
         };
         std::vector<BookCounters> counters;
         std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
         std::vector<std::pair<SymbolId, OrderId>> pegQueue;
         uint64_t lease = 0;
+        bool killed = false;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
             if (cut) pauseWorkersForCut();
@@ -3066,6 +3078,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 }
                 appendsBefore = journal_->entriesAppended();
                 lease = sequenceLease_.load(std::memory_order_acquire);
+                killed = killSwitchActive_.load(std::memory_order_acquire);
             }
             for (SymbolId symbolId : symbolIds_) {
                 const OrderBook* book = getOrderBook(symbolId);
@@ -3077,10 +3090,13 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 const uint64_t nextArrival = book->nextArrivalLocked();
                 Price anchoredMin = 0;
                 const bool anchored = book->anchoredRangeLocked(anchoredMin);
+                uint64_t volatilityStart = 0;
+                const bool volatilityStarted = book->volatilityClockLocked(volatilityStart);
                 if (next > 1 || prices.lastTrade != 0 || prices.reference != 0 ||
-                    nextArrival > 1 || anchored)
+                    nextArrival > 1 || anchored || volatilityStarted)
                     counters.push_back({symbolId, next, prices, nextArrival, anchored,
-                                        anchoredMin});   // books that were used
+                                        anchoredMin, volatilityStarted,
+                                        volatilityStart});   // books that were used
                 if (book->getTradingState() != TradingState::Continuous || book->sessionBegun())
                     states.push_back({symbolId, book->getTradingState(), book->sessionBegun(),
                                       book->sessionDate(), book->preHaltState()});
@@ -3111,17 +3127,19 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (state != replayed) snapshotJournal.logTradingState(symbolId, state);
             }
             if (lease != 0) snapshotJournal.logCounters(0, 0, lease);
+            if (killed) snapshotJournal.logKillSwitch(true);
             // Before the orders: the anchored band must be in place before the
             // first one is put back, or it re-anchors on that order (JOURNAL-2).
             // The prices may go first too, since restoreOrder puts an order
             // back without admitting it, so nothing in it reads them; that
             // is what made them order-sensitive when restore re-admitted.
-            for (const auto& [symbolId, nextTradeId, prices, nextArrival, anchored,
-                              anchoredMin] : counters)
-                snapshotJournal.logCounters(symbolId, nextTradeId, 0,
-                                            prices.lastTrade, prices.reference,
-                                            prices.lastTradeQty, nextArrival, anchored,
-                                            anchoredMin);
+            // After the states, whose entry into VolatilityAuction resets the
+            // dwell clock this restores.
+            for (const auto& c : counters)
+                snapshotJournal.logCounters(c.symbolId, c.nextTradeId, 0, c.prices.lastTrade,
+                                            c.prices.reference, c.prices.lastTradeQty,
+                                            c.nextArrival, c.anchored, c.anchoredMin,
+                                            c.volatilityStarted, c.volatilityStart);
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,

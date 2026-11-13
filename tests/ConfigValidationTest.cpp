@@ -155,6 +155,22 @@ void test_risk_coverage() {
     PASS();
 }
 
+void test_rate_limit() {
+    SECTION("rate_limit: both > 0 or neither");
+    Config both; fillValidConfig(both);
+    both.loadMap({{"rate_limit.default_rate", "100"}, {"rate_limit.default_burst", "10"}});
+    assert(check(both).ok);
+    for (const char* bad : {"rate_limit.default_rate", "rate_limit.default_burst"}) {
+        Config one; fillValidConfig(one);
+        one.set(bad, "5");
+        expectError(check(one), "must both be set and > 0");
+    }
+    Config zero; fillValidConfig(zero);
+    zero.loadMap({{"rate_limit.default_rate", "0"}, {"rate_limit.default_burst", "10"}});
+    expectError(check(zero), "must both be set and > 0");
+    PASS();
+}
+
 void test_journal_path_writable() {
     SECTION("Journal path writability");
     assert(!isJournalPathWritable("/nonexistent_dir_p37_xyz/journal.wal"));
@@ -217,6 +233,7 @@ int main() {
     test_every_symbol_needs_a_band();
     test_participant_limits();
     test_risk_coverage();
+    test_rate_limit();
     test_journal_path_writable();
     test_worker_cores();
 

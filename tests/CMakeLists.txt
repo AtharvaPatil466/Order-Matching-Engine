@@ -295,6 +295,15 @@ set_tests_properties(EngineRequiresControlsTest PROPERTIES
     TIMEOUT 180
     LABELS "project;lifecycle;security")
 
+# SURF-10: rate_limit.default_rate / default_burst apply at startup, not only
+# on SIGHUP. Admin port 29551.
+add_test(NAME EngineRateLimitConfigTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_rate_limit_config.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRateLimitConfigTest PROPERTIES
+    TIMEOUT 120
+    LABELS "project;lifecycle")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)

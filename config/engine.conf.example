@@ -94,8 +94,12 @@ checkpoint_entries = 100000
 checkpoint_bytes   = 104857600
 
 # ── Rate Limiting ────────────────────────────────────────────────────────────
-# not read. The rate limiter is off unless a SIGHUP reload finds
-# rate_limit.default_rate (and rate_limit.default_burst) in this file.
+# The default token bucket for every participant, at startup and on SIGHUP:
+# messages a second and the burst it may send at once. Both > 0, or neither
+# (no rate limit).
+# rate_limit.default_rate  = 10000
+# rate_limit.default_burst = 100
+# not read:
 rate_limit_msgs_per_sec = 10000
 rate_limit_burst        = 100
 queue_depth_threshold   = 0.8

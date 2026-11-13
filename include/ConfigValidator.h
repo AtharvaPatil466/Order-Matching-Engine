@@ -16,6 +16,9 @@
 //   participants = 10,20                    # comma-separated ParticipantIds
 //   participant.<id>.position_limit = <int64>   # must be set AND > 0
 //
+//   rate_limit.default_rate  = <int64>      # both > 0, or neither
+//   rate_limit.default_burst = <int64>
+//
 //   worker_cores = 2,3,4,5                  # validateWorkerCores(), below
 //
 // Validated invariants:
@@ -149,6 +152,19 @@ inline std::vector<ParticipantId> configuredParticipants(const Config& cfg,
     return ids;
 }
 
+// rate_limit.default_rate / default_burst: both > 0, or neither set. The
+// default token bucket for every participant (messages a second, and how many
+// it may send at once); unset, there is no rate limit.
+inline void validateRateLimit(const Config& cfg, ConfigValidationResult& result) {
+    if (!cfg.has("rate_limit.default_rate") && !cfg.has("rate_limit.default_burst")) return;
+    if (cfg.getInt64("rate_limit.default_rate") <= 0 ||
+        cfg.getInt64("rate_limit.default_burst") <= 0) {
+        result.fail("rate_limit.default_rate and rate_limit.default_burst must both be set "
+                    "and > 0 (messages a second per participant, and the burst it may send "
+                    "at once), or neither");
+    }
+}
+
 // Validate startup config for an engine of `numSymbols` books. Pure — returns
 // every problem found (does not exit), so the caller can print them all at
 // once. `priceMapCapacity` defaults to the engine's real FlatPriceMap size;
@@ -184,6 +200,7 @@ inline ConfigValidationResult validateStartupConfig(
                         "is engine-wide, not per participant; remove the key");
         }
     }
+    validateRateLimit(cfg, result);
     return result;
 }
 

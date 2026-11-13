@@ -364,19 +364,21 @@ file. Keys `OrderEngine` reads:
 | `participants`, `participant.<id>.position_limit` | startup | Required unless `--no-risk-limits`: the ids, each below 1024, and each one's position limit (> 0), applied before replay. An order that would take the participant's filled-plus-working position past it is rejected |
 | `instrument.<s>.tick_size`, `instrument.<s>.lot_size`, `participant.<id>.otr_limit` | startup | Refused: nothing applies them (the tick is fixed, there is no lot size, the OTR throttle is engine-wide) |
 | `gateway_port`, `gateway_bind`, `participant_credentials` | startup | The order port (§8), when the flag is not given |
-| `rate_limit.default_rate`, `rate_limit.default_burst` | `SIGHUP` only | Default rate limit for every participant, applied when the rate is above 0 |
+| `rate_limit.default_rate`, `rate_limit.default_burst` | startup and `SIGHUP` | Default token bucket for every participant: messages a second and the burst it may send at once. Both > 0 or neither (no rate limit); anything else refuses to boot, and on `SIGHUP` keeps the running limit. An order over it is rejected `RateLimitExceeded` |
 | `worker_cores` | startup | The CPU each async worker pins itself to, in worker order, numbered as `taskset -c` numbers them (`2,3,4,5`). Unset, worker i takes the i-th CPU the process may run on (its `taskset`, systemd `CPUAffinity=` or cpuset mask), which is CPU i when every CPU is allowed. The `engine_start` log line names each worker's CPU (`worker_cores`, `-` = unpinned). A non-number, a repeat, a CPU outside the process's mask, fewer entries than `--threads`, or any list on macOS (no affinity mask) is fatal |
 | `order_pool_capacity`, `trade_history_capacity` | book creation | Book sizing. Read from the file named by `OB_CONFIG_PATH` and from `OB_<KEY>`, **not** from `--config` |
 
 Nothing else in `config/engine.conf.example` is read.
 
-`SIGHUP` re-reads the `--config` file and applies only the rate limit. The main
-loop checks for it every 100 ms:
+`SIGHUP` re-reads the `--config` file and applies only the rate limit. A file
+that no longer loads, or a bad rate, is logged as `[Config] ERROR` and changes
+nothing. The main loop checks for it every 100 ms:
 
 ```bash
 kill -HUP "$(cat /var/lib/orderengine/engine.pid)"
 sleep 1
-grep -F "[Config] Rate limiter reconfigured: 1000 msg/s" /var/lib/orderengine/engine.log
+grep -F "[Config] Reload applied" /var/lib/orderengine/engine.log
+grep -F "[Config] Rate limit: 1000 msg/s, burst 100 per participant" /var/lib/orderengine/engine.log
 ```
 
 Thread count, symbol count, ports and the journal path take effect only at a

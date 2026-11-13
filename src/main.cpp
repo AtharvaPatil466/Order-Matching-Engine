@@ -314,6 +314,18 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // The default per-participant rate limit, from the validated keys. At boot
+    // and on SIGHUP: it used to be read only on SIGHUP, so every restart came
+    // up unlimited whatever the file said (SURF-10).
+    const auto applyRateLimit = [&cfg](MatchingEngine& eng) {
+        const auto rate = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_rate", 0));
+        const auto burst = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_burst", 0));
+        if (rate == 0) return;
+        eng.getRateLimiter().reconfigure(rate, burst);
+        std::cout << "[Config] Rate limit: " << rate << " msg/s, burst " << burst
+                  << " per participant\n";
+    };
+
     // ── Engine ────────────────────────────────────────────────────────
     // The publisher outlives the engine, whose workers call its listener.
     MarketDataPublisher mdPub("orderbook_md");
@@ -359,6 +371,8 @@ int main(int argc, char* argv[]) {
                   << (waivers.riskLimits ? " (--no-risk-limits: any other is unlimited)" : "")
                   << "\n";
     }
+
+    applyRateLimit(engine);
 
     // Enable, refuse and replay the journal (JournalBoot.h). Immediate, not the
     // default group commit: the order port's ack waits for the worker, and under
@@ -582,12 +596,16 @@ int main(int argc, char* argv[]) {
     while (g_running.load(std::memory_order_acquire)) {
         if (g_reload_config.exchange(false, std::memory_order_acq_rel) && !configPath.empty()) {
             std::cout << "[Config] SIGHUP received — reloading " << configPath << "\n";
-            cfg.loadFile(configPath);
-            const uint64_t newRate = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_rate", 0));
-            const uint64_t newBurst = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_burst", 0));
-            if (newRate > 0) {
-                engine.getRateLimiter().reconfigure(newRate, newBurst);
-                std::cout << "[Config] Rate limiter reconfigured: " << newRate << " msg/s\n";
+            // A file that fails to load, or a bad rate, leaves the running limit.
+            ConfigValidationResult vr;
+            if (!cfg.loadFile(configPath)) {
+                std::cerr << "[Config] ERROR: could not reload " << configPath
+                          << "; nothing changed\n";
+            } else if (validateRateLimit(cfg, vr); !vr.ok) {
+                std::cerr << "[Config] ERROR: " << vr.errors.front() << "; rate limit unchanged\n";
+            } else {
+                applyRateLimit(engine);
+                std::cout << "[Config] Reload applied\n";
             }
         }
         if (journalMaxMb > 0) {

@@ -37,10 +37,12 @@
 // is ever published. alarm() turns the pro-rata livelock into a failure instead
 // of a hung suite.
 //
-// The route needs no crossing liquidity at all, which is what makes it
-// reachable by one client on its own: a buy iceberg with minQty against an
-// empty ask side fails the minQty screen (nothing crosses), does not cross, and
-// rests.
+// The route needed no crossing liquidity at all: a buy iceberg with minQty
+// against an empty ask side failed the minQty screen, did not cross, and
+// rested. That route is gone — an order whose arrival cannot meet its minimum
+// is cancelled now (Rule 9.5, MR-5) — so the iceberg reaches Continuous with
+// its minimum unmet the one way left: it rests through an auction, which does
+// not apply minQty.
 
 #include "OrderBook.h"
 
@@ -80,6 +82,7 @@ struct TradeRecorder : EventListener {
 // Rest a buy iceberg through the minQty path: the ask side is empty, so the
 // minimum cannot be met and nothing crosses.
 void restIcebergThroughMinQty(OrderBook& book) {
+    book.setTradingState(TradingState::PreOpen);
     const auto rested = book.addOrder(1, kMaker, Side::Buy, kPrice, kTotal,
                                       OrderType::Iceberg, /*stopPrice=*/0,
                                       /*displayQty=*/kDisplay, TimeInForce::GTC,
@@ -88,6 +91,7 @@ void restIcebergThroughMinQty(OrderBook& book) {
                                       /*trailAmount=*/0, /*minQty=*/kMinQty);
     assert(std::holds_alternative<OrderId>(rested) &&
            "an iceberg with an unmet minQty that does not cross must rest");
+    book.setTradingState(TradingState::Continuous);
 
     // The level must advertise the displayed slice — not zero.
     const auto snap = book.getSnapshot();

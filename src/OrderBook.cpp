@@ -1105,9 +1105,8 @@ std::optional<RejectReason> OrderBook::screenFOK(Order* order, OrderId orderId,
 // --- Min quantity check ---  Precondition: bookLock_ held.
 // nullopt => the order goes on to match. A value => the order was finalized
 // here (cancelled, or rested without matching) and addOrder returns it.
-std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Side side,
-                                               Price price, Quantity qty, OrderType type,
-                                               Quantity minQty) {
+std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Quantity qty,
+                                               OrderType type, Quantity minQty) {
     // Not in an auction state: nothing executes until the uncross, where a
     // crossing order is how the auction accumulates, so a crossing minQty
     // order joins it rather than being cancelled for "locking" a book that is
@@ -1116,47 +1115,17 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
     // every level, and it never rests.
     if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
         if (sweepFillQty(*order) < minQty) {
-            if (type == OrderType::IOC || type == OrderType::Market) {
-                untrackOrder(order);
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-                return orderId;
-            }
-            // H3: a limit order may rest here ONLY if it does not cross.
-            //
-            // sweepFillQty counts liquidity at crossing prices only, so a false
-            // return still permits some crossable size — just less than
-            // minQty. Resting unconditionally therefore parked the order at a
-            // price that crosses the opposite side, leaving bid >= ask: an
-            // invalid book. (Ask 30 @ 100, buy 100 @ 100 minQty 50 => both
-            // rest at 100, locked.)
-            //
-            // The semantic is a minimum on the FIRST execution: minQty is
-            // checked once at admission and the stored field is never read
-            // again, so matching has no per-fill minimum to enforce. A
-            // non-crossing order can therefore rest and wait for liquidity —
-            // that is the useful case and it stays. A crossing one cannot
-            // wait, because waiting is what produces the locked book, so it is
-            // cancelled, exactly as the IOC branch above does.
-            const bool wouldCross = (side == Side::Buy)
-                ? (!asks_.empty() && price >= asks_.bestPrice())
-                : (!bids_.empty() && price <= bids_.bestPrice());
-            if (wouldCross) [[unlikely]] {
-                untrackOrder(order);
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-                return orderId;
-            }
-            if (!addToBook(order)) {
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, 0);
-                untrackOrder(order);
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-            } else if (!order->isHidden) {
-                notifyMarketData(MarketDataUpdate::Action::Add, side, price);
-            }
+            // Rule 9.5: the minimum is on the order's first execution, so an
+            // order whose arrival cannot meet it does not trade and does not
+            // rest, whatever its type. A non-crossing limit used to rest and
+            // wait; matching never reads minQty, so its first execution, as a
+            // maker, was whatever the next aggressor brought: 1 lot of a
+            // minimum of 50 (MR-5). A crossing one could not wait either: it
+            // would have locked the book (H3).
+            untrackOrder(order);
+            orderLookup_.erase(orderId);
+            orderPool_.deallocate(order);
+            notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
             return orderId;
         }
     }
@@ -1272,7 +1241,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                                        pegType, pegOffset, trailAmount)) return *id;
 
     if (auto r = screenFOK(order, orderId, qty, type)) return *r;
-    if (auto id = screenMinQty(order, orderId, side, price, qty, type, minQty)) return *id;
+    if (auto id = screenMinQty(order, orderId, qty, type, minQty)) return *id;
 
     // --- Match (skipped during auction / pre-open) ---
     // PreOpen / AuctionOpen / AuctionClose all accumulate without
@@ -2603,6 +2572,21 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         r != RejectReason::None) [[unlikely]] {
         reason = r;
         return false;
+    }
+    // Rule 9.5 on a replace (MR-5). An order that has not executed and carries
+    // a minimum (one that rested through an auction, which does not apply it)
+    // trades at least that much on the replace's sweep, or nothing: a sweep
+    // that would fill less is refused with the liquidity screen's reason.
+    if (order->minQty > 0 && order->cumQty == 0 && newPrice != order->price &&
+        !inAuctionState()) [[unlikely]] {
+        Order probe = *order;
+        probe.price = newPrice;
+        probe.remainingQty = newLeaves;
+        const Quantity fills = sweepFillQty(probe);
+        if (fills > 0 && fills < order->minQty) {
+            reason = RejectReason::FOKInsufficientLiquidity;
+            return false;
+        }
     }
     if (newLeaves < order->remainingQty) releaseWorking(*order, order->remainingQty - newLeaves);
 

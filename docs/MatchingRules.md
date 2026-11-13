@@ -1393,8 +1393,17 @@ back "not yours", and you have mapped a competitor's resting book.
 
 ### Rule 9.5 — `minQty` is a minimum on the FIRST execution only
 
-`minQty` is checked once at admission and the stored field is never read again. Matching
-enforces no per-fill minimum.
+`minQty` is a minimum on the order's first execution, and it is met on arrival or not at all:
+in `Continuous`, an order whose arrival sweep cannot fill its minimum is cancelled untraded,
+whatever its type, and never rests with the minimum unmet. Matching therefore needs no per-fill
+minimum and never reads the field. An order that meets it trades, and its remainder rests with no
+minimum left. **A non-crossing limit used to rest and wait**, and since matching never reads
+`minQty` its first execution, as a maker, was whatever the next aggressor brought: 1 lot of a
+minimum of 50 (MR-5). The one way an order still reaches `Continuous` with its minimum unmet is
+through an auction, which does not apply `minQty` (below); a cancel/replace of such an order
+that would cross for less than its minimum is refused with `FOKInsufficientLiquidity`, the
+liquidity screen's reason, and leaves the order as it was. As a maker it is not protected
+(decision for the author: cancel such orders at the reopen, or accept the gap).
 
 It is checked against what the sweep would actually **fill**, not against everything at a
 crossing price. `sweepFillQty()` dry-runs the sweep over the opposite book, at crossing prices
@@ -1411,9 +1420,9 @@ liquidity and its own order filled 5 (roadmap 1.6-F5, GTDIFF-2); and it counted 
 iceberg's displayed slice, so an IOC 50 `minQty` 10 against an iceberg of 100 showing 5 was
 cancelled unfilled (OTM-11).
 
-If the dry run fills less than `minQty`: an `IOC` or `Market` order is cancelled untraded; a
-**crossing** limit order is cancelled (resting it would leave bid ≥ ask, a locked book); a
-**non-crossing** limit order rests and waits.
+If the dry run fills less than `minQty`, the order is cancelled untraded: an `IOC` or `Market`
+order, a **crossing** limit (resting it would leave bid ≥ ask, a locked book), and a
+**non-crossing** limit (see above). Pinned by `tests/RestingOrderRulesTest.cpp`.
 
 **A `Market` order with `minQty` is an IOC with `minQty`.** It is counted at every level it can
 reach — the levels inside the collar, below, where the sweep stops; one that misses its minimum

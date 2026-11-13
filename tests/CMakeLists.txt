@@ -1617,3 +1617,14 @@ gtest_discover_tests(PrintBandTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;auction")
+
+# A resting order's minQty (Rule 9.5), DecreaseAndCancel's report to the
+# resting owner and CancelBoth in continuous matching (MR-5, MR-7).
+add_executable(RestingOrderRulesTest RestingOrderRulesTest.cpp)
+target_link_libraries(RestingOrderRulesTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(RestingOrderRulesTest)
+gtest_discover_tests(RestingOrderRulesTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")

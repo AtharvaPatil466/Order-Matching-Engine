@@ -857,12 +857,13 @@ void testMinQty() {
     assert(book.getBestBid() == 0);      // and the book is not locked
     assert(book.getBestAsk() == 1000000);
 
-    // A NON-crossing minQty order still rests and waits for liquidity — that
-    // is the useful case and the one the semantic exists for.
+    // A NON-crossing minQty order is cancelled too: resting, its first
+    // execution as a maker was whatever the next aggressor brought, below its
+    // minimum (Rule 9.5, MR-5). It used to rest and wait.
     book.addOrder(4, 4, Side::Buy, 999000, 100, OrderType::Limit, 0, 0,
                   TimeInForce::GTC, 0, 0, PegType::None, 0, 0, 50);
-    assert(book.getOrder(4) != nullptr);
-    assert(book.getBestBid() < book.getBestAsk());
+    assert(book.getOrder(4) == nullptr);
+    assert(book.getBestBid() == 0);
 
     // IOC with minQty that can't be met -> cancel
     book.addOrder(3, 3, Side::Buy, 1000000, 100, OrderType::IOC, 0, 0,

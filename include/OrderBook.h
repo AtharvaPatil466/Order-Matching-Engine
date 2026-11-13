@@ -1127,8 +1127,8 @@ private:
                                                 Price trailAmount);
     OB_ALWAYS_INLINE std::optional<RejectReason> screenFOK(Order* order, OrderId orderId,
                                           Quantity qty, OrderType type);
-    OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Side side, Price price,
-                                        Quantity qty, OrderType type, Quantity minQty);
+    OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Quantity qty,
+                                        OrderType type, Quantity minQty);
     // Rest or finish an order after it matched. `cumBefore` is its cumQty
     // before this match: an order that traded and rests is reported
     // PartiallyFilled (GTS-4). New orders and elected stops pass 0.

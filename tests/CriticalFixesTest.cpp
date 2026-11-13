@@ -638,14 +638,16 @@ TEST(AuditFixes, MinQtyCrossingThroughDoesNotCrossTheBook) {
 }
 
 // The useful case is preserved: a passive minQty order waits for liquidity.
-TEST(AuditFixes, MinQtyNonCrossingStillRestsAndWaits) {
+// It used to rest and wait, and then execute below its minimum as a maker
+// (Rule 9.5, MR-5): an order whose arrival cannot meet its minimum is cancelled.
+TEST(AuditFixes, MinQtyNonCrossingIsCancelledNotRested) {
     OrderBook book(1); relaxBook(book);
 
     book.addOrder(1, 1, Side::Sell, PX, 30, OrderType::Limit);
     book.addOrder(2, 2, Side::Buy, PX - 1000, 100, OrderType::Limit, 0, 0,
                   TimeInForce::GTC, 0, 0, PegType::None, 0, 0, /*minQty=*/50);
 
-    EXPECT_NE(book.getOrder(2), nullptr) << "a non-crossing minQty order rests";
+    EXPECT_EQ(book.getOrder(2), nullptr) << "a minQty order rested with its minimum unmet";
     expectNotLockedOrCrossed(book, "non-crossing minQty buy");
 }
 

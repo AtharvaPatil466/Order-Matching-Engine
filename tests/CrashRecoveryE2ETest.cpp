@@ -22,6 +22,14 @@
 // Adds are all buys below one another, so nothing trades and presence is the
 // whole state. They sit on ten price levels, all that /book lists.
 //
+// THE CROSSING ROUND (N6/DA-3). Two participants on one session send sells and
+// buys at one price, so nearly every order trades, and the process is
+// SIGKILLed mid-stream the same way. Every fill a TradeNotification told the
+// session about must be in the journal: replaying it rebuilds a trade with the
+// same trade id, price and quantity. A report sent ahead of its entry's fsync
+// can name a trade the replay never makes; with the reports' wiring deleted
+// from OrderEngine's main, the round is told of no fill and fails too.
+//
 // Usage: CrashRecoveryE2ETest <path-to-OrderEngine>
 
 #include "GatewayProcess.h"
@@ -29,6 +37,7 @@
 #include <cassert>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -177,12 +186,92 @@ void crashRound(const char* bin, uint16_t& port, uint32_t seed) {
     ++port;
 }
 
+struct Told { Price price; Quantity qty; };
+
+void crossingRound(const char* bin, uint16_t& port, uint32_t seed) {
+    constexpr ParticipantId kSeller = 7, kBuyer = 8;
+    const std::string journal = tempJournalPath("ob_crash_cross_" + std::to_string(seed));
+    std::remove(journal.c_str());
+    std::mt19937 rng(seed);
+    const int killAfter = 10 + static_cast<int>(rng() % (kOps - 20));
+
+    pid_t pid = startOnFreePort(bin, port, journal);
+    assert(pid > 0 && "OrderEngine never started listening");
+    std::map<uint64_t, Told> told;   // trade id -> what the session was told
+    {
+        Client c;
+        assert(c.connect(port));
+        size_t sent = 0, inFlight = 0;
+        int answered = 0;
+        while (answered < killAfter) {
+            while (sent < static_cast<size_t>(kOps) && inFlight < static_cast<size_t>(kWindow)) {
+                OrderRequest r{};
+                r.type = OrderRequest::Type::NewOrder;
+                r.symbolId = kSymbol;
+                r.orderId = sent + 1;
+                const bool sell = sent % 2 == 0;
+                r.participantId = sell ? kSeller : kBuyer;
+                r.side = sell ? Side::Sell : Side::Buy;
+                r.price = 10000;
+                r.qty = 1 + rng() % 10;
+                r.orderType = OrderType::Limit;
+                r.tif = TimeInForce::GTC;
+                assert(c.send(r));
+                ++sent;
+                ++inFlight;
+            }
+            GatewayResponse f{};
+            assert(c.next(f) && "the gateway went quiet before the kill");
+            if (f.type == GatewayResponse::Type::TradeNotification) {
+                told[f.trade.tradeId] = Told{f.trade.price, f.trade.quantity};
+                continue;
+            }
+            if (f.type == GatewayResponse::Type::OrderUpdateNotification) continue;
+            assert(f.type == GatewayResponse::Type::Ack && "a crossing order was refused");
+            --inFlight;
+            ++answered;
+        }
+        kill(pid, SIGKILL);
+        waitpid(pid, nullptr, 0);
+    }
+    ++port;
+
+    // Replay the journal the way every boot does, and read back its trades.
+    MatchingEngine replayed;
+    replayed.addSymbol(0);
+    replayed.addSymbol(1);
+    replayed.enableJournal(journal);
+    replayed.replayJournal();
+    // Single-threaded here, so draining the book's trade ring is safe.
+    auto& ring = const_cast<RingBuffer<Trade>&>(
+        replayed.getOrderBook(kSymbol)->getTradeRingBuffer());
+    std::map<uint64_t, Told> rebuilt;
+    for (Trade t{}; ring.pop(t);) rebuilt[t.tradeId] = Told{t.price, t.quantity};
+    std::remove(journal.c_str());
+
+    int missing = 0;
+    for (const auto& [id, t] : told) {
+        const auto it = rebuilt.find(id);
+        if (it == rebuilt.end() || it->second.price != t.price || it->second.qty != t.qty) {
+            ++missing;
+            std::printf("  MISSING: trade %llu (%lld x %llu) was reported, replay has %s\n",
+                        (unsigned long long)id, (long long)t.price, (unsigned long long)t.qty,
+                        it == rebuilt.end() ? "no such trade" : "a different one");
+        }
+    }
+    std::printf("  seed %u: %zu reported fills checked against %zu replayed trades\n", seed,
+                told.size(), rebuilt.size());
+    assert(!told.empty() && "the session was told of no fill: are execution reports wired?");
+    assert(missing == 0 && "a fill reported to a client is not in the journal after kill -9");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     assert(argc == 2 && "usage: CrashRecoveryE2ETest <path-to-OrderEngine>");
     uint16_t port = 31540;
     for (uint32_t seed : {1u, 2u, 3u}) crashRound(argv[1], port, seed);
+    for (uint32_t seed : {4u, 5u, 6u}) crossingRound(argv[1], port, seed);
     std::puts("CrashRecoveryE2ETest passed");
     return 0;
 }

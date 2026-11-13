@@ -63,6 +63,13 @@ public:
         return false;
     }
 
+    // The next frame of any type: an answer or an execution report.
+    bool next(GatewayResponse& out) {
+        uint32_t len = 0;
+        if (!recvAll(&len, sizeof(len)) || ntohl(len) != sizeof(GatewayResponse)) return false;
+        return recvAll(&out, sizeof(out));
+    }
+
     bool sendRaw(const void* b, size_t n) { return sendAll(b, n); }
     ssize_t recvSome(void* b, size_t n) {
         ssize_t r;
@@ -122,7 +129,16 @@ inline pid_t startEngine(const char* bin, uint16_t gatewayPort,
         int status = 0;
         if (waitpid(pid, &status, WNOHANG) == pid) return -1;
         Client probe;
-        if (probe.connect(gatewayPort)) return pid;
+        if (probe.connect(gatewayPort)) {
+            // Something answered, but it may be another process on that port
+            // (another test, another worktree's suite) while ours is failing
+            // to bind it. Ours refuses a taken port within moments.
+            for (int j = 0; j < 6; ++j) {
+                usleep(50 * 1000);
+                if (waitpid(pid, &status, WNOHANG) == pid) return -1;
+            }
+            return pid;
+        }
         usleep(50 * 1000);
     }
     kill(pid, SIGKILL);

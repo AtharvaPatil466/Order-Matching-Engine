@@ -1013,25 +1013,46 @@ day's close and execute there (roadmap 1.8-H3, AUCT-8 / OTM-9; pinned by
 `matchAlgorithm_` and is always FIFO is a real semantic choice — a pro-rata product would
 plausibly want pro-rata allocation at the cross — and nothing states it or tests it.
 
-### Rule 7.4 — The breaker trips on the first fill's price and starts a timed volatility auction
+### Rule 7.4 — The breaker tests every continuous print and starts a timed volatility auction
 
-In `Continuous`, before an arriving order matches, the book takes the price its **first fill**
-would print at — the best opposite level it crosses, stepping over its owner's own orders
-where self-trade prevention would — and compares it with `referencePrice_`. If it deviates by
-more than `cbThreshold_`, the book enters `VolatilityAuction` before anything prints and a
-`breaker_trip` event is logged. The order becomes the auction's first arrival: a limit rests,
-a market order is parked for the reopening cross, an IOC or FOK is cancelled. Only the first
-fill is tested; a sweep that starts in band runs on. A passive order trips nothing however far
-it is from the market, and nothing trips in an auction state.
+In `Continuous`, every print is tested before it happens, whatever caused it: an arriving
+order, a cancel/replace, an elected stop, stop-limit, MIT or trailing stop, and an election
+latched earlier that fires now. The price of each fill — after self-trade prevention has
+decided the fill will happen — is compared with `referencePrice_`; a print more than
+`cbThreshold_` away does not happen. The book enters `VolatilityAuction`, a `breaker_trip` event
+is logged, and the order that would have printed keeps the fills it made inside the band and is
+treated as an auction arrival with the rest: a limit (an elected stop-limit or trailing stop
+included) rests, a market order (an elected stop or MIT included) is parked for the reopening
+cross, an IOC or FOK is cancelled. A FOK or `minQty` screen counts only the liquidity inside the
+band, so a FOK never fills in part; one whose size the band cannot hold is refused with
+`FOKInsufficientLiquidity` and trips nothing, since it never prints. A passive order trips
+nothing however far it is from the market, and nothing trips in an auction state.
 
-The breaker used to test each order's **limit** price and switch the book on a breach: one
-passive order far from the market stopped continuous trading for the whole symbol, and nothing
-reopened it (PRIOR-5, AUCT-8). The 0.14 stop-gap then rejected such orders one by one. A
-**replace** is still refused on its new limit price (`VolatilityCircuitBreaker`): it is never
-auctioned, so a crossing replace cannot print out of band either (roadmap 1.8-H3; pinned by
-`tests/VolatilityBreakerTest.cpp`).
+**Elections in a tripped sweep are latched, not executed.** Once the book has left
+`Continuous`, the stop and trailing-stop sweeps still latch what the in-band prints elected,
+but execute nothing; the latched elections fire on the first sweep after the reopen, and their
+prints face the band measured from the reopening print. A stop cascade therefore stops at the
+band (MR-2: one in-band 1-lot trigger used to elect 66 stops and print 33% below the reference
+with the book still `Continuous`; the default 5% market collar, measured from each elected
+order's own touch, did not bound it).
 
-> `firstFillPrice` and `tripBreakerOnFirstFill` in `src/OrderBook.cpp`
+**The reference is a price that traded.** `referencePrice_` comes only from the first print
+(which also bounds the rest of its own sweep), an auction cross, `setReferencePrice`, the
+reopening print of a volatility auction, or a checkpoint. It used to be seeded by the first
+priced order *seen*, ahead of the FOK and PostOnly refusals, so a rejected 1-lot FOK at 0.0001
+fixed it and the first honest trade put the symbol into a five-minute auction (MR-1). Until there
+is a reference neither the breaker nor the price band applies.
+
+The breaker used to test each order's **limit** price, then (H3) only an arriving order's first
+fill: a sweep that started in band ran on through it, a replace was refused on its limit while
+its print was never tested (so replacing a 4.00 bid to 9.60 traded at 5.00 against a 10.00
+reference, FORMAL-1), and elected stops were not tested at all. A replace is now admitted on
+the same terms as a new order at its price — `VolatilityCircuitBreaker` is no longer emitted —
+and its print is tested. Pinned by `tests/PrintBandTest.cpp` and
+`tests/VolatilityBreakerTest.cpp`.
+
+> `printBand` / `tripBreaker`, asked in `match()`, `matchProRata()` and `sweepFillQty()`, in
+> `src/OrderBook.cpp`
 
 **The auction reopens on a timer.** A book in `VolatilityAuction` — tripped or entered with
 `setTradingState` — reopens after the dwell, 5 minutes by default (`volatility_auction_dwell_ms`).
@@ -1042,9 +1063,13 @@ in sync mode. The reopen is an ordinary journaled
 `TradingStateChange` to `Continuous`, which runs the uncross and re-anchors `referencePrice_`
 to the reopening print. `resumeVolatilityAuction()` reopens at once.
 
-**A trip is journaled.** The engine writes a `TradingStateChange(VolatilityAuction)` record
-ahead of the order that tripped the breaker, and replay never evaluates the breaker itself, so
-recovery reproduces the trip even with another threshold. The dwell clock is not journaled:
+**A trip is journaled, and replay evaluates the breaker.** Replay stops a sweep at the same fill
+as live did, because the reference is reproduced (prints, crosses and checkpoints) and the
+threshold is configuration; a replaying engine must run with the live threshold, as it must with
+the live market collar. The engine writes a `TradingStateChange(VolatilityAuction)` record
+**after** the add or replace that tripped, where replay finds the book already in the auction.
+It used to go ahead of the order, so replay made the order an auction arrival; with a trip
+mid-sweep that would drop its in-band fills. Journals written that way still replay as before. The dwell clock is not journaled:
 after a restart into a volatility auction the dwell starts again.
 
 **A checkpoint carries the reference and the last trade price** (the per-book `Counters`
@@ -1062,11 +1087,11 @@ distance from the real thing needs stating:
 
 | US-equities LULD (Reg NMS Plan) | This engine |
 |---|---|
-| Reference price is a rolling 5-minute average | `referencePrice_` is seeded from the first limit price seen and re-anchored only on a volatility-auction reopen (`src/OrderBook.cpp:591-595`, `src/OrderBook.cpp:2881`) |
+| Reference price is a rolling 5-minute average | `referencePrice_` is set by the first print (or an auction cross, or `setReferencePrice`) and re-anchored only on a volatility-auction reopen (Rule 7.4) |
 | Band percentage is tiered by price and by time of day, and doubles near the open/close | One flat `priceBandPct_` for the whole session |
 | A quote at the band creates a *Limit State*; 15 seconds in Limit State becomes a 5-minute pause | No Limit State; a would-be print outside the breaker threshold starts a volatility auction at once |
 | A pause reopens via an auction on a published schedule | The volatility auction reopens with a cross after a fixed dwell (5 minutes by default) |
-| Trades outside the band are prohibited | The band is an **admission** filter on limit-style orders only — see [defect B5](#b5--triggered-stops-and-pegs-bypass-the-price-band-and-the-circuit-breaker) |
+| Trades outside the band are prohibited | The band is an **admission** filter on limit-style orders only; what bounds every print is the breaker (Rule 7.4) — see [B5](#b5--triggered-stops-and-pegs-bypassed-the-circuit-breaker-fixed-for-the-breaker) |
 
 The band is checked only for `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden`.
 `Market`, `Stop`, `StopLimit`, `TrailingStop`, `MIT` and `Pegged` are all excluded.
@@ -1194,7 +1219,7 @@ which first expires every order due — cancels it with the same `Cancelled` upd
 sends, after the fills it has already made go out, and the engine journals that cancel ahead
 of the order that met it. Replay never reads the clock: it applies the journaled cancel. The
 screens that count liquidity before a sweep, the FOK and `minQty` dry run and the breaker's
-first-fill price, look past an expired maker the same way, so a FOK cannot be filled in part
+band, look past an expired maker the same way, so a FOK cannot be filled in part
 by liquidity that leaves under it. One operation reads the clock once, so its screens and its
 sweep agree on what has expired (THR-10).
 
@@ -1490,29 +1515,21 @@ the opposite touch is clamped one tick behind it. `Pegged` is admitted again. Pi
 `tests/PegOrderTest.cpp`; `validateIntegrity()` now refuses a crossed book in `Continuous`
 (Rule 5.8).
 
-### B5 — Triggered stops and pegs bypass the price band and the circuit breaker
+### B5 — Triggered stops and pegs bypassed the circuit breaker (fixed for the breaker)
 
-The price band is checked only for `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden`;
-the circuit breaker tests the first fill of an order arriving through `addOrder` (Rule 7.4).
+The circuit breaker tested only the first fill of an order arriving through `addOrder`, and
+`checkStopOrders` / `updateTrailingStops` call `match()` directly, so a triggered stop executed
+with no breaker check: a stop cascade printed straight through it (MR-2). **Fixed:** the breaker
+is asked at every fill inside `match()` and `matchProRata()`, so every print faces it, whatever
+caused it (Rule 7.4). A peg never prints as an aggressor (it is clamped behind the opposite
+touch, Rule 6.4); as a maker its prints are tested like any other.
 
-> `admitPriceBand` (band) and `tripBreakerOnFirstFill` (breaker) in `src/OrderBook.cpp`
-
-A `Stop` is admitted without either check, because at admission it carries a trigger rather
-than a tradeable price — reasonable. But when it elects, `checkStopOrders` rewrites its type
-to `Limit`/`Market` and calls `match()` **directly**, never re-entering `addOrder`.
-
-> `checkStopOrders()` in `src/OrderBook.cpp`
-
-So a triggered stop executes with **no band check and no breaker check, ever**. A stop
-cascade can therefore print straight through a LULD band that would have rejected the same
-order submitted directly — which is the exact scenario price bands exist to contain. The same
-holds for `TrailingStop` (`updateTrailingStops()`) and for `Pegged`, which is excluded from the
-band list; a peg's only price check is the opposite touch (Rule 6.4).
-
-**Severity: high for anything claiming LULD-style controls.** No comment considers the
-re-check, and no test covers a stop firing outside the band. It is genuinely ambiguous whether
-this is a deliberate "a stop is already committed" stance or simply an unconsidered gap —
-**from the code you cannot tell.**
+**Still open: the admission band is not re-applied at election.** The band of Rule 7.5 is
+checked only on `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden` at admission. An
+elected stop-limit or trailing stop whose limit lies outside the band is not refused when it
+elects; its prints are bounded by the breaker, and if its sweep empties the book inside the band
+its remainder can rest as a quote outside the band. Decision for the author: refuse it at
+election (`OutsidePriceBand`), or leave it as a quote.
 
 ### B6 — GTD expiry timestamps are compared against a platform-dependent epoch
 

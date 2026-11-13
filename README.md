@@ -57,7 +57,7 @@ One protocol: the native binary protocol above, on `OrderEngine`'s order port. `
 ### Regulatory & Risk
 In `OrderEngine`, only self-match prevention (cancel-incoming), the 5% circuit breaker, the per-participant kill and OTR tracking are active. Pre-trade risk limits, LMM/DMM roles and pro-rata are library code that nothing enables; the rate limiter is off by default. See [docs/Compliance.md](./docs/Compliance.md).
 - **Self-Match Prevention (SMP)**: Cancel-Taker strategy <!-- claim:stp-default-cancel-incoming -->
-- **Volatility Circuit Breakers**: a fixed 5% threshold on the price an order's first fill would print at; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing <!-- claim:circuit-breaker -->
+- **Volatility Circuit Breakers**: a fixed 5% threshold on the price of every continuous print, elected stops and replaces included, against a reference set by the first print; a breach puts the symbol into a volatility auction that reopens with a cross after 5 minutes (`volatility_auction_dwell_ms`). A passive order far from the market trips nothing <!-- claim:circuit-breaker -->
 - **OTR Monitoring**: Order-to-Trade ratio tracking per participant <!-- claim:otr -->
 - **Kill Switch**: Cancels every resting order of a participant on every symbol, each cancel journaled, before the call returns <!-- claim:kill-participant -->
 - **LMM/DMM Market Maker Privileges**: `ParticipantRole` enum (Regular/LMM/DMM); ProRata matching guarantees 40% floor allocation to LMM/DMM orders; remainder distributed to privileged roles first <!-- claim:prorata-lmm-floor -->

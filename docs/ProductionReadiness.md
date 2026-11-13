@@ -13,8 +13,8 @@ This project is a low-latency matching-engine implementation for research and po
 - Self-match prevention policy variants: cancel taker, cancel maker, decrement-and-cancel, and participant hierarchy rules.
 - Cancel/replace priority rules for every amendment type, including hidden and iceberg orders.
 - Market order protection, price collars, auction states, halt/resume transitions. What `OrderEngine` runs:
-  a 5% circuit breaker on an arriving order's first fill that puts the symbol into a timed volatility
-  auction (`tripBreakerOnFirstFill` in `src/OrderBook.cpp`; `VolatilityBreakerTest`) <!-- claim:circuit-breaker -->, in OrderEngine with
+  a 5% circuit breaker on every continuous print that puts the symbol into a timed volatility
+  auction (`printBand` in `src/OrderBook.cpp`; `VolatilityBreakerTest`, `PrintBandTest`) <!-- claim:circuit-breaker -->, in OrderEngine with
   a config file each symbol's static price range (`instrument.<s>.min_price` / `max_price`, enforced at
   admission; `PriceRangeTest`, `EngineRequiresPriceBandTest`) <!-- claim:price-range -->, and, only in OrderEngine with
   `--session-schedule`, the scheduled auction states (`SessionSchedulerTest`) <!-- claim:session-schedule -->, and in every book a

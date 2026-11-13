@@ -245,7 +245,9 @@ void runOracle(bool selfCrossing, uint64_t seed, int runs) {
     }
     // The generator must actually reach the cases it is here for.
     EXPECT_GT(crosses, runs / 3);
-    if (selfCrossing) EXPECT_GT(stpCuts, runs / 4);
+    if (selfCrossing) {
+        EXPECT_GT(stpCuts, runs / 4);
+    }
 }
 
 }  // namespace

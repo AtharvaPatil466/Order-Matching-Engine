@@ -360,9 +360,11 @@ Each accepted order, cancel, modify and trading-state change is appended as a
 fixed-size record.
 Each append is synced before it returns (`Immediate`), and the order port
 answers a request only after the worker has run it, so an Ack means its entry is
-on disk and survives `kill -9`. That costs one fsync per order. Market data is
-not held back: a fill can reach `/orderbook_md` before its order's entry is
-synced (roadmap 1.4-D7).
+on disk and survives `kill -9`. That costs one fsync per order. Execution
+reports and `/orderbook_md` are held to the same rule: what a request produced
+leaves only once its entries are synced, and never if the journal halted
+(`gateway_reports_undelivered_total` counts reports for a participant with no
+session; they are not replayed on reconnect).
 
 ### Checkpoints
 

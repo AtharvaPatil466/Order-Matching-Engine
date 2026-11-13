@@ -236,6 +236,30 @@ before the trade.
 path above) and by `tests/WideDifferentialFuzz.cpp`, which checks each report against the
 trades delivered before it.
 
+### Rule 2.6 — On the order port, the owner hears every fill and every status change, once durable
+
+`OrderEngine`'s order port forwards what the book emits to the order's owner: a
+`TradeNotification` per fill to the aggressor and to each maker (the execution, the order's
+cumulative and leaves, the trade id; the contra side's order and participant are zeroed), and an
+`OrderUpdateNotification` per status change (`Accepted`; `Cancelled` for an IOC, FOK or Market
+remainder, an expiry, a kill switch or a session end; `CancelledBySTP`; `Rejected` for a new
+order the book refused after its Ack). Rule 2.5's order holds on the wire. The owner is the
+participant in the order's scoped id; every session whose credential covers it, or that has
+claimed it with authentication off, receives the report. A participant with no live session
+is not told later: the report is dropped and counted (`gateway_reports_undelivered_total`).
+
+A request's reports, and the market data it produced, leave only after its journal entries
+are durable; if the journal refused them, nothing about that request is ever shown. A session
+whose unread output reaches 1 MiB is disconnected; matching never waits for it.
+
+Not reported, because the book emits nothing for them: a stop's election before it trades
+(Rule 5.6), a resting order shrunk by `DecreaseAndCancel`, and the outcome of a cancel, modify
+or replace (its Ack means the worker ran it, not that it took effect; a later fill's leaves can
+be stale after a modify).
+
+**Status: Deliberate — pinned** by `tests/GatewayExecutionReportTest.cpp` and the crossing
+rounds of `tests/CrashRecoveryE2ETest.cpp`. Sync-mode `TcpGateway` sends no reports.
+
 ---
 
 ## 3. Iceberg orders

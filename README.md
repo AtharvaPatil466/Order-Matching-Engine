@@ -76,7 +76,7 @@ In `OrderEngine`, only self-match prevention (cancel-incoming), the 5% circuit b
 - **Calibration & Backtesting**: `CalibrationPipeline` (Nelder-Mead minimization of spread decomposition residuals), `BacktestEngine` (replay historical tape against research models), `ResearchDashboard` and `ResearchSerializer` for result persistence
 
 ### Reliability & Observability
-- **CRC-32 Journaling**: a journal replayed on boot <!-- claim:journal-replay-on-boot --> (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind <!-- claim:journal-torn-tail -->), atomic checkpoint <!-- claim:checkpoint-atomic -->, and deterministic replay via virtual clock <!-- claim:gtd-replay -->. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `OrderEngine` syncs every entry and answers its order port only after the worker has written it, though a fill on its market-data feed can precede its order's entry; the library's synchronous mode with durable client acks holds fills and order updates until the entry is synced. <!-- claim:gw-durable-events --> A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
+- **CRC-32 Journaling**: a journal replayed on boot <!-- claim:journal-replay-on-boot --> (one that does not decode is refused; a torn final write is cut off at boot and kept in `<journal>.torn`, never appended behind <!-- claim:journal-torn-tail -->), atomic checkpoint <!-- claim:checkpoint-atomic -->, and deterministic replay via virtual clock <!-- claim:gtd-replay -->. It is **not write-ahead**: the book applies an order before its entry is appended (`MatchingEngine.cpp`). `OrderEngine` syncs every entry and answers its order port, sends its execution reports and publishes its market data only after the worker has written it; the library's synchronous mode with durable client acks holds fills and order updates until the entry is synced. <!-- claim:gw-durable-events --> A checkpoint replaces the journal with a snapshot of resting orders, so it is not a retained history; monotonic `steady_clock` timestamps (NTP-skew-safe); stale `.tmp` cleanup on startup
 - **Single Node, Journal Recovery**: one `OrderEngine` and no replication or failover; a restart replays the journal. Replication was deleted rather than finished, and `--role` / `OB_NODE_ROLE` refuse to boot, saying so. <!-- claim:repl-refuses-role -->
 - **Deterministic Sequencing**: a book's `MarketDataUpdate` events carry strictly increasing `sequenceNumber`s, and a subscriber that applies only them holds the book's depth <!-- claim:md-l2-sequence -->. `Trade` and `OrderUpdate` carry one too; no test holds either to an order
 - **GTD Virtual Clock**: `setExpiryClock(ClockFn)` seam for cross-day replay — DAY/GTD expirations are journaled and replayed identically <!-- claim:gtd-replay -->
@@ -286,8 +286,9 @@ arrives — the scenario `GatewayJournalRestartTest`, `CrashRecoveryE2ETest` and
 `OrderEngineGatewayTest` run against the real binary. <!-- claim:gw-durable-ack -->
 In the library's synchronous mode with durable client acks on, fills and order
 updates are held until durable too. <!-- claim:gw-durable-events --> `OrderEngine`
-runs async, where that gate is refused, so its market-data feed can show a fill
-up to one order before that order's entry is on disk (roadmap 1.4-D7).
+holds its execution reports and its market-data feed to the same rule: what a
+request produced leaves only once that request's journal entries are synced, and
+never if the journal refused them. <!-- claim:gw-exec-reports -->
 
 The cost is one fsync per order, and the order port's single event thread waits
 it out, so order-entry throughput is bounded by your disk's fsync latency.
@@ -338,6 +339,21 @@ with. Every id the port sends back is the client's. A request whose participant
 id is 1024 or more, or whose order id is 2^54 or more, is refused with
 `InvalidFieldValue` whatever its type, the kill switch included.
 <!-- claim:gw-ids-per-participant -->
+
+Besides the Ack or Error answering each request, the port sends execution
+reports unasked (V2 `clientRequestId` 0), so a client switches on the response
+`type` first. A `TradeNotification` goes to the aggressor and to each maker for
+every fill, carrying the trade id, price and quantity and the order's cumulative
+and leaves; the contra side stays anonymous. An `OrderUpdateNotification` goes
+out for every status change: `Accepted`, the cancels the engine makes (IOC, FOK
+and Market remainders, expiry, kill switch, session end, self-trade prevention)
+and a new order refused after its Ack. They reach every session that may act
+for the order's participant; one with no session is not told later. A session
+that stops reading is disconnected once its queued output reaches the
+per-session ceiling (`TcpGateway::kMaxWriteBufBytes`). Not yet
+reported: a stop's election before it trades, a `DecreaseAndCancel` reduction,
+and whether a cancel, modify or replace took effect (see MatchingRules Rule 2.6).
+<!-- claim:gw-exec-reports -->
 
 ### Replication: removed
 `OrderEngine` runs as a single node and recovers from its journal. Primary/backup replication had no fencing, a promoted backup kept applying the old primary's stream, its send blocked the journal commit path and resync only added orders, so it was deleted rather than finished. `--role` / `OB_NODE_ROLE` still refuse to boot, so a deployment that sets one finds out at startup. <!-- claim:repl-refuses-role -->

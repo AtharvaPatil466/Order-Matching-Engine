@@ -372,7 +372,7 @@ that permits a self-cross, and the unconfigured default prevents.
 | `CancelResting` (1) | Remove the resting order, incoming continues |
 | `CancelIncoming` (2) | Cancel the incoming order, resting survives |
 | `CancelBoth` (3) | Remove both |
-| `DecreaseAndCancel` (4) | Reduce both orders by the smaller remaining quantity; cancel whichever reaches zero (continuous trading; in an auction the older order is cancelled — see [B2](#b2--decreaseandcancel-never-decrements-the-incoming-order-fixed-in-continuous-trading)) |
+| `DecreaseAndCancel` (4) | Reduce both orders by the smaller remaining quantity; cancel whichever reaches zero, and send a surviving resting order's owner an update with its new leaves in its own status (MR-7) (continuous trading; in an auction the older order is cancelled — see [B2](#b2--decreaseandcancel-never-decrements-the-incoming-order-fixed-in-continuous-trading)) |
 
 ### Rule 4.1 — An STP-cancelled order reports `CancelledBySTP`, never `Cancelled` and never `Filled`
 

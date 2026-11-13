@@ -82,3 +82,28 @@ TEST(AuctionPriority, CancellingAnMocKeepsTheOthersInArrivalOrderAtTheClose) {
     EXPECT_EQ(b.rec.trades[0].buyOrderId, 2u);
 }
 
+TEST(StaleOnClose, AHaltedCloseCancelsReleasedMocLocAndParkedMarketOrders) {
+    Book b(TradingState::Continuous);
+    b.book.addOrder(1, 11, Side::Buy, 0, 5, OrderType::MOC);
+    b.book.addOrder(2, 12, Side::Sell, 1010, 5, OrderType::LOC);
+    b.book.setTradingState(TradingState::AuctionClose);
+    b.book.addOrder(3, 13, Side::Buy, 0, 5, OrderType::Market);
+    b.book.setTradingState(TradingState::Halted);
+    b.book.setTradingState(TradingState::PostClose);
+    EXPECT_TRUE(b.rec.trades.empty());
+    for (OrderId id : {1u, 2u, 3u}) {
+        EXPECT_EQ(b.book.getOrder(id), nullptr) << "#" << id << " survived the close";
+        EXPECT_EQ(b.rec.last[id].status, OrderStatus::Cancelled) << "#" << id;
+    }
+}
+
+TEST(StaleOnClose, AHaltedVolatilityAuctionCancelsItsParkedMarketOrders) {
+    Book b(TradingState::Continuous);
+    b.book.setTradingState(TradingState::VolatilityAuction);
+    b.book.addOrder(3, 13, Side::Buy, 0, 5, OrderType::Market);
+    b.book.setTradingState(TradingState::Halted);
+    b.book.setTradingState(TradingState::PostClose);
+    EXPECT_EQ(b.book.getOrder(3), nullptr);
+    EXPECT_EQ(b.rec.last[3].status, OrderStatus::Cancelled);
+}
+

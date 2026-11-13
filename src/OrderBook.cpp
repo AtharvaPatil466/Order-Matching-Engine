@@ -2222,9 +2222,12 @@ void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
     // still parked at session end — the close never ran: halted over it, or a
     // volatility auction ran into it — used to wait for the next transition
     // into AuctionClose and execute at tomorrow's close, an overnight
-    // position nobody asked for. Released ones are gone by now: the closing
-    // cross fills or cancels them.
+    // position nobody asked for. Released ones are gone if the closing cross
+    // ran; a close reached through a halt runs none, so its released MOCs and
+    // LOCs and any parked market order are cancelled as an empty cross would.
     if (s == TradingState::PostClose) {
+        cancelAuctionMarketOrders();
+        cancelLocOrders();
         while (!onCloseOrders_.empty()) {
             const size_t last = onCloseOrders_.size() - 1;
             Order* o = onCloseOrders_[last];

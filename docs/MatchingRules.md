@@ -1044,7 +1044,10 @@ An `MOC` / `LOC` sent before the close waits in `onCloseOrders_` until the book 
 `AuctionClose`. Any still waiting when the book enters `PostClose` — the close never ran: a
 halt over it, or a volatility auction run into it — is cancelled. It used to wait for the next
 day's close and execute there (roadmap 1.8-H3, AUCT-8 / OTM-9; pinned by
-`tests/OnCloseSessionEndTest.cpp`).
+`tests/OnCloseSessionEndTest.cpp`). A close reached through a halt (`AuctionClose` or
+`VolatilityAuction` → `Halted` → `PostClose`) runs no cross, so it cancels what an empty cross
+would: released `MOC`, `LOC` in the book and parked market orders. They used to survive into
+the next session (pinned by `StaleOnClose.*` in `tests/AuctionUncrossRulesTest.cpp`).
 
 > `uncross()` in `src/OrderBook.cpp` — `nextParked` and the step-3 cancel pass
 

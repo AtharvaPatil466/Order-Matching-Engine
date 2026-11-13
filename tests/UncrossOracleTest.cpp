@@ -37,10 +37,9 @@ struct In {
     uint64_t age;  // the engine's age key for "which is newer" (see ageKey)
 };
 
-// The one place this test reads an order's age. ponytail: Order::timestamp,
-// as the engine's arrivedNoEarlierThan does; switch both to the per-book
-// arrival sequence together (lane a, MIDS-1).
-uint64_t ageKey(const Order& o) { return o.timestamp; }
+// The one place this test reads an order's age: the per-book arrival
+// sequence, as the engine's arrivedNoEarlierThan does (MIDS-1).
+uint64_t ageKey(const Order& o) { return o.arrivalSeq; }
 
 struct Cap : EventListener {
     std::vector<Trade> trades;

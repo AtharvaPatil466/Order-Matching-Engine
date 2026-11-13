@@ -1383,11 +1383,21 @@ bool OrderBook::stpDecreaseBoth(Order* incoming, Order* resting) {
     incoming->initialQty   -= dec;
     if (dec == resting->remainingQty) return true;  // its cancel releases the rest
     releaseWorking(*resting, dec);
+    const Quantity displayBefore = displayQuantity(*resting);
     resting->remainingQty -= dec;
     resting->initialQty   -= dec;
     // Keep visibleQty <= remainingQty or a later fill underflows
     // remainingQty to UINT64_MAX (no-op for a non-iceberg).
     resting->visibleQty = std::min(resting->visibleQty, resting->remainingQty);
+    // Its owner hears of it, in its own status with the new leaves, as a
+    // restatement; the order-level feed hears of the displayed shrink. The
+    // owner used to keep seeing 100 while the engine held 70 (MR-7). The L2
+    // level is republished by the sweep that touched it.
+    notifyOrderUpdate(resting->id, resting->status, resting->cumQty, resting->remainingQty);
+    const Quantity displayAfter = displayQuantity(*resting);
+    if (!resting->isHidden && displayAfter < displayBefore)
+        notifyBookVisible(BookVisibleUpdate::Action::Reduce, resting->id, resting->side,
+                          resting->price, displayBefore - displayAfter);
     return false;
 }
 

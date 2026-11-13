@@ -296,10 +296,12 @@ bool runSeed(uint64_t seed, size_t nOps, size_t forcedCut) {
     a.engine.start();
     a.engine.getOrderBook(S)->setEventListener(&a.events);
     for (size_t i = 0; i < cut; ++i) apply(a.engine, flow[i]);
-    a.engine.commitJournal();
+    // flush(), not commitJournal(): on the io_uring path a commit only
+    // submits the write chain, and a copy taken then misses the tail.
+    a.engine.getJournal()->flush();
     fs::copy_file(live, plain);
     a.engine.checkpoint();
-    a.engine.commitJournal();
+    a.engine.getJournal()->flush();
     fs::copy_file(live, ckpt);
 
     Replica b, c;

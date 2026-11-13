@@ -1668,3 +1668,15 @@ target_link_libraries(GatewayExecutionReportTest PRIVATE OrderMatcher)
 enable_assertions(GatewayExecutionReportTest)
 add_test(NAME GatewayExecutionReportTest COMMAND GatewayExecutionReportTest)
 set_tests_properties(GatewayExecutionReportTest PROPERTIES TIMEOUT 120 LABELS "project;integration;recovery")
+
+# The uncross keeps arrival order among parked orders, resolves only self-crossing
+# pairs that can meet at the clearing price, and a halted close cancels
+# on-close and parked orders (MIDS-4, MIDS-5).
+add_executable(AuctionUncrossRulesTest AuctionUncrossRulesTest.cpp)
+target_link_libraries(AuctionUncrossRulesTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(AuctionUncrossRulesTest)
+gtest_discover_tests(AuctionUncrossRulesTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")

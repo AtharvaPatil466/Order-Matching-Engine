@@ -1031,7 +1031,11 @@ limit's price: each side's next order is its oldest unfilled parked market order
 when none is left the front of the best limit level. They never enter the book. They used to
 be inserted at the discovered price, at the back of that level, so a later limit there — or
 any limit priced through the cross — filled first and the market order was cancelled
-unfilled (roadmap 1.8-H2, AUCT-2; pinned by `tests/AuctionMarketPriorityTest.cpp`). Any
+unfilled (roadmap 1.8-H2, AUCT-2; pinned by `tests/AuctionMarketPriorityTest.cpp`). "Oldest"
+is arrival order: an order that leaves the parked list (cancel, STP) no longer lets the
+latest arrival take its slot, which put it ahead of everything parked after the leaver
+(MIDS-4); the on-close list keeps arrival order the same way, so released `MOC` and `LOC`
+queue as they arrived. Any
 market-order remainder is cancelled after the cross rather than left resting — a market order
 is auction-only and does not get to become a limit at the clearing price. Unfilled `LOC`
 orders are cancelled likewise (`cancelLocOrders()`).

@@ -2364,12 +2364,12 @@ void OrderBook::untrackOrder(Order* order) {
         case OrderType::MOC:
             // An MOC moves from onCloseOrders_ into auctionMarketOrders_ when
             // the closing cross releases it, so it can be sitting in either.
-            onCloseOrders_.erase_value(order);
+            onCloseOrders_.erase_value_ordered(order);
             locActiveIds_.erase_value(order->id);
-            auctionMarketOrders_.erase_value(order);
+            auctionMarketOrders_.erase_value_ordered(order);
             break;
         case OrderType::LOC:
-            onCloseOrders_.erase_value(order);
+            onCloseOrders_.erase_value_ordered(order);
             locActiveIds_.erase_value(order->id);
             break;
         case OrderType::Market:
@@ -2379,7 +2379,7 @@ void OrderBook::untrackOrder(Order* order) {
             // pointing at the slot, the pool re-handed that slot to an
             // unrelated new order, and the next uncross() repriced THAT order
             // and addToBook'd it a second time — one node in two price levels.
-            auctionMarketOrders_.erase_value(order);
+            auctionMarketOrders_.erase_value_ordered(order);
             break;
         default:
             break;
@@ -3331,9 +3331,12 @@ void OrderBook::cancelAuctionMarketOrders() {
         // "normally" is what the double free above relied on: if anything
         // ever rests one, freeing it here would leave its level pointing at
         // freed memory. Free nothing that is still linked.
+        // Not untrackOrder: it erases from the list this loop walks, and the
+        // list is cleared below.
         removeFromBook(m);
-        untrackOrder(m);
-        notifyOrderUpdate(m->id, OrderStatus::Cancelled, 0, 0);
+        releaseWorking(*m, m->remainingQty);
+        // A market order the breaker parked mid-sweep has fills (cumQty).
+        notifyOrderUpdate(m->id, OrderStatus::Cancelled, m->cumQty, 0);
         orderLookup_.erase(m->id);
         orderPool_.deallocate(m);
     }

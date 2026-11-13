@@ -9,6 +9,7 @@
 #include "RingBuffer.h"
 #include "SelfTradeProtection.h"
 #include "BatchRiskValidator.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -245,6 +246,20 @@ public:
         for (size_t i = 0; i < size_; i++) {
             if (data_[i] == val) {
                 erase_swap(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Erase by value, keeping the rest in order. For lists whose order is a
+    // priority: the parked market and on-close orders cross in arrival order,
+    // and a swap moved the last arrival into the leaver's slot (MIDS-4).
+    bool erase_value_ordered(const T& val) {
+        for (size_t i = 0; i < size_; i++) {
+            if (data_[i] == val) {
+                std::move(data_ + i + 1, data_ + size_, data_ + i);
+                size_--;
                 return true;
             }
         }

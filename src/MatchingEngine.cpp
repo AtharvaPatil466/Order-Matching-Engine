@@ -804,6 +804,7 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             }
 
             processRequest(threadIndex, req);
+            if (stepEndHook_) stepEndHook_(threadIndex);
             if (req.ingressTsc != 0) {
                 // Stamp end with the same cheap counter, then convert the tick
                 // delta to ns ONCE here (metrics write, off the matching path).
@@ -2670,6 +2671,17 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
 void MatchingEngine::commitJournal() {
     std::lock_guard<std::mutex> lock(journalMutex_);
     if (journal_) journal_->commitPending();
+}
+
+bool MatchingEngine::syncJournalForReports() {
+    if (!journal_) return true;
+    // Immediate synced each append before it returned; anything else may
+    // still hold this request's entries in a batch.
+    if (journal_->syncPolicy() != Journal::SyncPolicy::Immediate) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->flush();
+    }
+    return !journal_->halted();
 }
 
 void MatchingEngine::commitJournalIfDue() {

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cerrno>
+#include <type_traits>
 
 // MSG_NOSIGNAL is Linux-only; on macOS/BSD SO_NOSIGPIPE is set per-socket.
 #ifndef MSG_NOSIGNAL
@@ -313,6 +314,8 @@ void TcpGateway::eventLoop() {
                 handleClientData(fd);
             }
         }
+        pumpReports();
+        reapOverflowed();
         checkIdleTimeouts();
         if (tick_) tick_();
         // D3: a sync engine journals on this thread; commit before blocking.
@@ -341,6 +344,8 @@ void TcpGateway::eventLoop() {
                 }
             }
         }
+        pumpReports();
+        reapOverflowed();
         checkIdleTimeouts();
         if (tick_) tick_();
         // D3: a sync engine journals on this thread; commit before blocking.
@@ -706,6 +711,14 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
         }
     }
 
+    // With auth off the claim is all there is: this session hears that
+    // participant's execution reports.
+    if (!(auth_ && auth_->enabled()) &&
+        std::find(state.claimed.begin(), state.claimed.end(), req.participantId) ==
+            state.claimed.end()) {
+        state.claimed.push_back(req.participantId);
+    }
+
     SubmitResult result = SubmitResult::rejected(RejectReason::EngineStopped);
 
     // Ownership enforcement is only meaningful once the identity is verified.
@@ -775,6 +788,195 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
                       rejectReasonToString(clientVisibleReason(result.rejectReason)));
     }
     sendResponse(fd, resp);
+    // The request has run (waitForDrain above): its reports follow its answer.
+    pumpReports();
+}
+
+// ─── Execution reports ──────────────────────────────────────────────────────
+
+void TcpGateway::enableExecutionReports() {
+    if (reports_) return;
+    reports_ = std::make_unique<MpscQueue<Report>>(kReportQueueSlots);
+    for (SymbolId sym : engine_.symbolIds()) {
+        OrderBook* book = engine_.getOrderBook(sym);
+        if (!book) continue;
+        auto tap = std::make_unique<BookTap>();
+        tap->gw = this;
+        tap->symbol = sym;
+        tap->downstream = book->eventListener();
+        // Orders already resting (replayed) report their fills from where
+        // they stand. The workers have not started, so the walk is safe.
+        book->forEachOrder([&](const Order& o) {
+            legs_[o.id] = Leg{o.cumQty, o.remainingQty};
+        });
+        book->setEventListener(tap.get());
+        taps_.push_back(std::move(tap));
+    }
+    engine_.setStepEndHook([this](size_t worker) { onStepEnd(worker); });
+}
+
+// Worker thread. A sync engine runs on the caller's thread with no step end,
+// so it keeps its listener as it was and gets no reports.
+template <typename E>
+void TcpGateway::capture(const BookTap& tap, Report::Kind kind, const E& e) {
+    if (!engine_.isAsync()) {
+        if (!tap.downstream) return;
+        if constexpr (std::is_same_v<E, Trade>) tap.downstream->onTrade(e);
+        else if constexpr (std::is_same_v<E, OrderUpdate>) tap.downstream->onOrderUpdate(e);
+        else if constexpr (std::is_same_v<E, MarketDataUpdate>) tap.downstream->onMarketData(e);
+        else if constexpr (std::is_same_v<E, BookVisibleUpdate>) tap.downstream->onBookVisible(e);
+        else tap.downstream->onUncross(e);
+        return;
+    }
+    Report r;
+    r.kind = kind;
+    r.worker = static_cast<uint32_t>(engine_.workerOf(tap.symbol));
+    r.downstream = tap.downstream;
+    r.event = e;
+    if (!reports_->push(r)) reportsDropped_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Worker thread, after each request: its events are releasable once the
+// journal has what produced them. A lost StepEnd (full queue) only merges
+// this request's events into the next one's, which is later, never earlier.
+void TcpGateway::onStepEnd(size_t worker) {
+    Report r;
+    r.kind = Report::Kind::StepEnd;
+    r.worker = static_cast<uint32_t>(worker);
+    r.durable = engine_.syncJournalForReports();
+    if (!reports_->push(r)) reportsDropped_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TcpGateway::pumpReports() {
+    if (!reports_) return;
+    Report r;
+    while (reports_->pop(r)) {
+        if (r.worker >= held_.size()) held_.resize(r.worker + 1);
+        std::vector<Report>& held = held_[r.worker];
+        if (r.kind != Report::Kind::StepEnd) {
+            held.push_back(std::move(r));
+            continue;
+        }
+        if (r.durable) {
+            for (const Report& e : held) deliver(e);
+        } else {
+            // The journal refused this request: nobody may hear about it.
+            reportsWithheld_.fetch_add(held.size(), std::memory_order_relaxed);
+        }
+        held.clear();
+    }
+    // No reaping here: processMessage() calls this while feedBytes() still
+    // holds its session. The event loop reaps between passes.
+}
+
+void TcpGateway::deliver(const Report& r) {
+    EventListener* down = r.downstream;
+    switch (r.kind) {
+    case Report::Kind::Trade: {
+        const Trade& t = std::get<Trade>(r.event);
+        if (down) down->onTrade(t);
+        deliverTrade(t, t.buyOrderId, Side::Buy);
+        deliverTrade(t, t.sellOrderId, Side::Sell);
+        break;
+    }
+    case Report::Kind::Update: {
+        const OrderUpdate& u = std::get<OrderUpdate>(r.event);
+        if (down) down->onOrderUpdate(u);
+        deliverUpdate(u);
+        break;
+    }
+    case Report::Kind::MarketData:
+        if (down) down->onMarketData(std::get<MarketDataUpdate>(r.event));
+        break;
+    case Report::Kind::BookVisible:
+        if (down) down->onBookVisible(std::get<BookVisibleUpdate>(r.event));
+        break;
+    case Report::Kind::Uncross:
+        if (down) down->onUncross(std::get<UncrossReport>(r.event));
+        break;
+    case Report::Kind::StepEnd:
+        break;
+    }
+}
+
+void TcpGateway::deliverTrade(const Trade& t, OrderId own, Side side) {
+    Leg& leg = legs_[own];
+    leg.cum += t.quantity;
+    leg.leaves = leg.leaves > t.quantity ? leg.leaves - t.quantity : 0;
+
+    GatewayResponse resp{};
+    resp.type = GatewayResponse::Type::TradeNotification;
+    resp.orderId = clientOrderId(own);
+    resp.sequenceId = t.sequenceNumber;
+    resp.trade = t;
+    // The contra side stays anonymous.
+    if (side == Side::Buy) {
+        resp.trade.buyOrderId = resp.orderId;
+        resp.trade.sellOrderId = 0;
+        resp.trade.sellerId = 0;
+    } else {
+        resp.trade.sellOrderId = resp.orderId;
+        resp.trade.buyOrderId = 0;
+        resp.trade.buyerId = 0;
+    }
+    resp.orderUpdate.orderId = resp.orderId;
+    resp.orderUpdate.status = leg.leaves == 0 ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+    resp.orderUpdate.filledQty = leg.cum;
+    resp.orderUpdate.remainingQty = leg.leaves;
+    resp.orderUpdate.lastFillPrice = t.price;
+    resp.orderUpdate.timestamp = t.timestamp;
+    resp.orderUpdate.sequenceNumber = t.sequenceNumber;
+    sendToParticipant(gatewayOrderOwner(own), resp);
+}
+
+void TcpGateway::deliverUpdate(const OrderUpdate& u) {
+    if (isTerminalStatus(u.status)) {
+        legs_.erase(u.orderId);
+    } else {
+        legs_[u.orderId] = Leg{u.filledQty, u.remainingQty};
+    }
+    GatewayResponse resp{};
+    resp.type = GatewayResponse::Type::OrderUpdateNotification;
+    resp.orderId = clientOrderId(u.orderId);
+    resp.rejectReason = clientVisibleReason(u.rejectReason);
+    resp.sequenceId = u.sequenceNumber;
+    resp.orderUpdate = u;
+    resp.orderUpdate.orderId = resp.orderId;
+    resp.orderUpdate.rejectReason = resp.rejectReason;
+    sendToParticipant(gatewayOrderOwner(u.orderId), resp);
+}
+
+bool TcpGateway::serves(const ClientState& state, ParticipantId p) const {
+    if (auth_ && auth_->enabled()) return state.identity.valid() && state.identity.permits(p);
+    return std::find(state.claimed.begin(), state.claimed.end(), p) != state.claimed.end();
+}
+
+// ponytail: a scan of every session per report; index sessions by
+// participant if a deployment runs enough sessions for it to show.
+void TcpGateway::sendToParticipant(ParticipantId p, const GatewayResponse& resp) {
+    bool sent = false;
+    for (auto& [fd, state] : clients_) {
+        if (state.writeBufOverflowed || !serves(state, p)) continue;
+        sendResponse(fd, resp, /*unsolicited=*/true);
+        sent = true;
+    }
+    if (!sent) {
+        // Decision: no live session, no report. Nothing replays it on
+        // reconnect yet (a drop copy or a replay is the follow-up).
+        reportsUndelivered_.fetch_add(1, std::memory_order_relaxed);
+        static auto& kUndelivered = MetricsRegistry::instance().counter(
+            "gateway_reports_undelivered_total",
+            "Execution reports for a participant with no live session");
+        kUndelivered.increment();
+    }
+}
+
+// A session that stopped reading is disconnected rather than buffered for.
+void TcpGateway::reapOverflowed() {
+    std::vector<int> slow;
+    for (const auto& [fd, state] : clients_)
+        if (state.writeBufOverflowed) slow.push_back(fd);
+    for (int fd : slow) removeClient(fd);
 }
 
 void TcpGateway::removeClient(int fd) {
@@ -791,7 +993,7 @@ void TcpGateway::removeClient(int fd) {
     kDiscTotal.increment();
 }
 
-bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp) {
+bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp, bool unsolicited) {
     auto it = clients_.find(fd);
     if (it == clients_.end()) return false;
     ClientState& state = it->second;
@@ -801,7 +1003,7 @@ bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp) {
     uint32_t payloadLen = sizeof(GatewayResponse);
     if (state.protocolVersion == GATEWAY_PROTOCOL_V2) {
         v2.header.version = GATEWAY_PROTOCOL_V2;
-        v2.header.clientRequestId = state.lastClientRequestId;
+        v2.header.clientRequestId = unsolicited ? 0 : state.lastClientRequestId;
         v2.response = resp;
         payload = reinterpret_cast<const char*>(&v2);
         payloadLen = sizeof(v2);

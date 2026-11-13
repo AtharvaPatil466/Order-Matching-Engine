@@ -98,6 +98,12 @@ void login(TestClient& c) {
 void acked(TestClient& c, const OrderRequest& req, const char* what) {
     GatewayResponseV2 r{};
     require(c.sendOrderV2(req, req.orderId) && c.recvResponseV2(r), "no answer to an order");
+    // Execution reports for the session's orders arrive unasked; skip to the answer.
+    while (r.response.type == GatewayResponse::Type::TradeNotification ||
+           r.response.type == GatewayResponse::Type::OrderUpdateNotification) {
+        require(r.header.clientRequestId == 0, "a report claimed a request");
+        require(c.recvResponseV2(r), "no answer to an order");
+    }
     if (r.response.type != GatewayResponse::Type::Ack)
         std::fprintf(stderr, "order %llu answered: %s\n",
                      static_cast<unsigned long long>(req.orderId), r.response.errorMessage);

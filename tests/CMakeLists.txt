@@ -1635,3 +1635,12 @@ target_link_libraries(GatewayParticipantIsolationTest PRIVATE OrderMatcher)
 enable_assertions(GatewayParticipantIsolationTest)
 add_test(NAME GatewayParticipantIsolationTest COMMAND GatewayParticipantIsolationTest)
 set_tests_properties(GatewayParticipantIsolationTest PROPERTIES TIMEOUT 60 LABELS "project;security;integration")
+
+# N6 / DA-3, DA-4: fills, engine cancels and post-ack rejects reach the owning
+# sessions, only once durable, without a slow reader stalling matching; the
+# market-data feed is held to the same rule.
+add_executable(GatewayExecutionReportTest GatewayExecutionReportTest.cpp)
+target_link_libraries(GatewayExecutionReportTest PRIVATE OrderMatcher)
+enable_assertions(GatewayExecutionReportTest)
+add_test(NAME GatewayExecutionReportTest COMMAND GatewayExecutionReportTest)
+set_tests_properties(GatewayExecutionReportTest PROPERTIES TIMEOUT 120 LABELS "project;integration;recovery")

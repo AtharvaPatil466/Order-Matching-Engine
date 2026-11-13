@@ -457,6 +457,25 @@ public:
     // when one happens. Async workers do it themselves before they park.
     void commitJournal();
 
+    // Async only. Called on a worker after each request it runs, once that
+    // request's journal appends have returned. What the request produced is
+    // released to clients from here (TcpGateway::enableExecutionReports), so
+    // nothing reaches anyone ahead of the entry behind it. Set before
+    // startAsync; unset costs one test per request.
+    void setStepEndHook(std::function<void(size_t threadIndex)> fn) {
+        stepEndHook_ = std::move(fn);
+    }
+
+    // Whether every entry appended so far is on stable storage, making it so
+    // first under a policy that batches. False once the journal has halted:
+    // what produced those entries must never be shown. True with no journal.
+    bool syncJournalForReports();
+
+    // Every symbol added so far. Not while symbols are being added.
+    const std::vector<SymbolId>& symbolIds() const { return symbolIds_; }
+    // The worker that owns `symbol`'s book. Async only.
+    size_t workerOf(SymbolId symbol) const { return getThreadIndex(symbol); }
+
     // Async stats (aggregates across all threads)
     uint64_t getSubmittedCount() const;
     uint64_t getProcessedCount() const;
@@ -669,6 +688,7 @@ private:
     std::atomic<bool> sessionEndScheduled_{true};  // see setSessionEndScheduled
     std::unique_ptr<Journal> journal_;
     DurabilityGate           durabilityGate_;
+    std::function<void(size_t)> stepEndHook_;
     // Atomic because Journal's io_uring path fires onDurable_ from its reaper
     // thread. The callback now only publishes here; draining the gate is the
     // order-processing thread's job. See enableDurableClientAcks.

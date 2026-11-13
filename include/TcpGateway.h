@@ -13,7 +13,9 @@
 #include <cstdint>
 #include <cstring>
 #include <chrono>
+#include <memory>
 #include <mutex>
+#include <variant>
 
 // POSIX networking
 #include <sys/socket.h>
@@ -95,6 +97,26 @@ inline GatewayLoginV2 makeGatewayLogin(std::string_view user,
     return frame;
 }
 
+// Ack and Error answer the request named by the V2 header's clientRequestId.
+// TradeNotification and OrderUpdateNotification are execution reports: sent
+// unasked, with clientRequestId 0, to every session that may act for the
+// order's participant, once the journal entry behind them is durable. Only
+// on a gateway with enableExecutionReports() (OrderEngine's) on an async
+// engine. A client reads Type before anything else.
+//
+//   TradeNotification       one fill of the session's order, to the aggressor
+//                           and to each maker. `trade` is the execution, with
+//                           the contra side's order and participant zeroed;
+//                           `orderUpdate` is this order after it: filledQty is
+//                           cumulative, remainingQty the leaves, status
+//                           PartiallyFilled or Filled.
+//   OrderUpdateNotification every status change of the order: Accepted, a
+//                           cancel the engine made (Cancelled for IOC/FOK/
+//                           Market remainders, expiry, kill switch, session end;
+//                           CancelledBySTP), and Rejected for a new order the
+//                           book refused after its Ack.
+//
+// orderId fields are always the client's own id (see gatewayOrderId).
 struct GatewayResponse {
     enum class Type : uint8_t {
         Ack = 1,
@@ -191,6 +213,27 @@ public:
     // the pre-H7 behaviour and takes req.participantId on trust.
     void setParticipantAuth(const ParticipantAuth* auth) { auth_ = auth; }
 
+    // Tell participants what happened to their orders (fills, engine cancels,
+    // post-ack rejects), and hold the books' existing listener (the market-
+    // data feed) to the same rule. Call once, after replay and after the
+    // books' listeners are set, and BEFORE engine.startAsync(): it installs a
+    // listener on every book and the engine's step-end hook.
+    //
+    // A worker never writes a socket. What a request produces goes into one
+    // preallocated queue; at the end of the request the worker syncs the
+    // journal (a no-op under Immediate) and marks the request's events
+    // releasable, or withheld if the journal halted. This thread delivers
+    // them in order. A session that does not read is disconnected when its
+    // queued output reaches kMaxWriteBufBytes; a full queue drops and counts.
+    // Sync engines are untouched: their own DurabilityGate covers them.
+    void enableExecutionReports();
+
+    uint64_t reportsDropped() const { return reportsDropped_.load(std::memory_order_relaxed); }
+    uint64_t reportsWithheld() const { return reportsWithheld_.load(std::memory_order_relaxed); }
+    uint64_t reportsUndelivered() const {
+        return reportsUndelivered_.load(std::memory_order_relaxed);
+    }
+
 private:
     friend struct TcpGatewayFuzzAccess;  // fuzz/fuzz_gateway_engine.cpp drives feedBytes
 
@@ -211,7 +254,54 @@ private:
         // Who this connection proved it is. Default-constructed permits
         // nothing, so a session that never logged in fails closed.
         AuthorizedIdentity identity;
+        // With auth off, the participants this session has claimed: its
+        // execution reports are theirs.
+        std::vector<ParticipantId> claimed;
     };
+
+    // One event a worker produced, or the end of one request (StepEnd).
+    struct Report {
+        enum class Kind : uint8_t { Trade, Update, MarketData, BookVisible, Uncross, StepEnd };
+        Kind kind{Kind::StepEnd};
+        bool durable{false};           // StepEnd: may this request's events be shown?
+        uint32_t worker{0};
+        EventListener* downstream{nullptr};
+        std::variant<Trade, OrderUpdate, MarketDataUpdate, BookVisibleUpdate, UncrossReport> event;
+    };
+
+    // Installed on each book: hands its events to the gateway's queue.
+    struct BookTap : EventListener {
+        TcpGateway* gw{nullptr};
+        SymbolId symbol{0};
+        EventListener* downstream{nullptr};
+        void onTrade(const Trade& t) override { gw->capture(*this, Report::Kind::Trade, t); }
+        void onOrderUpdate(const OrderUpdate& u) override {
+            gw->capture(*this, Report::Kind::Update, u);
+        }
+        void onMarketData(const MarketDataUpdate& u) override {
+            gw->capture(*this, Report::Kind::MarketData, u);
+        }
+        void onBookVisible(const BookVisibleUpdate& u) override {
+            gw->capture(*this, Report::Kind::BookVisible, u);
+        }
+        void onUncross(const UncrossReport& r) override {
+            gw->capture(*this, Report::Kind::Uncross, r);
+        }
+    };
+
+    // An order's cumulative and leaves, as this thread has seen them.
+    struct Leg { Quantity cum{0}; Quantity leaves{0}; };
+
+    template <typename E>
+    void capture(const BookTap& tap, Report::Kind kind, const E& e);
+    void onStepEnd(size_t worker);
+    void pumpReports();
+    void deliver(const Report& r);
+    void deliverTrade(const Trade& t, OrderId own, Side side);
+    void deliverUpdate(const OrderUpdate& u);
+    void sendToParticipant(ParticipantId p, const GatewayResponse& resp);
+    bool serves(const ClientState& state, ParticipantId p) const;
+    void reapOverflowed();
 
     // What one framed request turned out to be. The two payloads are small and
     // a connection sends at most a handful of logins, so they sit side by side
@@ -236,7 +326,8 @@ private:
     // fd, so the caller does the removal once it is done with `state`.
     bool handleLogin(int fd, ClientState& state, const GatewayLoginRequest& login);
     void removeClient(int fd);
-    bool sendResponse(int fd, const GatewayResponse& resp);
+    // `unsolicited`: an execution report, sent with clientRequestId 0.
+    bool sendResponse(int fd, const GatewayResponse& resp, bool unsolicited = false);
     bool decodeFrame(ClientState& state, uint32_t msgLen, DecodedFrame& out,
                      GatewayResponse& errorResp);
     bool isIPAllowed(uint32_t ip) const;
@@ -276,6 +367,18 @@ private:
     static constexpr size_t kMaxWriteBufBytes = 1u << 20;  // 1 MiB
 
     std::function<void()> tick_;
+
+    // Execution reports (enableExecutionReports). The queue is filled by the
+    // workers and drained by the event thread; the rest is event-thread only.
+    // ponytail: one queue for every worker, per-worker rings if it contends.
+    static constexpr size_t kReportQueueSlots = 1u << 15;
+    std::unique_ptr<MpscQueue<Report>> reports_;
+    std::vector<std::unique_ptr<BookTap>> taps_;
+    std::vector<std::vector<Report>> held_;            // per worker, awaiting its StepEnd
+    std::unordered_map<OrderId, Leg> legs_;
+    std::atomic<uint64_t> reportsDropped_{0};
+    std::atomic<uint64_t> reportsWithheld_{0};
+    std::atomic<uint64_t> reportsUndelivered_{0};
 
 public:
     void setIdleTimeout(std::chrono::seconds timeout) { idleTimeout_ = timeout; }

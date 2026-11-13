@@ -96,10 +96,11 @@ bool loadParticipantAuth(const std::string& credPath, bool authDisabled, Partici
     return false;
 }
 
-// Publishes each book's updates from the worker that owns the book, and nowhere
-// else: nothing here reads a book off its own thread (LF-2, MD-11). The ring has
-// one writer at a time because the lock hands it between workers.
-// ponytail: one lock across workers, per-worker rings if it shows in the latency.
+// Publishes each book's updates. They reach it from the order port's event
+// thread, once the journal entry behind them is durable (DA-4): the gateway's
+// execution reports carry it as each book's downstream listener. Nothing here
+// reads a book (LF-2, MD-11). The lock keeps the ring single-writer whatever
+// thread calls.
 struct MarketDataListener : EventListener {
     explicit MarketDataListener(MarketDataPublisher& p) : pub(p) {}
     void onMarketData(const MarketDataUpdate& u) override {
@@ -432,6 +433,12 @@ int main(int argc, char* argv[]) {
         std::cerr << "[MarketData] WARNING: could not open /orderbook_md; no feed\n";
     }
 
+    // Execution reports, and the market-data feed behind them, go out only
+    // once the journal holds what produced them. Installed on the books and
+    // the workers, so before they start.
+    TcpGateway gateway(engine);
+    gateway.enableExecutionReports();
+
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
     engine.setWorkerCores(workerCores);
     engine.startAsync(numThreads, 8192);
@@ -495,7 +502,6 @@ int main(int argc, char* argv[]) {
 
     // ── Order entry ──────────────────────────────────────────────────
     // After replay, so no order races the book being rebuilt, and before Ready.
-    TcpGateway gateway(engine);
     gateway.setBindAddress(gatewayBind);
     gateway.setParticipantAuth(participantAuth.enabled() ? &participantAuth : nullptr);
     if (!gateway.start(gatewayPort)) {

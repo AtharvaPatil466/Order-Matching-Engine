@@ -1111,7 +1111,8 @@ private:
     void setTradingStateLocked(TradingState s, uint32_t tradingDate = 0);
     bool transitionAllowed(TradingState to, uint32_t tradingDate) const;
     // H5: the orders STP takes out before discovery (see the definition).
-    void planAuctionSelfCrosses(std::vector<Order*>& victims) const;
+    AuctionResult planAuctionSelfCrosses(std::vector<Order*>& victims) const;
+    AuctionResult discoverExcluding(const std::vector<Order*>& sortedExcluded) const;
     void stpCancelAuctionOrder(Order* o);
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
     // The volatility breaker's one question, asked of every continuous print

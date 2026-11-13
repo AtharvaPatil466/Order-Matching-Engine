@@ -492,19 +492,30 @@ since neither is journaled and a replay would otherwise number every later order
 `timestamp` that a checkpoint restore re-stamped in bids-then-asks order, which made every
 restored bid older than every ask and cancelled the other leg (MIDS-1).
 
-The pairs are resolved **before** price discovery, not as they meet in the cross. Per
-participant, buys and sells are walked most aggressive first (parked market orders in arrival
-order, then limits in price-time order); every pair that crosses — either side priceless, or
-bid ≥ ask — is resolved by the owner's mode with this mapping. `DecreaseAndCancel` cuts the
+The pairs are resolved **before** price discovery, not as they meet in the cross, and only
+pairs that can meet: **both orders executable at the clearing price** (priceless, or a limit
+at or through it), as continuous STP fires only on orders that would trade. Since the price
+depends on what is cut, the plan is a fixed point: discover the price without the orders cut
+so far; per participant, walk its executable buys and sells most aggressive first (parked
+market orders in arrival order, then limits in price-time order) and resolve each pair by the
+owner's mode with this mapping; repeat until a pass cuts nothing. `DecreaseAndCancel` cuts the
 older order, which is where the cross's repeated decrements always ended. The published
 indicative already excludes these orders, and `uncross()` cancels them (`CancelledBySTP`)
 before it discovers the price, so a participant's own buy and sell can no longer move the
 print or inflate the paired volume (roadmap 1.8-H5, AUCT-3; this closed defect B3).
 
-> `planAuctionSelfCrosses()` and `stpCancelAuctionOrder()` in `src/OrderBook.cpp`
+A pair that merely crosses itself is left alone (MIDS-5). The plan used to cut every pair
+with bid ≥ ask: P's buy 10@101 and sell 100@99 under Q's buy 100@105 lost P's sell, and the
+100-lot cross at 105 — where P's buy@101 cannot trade — became no cross. Now it prints. Any
+two orders that meet in the cross are both executable at its price, so after the plan the
+cross never meets a same-owner pair; the in-loop STP branch that guarded it was never
+executed and is gone (an `assert` stands in its place).
+
+> `planAuctionSelfCrosses()`, `arrivedNoEarlierThan()` and `stpCancelAuctionOrder()` in
+> `src/OrderBook.cpp`
 
 **Status: Deliberate — commented and pinned** (`tests/StpSemanticsTest.cpp`, auction section;
-`tests/AuctionSelfCrossTest.cpp`).
+`tests/AuctionSelfCrossTest.cpp`; `tests/AuctionUncrossRulesTest.cpp`).
 
 ---
 

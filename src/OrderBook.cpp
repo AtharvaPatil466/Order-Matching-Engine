@@ -3037,6 +3037,14 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
 }
 
 // ─── Uncross (Auction) ──────────────────────────────────────────────────────
+
+// Whether `a` arrived no earlier than `b`: the auction's "incoming" order of a
+// self-crossing pair. The one place the uncross asks which of two orders is
+// older. Age is the per-book arrival sequence a checkpoint carries (MIDS-1);
+// two orders on one book never share one, so there are no ties.
+static bool arrivedNoEarlierThan(const Order& a, const Order& b) {
+    return a.arrivalSeq >= b.arrivalSeq;
+}
 // Uses stack-allocated FixedVector to avoid heap allocation during auction.
 
 void OrderBook::uncross() {
@@ -3113,7 +3121,7 @@ void OrderBook::uncrossLocked() {
         return nullptr;
     };
     // Takes an order out of the cross: a parked one by nulling its slot, a
-    // resting one through `inBook` (stpCancelRestingOrder / retireFilled).
+    // resting one through its level (retireFilled).
     auto releaseParked = [&](size_t cursor) { auctionMarketOrders_[cursor] = nullptr; };
 
     // Execute trades at the uncross price
@@ -3137,82 +3145,12 @@ void OrderBook::uncrossLocked() {
 
         if (!buyer || !seller) break;
 
-        // ── C1: mode-aware STP in the auction cross ─────────────────────────
-        // The pre-fix code ignored stpModes_ entirely and always cancelled the
-        // BUYER — an arbitrary side bias — reporting it as a client-initiated
-        // Cancelled.
-        //
-        // An auction has no aggressor: both orders were resting before the
-        // uncross, so CancelIncoming / CancelResting / DecreaseResting have no
-        // literal referent. "Incoming" maps to the LATER-ARRIVING order by
-        // arrivalSeq: price-time is the auction's own ordering, and the newer
-        // order is the one that created the self-cross. Two orders on one book
-        // never share an arrivalSeq, so there are no ties (MIDS-1: this was a
-        // wall-clock timestamp, which a checkpoint restore re-stamped).
-        //
-        // Whose mode applies is unambiguous — checkSMP has already established
-        // both orders belong to the same participant, so the two lookups are
-        // the same lookup.
-        //
-        // H5: planAuctionSelfCrosses already removed every pair that could
-        // meet here (an eligible bid and an eligible ask always cross), before
-        // the price was discovered. This branch is therefore unreachable; it
-        // stays so a self-trade can never print if that invariant breaks.
-        if (checkSMP(*buyer, *seller)) {
-            const STPMode stpMode = getSTPMode(buyer->participantId);
-            const STPResult stp = SelfTradeProtection::check(
-                buyer->participantId, seller->participantId, stpMode,
-                std::min(buyer->remainingQty, seller->remainingQty));
-
-            const bool buyerIsNewer = buyer->arrivalSeq > seller->arrivalSeq;
-            Order*     newer     = buyerIsNewer ? buyer    : seller;
-            OrderList* newerLvl  = buyerIsNewer ? bidLevel : askLevel;
-            FlatPriceMap& newerBk = buyerIsNewer ? bids_   : asks_;
-            size_t     newerCur  = buyerIsNewer ? buyCursor : sellCursor;
-            Order*     older     = buyerIsNewer ? seller   : buyer;
-            OrderList* olderLvl  = buyerIsNewer ? askLevel : bidLevel;
-            FlatPriceMap& olderBk = buyerIsNewer ? asks_   : bids_;
-            size_t     olderCur  = buyerIsNewer ? sellCursor : buyCursor;
-
-            // A null level means a parked market order: it was never in the
-            // book, so it leaves the cross through its slot instead.
-            auto stpCancel = [&](Order* o, OrderList* lvl, FlatPriceMap& bk, size_t cur) {
-                if (lvl) { stpCancelRestingOrder(o, lvl, bk); return; }
-                notifyOrderUpdate(o->id, OrderStatus::CancelledBySTP,
-                                  o->initialQty - o->remainingQty, 0);
-                releaseWorking(*o, o->remainingQty);
-                releaseParked(cur);
-                orderLookup_.erase(o->id);
-                orderPool_.deallocate(o);
-            };
-
-            switch (stp.action) {
-            case STPResult::Action::NoSelfTrade:
-            case STPResult::Action::CancelIncoming:
-                stpCancel(newer, newerLvl, newerBk, newerCur);
-                break;
-            case STPResult::Action::CancelResting:
-                stpCancel(older, olderLvl, olderBk, olderCur);
-                break;
-            case STPResult::Action::CancelBoth:
-                stpCancel(newer, newerLvl, newerBk, newerCur);
-                stpCancel(older, olderLvl, olderBk, olderCur);
-                break;
-            case STPResult::Action::DecreaseResting:
-                if (stp.decreaseAmount >= older->remainingQty) {
-                    stpCancel(older, olderLvl, olderBk, olderCur);
-                } else {
-                    releaseWorking(*older, stp.decreaseAmount);
-                    older->remainingQty -= stp.decreaseAmount;
-                    older->initialQty   -= stp.decreaseAmount;  // not a fill
-                    // Keep visibleQty <= remainingQty or a later fill
-                    // underflows remainingQty to UINT64_MAX.
-                    older->visibleQty = std::min(older->visibleQty, older->remainingQty);
-                }
-                break;
-            }
-            continue;
-        }
+        // No self-match here (MIDS-5): planAuctionSelfCrosses resolved every
+        // same-owner pair executable at this price, and a buyer and seller
+        // that meet here are both executable at it (a parked order, or a
+        // limit at or through the price). The in-loop STP branch that once
+        // stood here was never executed by any test or fuzz run.
+        assert(!checkSMP(*buyer, *seller) && "self-cross plan missed a pair");
 
         Quantity fillQty = std::min({buyer->remainingQty, seller->remainingQty, remainingVolume});
 
@@ -3417,60 +3355,80 @@ void OrderBook::cancelLocOrders() {
 // of 1000 at 99 moved an honest 105 cross to 99, published 1100 paired instead
 // of 100, and were then cancelled unfilled, so they cost their owner nothing.
 //
-// Per participant, its buys and sells are walked most aggressive first —
-// parked market orders in arrival order, then limits in price-time order — and
-// each pair that crosses (either side priceless, or bid >= ask) is resolved by
-// the owner's mode, with the same newer/older mapping the cross has always
-// used: "incoming" is the later arrival (arrivalSeq). DecreaseResting
-// cuts the older order: in the cross it was decremented by the newer order's
-// size, pair after pair, until it was gone. A pair that does not cross ends
-// the walk, since every later pair is less aggressive.
+// MIDS-5: only a pair that can meet is resolved — both orders executable at
+// the clearing price (priceless, or a limit at or through it), as continuous
+// STP fires only on orders that would trade. Crossing each other is not
+// enough: P's buy@101 and sell@99 under Q's buy@105 clear at 105, where P's
+// buy cannot trade, and cutting P's sell voided Q's 100-lot cross.
 //
-// Pure read. Discovery excludes the result; uncross() cancels it first, after
-// which the plan is empty — so the published indicative equals the print.
-// ponytail: allocates a map and per-owner vectors per call; the auction runs
-// once per session and the admin indicative is on demand.
-void OrderBook::planAuctionSelfCrosses(std::vector<Order*>& victims) const {
-    struct Sides { std::vector<Order*> buys, sells; };
-    std::map<ParticipantId, Sides> byOwner;  // ordered: deterministic cancel order
-    auto note = [&](Order* o) {
-        Sides& s = byOwner[o->participantId];
-        (o->side == Side::Buy ? s.buys : s.sells).push_back(o);
-    };
-    for (Order* m : auctionMarketOrders_) note(m);
-    bids_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
-    asks_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
-
+// The price depends on what is cut, so this is a fixed point: discover the
+// price without the orders cut so far, resolve the same-owner pairs
+// executable at it, and repeat until a pass cuts nothing (each pass cuts at
+// least one order, so at most one pass per order). Per participant, its
+// executable buys and sells are walked most aggressive first — parked market
+// orders in arrival order, then limits in price-time order — and each pair is
+// resolved by the owner's mode: "incoming" is the later arrival, ties go to
+// the buyer. DecreaseResting cuts the older order: in the cross it was
+// decremented by the newer order's size, pair after pair, until it was gone.
+//
+// Pure read; returns the discovery without the victims. uncross() cancels
+// them first, after which the plan is empty — so the published indicative
+// equals the print.
+// ponytail: allocates per pass and re-runs discovery per pass; the auction
+// runs once per session and the admin indicative is on demand.
+AuctionResult OrderBook::planAuctionSelfCrosses(std::vector<Order*>& victims) const {
     auto priceless = [](const Order* o) {
         return o->type == OrderType::Market || o->type == OrderType::MOC;
     };
-    for (const auto& [owner, s] : byOwner) {
-        size_t bi = 0, si = 0;
-        while (bi < s.buys.size() && si < s.sells.size()) {
-            Order* buy = s.buys[bi];
-            Order* sell = s.sells[si];
-            if (!priceless(buy) && !priceless(sell) && buy->price < sell->price) break;
+    std::vector<Order*> cut;  // sorted copy of victims, for lookup
+    for (;;) {
+        cut.assign(victims.begin(), victims.end());
+        std::sort(cut.begin(), cut.end());
+        const AuctionResult res = discoverExcluding(cut);
+        if (!res.hasCross) return res;
+        const Price px = res.indicativePrice;
 
-            const bool buyIsNewer = buy->arrivalSeq > sell->arrivalSeq;
-            const STPResult stp = SelfTradeProtection::check(
-                owner, owner, getSTPMode(owner), std::min(buy->remainingQty, sell->remainingQty));
-            bool cutBuy = false, cutSell = false;
-            switch (stp.action) {
-            case STPResult::Action::NoSelfTrade:
-            case STPResult::Action::CancelIncoming:
-                (buyIsNewer ? cutBuy : cutSell) = true;
-                break;
-            case STPResult::Action::CancelResting:
-            case STPResult::Action::DecreaseResting:
-                (buyIsNewer ? cutSell : cutBuy) = true;
-                break;
-            case STPResult::Action::CancelBoth:
-                cutBuy = cutSell = true;
-                break;
+        struct Sides { std::vector<Order*> buys, sells; };
+        std::map<ParticipantId, Sides> byOwner;  // ordered: deterministic cancel order
+        auto note = [&](Order* o) {
+            if (std::binary_search(cut.begin(), cut.end(), o)) return;
+            const bool buy = o->side == Side::Buy;
+            if (!priceless(o) && (buy ? o->price < px : o->price > px)) return;
+            Sides& s = byOwner[o->participantId];
+            (buy ? s.buys : s.sells).push_back(o);
+        };
+        for (Order* m : auctionMarketOrders_) note(m);
+        bids_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
+        asks_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
+
+        const size_t before = victims.size();
+        for (const auto& [owner, s] : byOwner) {
+            size_t bi = 0, si = 0;
+            while (bi < s.buys.size() && si < s.sells.size()) {
+                Order* buy = s.buys[bi];
+                Order* sell = s.sells[si];
+                const bool buyIsNewer = arrivedNoEarlierThan(*buy, *sell);
+                const STPResult stp = SelfTradeProtection::check(
+                    owner, owner, getSTPMode(owner), std::min(buy->remainingQty, sell->remainingQty));
+                bool cutBuy = false, cutSell = false;
+                switch (stp.action) {
+                case STPResult::Action::NoSelfTrade:
+                case STPResult::Action::CancelIncoming:
+                    (buyIsNewer ? cutBuy : cutSell) = true;
+                    break;
+                case STPResult::Action::CancelResting:
+                case STPResult::Action::DecreaseResting:
+                    (buyIsNewer ? cutSell : cutBuy) = true;
+                    break;
+                case STPResult::Action::CancelBoth:
+                    cutBuy = cutSell = true;
+                    break;
+                }
+                if (cutBuy)  { victims.push_back(buy);  ++bi; }
+                if (cutSell) { victims.push_back(sell); ++si; }
             }
-            if (cutBuy)  { victims.push_back(buy);  ++bi; }
-            if (cutSell) { victims.push_back(sell); ++si; }
         }
+        if (victims.size() == before) return res;
     }
 }
 
@@ -3499,8 +3457,11 @@ void OrderBook::stpCancelAuctionOrder(Order* o) {
 AuctionResult OrderBook::discoverUncrossPrice() const {
     // Orders STP takes out before the cross count for nothing (H5).
     std::vector<Order*> selfCrossed;
-    planAuctionSelfCrosses(selfCrossed);
-    std::sort(selfCrossed.begin(), selfCrossed.end());
+    return planAuctionSelfCrosses(selfCrossed);
+}
+
+// Discovery over the book without `selfCrossed` (sorted).
+AuctionResult OrderBook::discoverExcluding(const std::vector<Order*>& selfCrossed) const {
     auto qtyOf = [&](const Order* o) -> Quantity {
         return std::binary_search(selfCrossed.begin(), selfCrossed.end(), o) ? 0 : o->remainingQty;
     };

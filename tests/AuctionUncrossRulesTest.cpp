@@ -82,6 +82,59 @@ TEST(AuctionPriority, CancellingAnMocKeepsTheOthersInArrivalOrderAtTheClose) {
     EXPECT_EQ(b.rec.trades[0].buyOrderId, 2u);
 }
 
+TEST(AuctionSelfCrossPlan, APairThatCannotMeetAtTheClearingPriceIsNotCancelled) {
+    Book b(TradingState::AuctionOpen);
+    b.book.addOrder(1, 1, Side::Buy, 101, 10, OrderType::Limit);   // P, older
+    b.book.addOrder(2, 1, Side::Sell, 99, 100, OrderType::Limit);  // P, newer
+    b.book.addOrder(3, 2, Side::Buy, 105, 100, OrderType::Limit);  // Q
+    const AuctionResult a = b.book.computeAuctionState();
+    EXPECT_EQ(a.indicativePrice, 105);
+    EXPECT_EQ(a.pairedVolume, 100u);
+    b.book.uncross();
+    ASSERT_EQ(b.rec.trades.size(), 1u);
+    EXPECT_EQ(b.rec.trades[0].price, 105);
+    EXPECT_EQ(b.rec.trades[0].quantity, 100u);
+    EXPECT_EQ(b.rec.trades[0].sellOrderId, 2u);
+    EXPECT_EQ(b.rec.trades[0].buyOrderId, 3u);
+    EXPECT_NE(b.book.getOrder(1), nullptr) << "P's buy@101 never trades at 105; it rests";
+    EXPECT_EQ(b.rec.last.count(1) ? b.rec.last[1].status : OrderStatus::Accepted, OrderStatus::Accepted);
+}
+
+TEST(AuctionSelfCrossPlan, APairBothExecutableAtTheClearingPriceIsResolved) {
+    Book b(TradingState::AuctionOpen);
+    b.book.addOrder(1, 10, Side::Buy, 105, 100, OrderType::Limit);
+    b.book.addOrder(2, 20, Side::Sell, 95, 100, OrderType::Limit);
+    b.book.addOrder(3, 99, Side::Buy, 99, 1000, OrderType::Limit);   // older
+    b.book.addOrder(4, 99, Side::Sell, 99, 1000, OrderType::Limit);  // newer: cut
+    b.book.uncross();
+    ASSERT_EQ(b.rec.trades.size(), 1u);
+    EXPECT_EQ(b.rec.trades[0].price, 105);
+    EXPECT_EQ(b.rec.trades[0].quantity, 100u);
+    EXPECT_EQ(b.rec.last[4].status, OrderStatus::CancelledBySTP);
+    EXPECT_NE(b.book.getOrder(3), nullptr);
+}
+
+TEST(AuctionSelfCrossPlan, ACutThatMovesThePriceIsFollowedToItsEnd) {
+    // At the first price (100) P's buy@100 and sell@100 both trade, so the
+    // newer sell is cut. Without it the price moves to 102, where P's
+    // buy@102 and sell@101 are both executable: the newer of those goes too.
+    Book b(TradingState::AuctionOpen);
+    b.book.addOrder(1, 7, Side::Buy, 100, 50, OrderType::Limit);
+    b.book.addOrder(2, 7, Side::Buy, 102, 10, OrderType::Limit);
+    b.book.addOrder(3, 7, Side::Sell, 101, 10, OrderType::Limit);  // newer than #2: cut
+    b.book.addOrder(4, 7, Side::Sell, 100, 50, OrderType::Limit);  // newer than #1: cut
+    b.book.addOrder(5, 8, Side::Buy, 103, 20, OrderType::Limit);
+    b.book.addOrder(6, 9, Side::Sell, 102, 20, OrderType::Limit);
+    const AuctionResult a = b.book.computeAuctionState();
+    b.book.uncross();
+    for (const Trade& t : b.rec.trades) {
+        EXPECT_FALSE(t.buyerId == 7 && t.sellerId == 7) << "self-trade printed";
+        EXPECT_EQ(t.price, a.indicativePrice);
+    }
+    EXPECT_EQ(b.rec.last[4].status, OrderStatus::CancelledBySTP);
+    EXPECT_EQ(b.rec.last[3].status, OrderStatus::CancelledBySTP);
+}
+
 TEST(StaleOnClose, AHaltedCloseCancelsReleasedMocLocAndParkedMarketOrders) {
     Book b(TradingState::Continuous);
     b.book.addOrder(1, 11, Side::Buy, 0, 5, OrderType::MOC);
@@ -106,4 +159,3 @@ TEST(StaleOnClose, AHaltedVolatilityAuctionCancelsItsParkedMarketOrders) {
     EXPECT_EQ(b.book.getOrder(3), nullptr);
     EXPECT_EQ(b.rec.last[3].status, OrderStatus::Cancelled);
 }
-

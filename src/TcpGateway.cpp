@@ -713,10 +713,13 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
 
     // With auth off the claim is all there is: this session hears that
     // participant's execution reports.
+    // By value: OrderRequest is packed, so a reference to one of its fields
+    // (std::find's argument, a ?: of two lvalues) is a misaligned reference.
+    const ParticipantId participant = req.participantId;
     if (!(auth_ && auth_->enabled()) &&
-        std::find(state.claimed.begin(), state.claimed.end(), req.participantId) ==
+        std::find(state.claimed.begin(), state.claimed.end(), participant) ==
             state.claimed.end()) {
-        state.claimed.push_back(req.participantId);
+        state.claimed.push_back(participant);
     }
 
     SubmitResult result = SubmitResult::rejected(RejectReason::EngineStopped);
@@ -726,7 +729,7 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
     // against it buys nothing and would reject clients that never filled the
     // field in — the check above has already established which case this is.
     const ParticipantId requester =
-        (auth_ && auth_->enabled()) ? req.participantId : kAnyParticipant;
+        (auth_ && auth_->enabled()) ? participant : kAnyParticipant;
 
     switch (req.type) {
         case OrderRequest::Type::NewOrder:

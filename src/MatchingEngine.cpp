@@ -1335,12 +1335,11 @@ void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
     // order cut short after real fills ends Cancelled / CancelledBySTP with
     // filledQty > 0 (GTDIFF-4), and a zero-fill STP kill still cannot win (C1).
     if (!ocoActive || !ocoActive->load(std::memory_order_relaxed)) return;
-    if (u.filledQty > 0) {
-        executed.push_back({u.orderId, true});
-    } else if (u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP) {
-        // Not Rejected: a refused duplicate carries the live order's id.
-        executed.push_back({u.orderId, false});
-    }
+    const bool left = u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP;
+    // Not Rejected: a refused duplicate carries the live order's id.
+    if (u.filledQty == 0 && !left) return;
+    std::lock_guard<std::mutex> lock(executedMutex);
+    executed.push_back({u.orderId, u.filledQty > 0});
 }
 
 void MatchingEngine::OcoBookListener::onTrade(const Trade& t) {
@@ -1373,11 +1372,16 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
     // (1) OCO: cancel the siblings of any leg that executed. Drain first so
     // the cancels below (which re-enter the observer with Cancelled updates,
     // drained next time as no-ops) cannot grow the buffer mid-iteration.
-    if (!obs->executed.empty()) {
+    // Events exist only once OCO is active, and it never turns back off.
+    if (ocoActive_.load(std::memory_order_relaxed)) {
         // Swap into the persistent scratch (so a re-entrant push during the
         // cancels below cannot grow the buffer mid-iteration), then clear it
-        // afterwards to retain its capacity for the next cycle.
-        obs->firedScratch.swap(obs->executed);
+        // afterwards to retain its capacity for the next cycle. Under the
+        // buffer's lock: a caller-thread sweep may be appending right now.
+        {
+            std::lock_guard<std::mutex> lock(obs->executedMutex);
+            obs->firedScratch.swap(obs->executed);
+        }
         for (const OcoBookListener::OcoEvent& ev : obs->firedScratch) {
             std::vector<OrderId> siblings;
             {

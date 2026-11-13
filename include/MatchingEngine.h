@@ -895,6 +895,11 @@ private:
         // leg leaving unfilled (any cancel, expiry, STP), which ends its link
         // so a later order reusing the id does not inherit it.
         struct OcoEvent { OrderId id; bool executed; };
+        // Appended under the book's lock by whichever thread ends the order:
+        // the book's worker, or a caller-thread sweep (session-end DAY
+        // cancels, kill switch). Drained by the worker outside that lock, so
+        // it has its own. Only taken while OCO is active.
+        std::mutex executedMutex;
         std::vector<OcoEvent> executed;
         std::vector<Trade>   trades;
         // Persistent drain buffers reused across driveOco cycles. The drain

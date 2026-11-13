@@ -701,11 +701,15 @@ public:
     // there keeps it released; PostClose has cancelled every unreleased one).
     // Returns None, or why it could not be placed: a duplicate id, a type
     // that never rests, a full list or pool, a price the book cannot hold.
+    // arrivalSeq is the order's age when the checkpoint was taken (Order::
+    // arrivalSeq); 0, from a checkpoint written before ages were carried,
+    // draws a fresh one as a new arrival would.
     RejectReason restoreOrder(OrderId orderId, ParticipantId participantId, Side side,
                               Price price, Quantity qty, OrderType type, Price stopPrice,
                               Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
                               Price stopLimitPrice, PegType pegType, Price pegOffset,
-                              Price trailAmount, Quantity minQty, bool hidden);
+                              Price trailAmount, Quantity minQty, bool hidden,
+                              uint64_t arrivalSeq = 0);
 
     // Recovery only: mark a parked stop as already elected, frozen at
     // `stopPrice`, the state a checkpoint found it in (see
@@ -811,6 +815,16 @@ public:
     void restoreNextTradeId(uint64_t next) {
         std::lock_guard<std::mutex> lock(bookLock_);
         if (next > nextTradeId_) nextTradeId_ = next;
+    }
+    // Order ages (Order::arrivalSeq) the same way: the checkpoint records the
+    // next one, and replay restores it and never lowers it.
+    uint64_t nextArrivalLocked() const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        return nextArrival_;
+    }
+    void restoreNextArrival(uint64_t next) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (next > nextArrival_) nextArrival_ = next;
     }
     // So are the prices the dropped trades left: the last trade (a market-vs-
     // market auction crosses at it) and the breaker's reference, which a book
@@ -1313,6 +1327,7 @@ private:
     MatchAlgorithm matchAlgorithm_;
 
     uint64_t nextTradeId_{1};
+    uint64_t nextArrival_{1};   // Order::arrivalSeq's source; a checkpoint carries it
     Price lastTradePrice_{0};
     Quantity lastTradeQty_{0};
     bool priceRangeConfigured_{false};  // setPriceRange, not the first-rest anchor

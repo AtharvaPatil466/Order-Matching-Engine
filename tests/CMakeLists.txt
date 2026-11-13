@@ -412,6 +412,14 @@ enable_assertions(CheckpointRestoreRefusedTest)
 add_test(NAME CheckpointRestoreRefusedTest COMMAND CheckpointRestoreRefusedTest)
 set_tests_properties(CheckpointRestoreRefusedTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# A restart from a checkpoint decides as the engine that wrote it would have:
+# order age, the anchored band, the volatility dwell (round 8).
+add_executable(CheckpointCompleteStateTest CheckpointCompleteStateTest.cpp)
+target_link_libraries(CheckpointCompleteStateTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointCompleteStateTest)
+add_test(NAME CheckpointCompleteStateTest COMMAND CheckpointCompleteStateTest)
+set_tests_properties(CheckpointCompleteStateTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
 add_executable(ReplaceAfterCheckpointTest ReplaceAfterCheckpointTest.cpp)

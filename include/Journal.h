@@ -155,6 +155,10 @@ inline constexpr Quantity SNAPSHOT_ICEBERG_SLICE = 2;
 // sends its peg to the back of that list, which rebuilds it. An older reader
 // finds the order already restored and skips the record.
 inline constexpr Quantity SNAPSHOT_PEG_QUEUE = 4;
+// Above the flags, an order's Snapshot record carries its arrivalSeq, the age
+// an auction's self-cross resolution compares (MIDS-1); restore gives it back
+// instead of a fresh one. 0, which every older record holds, carries none.
+inline constexpr unsigned SNAPSHOT_ARRIVAL_SHIFT = 8;
 
 inline constexpr uint64_t JOURNAL_EPOCH_LEGACY     = 0;  // may hold seeded orders
 inline constexpr uint64_t JOURNAL_EPOCH_NO_SEEDING = 1;  // writer seeded nothing
@@ -226,6 +230,15 @@ struct JournalEntry {
 inline Quantity snapshotCumQty(const JournalEntry& e) {
     return static_cast<Quantity>(e.newPrice);
 }
+
+inline uint64_t snapshotArrivalSeq(const JournalEntry& e) {
+    return e.newQty >> SNAPSHOT_ARRIVAL_SHIFT;
+}
+
+// A book's Counters record also carries, in expiryTime, the book's next
+// arrivalSeq (0: none), so orders after a restart are younger than every
+// restored one by the same margin as live.
+inline uint64_t countersNextArrival(const JournalEntry& e) { return e.expiryTime; }
 
 // An iceberg Snapshot's remaining slice; 0 restores nothing (see ICEBERG_SLICE).
 inline Quantity snapshotIcebergSlice(const JournalEntry& e) {
@@ -416,11 +429,13 @@ public:
                      Quantity displayQty = 0, PegType pegType = PegType::None,
                      Price pegOffset = 0, Price trailAmount = 0, Quantity minQty = 0,
                      bool hidden = false, bool stopElected = false,
-                     Quantity cumQty = 0, Quantity icebergSlice = 0) {
+                     Quantity cumQty = 0, Quantity icebergSlice = 0,
+                     uint64_t arrivalSeq = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Snapshot;
         entry.newQty = (stopElected ? SNAPSHOT_STOP_ELECTED : 0) |
-                       (icebergSlice != 0 ? SNAPSHOT_ICEBERG_SLICE : 0);
+                       (icebergSlice != 0 ? SNAPSHOT_ICEBERG_SLICE : 0) |
+                       (arrivalSeq << SNAPSHOT_ARRIVAL_SHIFT);
         entry.newPrice = static_cast<Price>(cumQty);  // see snapshotCumQty
         entry.timestamp = now();
         entry.orderId = id;
@@ -466,9 +481,10 @@ public:
 
     void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease,
                      Price lastTradePrice = 0, Price referencePrice = 0,
-                     Quantity lastTradeQty = 0) {
+                     Quantity lastTradeQty = 0, uint64_t nextArrival = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Counters;
+        entry.expiryTime = nextArrival;  // see countersNextArrival
         entry.timestamp = now();
         entry.symbolId = symbolId;
         entry.orderId = nextTradeId;

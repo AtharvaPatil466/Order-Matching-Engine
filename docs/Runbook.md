@@ -377,11 +377,12 @@ history. What it keeps:
   (stops, trailing stops, auction market and on-close orders), each list in its
   queue order, which decides which elected stops fire first and which market
   orders an uncross fills first. A stop keeps its election latch, a trailing
-  stop the trigger its trail had ratcheted to, and an iceberg what is left of
-  its displayed slice;
+  stop the trigger its trail had ratcheted to, an iceberg what is left of
+  its displayed slice, and every order its age (`arrivalSeq`), which an
+  auction's self-cross resolution compares;
 - each book's session: a begun session's `PreOpen` with its trading date (0 when
   undated), a halted book's pre-halt state, and any state but `Continuous`;
-- per book, the trade-id counter, the last trade's price and quantity and the
+- per book, the trade-id and arrival counters, the last trade's price and quantity and the
   reference price (the circuit breaker's), so a restored book trips and crosses
   as the one that wrote it would have;
 - per participant per book, the net position and the orders submitted and

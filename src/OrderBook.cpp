@@ -904,7 +904,7 @@ Order* OrderBook::allocateAndRegisterOrder(OrderId orderId, ParticipantId partic
     order->isHidden = hidden || (type == OrderType::Hidden);
     order->isStopTriggered = false;
     order->symbolId = symbolId_;
-    order->timestamp = nowNs();
+    order->arrivalSeq = nextArrival_++;
     order->next = nullptr;
     order->prev = nullptr;
 
@@ -2610,7 +2610,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 
         order->price = newPrice;
         order->remainingQty = newLeaves;
-        order->timestamp = nowNs();
+        order->arrivalSeq = nextArrival_++;
         const Quantity cumBefore = order->cumQty;
 
         // Check if new price crosses — if so, match first
@@ -2663,7 +2663,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             // priority — a growth must not jump the queue it joined smaller.
             removeFromBook(order);
             order->remainingQty = newLeaves;
-            order->timestamp = nowNs();
+            order->arrivalSeq = nextArrival_++;
             if (!addToBook(order)) {  // re-announces: back of the queue, new size
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
                 if (!order->isHidden)
@@ -2958,7 +2958,7 @@ void OrderBook::updatePeggedOrders() {
             const Price oldPrice = order->price;
             removeFromBook(order);
             order->price = newPrice;
-            order->timestamp = nowNs();
+            order->arrivalSeq = nextArrival_++;
             const bool rested = addToBook(order);
             if (!order->isHidden) {
                 notifyMarketData(MarketDataUpdate::Action::Delete, order->side, oldPrice);
@@ -3109,9 +3109,10 @@ void OrderBook::uncrossLocked() {
         // An auction has no aggressor: both orders were resting before the
         // uncross, so CancelIncoming / CancelResting / DecreaseResting have no
         // literal referent. "Incoming" maps to the LATER-ARRIVING order by
-        // timestamp: price-time is the auction's own ordering, and the newer
-        // order is the one that created the self-cross. Ties (equal timestamps)
-        // fall to the buyer, preserving the historical side for that case.
+        // arrivalSeq: price-time is the auction's own ordering, and the newer
+        // order is the one that created the self-cross. Two orders on one book
+        // never share an arrivalSeq, so there are no ties (MIDS-1: this was a
+        // wall-clock timestamp, which a checkpoint restore re-stamped).
         //
         // Whose mode applies is unambiguous — checkSMP has already established
         // both orders belong to the same participant, so the two lookups are
@@ -3127,7 +3128,7 @@ void OrderBook::uncrossLocked() {
                 buyer->participantId, seller->participantId, stpMode,
                 std::min(buyer->remainingQty, seller->remainingQty));
 
-            const bool buyerIsNewer = (buyer->timestamp >= seller->timestamp);
+            const bool buyerIsNewer = buyer->arrivalSeq > seller->arrivalSeq;
             Order*     newer     = buyerIsNewer ? buyer    : seller;
             OrderList* newerLvl  = buyerIsNewer ? bidLevel : askLevel;
             FlatPriceMap& newerBk = buyerIsNewer ? bids_   : asks_;
@@ -3381,7 +3382,7 @@ void OrderBook::cancelLocOrders() {
 // parked market orders in arrival order, then limits in price-time order — and
 // each pair that crosses (either side priceless, or bid >= ask) is resolved by
 // the owner's mode, with the same newer/older mapping the cross has always
-// used: "incoming" is the later arrival, ties go to the buyer. DecreaseResting
+// used: "incoming" is the later arrival (arrivalSeq). DecreaseResting
 // cuts the older order: in the cross it was decremented by the newer order's
 // size, pair after pair, until it was gone. A pair that does not cross ends
 // the walk, since every later pair is less aggressive.
@@ -3411,7 +3412,7 @@ void OrderBook::planAuctionSelfCrosses(std::vector<Order*>& victims) const {
             Order* sell = s.sells[si];
             if (!priceless(buy) && !priceless(sell) && buy->price < sell->price) break;
 
-            const bool buyIsNewer = buy->timestamp >= sell->timestamp;
+            const bool buyIsNewer = buy->arrivalSeq > sell->arrivalSeq;
             const STPResult stp = SelfTradeProtection::check(
                 owner, owner, getSTPMode(owner), std::min(buy->remainingQty, sell->remainingQty));
             bool cutBuy = false, cutSell = false;
@@ -3746,7 +3747,8 @@ RejectReason OrderBook::restoreOrder(OrderId orderId, ParticipantId participantI
                                      Price price, Quantity qty, OrderType type, Price stopPrice,
                                      Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
                                      Price stopLimitPrice, PegType pegType, Price pegOffset,
-                                     Price trailAmount, Quantity minQty, bool hidden) {
+                                     Price trailAmount, Quantity minQty, bool hidden,
+                                     uint64_t arrivalSeq) {
     std::unique_lock<std::mutex> lock(bookLock_);
     if (qty == 0) return RejectReason::InvalidQuantity;
     if (orderLookup_.find(orderId)) return RejectReason::DuplicateOrderId;
@@ -3779,10 +3781,15 @@ RejectReason OrderBook::restoreOrder(OrderId orderId, ParticipantId participantI
     if ((list && list->full()) || (releasedLoc && locActiveIds_.full()))
         return RejectReason::CapacityExhausted;
 
+    const uint64_t counterBefore = nextArrival_;
     Order* order = allocateAndRegisterOrder(orderId, participantId, side, price, qty, type,
                                            stopPrice, displayQty, tif, expiryTime, stopLimitPrice,
                                            pegType, pegOffset, trailAmount, minQty, hidden);
     if (!order) return RejectReason::CapacityExhausted;
+    if (arrivalSeq != 0) {  // the checkpoint's age, not a fresh one
+        order->arrivalSeq = arrivalSeq;
+        nextArrival_ = std::max(counterBefore, arrivalSeq + 1);
+    }
     if (rests && !addToBook(order)) {
         orderLookup_.erase(orderId);
         orderPool_.deallocate(order);

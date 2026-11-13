@@ -473,13 +473,18 @@ cannot slip past it.
 > `src/OrderBook.cpp:1133-1157`; parity between the counter and a brute-force rescan is
 > asserted in `tests/StpOccupancyTest.cpp`.
 
-### Rule 4.4 — In an auction cross, "incoming" means the later-arriving order by timestamp
+### Rule 4.4 — In an auction cross, "incoming" means the later-arriving order
 
 An auction has no aggressor — both orders were resting before the uncross — so
 `CancelIncoming` / `CancelResting` have no literal referent. The engine maps "incoming" to
-the **later-arriving** order by `timestamp`, on the grounds that price-time is the auction's
-own ordering and the newer order is the one that created the self-cross. Equal timestamps
-fall to the buyer.
+the **later-arriving** order, on the grounds that price-time is the auction's own ordering
+and the newer order is the one that created the self-cross. Arrival is `Order::arrivalSeq`, a
+per-book counter drawn when an order is admitted and again whenever it goes to the back of its
+queue (a reprice, a growth, a peg move), so two orders never tie. It is a sequence, not a
+clock: a journal replay regenerates it, and a checkpoint carries each order's value and the
+counter, so a restarted engine resolves the same pair the same way. It was a wall-clock
+`timestamp` that a checkpoint restore re-stamped in bids-then-asks order, which made every
+restored bid older than every ask and cancelled the other leg (MIDS-1).
 
 The pairs are resolved **before** price discovery, not as they meet in the cross. Per
 participant, buys and sells are walked most aggressive first (parked market orders in arrival
@@ -839,11 +844,11 @@ walk past any pegs resting at the touch to find the first non-pegged order (the 
 ponytail note names a per-side best-non-peg tracker as the upgrade path).
 
 When a peg's target differs from its current price, the order is **removed from the book,
-repriced, given a fresh timestamp, and re-inserted** — and insertion appends to the tail of
+repriced, given a fresh arrival sequence, and re-inserted** — and insertion appends to the tail of
 the destination level.
 
 > `updatePeggedOrders()` — `removeFromBook` → `order->price = newPrice` →
-> `order->timestamp = nowNs()` → `addToBook`
+> `order->arrivalSeq = nextArrival_++` → `addToBook`
 > `include/FlatPriceMap.h:146,151` — insertion is `push_back`
 
 **So yes: a repegged order loses time priority, every time it repegs.** A peg that follows a
@@ -1377,9 +1382,9 @@ Pinned by `tests/ReplaceQuantityTest.cpp`.
 
 | Change | Priority |
 |---|---|
-| Price changed | Lost. Removed, repriced, timestamped, matched if it now crosses, then re-rested at the tail. |
+| Price changed | Lost. Removed, repriced, given a fresh arrival sequence, matched if it now crosses, then re-rested at the tail. |
 | Same price, leaves down | **Kept.** In-place reduction. |
-| Same price, leaves the same or up | Lost. Removed and re-added at the tail with a fresh timestamp. |
+| Same price, leaves the same or up | Lost. Removed and re-added at the tail with a fresh arrival sequence. |
 
 A repriced order is **off the book while it matches** and acts as an aggressor. Its display
 entry is removed before the match so its fills surface through the resting maker's execution
@@ -1521,12 +1526,12 @@ at full size. Pinned by `DecreaseAndCancelDecrementsBothOrders` in `tests/StpSem
 on both paths.
 
 The auction still cancels the older order outright: its self-cross plan treats
-`DecreaseResting` like `CancelResting` ([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order-by-timestamp)).
+`DecreaseResting` like `CancelResting` ([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order)).
 
 ### B3 — Auction price discovery runs before auction STP (fixed)
 
 Fixed by roadmap 1.8-H5: self-crossing pairs are resolved before discovery
-([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order-by-timestamp)).
+([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order)).
 Discovery used to count them and STP removed them only in the execution loop, so a
 participant's buy and sell of 1000 at 99 moved an honest 105 cross to 99 and published 1100
 paired instead of 100.
@@ -1582,8 +1587,8 @@ A client-supplied absolute `expiryTime` therefore means two entirely different i
 depending on which standard library the engine was built against. The same GTD order that
 expires correctly on Linux expires immediately, or never, on macOS.
 
-Internal consistency is preserved — `Order::timestamp` uses the same clock, so time priority
-and the auction's newer/older STP mapping are unaffected — so this only bites the one field
+Time priority and the auction's newer/older STP mapping do not read a clock (queue position
+and `Order::arrivalSeq`), so this only bites the one field
 that crosses the API boundary as an absolute value. `setExpiryClock()`
 (`include/MatchingEngine.h:196`) lets a test inject a clock, which is why every expiry test
 passes on both platforms and none of them would catch this.

@@ -963,6 +963,7 @@ void MatchingEngine::leaseSequenceIds(uint64_t through) {
 void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
     if (book && e.orderId != 0) {
         book->restoreNextTradeId(e.orderId);
+        book->restoreNextArrival(countersNextArrival(e));
         book->restorePrices({e.price, e.newPrice, e.newQty});
     }
     if (e.quantity == 0) return;
@@ -2845,7 +2846,7 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
                                        entry.stopPrice, entry.displayQty, entry.timeInForce,
                                        entry.expiryTime, entry.stopLimitPrice, entry.pegType,
                                        entry.pegOffset, entry.trailAmount, entry.minQty,
-                                       entry.hidden);
+                                       entry.hidden, snapshotArrivalSeq(entry));
                 if (why != RejectReason::None) {
                     ++restoreRefusals_;
                     obSink().log(obEvent("checkpoint_restore_refused", LogSeverity::Error)
@@ -3046,6 +3047,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // carries the counters they would have restored, and the prices.
         struct BookCounters {
             SymbolId symbolId; uint64_t nextTradeId; OrderBook::CheckpointPrices prices;
+            uint64_t nextArrival;
         };
         std::vector<BookCounters> counters;
         std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
@@ -3070,8 +3072,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 }
                 const uint64_t next = book->nextTradeIdLocked();
                 const OrderBook::CheckpointPrices prices = book->checkpointPricesLocked();
-                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0)
-                    counters.push_back({symbolId, next, prices});   // books that traded or priced
+                const uint64_t nextArrival = book->nextArrivalLocked();
+                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0 || nextArrival > 1)
+                    counters.push_back({symbolId, next, prices, nextArrival});   // books used
                 if (book->getTradingState() != TradingState::Continuous || book->sessionBegun())
                     states.push_back({symbolId, book->getTradingState(), book->sessionBegun(),
                                       book->sessionDate(), book->preHaltState()});
@@ -3112,7 +3115,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.minQty, order.isHidden,
                                             order.isStopTriggered, order.cumQty,
                                             order.type == OrderType::Iceberg
-                                                ? order.visibleQty : 0);
+                                                ? order.visibleQty : 0,
+                                            order.arrivalSeq);
             }
             // After the orders, which put the pegs back in level order: the
             // order each book's reprice pass moves them in.
@@ -3120,10 +3124,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 snapshotJournal.logPegQueue(id, symbolId);
             // After the orders: each restored order's add sweeps stops at the
             // last trade, which would fire them into a half-restored book.
-            for (const auto& [symbolId, nextTradeId, prices] : counters)
+            for (const auto& [symbolId, nextTradeId, prices, nextArrival] : counters)
                 snapshotJournal.logCounters(symbolId, nextTradeId, 0,
                                             prices.lastTrade, prices.reference,
-                                            prices.lastTradeQty);
+                                            prices.lastTradeQty, nextArrival);
             // After the orders too: their re-adds count as submissions again.
             for (const auto& [symbolId, p] : positions)
                 snapshotJournal.logPosition(symbolId, p.participant, p.netPosition,

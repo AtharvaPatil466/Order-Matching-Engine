@@ -1193,9 +1193,33 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                           Quantity qty, OrderType type, Price stopPrice, Quantity displayQty,
                           TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
                           PegType pegType, Price pegOffset, Price trailAmount,
-                          Quantity minQty, bool hidden,
-                          [[maybe_unused]] bool riskChecksBypassed) {
+                          Quantity minQty, bool hidden, bool riskChecksBypassed) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    const uint64_t arrivalBefore = nextArrival_;
+    const Price referenceBefore = referencePrice_;
+    AddOrderResult result = addOrderLocked(orderId, participantId, side, price, qty, type,
+                                           stopPrice, displayQty, tif, expiryTime,
+                                           stopLimitPrice, pegType, pegOffset, trailAmount,
+                                           minQty, hidden, riskChecksBypassed);
+    // A refused order is not journaled, so it must leave nothing a later
+    // decision reads: replay never sees it. Not an age (a FOK screen refuses
+    // after allocating), or every later order is numbered differently; not
+    // the reference price it seeded before a later screen refused it (a
+    // crossing post-only), which the breaker and the uncross's tie-break read.
+    // A refusal trades nothing and moves no peg, so both are its own doing.
+    if (!std::holds_alternative<OrderId>(result)) [[unlikely]] {
+        nextArrival_ = arrivalBefore;
+        referencePrice_ = referenceBefore;
+    }
+    return result;
+}
+
+AddOrderResult OrderBook::addOrderLocked(OrderId orderId, ParticipantId participantId, Side side,
+                          Price price, Quantity qty, OrderType type, Price stopPrice,
+                          Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                          Price stopLimitPrice, PegType pegType, Price pegOffset,
+                          Price trailAmount, Quantity minQty, bool hidden,
+                          [[maybe_unused]] bool riskChecksBypassed) {
     sweepNow_ = 0;
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
@@ -2480,6 +2504,15 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                               RejectReason& reason, ParticipantId requester) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    const uint64_t arrivalBefore = nextArrival_;
+    const bool applied = cancelReplaceLocked(orderId, newPrice, newQty, reason, requester);
+    // Not journaled when refused, so no age used, as addOrder.
+    if (!applied) [[unlikely]] nextArrival_ = arrivalBefore;
+    return applied;
+}
+
+bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity newQty,
+                                    RejectReason& reason, ParticipantId requester) {
     sweepNow_ = 0;
     reason = RejectReason::OrderNotFound;
 

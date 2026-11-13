@@ -486,7 +486,9 @@ and the newer order is the one that created the self-cross. Arrival is `Order::a
 per-book counter drawn when an order is admitted and again whenever it goes to the back of its
 queue (a reprice, a growth, a peg move), so two orders never tie. It is a sequence, not a
 clock: a journal replay regenerates it, and a checkpoint carries each order's value and the
-counter, so a restarted engine resolves the same pair the same way. It was a wall-clock
+counter, so a restarted engine resolves the same pair the same way. An order the book refuses
+(a FOK screen refuses after allocating) and a replace it refuses give their sequence back,
+since neither is journaled and a replay would otherwise number every later order differently. It was a wall-clock
 `timestamp` that a checkpoint restore re-stamped in bids-then-asks order, which made every
 restored bid older than every ask and cancelled the other leg (MIDS-1).
 

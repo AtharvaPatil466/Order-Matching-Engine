@@ -306,6 +306,17 @@ public:
                      ParticipantId requester = kAnyParticipant);
 
 private:
+    // addOrder and cancelReplace with bookLock_ held; the public ones give a
+    // refusal's arrival sequence back.
+    AddOrderResult addOrderLocked(OrderId orderId, ParticipantId participantId, Side side,
+                                  Price price, Quantity qty, OrderType type, Price stopPrice,
+                                  Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                                  Price stopLimitPrice, PegType pegType, Price pegOffset,
+                                  Price trailAmount, Quantity minQty, bool hidden,
+                                  bool riskChecksBypassed);
+    bool cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity newQty,
+                             RejectReason& reason, ParticipantId requester);
+
     // Roadmap 1.9 I2: tell the engine's reservation ledger that `qty` of this
     // order's working quantity is gone without trading. A fill goes back through
     // onTrade instead, so what is reserved stays the sum of the live orders'

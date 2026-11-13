@@ -3886,6 +3886,13 @@ void OrderBook::restorePegQueue(OrderId orderId) {
     if (at != end) std::rotate(at, at + 1, end);
 }
 
+void OrderBook::restoreLocQueue(OrderId orderId) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    OrderId* const end = locActiveIds_.end();
+    OrderId* const at = std::find(locActiveIds_.begin(), end, orderId);
+    if (at != end) std::rotate(at, at + 1, end);
+}
+
 size_t OrderBook::getBidLevelsCount() const { return bids_.size(); }
 size_t OrderBook::getAskLevelsCount() const { return asks_.size(); }
 

@@ -155,6 +155,10 @@ inline constexpr Quantity SNAPSHOT_ICEBERG_SLICE = 2;
 // sends its peg to the back of that list, which rebuilds it. An older reader
 // finds the order already restored and skips the record.
 inline constexpr Quantity SNAPSHOT_PEG_QUEUE = 4;
+// LOC_QUEUE: the same for the LOC orders a close released into the book, in
+// the order the book tracks them, which is the order PostClose cancels the
+// unfilled ones in. Restore put them back in level order.
+inline constexpr Quantity SNAPSHOT_LOC_QUEUE = 8;
 // Above the flags, an order's Snapshot record carries its arrivalSeq, the age
 // an auction's self-cross resolution compares (MIDS-1); restore gives it back
 // instead of a fresh one. 0, which every older record holds, carries none.
@@ -537,10 +541,10 @@ public:
         appendEntry(entry);
     }
 
-    void logPegQueue(OrderId id, SymbolId symbolId) {
+    void logPegQueue(OrderId id, SymbolId symbolId, Quantity queue = SNAPSHOT_PEG_QUEUE) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Snapshot;
-        entry.newQty = SNAPSHOT_PEG_QUEUE;
+        entry.newQty = queue;
         entry.timestamp = now();
         entry.orderId = id;
         entry.symbolId = symbolId;

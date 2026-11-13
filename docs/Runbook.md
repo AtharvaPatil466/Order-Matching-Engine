@@ -381,7 +381,8 @@ history. What it keeps:
   to back, so a restored level keeps its time priority, then the parked ones
   (stops, trailing stops, auction market and on-close orders), each list in its
   queue order, which decides which elected stops fire first and which market
-  orders an uncross fills first. A stop keeps its election latch, a trailing
+  orders an uncross fills first, and the LOC orders a close released in the
+  order PostClose cancels the unfilled ones. A stop keeps its election latch, a trailing
   stop the trigger its trail had ratcheted to, an iceberg what is left of
   its displayed slice, and every order its age (`arrivalSeq`), which an
   auction's self-cross resolution compares;

@@ -2875,6 +2875,8 @@ size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
             }
             if (book && (entry.newQty & SNAPSHOT_PEG_QUEUE)) {
                 book->restorePegQueue(entry.orderId);
+            } else if (book && (entry.newQty & SNAPSHOT_LOC_QUEUE)) {
+                book->restoreLocQueue(entry.orderId);
             } else if (book && !book->getOrder(entry.orderId)) {
                 // Put back, not re-admitted: see OrderBook::restoreOrder.
                 const RejectReason why =
@@ -3090,7 +3092,7 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         };
         std::vector<BookCounters> counters;
         std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
-        std::vector<std::pair<SymbolId, OrderId>> pegQueue;
+        std::vector<std::pair<SymbolId, OrderId>> pegQueue, locQueue;
         uint64_t lease = 0;
         bool killed = false;
         {
@@ -3131,6 +3133,9 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 });
                 book->forEachPeggedOrderLocked([&](const Order& order) {
                     pegQueue.emplace_back(symbolId, order.id);
+                });
+                book->forEachReleasedLocLocked([&](OrderId id) {
+                    locQueue.emplace_back(symbolId, id);
                 });
                 book->forEachPositionLocked([&](const OrderBook::ParticipantPosition& p) {
                     positions.emplace_back(symbolId, p);
@@ -3183,6 +3188,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
             // order each book's reprice pass moves them in.
             for (const auto& [symbolId, id] : pegQueue)
                 snapshotJournal.logPegQueue(id, symbolId);
+            for (const auto& [symbolId, id] : locQueue)
+                snapshotJournal.logPegQueue(id, symbolId, SNAPSHOT_LOC_QUEUE);
             // After the orders too: their re-adds count as submissions again.
             for (const auto& [symbolId, p] : positions)
                 snapshotJournal.logPosition(symbolId, p.participant, p.netPosition,

@@ -911,6 +911,13 @@ public:
     // A checkpoint's PEG_QUEUE record: the peg goes to the back of the
     // reprice list. Applied in list order, after the orders, they rebuild it.
     void restorePegQueue(OrderId orderId);
+    // The released LOC orders the same way (Journal.h SNAPSHOT_LOC_QUEUE).
+    template <typename Fn>
+    void forEachReleasedLocLocked(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        for (OrderId id : locActiveIds_) fn(id);
+    }
+    void restoreLocQueue(OrderId orderId);
 
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }

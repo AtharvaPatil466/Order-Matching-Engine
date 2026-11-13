@@ -1707,7 +1707,11 @@ void MatchingEngine::settleFill(ParticipantId pid, Side side, Quantity qty) {
 
 void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
                                         double maxDeviationPct, int64_t maxNotional) {
-    if (sym >= MAX_RISK_SYMBOLS) return;
+    // MIDS-12: a limit with nowhere to live used to be dropped silently, so
+    // the symbol traded unchecked. Configuration-time, so it may throw.
+    if (sym >= MAX_RISK_SYMBOLS)
+        throw std::out_of_range("setFatFingerLimits: symbol id " + std::to_string(sym) +
+                                " >= MAX_RISK_SYMBOLS");
     ffMaxQty_[sym].store(maxQty, std::memory_order_relaxed);
     ffMaxDeviationBps_[sym].store(
         static_cast<int64_t>(maxDeviationPct * 10000.0 + 0.5), std::memory_order_relaxed);
@@ -1717,7 +1721,9 @@ void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
 }
 
 void MatchingEngine::setReferencePrice(SymbolId sym, Price px) {
-    if (sym >= MAX_RISK_SYMBOLS) return;
+    if (sym >= MAX_RISK_SYMBOLS)
+        throw std::out_of_range("setReferencePrice: symbol id " + std::to_string(sym) +
+                                " >= MAX_RISK_SYMBOLS");
     refPrice_[sym].store(px, std::memory_order_relaxed);
 }
 

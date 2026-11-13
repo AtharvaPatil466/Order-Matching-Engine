@@ -539,7 +539,9 @@ public:
     // lives in fixed-size arrays indexed by participant/symbol id. submitOrder
     // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue),
     // as do submitModify and submitCancelReplace for their requester;
-    // symbol ids at or above MAX_RISK_SYMBOLS bypass the fat-finger arrays.
+    // symbol ids at or above MAX_RISK_SYMBOLS have no fat-finger slot, so
+    // setFatFingerLimits / setReferencePrice throw std::out_of_range for them
+    // (MIDS-12: they were dropped silently).
     static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // ledger / OTR array bound
     static constexpr size_t MAX_RISK_SYMBOLS = 256;   // fat-finger array bound
 
@@ -572,7 +574,7 @@ public:
                             double maxDeviationPct, int64_t maxNotional);
     // Seed / override the reference price used by the ±deviation band. It is
     // otherwise tracked automatically from the last trade on that symbol.
-    void setReferencePrice(SymbolId sym, Price px);
+    void setReferencePrice(SymbolId sym, Price px);  // throws past MAX_RISK_SYMBOLS
 
     // P2-11 Order-to-trade ratio throttle (per participant, shared limit/window).
     // maxRatio 0 = disabled. A participant whose orders/trades over the rolling

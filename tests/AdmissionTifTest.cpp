@@ -71,3 +71,14 @@ TEST(AdmissionTif, IocAndFokWithDayNeedNoSessionEnd) {
                                      TimeInForce::DAY, 0);
     EXPECT_EQ(day.rejectReason, RejectReason::MissingRequiredField);
 }
+
+// MIDS-12: fat-finger limits for a symbol id past the arrays were dropped
+// without a word, so that symbol traded with no fat-finger check. Setting
+// them is refused loudly instead.
+TEST(AdmissionTif, FatFingerLimitsPastTheSymbolBoundAreRefusedNotDropped) {
+    MatchingEngine e;
+    const SymbolId past = static_cast<SymbolId>(MatchingEngine::MAX_RISK_SYMBOLS);
+    EXPECT_THROW(e.setFatFingerLimits(past, 10, 0.0, 0), std::out_of_range);
+    EXPECT_THROW(e.setReferencePrice(past, PX), std::out_of_range);
+    EXPECT_NO_THROW(e.setFatFingerLimits(past - 1, 10, 0.0, 0));
+}

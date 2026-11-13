@@ -472,6 +472,10 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     if (async_) {
         return;
     }
+    // The gate captures one in-flight request on the caller's thread and the
+    // async ack is given at enqueue; enableDurableClientAcks refuses async for
+    // that reason, so an earlier enable does not survive into it (DA-6).
+    if (durabilityGate_.enabled()) enableDurableClientAcks(false);
     // First, so a bad worker_cores list throws before anything is started.
     const size_t workers = numThreads > 0 ? numThreads : 1;
     std::vector<int> workerCpus = workerCpusFor(workers, workerCores_);

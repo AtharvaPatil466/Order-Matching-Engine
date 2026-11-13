@@ -419,8 +419,17 @@ public:
     // acknowledges at enqueue, before matching has happened at all, so gating
     // the dispatch would leave that ack still undurable and claim a guarantee
     // this does not provide. Refusing is better than half of one.
+    //
+    // Under GroupCommit it is accepted and holds events, but the SubmitResult
+    // is answered before the commit, so durableClientAcks() reports false
+    // (DA-6). startAsync turns the gate off.
     bool enableDurableClientAcks(bool on);
-    bool durableClientAcks() const { return durabilityGate_.enabled(); }
+    // True only when an accepted SubmitResult is on disk: the gate is on, the
+    // engine is sync, and every append syncs before it returns (Immediate).
+    bool durableClientAcks() const {
+        return durabilityGate_.enabled() && !async_ && journal_ &&
+               journal_->syncPolicy() == Journal::SyncPolicy::Immediate;
+    }
 
     // Events held back waiting for a commit. Should sit near zero; a rising
     // value means the journal has stalled and clients are hearing nothing.

@@ -412,6 +412,15 @@ enable_assertions(CheckpointRestoreRefusedTest)
 add_test(NAME CheckpointRestoreRefusedTest COMMAND CheckpointRestoreRefusedTest)
 set_tests_properties(CheckpointRestoreRefusedTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# Property: after a checkpoint restart (B) and a plain-journal restart (C), the
+# rest of a randomized flow gives the same trades, updates and books as the
+# engine that never stopped (A).
+add_executable(CheckpointEquivalenceTest CheckpointEquivalenceTest.cpp)
+target_link_libraries(CheckpointEquivalenceTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointEquivalenceTest)
+add_test(NAME CheckpointEquivalenceTest COMMAND CheckpointEquivalenceTest)
+set_tests_properties(CheckpointEquivalenceTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+
 # A journal entry applied live and refused on replay stops the boot.
 add_executable(ReplayRefusedEntryTest ReplayRefusedEntryTest.cpp)
 target_link_libraries(ReplayRefusedEntryTest PRIVATE OrderMatcher)

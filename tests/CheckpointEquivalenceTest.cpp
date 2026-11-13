@@ -200,10 +200,19 @@ BookState capture(MatchingEngine& e) {
     return s;
 }
 
+// The breaker's band for the run. Off (1e9) leaves every seed in the states the
+// flow drives; kTightBand trips it on this flow's few-tick moves, so stops are
+// elected and latched in a volatility auction and replay has to trip at the
+// same fill as live did. No expiry clock runs, so a tripped book stays in the
+// auction until the flow's own state changes move it.
+constexpr double kBreakerOff = 1e9;
+constexpr double kTightBand = 0.0005;
+double gBreakerThreshold = kBreakerOff;
+
 void setup(MatchingEngine& e) {
     e.addSymbol(S);
     OrderBook* b = e.getOrderBook(S);
-    b->setCircuitBreakerThreshold(1e9);   // the dwell needs the expiry clock
+    b->setCircuitBreakerThreshold(gBreakerThreshold);
     b->setSTPMode(2, STPMode::CancelResting);
     b->setSTPMode(3, STPMode::DecreaseAndCancel);
 }
@@ -341,18 +350,25 @@ bool runSeed(uint64_t seed, size_t nOps, size_t forcedCut) {
 
 int main(int argc, char** argv) {
     const uint64_t first = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1;
-    const uint64_t seeds = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 100;
+    const uint64_t seeds = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 60;
     const size_t ops = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 400;
     const size_t cut = argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 0;   // to bisect a seed
     size_t failed = 0;
-    for (uint64_t seed = first; seed < first + seeds; ++seed)
-        if (!runSeed(seed, ops, cut)) ++failed;
+    for (const double band : {kBreakerOff, kTightBand}) {
+        gBreakerThreshold = band;
+        for (uint64_t seed = first; seed < first + seeds; ++seed) {
+            if (!runSeed(seed, ops, cut)) {
+                std::printf("  (breaker band %g)\n", band);
+                ++failed;
+            }
+        }
+    }
     if (failed != 0) {
-        std::printf("CheckpointEquivalenceTest FAILED: %zu of %llu seeds diverged\n", failed,
-                    static_cast<unsigned long long>(seeds));
+        std::printf("CheckpointEquivalenceTest FAILED: %zu of %llu runs diverged\n", failed,
+                    static_cast<unsigned long long>(2 * seeds));
         return 1;
     }
-    std::printf("CheckpointEquivalenceTest passed: %llu seeds x %zu ops\n",
+    std::printf("CheckpointEquivalenceTest passed: %llu seeds x %zu ops, breaker off and tight\n",
                 static_cast<unsigned long long>(seeds), ops);
     return 0;
 }

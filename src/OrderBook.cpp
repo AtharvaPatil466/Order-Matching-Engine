@@ -3795,6 +3795,13 @@ RejectReason OrderBook::restoreOrder(OrderId orderId, ParticipantId participantI
     return RejectReason::None;
 }
 
+// A trailing stop's reference from its trigger: the ratchet, inverted. A sell
+// trigger floored at 0 says only that the high was at most the trail; taking
+// the trail ratchets the same from here.
+static Price trailRefFor(const Order& o, Price stopPrice) {
+    return o.side == Side::Buy ? stopPrice - o.trailAmount : stopPrice + o.trailAmount;
+}
+
 void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
     std::unique_lock<std::mutex> lock(bookLock_);
     Order** found = orderLookup_.find(orderId);
@@ -3804,8 +3811,12 @@ void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
         return;
     o->isStopTriggered = true;
     // A trailing stop's trigger moved with the price until it was elected;
-    // replay re-derived it from scratch, so put back the one it was elected at.
+    // replay re-derived it from scratch, so put back the one it was elected at,
+    // and the reference it was ratcheted from. Nothing reads the reference
+    // once the stop is elected, but a restored book that differs from the live
+    // one in a field nothing reads today is the next divergence.
     o->stopPrice = stopPrice;
+    if (o->type == OrderType::TrailingStop) o->trailRefPrice = trailRefFor(*o, stopPrice);
 }
 
 void OrderBook::restoreTrailingStop(OrderId orderId, Price stopPrice) {
@@ -3814,10 +3825,7 @@ void OrderBook::restoreTrailingStop(OrderId orderId, Price stopPrice) {
     Order* o = found ? *found : nullptr;
     if (!o || o->type != OrderType::TrailingStop || o->isStopTriggered) return;
     o->stopPrice = stopPrice;
-    // The ratchet, inverted. A sell trigger floored at 0 says only that the
-    // high was at most the trail; taking the trail ratchets the same from here.
-    o->trailRefPrice = o->side == Side::Buy ? stopPrice - o->trailAmount
-                                            : stopPrice + o->trailAmount;
+    o->trailRefPrice = trailRefFor(*o, stopPrice);
 }
 
 void OrderBook::restoreExecutedQty(OrderId orderId, Quantity cumQty) {

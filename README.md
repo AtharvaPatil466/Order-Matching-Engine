@@ -328,6 +328,17 @@ word with `GATEWAY_FLAG_LOGIN` set, carrying `user`/`secret` — sent before the
 first order. A session may then only submit as a participant its credential
 covers, which includes the kill switch. A failed login closes the connection. <!-- claim:gw-login -->
 
+### Order Entry Protocol
+
+Order ids are the client's own and are scoped by participant: the book holds
+`(participantId << 54) | orderId`, so two participants may use the same id on
+one symbol, neither can see nor touch the other's order by id, and a cancel,
+modify or replace names its order by the participant and id it was entered
+with. Every id the port sends back is the client's. A request whose participant
+id is 1024 or more, or whose order id is 2^54 or more, is refused with
+`InvalidFieldValue` whatever its type, the kill switch included.
+<!-- claim:gw-ids-per-participant -->
+
 ### Replication: removed
 `OrderEngine` runs as a single node and recovers from its journal. Primary/backup replication had no fencing, a promoted backup kept applying the old primary's stream, its send blocked the journal commit path and resync only added orders, so it was deleted rather than finished. `--role` / `OB_NODE_ROLE` still refuse to boot, so a deployment that sets one finds out at startup. <!-- claim:repl-refuses-role -->
 

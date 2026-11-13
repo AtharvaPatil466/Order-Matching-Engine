@@ -100,9 +100,12 @@ size_t restoredFrom(const std::string& path, OrderId maxId) {
     restarted.addSymbol(kSym);
     restarted.enableJournal(path);
     restarted.replayJournal();
+    // By the client's id: through TcpGateway the book's id carries the
+    // participant too (MIDS-3).
     size_t n = 0;
-    for (OrderId id = 1; id <= maxId; ++id)
-        if (restarted.getOrderBook(kSym)->getOrder(id)) ++n;
+    restarted.getOrderBook(kSym)->forEachOrder([&](const Order& o) {
+        if (clientOrderId(o.id) >= 1 && clientOrderId(o.id) <= maxId) ++n;
+    });
     return n;
 }
 

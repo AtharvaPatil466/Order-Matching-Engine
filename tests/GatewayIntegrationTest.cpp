@@ -95,12 +95,12 @@ void testBasicOrderFlow() {
     assert(tradeCount.load() == 1);
 
     // Verify book state: sell order should have 20 remaining
-    const Order* sell = book->getOrder(1);
+    const Order* sell = book->getOrder(gatewayOrderId(100, 1));
     assert(sell != nullptr);
     assert(sell->remainingQty == 20);
 
     // Buy order should be fully filled (gone from book)
-    const Order* buy = book->getOrder(2);
+    const Order* buy = book->getOrder(gatewayOrderId(200, 2));
     assert(buy == nullptr);
 
     client.disconnect();
@@ -146,13 +146,14 @@ void testCancelViaGateway() {
 
     // Verify order exists
     auto* book = engine.getOrderBook(0);
-    assert(book->getOrder(1) != nullptr);
+    assert(book->getOrder(gatewayOrderId(100, 1)) != nullptr);
 
     // Cancel it
     OrderRequest cancel{};
     cancel.type = OrderRequest::Type::Cancel;
     cancel.symbolId = 0;
     cancel.orderId = 1;
+    cancel.participantId = 100;   // ids are scoped by participant (MIDS-3)
 
     assert(client.sendOrder(cancel));
     assert(client.recvResponse(resp));
@@ -160,7 +161,7 @@ void testCancelViaGateway() {
 
     // Verify order is gone
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    assert(book->getOrder(1) == nullptr);
+    assert(book->getOrder(gatewayOrderId(100, 1)) == nullptr);
 
     client.disconnect();
     gateway.stop();
@@ -232,7 +233,7 @@ void testMultipleClients() {
     assert(tradeCount.load() == 1);
 
     // Sell order partially filled
-    assert(book->getOrder(1)->remainingQty == 40);
+    assert(book->getOrder(gatewayOrderId(100, 1))->remainingQty == 40);
 
     client1.disconnect();
     client2.disconnect();
@@ -463,7 +464,7 @@ void testGatewayProtocolRejectsUnsupportedVersion() {
     // The malformed version must be rejected before reaching the engine.
     auto* book = engine.getOrderBook(0);
     assert(book != nullptr);
-    assert(book->getOrder(9002) == nullptr);
+    assert(book->getOrder(gatewayOrderId(100, 9002)) == nullptr);
 
     client.disconnect();
     gateway.stop();

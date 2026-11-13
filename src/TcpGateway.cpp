@@ -649,6 +649,8 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
     const char* outOfRange = nullptr;
     if (wireReq.participantId >= kMaxParticipants) {
         outOfRange = "participant id out of range";
+    } else if (wireReq.orderId > kMaxClientOrderId) {
+        outOfRange = "order id out of range";
     }
     if (outOfRange) {
         GatewayResponse refused{};
@@ -659,7 +661,9 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
         sendResponse(fd, refused);
         return;
     }
-    const OrderRequest& req = wireReq;
+    // MIDS-3: from here on the order id is the participant's, not the venue's.
+    OrderRequest req = wireReq;
+    req.orderId = gatewayOrderId(wireReq.participantId, wireReq.orderId);
 
     // H7: req.participantId is a claim the client makes about itself. With a
     // credential store configured, the session has to have logged in and the

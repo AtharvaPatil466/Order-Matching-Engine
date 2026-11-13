@@ -74,7 +74,7 @@ struct Fixture {
     // is the read-only inspection its comment allows.
     bool resting(OrderId id) {
         engine.waitForDrain();
-        return engine.getOrderBook(0)->getOrder(id) != nullptr;
+        return engine.getOrderBook(0)->getOrder(gatewayOrderId(1, id)) != nullptr;
     }
 };
 

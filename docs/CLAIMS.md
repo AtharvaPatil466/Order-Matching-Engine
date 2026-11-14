@@ -91,6 +91,8 @@ source (the gtest file defining the case, the executable's sources, or the
 script ctest runs), and every row to have an entry. It is a text search: it
 cannot show that a test asserts the claim, only catch one that never reaches
 its subject, as `checkpoint-restore` once cited a test with no checkpoint in it.
+A term written `Test=call` is required of that one test, in addition: it pins
+the assertion a row depends on, so editing it out of the test fails the check.
 
 | ID | Each named test's source contains one of |
 |---|---|
@@ -101,14 +103,14 @@ its subject, as `checkpoint-restore` once cited a test with no checkpoint in it.
 | `boot-requires-controls` | `--no-price-band`, `--no-risk-limits`, `--no-journal`, `position_limit` |
 | `capacity-monitor` | `CapacityMonitor` |
 | `checkpoint-atomic` | `rewriteAtomically`, `checkpoint(` |
-| `checkpoint-restore` | `checkpoint(`, `gracefulShutdown(` |
+| `checkpoint-restore` | `checkpoint(`, `gracefulShutdown(`, `CheckpointEquivalenceTest=static_cast<int>(o.status)` |
 | `circuit-breaker` | `VolatilityAuction` |
 | `gtd-replay` | `setExpiryClock` |
 | `gw-auth-required` | `--participant-credentials`, `--no-participant-auth` |
 | `gw-credentials-malformed` | `loadFromFile` |
 | `gw-durable-ack` | `SIGKILL`, `JournalHalted` |
 | `gw-durable-events` | `enableDurableClientAcks` |
-| `gw-exec-reports` | `TradeNotification`, `OrderUpdateNotification` |
+| `gw-exec-reports` | `TradeNotification`, `OrderUpdateNotification`, `GatewayExecutionReportTest=OrderStatus::Triggered` |
 | `gw-ids-per-participant` | `gatewayOrderId`, `kMaxParticipants` |
 | `gw-login` | `sendLogin`, `GATEWAY_FLAG_LOGIN`, `NotOrderOwner` |
 | `gw-proto-compat` | `GATEWAY_PROTOCOL_V2` |

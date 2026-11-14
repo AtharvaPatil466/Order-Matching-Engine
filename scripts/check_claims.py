@@ -116,6 +116,13 @@ def gtest_files(name: str, cpps: list[Path]) -> list[Path]:
 def check_exercised(cid: str, cell: str, terms: list[str], sources, cpps) -> list[str]:
     if not terms:
         return [f"{cid}: no evidence entry in CLAIMS.md naming what its tests must call"]
+    # `Test=call` is required of that test alone, on top of the shared any-of terms.
+    shared = [t for t in terms if "=" not in t]
+    own = {}
+    for t in terms:
+        if "=" in t:
+            test, _, call = t.partition("=")
+            own.setdefault(test, []).append(call)
     errors = []
     for name in re.findall(r"`([^`]+)`", cell):
         if name.startswith("tla:"):
@@ -128,9 +135,12 @@ def check_exercised(cid: str, cell: str, terms: list[str], sources, cpps) -> lis
             errors.append(f"{cid}: `{name}` names missing source {', '.join(absent)}")
             continue
         text = "".join(f.read_text(errors="replace") for f in files)
-        if not any(t in text for t in terms):
+        if not any(t in text for t in shared):
             errors.append(f"{cid}: `{name}` ({', '.join(f.name for f in files)}) "
-                          f"contains none of {', '.join(terms)}")
+                          f"contains none of {', '.join(shared)}")
+        errors += [f"{cid}: `{name}` ({', '.join(f.name for f in files)}) "
+                   f"does not contain `{t}`, which its row requires of it"
+                   for t in own.get(name, []) if t not in text]
     return errors
 
 

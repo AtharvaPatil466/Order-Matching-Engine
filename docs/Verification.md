@@ -155,6 +155,14 @@ were deleted with them.
 - That the C++ does what the spec does. No refinement mapping links the two.
   `Refinement.tla`, which claimed to be one, never parsed and has been
   deleted.
+- Anything about the price band or the volatility breaker. The spec's
+  Replace re-aggresses through the same Match steps as Submit, and since
+  3697f79 so does the code: a replace that crosses goes through the same
+  `match()` and the same per-print band check as a new order (FORMAL-1, where
+  the replace path skipped the breaker, was fixed there and is pinned by
+  `PrintBand.CrossingReplaceDoesNotPrintThroughTheBand`). But neither path's
+  guard is in the spec, so the spec could not have found FORMAL-1 and cannot
+  show it stays fixed; that evidence is the test.
 - Anything at scale: 2 participants, 2 prices, quantities 1–3, 3 orders and 1
   replace per behaviour.
 - Anything about the parts listed under "Not modelled" above.
@@ -180,6 +188,19 @@ route. Books boot in `Continuous`. As in `setTradingStateLocked`, leaving
 an auction state for `Continuous` or `PostClose` is the uncross, and every
 other change prints nothing. The book is abstract (a sequence of quantities
 with no prices), so a crossed book cannot be expressed.
+
+**Not modelled: the cross itself.** The book has no sides, prices, owners
+or priority, and its uncross clears the whole book at one price, which the
+code does not do (the residual rests). So the spec says nothing about price
+discovery (Rule 7.2), allocation (Rule 7.3) or the self-cross plan
+(Rule 4.4: a same-owner pair is resolved only when both orders are
+executable at the clearing price, iterated to a fixed point, since e902d60).
+Those are checked against an independent reference written from the
+rulebook on 40,000 random books (`UncrossOracle.*` in
+`tests/UncrossOracleTest.cpp`) and pinned by `AuctionSelfCrossPlan.*`; no
+TLA+ model of them exists. Adding one means giving `Auction.tla`'s book
+sides, limit prices, owners and arrival order, which is a rewrite of the
+spec rather than an extension.
 
 | Property | Kind | Says | Broken cfg (`BUG`) that must break it |
 |---|---|---|---|

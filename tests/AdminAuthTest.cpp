@@ -145,7 +145,7 @@ int main() {
     // The README promises the token on every endpoint but the two probes, and
     // case 4 alone would pass with any other route served ahead of the check.
     for (const char* path : {"/prometheus", "/otr?participantId=1", "/book?symbolId=0",
-                             "/auction", "/fees", "/risk", "/cat", "/audit?symbolId=0",
+                             "/auction", "/audit?symbolId=0",
                              "/journal/head", "/version",
                              "/chaos/order"}) {
         auto r = httpGet(port, path);
@@ -209,7 +209,7 @@ int main() {
     // ── 9. Fail closed: no token and no explicit opt-out → never binds ──
     // The regression this guards: an operator who forgets to configure a
     // token used to get a fully open admin port serving /book, /otr and
-    // /risk to anyone with network reach. Omitting the token must now be a
+    // /audit to anyone with network reach. Omitting the token must now be a
     // startup failure, not a silent exposure.
     {
         AdminServer unconfigured(engine, 0);

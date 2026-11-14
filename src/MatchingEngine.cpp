@@ -233,9 +233,6 @@ bool MatchingEngine::pushWithBackpressure(size_t threadIndex, const OrderRequest
             bpThresholdFraction_ * requestQueues_[threadIndex]->capacity());
         if (requestQueues_[threadIndex]->approxSize() >= maxDepth) {
             bpRejectCount_.fetch_add(1, std::memory_order_relaxed);
-            if (backpressureCb_) {
-                backpressureCb_(req);
-            }
             return false;
         }
     }
@@ -251,9 +248,6 @@ bool MatchingEngine::pushWithBackpressure(size_t threadIndex, const OrderRequest
     }
 
     droppedCount_.fetch_add(1, std::memory_order_relaxed);
-    if (backpressureCb_) {
-        backpressureCb_(req);
-    }
     return false;
 }
 

@@ -71,9 +71,6 @@ private:
     std::string generateOtrResponse(ParticipantId pid) const;
     std::string generateBookResponse(SymbolId sym) const;
     std::string generateAuctionResponse(SymbolId sym) const;
-    std::string generateFeesResponse(ParticipantId pid) const;
-    std::string generateRiskResponse(uint32_t tier, uint64_t entityId) const;
-    std::string generateCatResponse() const;
     std::string generateAuditResponse(SymbolId sym) const;
     std::string generateJournalHeadResponse() const;
     std::string generateVersionResponse() const;

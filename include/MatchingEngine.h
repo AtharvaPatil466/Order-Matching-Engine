@@ -13,7 +13,6 @@
 #include "LatencyTracker.h"
 #include "RateLimiter.h"
 #include "GraduatedKillSwitch.h"
-#include "IncidentLogger.h"
 #include "CapacityMonitor.h"
 #include "Utils.h"
 #include "BatchRiskValidator.h"
@@ -499,13 +498,6 @@ public:
     uint64_t getSubmittedCount() const;
     uint64_t getProcessedCount() const;
 
-    // Backpressure handling. The callback fires when the engine's
-    // ingress queue is full and a request is being dropped. Note:
-    // `std::function` may heap-allocate when the captured lambda
-    // exceeds the small-buffer threshold — call this once at startup
-    // (not per-connection) to keep the allocation off the hot path.
-    using BackpressureCallback = std::function<void(const OrderRequest&)>;
-    void setBackpressureCallback(BackpressureCallback cb) { backpressureCb_ = std::move(cb); }
     void setMaxPushRetries(uint32_t retries) { maxPushRetries_ = retries; }
     uint64_t getDroppedCount() const { return droppedCount_.load(std::memory_order_relaxed); }
     // Control-plane enqueues that had to wait for ring space. Never indicates a
@@ -522,9 +514,6 @@ public:
     void setRateLimit(uint64_t ratePerSec, uint64_t burstSize) {
         rateLimiter_.setDefaultRate(ratePerSec, burstSize);
     }
-    void setParticipantRateLimit(ParticipantId id, uint64_t ratePerSec, uint64_t burstSize) {
-        rateLimiter_.setParticipantRate(id, ratePerSec, burstSize);
-    }
     RateLimiter& getRateLimiter() { return rateLimiter_; }
     uint64_t getRateLimitedCount() const { return rateLimitedCount_.load(std::memory_order_relaxed); }
 
@@ -534,12 +523,6 @@ public:
     void setBackpressureThreshold(double fraction) { bpThresholdFraction_ = fraction; }
     double getBackpressureThreshold() const { return bpThresholdFraction_; }
     uint64_t getBackpressureRejectCount() const { return bpRejectCount_.load(std::memory_order_relaxed); }
-
-    // Pre-trade risk batching configuration (Phase 1, Week 2)
-    void setRiskBatchSize(size_t size) {
-        riskBatchSize_ = size > 16 ? 16 : (size == 0 ? 1 : size);
-    }
-    size_t getRiskBatchSize() const { return riskBatchSize_; }
 
     // ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ─────────────────────
     // All checks below are O(1), lock-free (atomic ops only) and allocation-free
@@ -611,10 +594,6 @@ public:
     // ─── Phase 4: Graduated Kill Switch ──────────────────────────────
     GraduatedKillSwitch& getKillSwitch() { return killSwitch_; }
     const GraduatedKillSwitch& getKillSwitch() const { return killSwitch_; }
-
-    // ─── Phase 4: Incident Logger ───────────────────────────────────
-    IncidentLogger& getIncidentLogger() { return incidentLogger_; }
-    bool enableIncidentLog(const std::string& path) { return incidentLogger_.open(path); }
 
     // ─── Phase 4: Capacity Monitor ──────────────────────────────────
     // Live in async mode: startAsync() installs the resource-query callbacks
@@ -792,7 +771,6 @@ private:
     // thread-local block allocator in the .cpp (see nextSequenceId).
 
     // Backpressure (Gap 7)
-    BackpressureCallback backpressureCb_;
     uint32_t maxPushRetries_{1000};
     std::atomic<uint64_t> droppedCount_{0};
     // Times a control-plane enqueue had to spin on a full ring (C5 telemetry).
@@ -817,14 +795,12 @@ private:
     std::atomic<bool> checkpointPending_{false};
     size_t checkpointThresholdEntries_{250000};
     size_t checkpointThresholdBytes_{64 * 1024 * 1024};
-    size_t riskBatchSize_{8};
 
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     GraduatedKillSwitch killSwitch_;
     // Books the kill switch halted, so it resumes only those. Under bookMutex_.
     std::vector<SymbolId> killHalted_;
     void syncKillSwitchHalts();
-    IncidentLogger incidentLogger_;
     CapacityMonitor capacityMonitor_;
 
     // Internal helper: push to specific thread's queue with backpressure

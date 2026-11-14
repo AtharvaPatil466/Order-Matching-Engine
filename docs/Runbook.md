@@ -255,9 +255,6 @@ for your replay time.
 | `GET /auction?symbolId=N` | token | Trading state and indicative auction price, paired and imbalance quantity |
 | `GET /audit?symbolId=N` | token | Best bid/ask, spread, 5 levels |
 | `GET /otr?participantId=N` | token | Order and trade counts and order-to-trade ratio, **symbol 0 only** |
-| `GET /fees?participantId=N` | token | Accrued fee (no fee schedule is set by this binary) |
-| `GET /risk?tier=T&entityId=E` | token | Net position at a risk tier (0 Trader … 3 Firm) |
-| `GET /cat` | token | Audit-record count |
 | `GET /journal/head` | token | Whether a journal is on and its sequence number |
 | `GET /version` | token | Git SHA and build time |
 | `GET /chaos/order?...` | token + `X-Chaos-Token` | Submits an order. `{"enabled":false}` unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set |

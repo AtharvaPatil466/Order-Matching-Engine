@@ -93,7 +93,7 @@ bool AdminServer::start() {
     // setAuthDisabled(true).
     if (adminToken_.empty() && !authDisabled_) {
         std::cerr << "[AdminServer] REFUSING TO START: no admin token configured.\n"
-                  << "              The admin port exposes /book, /otr, /risk and\n"
+                  << "              The admin port exposes /book, /otr, /audit and\n"
                   << "              (with OB_CHAOS_INJECT) order injection.\n"
                   << "              Set a token via setAdminToken()/OB_ADMIN_TOKEN, or\n"
                   << "              call setAuthDisabled(true) to run it open on purpose.\n";
@@ -357,15 +357,6 @@ void AdminServer::handleConnection(int clientSocket) {
     } else if (path == "/auction") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateAuctionResponse(sym);
-    } else if (path == "/fees") {
-        ParticipantId pid = parseQueryUInt<ParticipantId>(query, "participantId");
-        body = generateFeesResponse(pid);
-    } else if (path == "/risk") {
-        uint32_t tier = parseQueryUInt<uint32_t>(query, "tier");
-        uint64_t ent = parseQueryUInt<uint64_t>(query, "entityId");
-        body = generateRiskResponse(tier, ent);
-    } else if (path == "/cat") {
-        body = generateCatResponse();
     } else if (path == "/audit") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateAuditResponse(sym);
@@ -380,7 +371,6 @@ void AdminServer::handleConnection(int clientSocket) {
                "\"/metrics\",\"/prometheus\",\"/health\",\"/readyz\","
                "\"/otr?participantId=X\",\"/book?symbolId=Y\","
                "\"/auction?symbolId=Y\",\"/audit?symbolId=Y\","
-               "\"/fees?participantId=X\",\"/risk?tier=T&entityId=E\",\"/cat\","
                "\"/journal/head\",\"/version\"]}";
     }
 
@@ -597,32 +587,6 @@ std::string AdminServer::generateAuctionResponse(SymbolId sym) const {
         << "\"imbalanceQty\":" << a.imbalanceQty << ","
         << "\"imbalanceSide\":\"" << (a.imbalanceSide == Side::Buy ? "buy" : "sell") << "\""
         << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateFeesResponse(ParticipantId pid) const {
-    std::ostringstream oss;
-    oss << "{\"participantId\":" << pid
-        << ",\"accruedFee\":" << engine_.accruedFee(pid) << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateRiskResponse(uint32_t tier, uint64_t entityId) const {
-    std::ostringstream oss;
-    if (tier > 3) {
-        oss << "{\"error\":\"tier must be 0=Trader,1=Strategy,2=Account,3=Firm\"}";
-        return oss.str();
-    }
-    static const char* kTierNames[] = {"Trader", "Strategy", "Account", "Firm"};
-    oss << "{\"tier\":\"" << kTierNames[tier] << "\",\"entityId\":" << entityId
-        << ",\"netPosition\":"
-        << engine_.riskNetPosition(static_cast<RiskTier>(tier), entityId) << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateCatResponse() const {
-    std::ostringstream oss;
-    oss << "{\"auditRecordCount\":" << engine_.auditRecordCount() << "}";
     return oss.str();
 }
 

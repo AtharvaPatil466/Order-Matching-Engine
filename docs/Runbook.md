@@ -11,8 +11,11 @@ through this page would. A block preceded by a `runbook-smoke: skip` marker is
 not run, and the marker says why (it needs systemd, Docker, a real NIC, or it
 is a config file or sample output rather than a command). The script prints
 every block it skips. It also fails if a flag listed in a table here is not in
-`OrderEngine --help`. CI runs it on every push and pull request (the
-`runbook-smoke` job in `.github/workflows/ci.yml`).
+`OrderEngine --help`. The `runbook-smoke` job in `.github/workflows/ci.yml` is
+set to run it on every push and pull request, but that job was added in round 8
+and **has never run**: nothing from that round has been pushed. The script last
+passed in a local `ubuntu:24.04` container. Until the job has run on CI,
+"executed" means executed by hand, as of that local run.
 
 ---
 
@@ -221,16 +224,23 @@ Other environment variables `OrderEngine` reads: `OB_CHAOS_INJECT` and
    `max_price` (§6), before any order exists, and each listed participant's
    position limit: `[Config] Price bands set for <B> of <S> symbols` and
    `[Risk] Position limits set for <N> participant(s)`. Under `--no-price-band`
-   a symbol with no band centres it on its first resting order.
+   a symbol with no band centres it on its first resting order. The default
+   rate limit is applied if `rate_limit.default_rate` and `default_burst` are
+   set (`[Config] Rate limit: ...`).
 5. The journal is opened, a torn final write is cut, and the journal is
-   replayed (§7). The legacy-epoch and unreadable-journal refusals happen here.
+   replayed (§7). The legacy-epoch and unreadable-journal refusals happen here,
+   and so does `replay_entry_refused`: any entry replay cannot apply stops the
+   boot.
 6. The alert webhook is set up if `alert_webhook_url` is set (§6). An
    `https://` URL is refused: the dispatcher has no TLS client, so point it at
-   a local TLS terminator on `http://127.0.0.1`.
-7. The market-data segment `/orderbook_md` opens and every book publishes to
-   it (a failure is a `[MarketData] WARNING` and no feed). Then the worker
-   threads, the GTD/DAY expiry timer and, with `--session-schedule`, the
-   session scheduler start.
+   a local TLS terminator on `http://127.0.0.1`. The session schedule, if one
+   is given, is parsed; a malformed one is fatal.
+7. The market-data segment `/orderbook_md` opens (a failure is a
+   `[MarketData] WARNING` and no feed). Execution reports are switched on; the
+   feed is published from the order port's thread, behind them, once the
+   journal entry behind each update is synced. Then the worker threads, the
+   GTD/DAY expiry timer and, with `--session-schedule`, the session scheduler
+   start.
 8. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
    is a failed bind.
 9. The order port binds: `[Gateway] Order Gateway listening on ADDR:PORT`. A
@@ -252,9 +262,9 @@ for your replay time.
 | `GET /readyz` | none | 200 `{"status":"ready"}`, or 503 before the engine is ready |
 | `GET /metrics` | token | JSON: `submitted`, `processed`, `rateLimited`, `backpressureRejected`, `queueDropped`, `pendingOrders`, `e2eLatency` percentiles in ns |
 | `GET /prometheus` | token | Text exposition of the metrics registry |
-| `GET /book?symbolId=N` | token | 10 levels per side and the last trade |
-| `GET /auction?symbolId=N` | token | Trading state and indicative auction price, paired and imbalance quantity |
-| `GET /audit?symbolId=N` | token | Best bid/ask, spread, 5 levels |
+| `GET /book?symbolId=N` | token | 10 levels per side and the last trade; 503 `journal_halted` while the journal is halted (§7) |
+| `GET /auction?symbolId=N` | token | Trading state and indicative auction price, paired and imbalance quantity; 503 while halted |
+| `GET /audit?symbolId=N` | token | Best bid/ask, spread, 5 levels; 503 while halted |
 | `GET /otr?participantId=N` | token | Order and trade counts and order-to-trade ratio, **symbol 0 only** |
 | `GET /journal/head` | token | Whether a journal is on and its sequence number |
 | `GET /version` | token | Git SHA and build time |
@@ -499,14 +509,24 @@ Boot runs `include/JournalBoot.h` and prints the result: `[Engine] Replayed X of
 - **Replayed nothing.** If the journal holds recoverable entries and replay
   applied none, the engine refuses to start rather than serve an empty book.
 
-The replay count is entries consumed, not entries applied: an entry that
-replays and is refused (a duplicate order id, for one) is still counted.
+The replay count is entries applied. An entry the engine applied when it wrote
+it and replay refuses (a narrower band at the restart, for one) is logged as
+`replay_entry_refused` with its sequence number, and the engine refuses to
+start (`[Engine] FATAL: <n> journal entries ... could not be replayed`). Under
+`--replay-legacy-journal` on a legacy journal it warns and starts instead. A
+cancel that finds no order is not a refusal.
 
 ### Write failures
 
 If a write, flush or sync of the journal fails (a full disk, for one), the
-process prints `[Journal] FATAL: <what> failed for <path>` and aborts. A
-restart replays up to the last whole record. Free space before restarting.
+journal halts: the process prints `[Journal] HALTED: <what> failed for <path>`,
+logs `journal.halted`, and **keeps running with every book frozen**. Every
+request is answered `JournalHalted`, expiry and session transitions stop, and
+`/book`, `/auction` and `/audit` answer 503 (§4). Nothing clears a halt but a
+restart. Free space, then restart: replay restores everything that was
+acknowledged. The one request whose own record failed may have been applied in
+memory before the halt; it was never acknowledged, and the restart drops it
+(MatchingRules Rule 2.7).
 
 Stop the engine before the next section:
 
@@ -523,8 +543,17 @@ grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
 
 `OrderEngine` takes orders on one TCP port, in the native binary protocol
 (`include/TcpGateway.h`): length-prefixed frames, a bare V1 `OrderRequest` or a
-V2 frame with a 24-byte header. Each request gets one answer, Ack or Error;
-nothing else is sent (no fill or cancel reports yet, roadmap 1.9-I7).
+V2 frame with a 24-byte header. Each request gets one answer, Ack or Error.
+Execution reports follow unasked (V2, `clientRequestId` 0): a
+`TradeNotification` to both sides of every fill and an
+`OrderUpdateNotification` to the owner for every status change and for the
+outcome of each cancel, modify and replace (MatchingRules Rule 2.6). They leave
+only after the journal entry behind them is synced. A stop's election is not
+reported until it trades. A report for a participant with no live session is
+dropped and counted (`gateway_reports_undelivered_total`); a session that stops
+reading is disconnected at 1 MiB of queued output. Order ids are scoped by
+participant: a cancel, modify or replace names the participant that entered
+the order.
 
 | Flag | Environment | Meaning |
 |---|---|---|
@@ -541,15 +570,15 @@ participants its credential covers; a failed login closes the connection.
 
 **What an Ack means.** With a journal, the request's entry is on disk (§7). It
 does not mean the book took the order: a reject decided while matching
-(post-only, FOK, a duplicate id, a cancel of an unknown id) still answers Ack.
-Read `/book` to see where an order stands.
+(post-only, FOK, a duplicate id, a cancel of an unknown id) still answers Ack,
+and the execution report that follows says what happened.
 
 A participant's `KillSwitch` message (type 5) cancels all of that
 participant's resting orders. Each cancel is journaled. It is a one-shot sweep,
 not a halt: the participant can send new orders straight away.
 
-Market data goes to the shared-memory segment `orderbook_md`, written by each
-book's worker. There are no L2 snapshots on it, so a subscriber that falls a
+Market data goes to the shared-memory segment `orderbook_md`, written from the
+order port's thread once the journal entry behind each update is synced. There are no L2 snapshots on it, so a subscriber that falls a
 lap behind (`[GAP]` in `MdSubscriber`) has nothing to resync from until it
 restarts.
 
@@ -560,9 +589,9 @@ restarts.
 | Symptom | Where to look | Action |
 |---|---|---|
 | Process exits at start | The `FATAL` line on stderr | Each names its cause and the fix: §3 for flags and config, §8 for the order port, §7 for the journal |
-| An acked order is not on `/book` | The order's type and price | A reject decided while matching still answers Ack (§8) |
+| An acked order is not on `/book` | The execution reports the client received | A reject decided while matching still answers Ack; the outcome follows as an `OrderUpdateNotification` (§8) |
 | `OrderEngine` probes refused for a long time after a restart | Journal size | Replay runs before the admin port opens; check `JournalReplayCLI --stats` on a copy |
-| `[Journal] FATAL: ... failed` and an abort | Disk space, I/O errors | §7 "Write failures" |
+| `[Journal] HALTED: ... failed`, every request answered `JournalHalted` | Disk space, I/O errors | §7 "Write failures": fix the disk and restart |
 | `[Journal] REFUSING TO APPEND` | The repair line in the message | §7; keep a copy of the file before truncating |
 | Webhook alerts never arrive | Startup `[Alert]` line | Only `http://` is delivered; check the sidecar |
 | A client keeps trading after a kill message | Nothing is wrong | The kill is a one-shot cancel, not a halt (§8) |

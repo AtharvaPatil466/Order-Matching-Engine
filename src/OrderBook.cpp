@@ -2152,14 +2152,14 @@ const char* tradingStateName(TradingState s) {
 }
 }  // namespace
 
-void OrderBook::setTradingState(TradingState s) {
+bool OrderBook::setTradingState(TradingState s) {
     std::unique_lock<std::mutex> lock(bookLock_);
-    setTradingStateLocked(s);
+    return setTradingStateLocked(s);
 }
 
-void OrderBook::beginSession(uint32_t tradingDate) {
+bool OrderBook::beginSession(uint32_t tradingDate) {
     std::unique_lock<std::mutex> lock(bookLock_);
-    setTradingStateLocked(TradingState::PreOpen, tradingDate);
+    return setTradingStateLocked(TradingState::PreOpen, tradingDate);
 }
 
 // Decision 7: the session transition table, docs/MatchingRules.md Rule 7.7.
@@ -2191,16 +2191,18 @@ bool OrderBook::transitionAllowed(TradingState to, uint32_t tradingDate) const {
     return false;
 }
 
-// Precondition: bookLock_ held.
-void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
-    if (tradingState_ == s) return;  // no-op transitions don't emit events
+// Precondition: bookLock_ held. False only when the table refuses the edge;
+// a reopen whose elections trip the breaker was applied, and returns true
+// though the book is then in VolatilityAuction.
+bool OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
+    if (tradingState_ == s) return true;  // no-op transitions don't emit events
     if (!replayMode_ && !transitionAllowed(s, tradingDate)) {
         obSink().log(obEvent("trading_state_refused", LogSeverity::Warn)
                          .kv("symbol", (long long)symbolId_)
                          .kv("from", tradingStateName(tradingState_))
                          .kv("to",   tradingStateName(s))
                          .kv("trading_date", (long long)tradingDate));
-        return;
+        return false;
     }
     if (s == TradingState::PreOpen) {
         sessionBegun_ = true;
@@ -2254,6 +2256,17 @@ void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
                 onCloseOrders_.erase_swap(last);  // not in the lookup: just drop it
         }
     }
+    // Continuous trading resumes with the elections the book owes: those
+    // latched while it could not execute them (a breaker trip mid-sweep) and
+    // those the reopening cross printed through. They used to wait for the
+    // next incoming order, which may never come. Replay runs this too, so a
+    // restart elects the same orders at the same transition. Any state may
+    // reach Continuous here; a halt resumed into it owes the same.
+    if (s == TradingState::Continuous) {
+        sweepNow_ = 0;   // this operation's expiry clock, not the last one's
+        runTriggerSweeps(0);
+    }
+    return true;
 }
 
 // Drop `order` from every tracking list that holds a raw pointer to it.

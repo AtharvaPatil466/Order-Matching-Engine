@@ -712,12 +712,12 @@ This is the part a participant needs to know and the part the engine does not te
   execution removes the order and discards the election, silently
   (`src/OrderBook.cpp:1879` → `src/OrderBook.cpp:1843-1846`). The owner is never told their
   stop had already been elected.
-- **Deferral is measured in arriving orders, not in time.** The sweep runs only from
-  `addOrder`, for an order that reaches matching, and from a `cancelReplace` that changes
-  price, both in `Continuous` (Rule 5.8). A newly parked stop or peg, a FOK rejected for
-  liquidity, an order the `minQty` screen finalized, cancels, modifies, same-price replaces,
-  expiry sweeps and uncrosses do **not** drain the backlog. If order flow stops, a latched
-  stop sits latched indefinitely.
+- **Deferral is measured in sweeps, not in time.** The sweep runs from `addOrder`, for an
+  order that reaches matching, from a `cancelReplace` that changes price, both in
+  `Continuous`, and at every transition into `Continuous` (Rule 5.8). A newly parked stop or
+  peg, a FOK rejected for liquidity, an order the `minQty` screen finalized, cancels,
+  modifies, same-price replaces and expiry sweeps do **not** drain a backlog left by the
+  execution budget; the next order or the next reopen does.
 
 **Status: Deliberate — pinned** by `GatewayExecutionReportTest` (`elections`: the
 `Triggered` report arrives before the elected stop's first fill).
@@ -763,6 +763,14 @@ runs them after its finalize step, and so does a `cancelReplace` that changes pr
 repriced order is an aggressor and its prints elect stops like any other. Neither runs them in
 `PreOpen` or an auction state (Rule 7.1).
 
+Every transition into `Continuous` runs them too, after the reopening cross if there is one
+(`setTradingStateLocked`): the open, the end of a volatility auction, a halt resumed into
+`Continuous`. So a stop latched while the book could not execute it, and a stop the reopening
+cross printed through, are elected at the reopen rather than at the next incoming order, and
+pegs reprice against the book the cross left. Their prints face the band like any; if they trip
+the breaker again the engine journals that trip after the transition, as it does for an
+order's. Replay runs the same sweep at the same record.
+
 So the aggressor's own report comes first: its rest or `Filled` update precedes the executions
 of any stop it elected. The sweeps used to run between `match()` and the finalize step. A stop
 elected by the incoming order's own print then matched a book that did not yet hold that
@@ -775,11 +783,14 @@ MATCH-5).
 `Continuous`; the accumulation states, where crossing orders legitimately wait for the
 uncross, pass.
 
-> `runTriggerSweeps()`, its two call sites in `addOrder` and `cancelReplace`, and
+> `runTriggerSweeps()`, its call sites in `addOrder`, `cancelReplace` and
+> `setTradingStateLocked`, and
 > `validateIntegrity()` in `src/OrderBook.cpp`
 
 **Status: Deliberate — commented and pinned.** `tests/StopSweepOrderTest.cpp` (incoming-print
-and replace elections), `tests/IntegrityOracleTest.cpp` (crossed and locked books).
+and replace elections), `tests/IntegrityOracleTest.cpp` (crossed and locked books),
+`tests/PrintBandTest.cpp` (`LatchedElectionsAreCheckedWhenTheyFire`,
+`TheOpeningCrossElectsAtTheOpen`: elections at the reopen).
 
 ---
 
@@ -1129,7 +1140,7 @@ nothing however far it is from the market, and nothing trips in an auction state
 
 **Elections in a tripped sweep are latched, not executed.** Once the book has left
 `Continuous`, the stop and trailing-stop sweeps still latch what the in-band prints elected,
-but execute nothing; the latched elections fire on the first sweep after the reopen, and their
+but execute nothing; the latched elections fire at the reopen itself (Rule 5.8), and their
 prints face the band measured from the reopening print. A stop cascade therefore stops at the
 band (MR-2: one in-band 1-lot trigger used to elect 66 stops and print 33% below the reference
 with the book still `Continuous`; the default 5% market collar, measured from each elected

@@ -530,10 +530,10 @@ public:
     // or ends the session (PostClose).
     // Replay applies what the journal holds without judging it: the engine
     // journals only transitions that were applied.
-    void setTradingState(TradingState s);
+    bool setTradingState(TradingState s);   // false: refused by the table
     // Enter PreOpen for trading date `tradingDate` (days since 1970-01-01;
     // 0 = undated, which PostClose refuses). Same rules as above.
-    void beginSession(uint32_t tradingDate);
+    bool beginSession(uint32_t tradingDate);
     uint32_t sessionDate() const { return sessionDate_; }  // 0 = none/undated
     bool sessionBegun() const { return sessionBegun_; }    // dated or not
     // Safe from any thread: reads publishedState_, the atomic copy the owner
@@ -1113,7 +1113,7 @@ private:
     // Lock-free bodies of uncross() / setTradingState(), so a transition can
     // run the cross under the same bookLock_ as the flip (H4).
     void uncrossLocked();
-    void setTradingStateLocked(TradingState s, uint32_t tradingDate = 0);
+    bool setTradingStateLocked(TradingState s, uint32_t tradingDate = 0);
     bool transitionAllowed(TradingState to, uint32_t tradingDate) const;
     // H5: the orders STP takes out before discovery (see the definition).
     AuctionResult planAuctionSelfCrosses(std::vector<Order*>& victims) const;

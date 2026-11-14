@@ -2666,9 +2666,9 @@ uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
     const auto state = static_cast<TradingState>(req.newQty);
     const auto tradingDate = static_cast<uint32_t>(req.expiryTime);
     if (req.type == OrderRequest::Type::TradingState) {
-        if (state == TradingState::PreOpen) book->beginSession(tradingDate);
-        else book->setTradingState(state);
-        if (book->getTradingState() != state) return 0;  // refused: nothing happened
+        const bool applied = state == TradingState::PreOpen ? book->beginSession(tradingDate)
+                                                            : book->setTradingState(state);
+        if (!applied) return 0;  // refused: nothing happened
     } else {
         book->uncross();
     }
@@ -2677,6 +2677,8 @@ uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
         std::lock_guard<std::mutex> lock(journalMutex_);
         if (req.type == OrderRequest::Type::TradingState) {
             journal_->logTradingState(req.symbolId, state, tradingDate);
+            // A reopen's elections may trip the breaker, as an order's can.
+            logBreakerTrip(req.symbolId, state, book->getTradingState());
         } else {
             journal_->logUncross(req.symbolId);
         }

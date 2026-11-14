@@ -100,8 +100,9 @@ TEST(PrintBand, StopCascadeStopsAtTheBand) {
     }
 }
 
-// Elections latched while the book was in the auction fire after the reopen,
-// and their prints are tested against the reopening reference.
+// Elections latched while the book was in the auction fire at the reopen
+// itself, not at the next incoming order, and their prints are tested against
+// the reopening reference.
 TEST(PrintBand, LatchedElectionsAreCheckedWhenTheyFire) {
     Book b;
     OrderId id = 1;
@@ -114,18 +115,50 @@ TEST(PrintBand, LatchedElectionsAreCheckedWhenTheyFire) {
     ASSERT_TRUE(accepted(b->addOrder(3000, 40, Side::Sell, 0, 1, OrderType::Market)));
     ASSERT_EQ(b->getTradingState(), TradingState::VolatilityAuction);
 
-    ASSERT_TRUE(b->resumeVolatilityAuction());
-    ASSERT_EQ(b->getTradingState(), TradingState::Continuous);
-    const Price reopen = b.reference();
-    ASSERT_GT(reopen, 0);
+    // Still parked as stops: elected (latched) but not executed. One that the
+    // breaker stopped mid-execution is a market order parked for the cross.
+    const auto parkedStops = [&] {
+        int n = 0;
+        for (int i = 0; i < 66; ++i)
+            if (const Order* o = b->getOrder(1000 + i); o && o->type == OrderType::Stop) ++n;
+        return n;
+    };
+    const int latched = parkedStops();
+    ASSERT_GT(latched, 0);
     b.rec.trades.clear();
 
-    // Any order runs the trigger sweep; the latched stops fire here.
-    ASSERT_TRUE(accepted(b->addOrder(id++, 50, Side::Sell, 2 * kRef, 1, OrderType::Limit)));
+    ASSERT_TRUE(b->resumeVolatilityAuction());
+    const Price reopen = b.reference();
+    ASSERT_GT(reopen, 0);
+    EXPECT_LT(parkedStops(), latched) << "the latched elections waited for the next order";
     ASSERT_FALSE(b.rec.trades.empty()) << "the latched elections never fired";
     const Price lo = reopen - reopen / 20;
     for (const Trade& t : b.rec.trades)
         EXPECT_GE(t.price, lo) << "a latched election printed outside the reopened band";
+}
+
+// A stop whose trigger the opening cross printed through is elected at the
+// open, as one an incoming order printed through would be. It used to wait,
+// armed, for the first order after the open.
+TEST(PrintBand, TheOpeningCrossElectsAtTheOpen) {
+    Book b;
+    OrderId id = 1;
+    tradeAtReference(b, id);
+    ASSERT_TRUE(accepted(b->addOrder(id++, 20, Side::Buy, 98000, 10, OrderType::Limit)));
+    ASSERT_TRUE(accepted(b->addOrder(500, 30, Side::Sell, 0, 5, OrderType::Stop, 99500)));
+    b->setTradingState(TradingState::AuctionOpen);
+    ASSERT_TRUE(accepted(b->addOrder(id++, 21, Side::Buy, 99000, 3, OrderType::Limit)));
+    ASSERT_TRUE(accepted(b->addOrder(id++, 22, Side::Sell, 99000, 3, OrderType::Limit)));
+    b.rec.trades.clear();
+
+    b->setTradingState(TradingState::Continuous);   // crosses 3 at 9.90
+    ASSERT_EQ(b->getTradingState(), TradingState::Continuous);
+    EXPECT_EQ(b->getOrder(500), nullptr) << "the stop the open printed through is still armed";
+    Quantity soldByStop = 0;
+    for (const Trade& t : b.rec.trades)
+        if (t.sellOrderId == 500) soldByStop += t.quantity;
+    EXPECT_EQ(soldByStop, 5u);
+    EXPECT_EQ(b.rec.last[500].status, OrderStatus::Filled);
 }
 
 TEST(PrintBand, InBandElectionStillTrades) {

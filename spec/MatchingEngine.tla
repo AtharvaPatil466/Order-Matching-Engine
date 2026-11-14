@@ -30,8 +30,10 @@
 (*                                                                         *)
 (* Not modelled: Market/IOC/FOK/iceberg/hidden orders, the other three STP *)
 (* modes, a replace that changes price and quantity together, auctions,    *)
-(* pro-rata, risk and admission checks, the journal and crash recovery,    *)
-(* and concurrency between symbols or threads.                             *)
+(* pro-rata, risk and admission checks, the price band and volatility      *)
+(* breaker (the code's Submit and Replace share match() and its per-print  *)
+(* band check; the spec has neither), the journal and crash recovery, and  *)
+(* concurrency between symbols or threads.                                 *)
 (*                                                                         *)
 (* Non-vacuity: CONSTANT BUG injects one defect at a time. Each            *)
 (* MatchingEngineBroken*.cfg names one and checks only the property that   *)
@@ -51,6 +53,13 @@
 (*                             resting (MATCH-2) -> NoEmptyRestingOrder    *)
 (*   "replace_keeps_priority"  Replace keeps the old timestamp             *)
 (*                             -> FIFO_Preservation                        *)
+(*   "fill_swap_remove"        a fill that empties a resting order moves   *)
+(*                             its level's last order into its slot        *)
+(*                             -> FIFO_Preservation, reachable only when a *)
+(*                             level three deep is hit, so only at         *)
+(*                             MatchingEngineDeep.cfg bounds               *)
+(*                             (MatchingEngineDeepBrokenSwap.cfg; it       *)
+(*                             PASSES at MatchingEngine.cfg)               *)
 (***************************************************************************)
 
 EXTENDS Integers, Sequences, FiniteSets
@@ -65,7 +74,7 @@ CONSTANTS
 
 ASSUME BUG \in {"none", "no_fifo", "worst_price_first", "aggressor_price",
                 "rest_crossed", "no_stp", "modify_to_zero",
-                "replace_keeps_priority"}
+                "replace_keeps_priority", "fill_swap_remove"}
 
 VARIABLES
     bids,       \* Prices -> Seq(order id), front = oldest
@@ -112,13 +121,22 @@ Contra(o) ==
     LET q == Book(Opposite(orders[o].side))[MatchLevel(o)]
     IN  IF BUG = "no_fifo" /\ Len(q) > 1 THEN q[Len(q)] ELSE q[1]
 
-Drop(q, o) == SelectSeq(q, LAMBDA x : x /= o)
+\* Remove o from queue q, keeping the others in order. With swap (BUG
+\* "fill_swap_remove", on a fill only) the level's last order moves into
+\* o's slot instead: an O(1) erase that reorders the queue, visible only
+\* when a fill empties an order with two or more behind it.
+Drop(q, o, swap) ==
+    IF swap /\ Len(q) > 1
+    THEN LET i    == CHOOSE j \in 1..Len(q) : q[j] = o
+             rest == SubSeq(q, 1, Len(q) - 1)
+         IN  IF i = Len(q) THEN rest ELSE [rest EXCEPT ![i] = q[Len(q)]]
+    ELSE SelectSeq(q, LAMBDA x : x /= o)
 
 \* Book after removing order o from its level.
-WithoutBids(o) == IF orders[o].side = "Buy"
-                  THEN [bids EXCEPT ![orders[o].price] = Drop(@, o)] ELSE bids
-WithoutAsks(o) == IF orders[o].side = "Sell"
-                  THEN [asks EXCEPT ![orders[o].price] = Drop(@, o)] ELSE asks
+WithoutBids(o, swap) == IF orders[o].side = "Buy"
+                        THEN [bids EXCEPT ![orders[o].price] = Drop(@, o, swap)] ELSE bids
+WithoutAsks(o, swap) == IF orders[o].side = "Sell"
+                        THEN [asks EXCEPT ![orders[o].price] = Drop(@, o, swap)] ELSE asks
 
 Init ==
     /\ bids = [p \in Prices |-> <<>>]
@@ -155,8 +173,8 @@ Match ==
                  ![a].filledQty    = @ + fill,
                  ![r].remainingQty = rRem,
                  ![r].filledQty    = @ + fill]
-          /\ bids' = IF rRem = 0 THEN WithoutBids(r) ELSE bids
-          /\ asks' = IF rRem = 0 THEN WithoutAsks(r) ELSE asks
+          /\ bids' = IF rRem = 0 THEN WithoutBids(r, BUG = "fill_swap_remove") ELSE bids
+          /\ asks' = IF rRem = 0 THEN WithoutAsks(r, BUG = "fill_swap_remove") ELSE asks
           /\ aggressor' = IF aRem = 0 THEN 0 ELSE a
           /\ lastTrade' = [aggressorId |-> a, restingId |-> r,
                            price |-> price, qty |-> fill]
@@ -192,8 +210,8 @@ Cancel(o) ==
     /\ Resting(o)
     /\ orders' = [orders EXCEPT ![o].cancelledQty = @ + orders[o].remainingQty,
                                 ![o].remainingQty = 0]
-    /\ bids' = WithoutBids(o)
-    /\ asks' = WithoutAsks(o)
+    /\ bids' = WithoutBids(o, FALSE)
+    /\ asks' = WithoutAsks(o, FALSE)
     /\ lastTrade' = NoTrade
     /\ UNCHANGED <<aggressor, replaces>>
 
@@ -215,8 +233,8 @@ Replace(o, newPrice) ==
     /\ orders' = [orders EXCEPT
            ![o].price     = newPrice,
            ![o].timestamp = IF BUG = "replace_keeps_priority" THEN @ ELSE Now]
-    /\ bids' = WithoutBids(o)
-    /\ asks' = WithoutAsks(o)
+    /\ bids' = WithoutBids(o, FALSE)
+    /\ asks' = WithoutAsks(o, FALSE)
     /\ aggressor' = o
     /\ replaces' = replaces + 1
     /\ lastTrade' = NoTrade

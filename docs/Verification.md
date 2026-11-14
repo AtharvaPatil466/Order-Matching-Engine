@@ -1,6 +1,6 @@
 # TLA+ Verification Report
 
-> **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,796,145 states generated, 2,726,157 distinct, depth 14, complete · each of the seven `MatchingEngineBroken*.cfg` variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`) <!-- claim:tla-matching-engine -->
+> **MatchingEngine.tla** (continuous price-time matching with STP, modify and replace): zero violations at `MatchingEngine.cfg` — 6,982,213 states generated, 2,732,033 distinct, depth 14, complete — and at `MatchingEngineDeep.cfg`, where a fill reaches a level three deep — 29,037,117 generated, 10,637,301 distinct, depth 18, complete · each of the eight broken variants fails with the counterexample its injected bug should produce · checked by CI on every push (`.github/workflows/tla.yml`) <!-- claim:tla-matching-engine -->
 
 > **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22 <!-- claim:tla-auction -->
 
@@ -92,7 +92,7 @@ invariant held vacuously.
 |---|---|---|---|
 | `NoNegativeQuantity` | invariant | No order's remaining, filled or cancelled quantity is negative | — |
 | `NoEmptyRestingOrder` | invariant | Every resting order has quantity left | `MatchingEngineBrokenModify.cfg` (`modify_to_zero`: Modify accepts 0, MATCH-2) |
-| `FIFO_Preservation` | invariant | At every level, queue order is timestamp order | `MatchingEngineBrokenReplace.cfg` (`replace_keeps_priority`) |
+| `FIFO_Preservation` | invariant | At every level, queue order is timestamp order | `MatchingEngineBrokenReplace.cfg` (`replace_keeps_priority`); `MatchingEngineDeepBrokenSwap.cfg` (`fill_swap_remove`, at the deep bound only) |
 | `MatchingConservation` | invariant | For every order, quantity = remaining + filled + cancelled; total filled on buys = total filled on sells | — |
 | `NoCrossedBookAfterStep` | invariant | Best bid < best ask whenever both sides rest. Holds in every state, not only between submissions, because the aggressor is off the book while it matches | `MatchingEngineBrokenCross.cfg` (`rest_crossed`) |
 | `NoSelfTrade` | invariant | No fill has the same participant on both sides | `MatchingEngineBrokenStp.cfg` (`no_stp`) |
@@ -106,39 +106,65 @@ so nothing yet shows that either can fail.
 
 ### Last run
 
-Every number below is from one run on 2026-10-18 of the files in this tree,
-with `spec/tla2tools.jar` (TLC2 version 2026.05.04), 2 workers, on an Apple
-Silicon machine shared with other jobs. CI downloads the jar from the
-tlaplus `v1.8.0` release tag, so its version and timing can differ; the
-distinct-state count of an exhaustive run should not.
+Every number below is from one run on 2026-11-14 of the files in this tree,
+through `spec/check.sh` (deadlock check on) with the tlaplus `v1.8.0` release
+jar CI uses, `-workers auto`, on the Apple Silicon dev box shared with other
+jobs. Distinct-state counts of an exhaustive run are exact; for a broken cfg
+the count when TLC stopped depends on worker scheduling and varies run to run.
 
 ```
 MatchingEngine.cfg
 CONSTANTS MaxOrders = 3, MaxReplaces = 1, Participants = {1, 2},
           Prices = {100, 200}, MaxQty = 3, BUG = "none"
-
 Model checking completed. No error has been found.
-6796145 states generated, 2726157 distinct states found, 0 states left on queue.
+6982213 states generated, 2732033 distinct states found, 0 states left on queue.
 The depth of the complete state graph search is 14.
-Fingerprint collision probability: calculated 6.0E-7, from actual fingerprints 1.5E-6
-Finished in 03min 16s   (exit 0)
+Finished in 23s   (exit 0)
+
+MatchingEngineDeep.cfg
+CONSTANTS MaxOrders = 4, MaxReplaces = 1, Participants = {1, 2},
+          Prices = {100}, MaxQty = 3, BUG = "none"
+Model checking completed. No error has been found.
+29037117 states generated, 10637301 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 18.
+Finished in 01min 54s   (exit 0)
 ```
+
+(2,732,033 is 5,876 more than the 2,726,157 quoted before: the terminal
+`AllDone` step that replaced `-deadlock` clears `lastTrade`, which adds one
+state per finished behaviour that ended on a fill.)
 
 | Broken cfg | TLC result | Distinct states when it stopped | Exit |
 |---|---|---:|---:|
-| `MatchingEngineBroken.cfg` | Action property FIFOExecution is violated | 7,032 | 13 |
-| `MatchingEngineBrokenPrice.cfg` | Action property PricePriority is violated | 8,518 | 13 |
-| `MatchingEngineBrokenExecPrice.cfg` | Action property ExecPriceIsPassive is violated | 645 | 13 |
-| `MatchingEngineBrokenCross.cfg` | Invariant NoCrossedBookAfterStep is violated | 427 | 12 |
-| `MatchingEngineBrokenStp.cfg` | Invariant NoSelfTrade is violated | 355 | 12 |
-| `MatchingEngineBrokenModify.cfg` | Invariant NoEmptyRestingOrder is violated | 84 | 12 |
-| `MatchingEngineBrokenReplace.cfg` | Invariant FIFO_Preservation is violated | 3,435 | 12 |
+| `MatchingEngineBroken.cfg` | Action property FIFOExecution is violated | 4,534 | 13 |
+| `MatchingEngineBrokenPrice.cfg` | Action property PricePriority is violated | 3,709 | 13 |
+| `MatchingEngineBrokenExecPrice.cfg` | Action property ExecPriceIsPassive is violated | 420 | 13 |
+| `MatchingEngineBrokenCross.cfg` | Invariant NoCrossedBookAfterStep is violated | 572 | 12 |
+| `MatchingEngineBrokenStp.cfg` | Invariant NoSelfTrade is violated | 336 | 12 |
+| `MatchingEngineBrokenModify.cfg` | Invariant NoEmptyRestingOrder is violated | 336 | 12 |
+| `MatchingEngineBrokenReplace.cfg` | Invariant FIFO_Preservation is violated | 4,831 | 12 |
+| `MatchingEngineDeepBrokenSwap.cfg` | Invariant FIFO_Preservation is violated | 21,135 | 12 |
 
-With `MaxOrders = 3`, two orders can rest at one level and a third can cross
-both, or two levels can rest on one side and a third can reach both, so FIFO
-selection, price priority, partial fills, sweeps, STP and a re-aggressing
-replace are all reachable (each broken cfg's counterexample is one of those
-interleavings). No larger bound has been run on this spec.
+### What each bound can reach
+
+At `MatchingEngine.cfg` two orders can rest at one level and a third can
+cross both, or two levels can rest on one side and a third can reach both,
+so FIFO selection, price priority, partial fills, sweeps, STP and a
+re-aggressing replace are all reachable. Three orders on one side can also
+rest at one level, so a cancel from the front or middle of a three-deep
+queue is reachable there: a variant that swap-erases on every removal fails
+`FIFO_Preservation` at this bound in 3,204 distinct states (Cancel of the
+front of `<<1, 2, 3>>` leaves `<<3, 2>>`). What it cannot reach is a fill
+against a level three deep: that needs a fourth order. So a defect on the
+fill path that only shows with two orders behind the one filled, such as
+`BUG = "fill_swap_remove"` (a fill that empties an order swap-erases it),
+**passes** `MatchingEngine.cfg` — the run covers all 2,732,033 states — and is
+found only at `MatchingEngineDeep.cfg`: one price and four orders, so three
+rest and a fourth sweeps them (a 3-lot through three 1-lots, a fill in the
+middle of a partially filled queue, a replace to the back with orders on both
+sides). Price priority across levels stays `MatchingEngine.cfg`'s job. A
+two-price, four-order bound was not run: one price at four orders already
+takes two minutes.
 
 ### Earlier figures
 
@@ -164,7 +190,7 @@ were deleted with them.
   guard is in the spec, so the spec could not have found FORMAL-1 and cannot
   show it stays fixed; that evidence is the test.
 - Anything at scale: 2 participants, 2 prices, quantities 1–3, 3 orders and 1
-  replace per behaviour.
+  replace per behaviour (4 orders at one price in `MatchingEngineDeep.cfg`).
 - Anything about the parts listed under "Not modelled" above.
 
 ## Auction.tla
@@ -256,6 +282,8 @@ from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 |------|---------|
 | `spec/MatchingEngine.tla` | Continuous price-time matching with STP, Modify and Replace (section above) |
 | `spec/MatchingEngine.cfg` | The bounds CI checks (MaxOrders=3, MaxReplaces=1) |
+| `spec/MatchingEngineDeep.cfg` | One price, MaxOrders=4: a fill reaches a level three deep |
+| `spec/MatchingEngineDeepBrokenSwap.cfg` | A fill swap-erases: fails at the deep bound, passes at `MatchingEngine.cfg` |
 | `spec/MatchingEngineBroken*.cfg` | Seven non-vacuity variants, one injected bug each; CI requires each to fail on its property |
 | `spec/MpscQueue.tla` | MPSC ring: no item invented or duplicated, per-producer FIFO, every item eventually consumed |
 | `spec/EngineConsumer.tla` | Worker loop wake-up protocol (`MatchingEngine::workerLoop`): no item invented or duplicated, every item eventually consumed, no lost wake-up (deadlock) |

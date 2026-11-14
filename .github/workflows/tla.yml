@@ -15,9 +15,12 @@ name: TLA+ Model Checking
 #                        registerOco, mapParticipant, setRiskTierLimits or
 #                        setPositionLimit, so it never executes this code.
 #
-# MatchingEngine.tla is checked at MatchingEngine.cfg (a few minutes), and
-# each of its seven MatchingEngineBroken*.cfg variants must fail with the
-# counterexample its injected bug produces. Auction.tla's AuctionBrokenEdge.cfg
+# MatchingEngine.tla is checked at MatchingEngine.cfg (about a minute) and at
+# MatchingEngineDeep.cfg (one price, four orders: a fill reaches a level
+# three deep; about two minutes), and each of its eight broken variants must
+# fail with the counterexample its injected bug produces;
+# MatchingEngineDeepBrokenSwap.cfg's bug passes at MatchingEngine.cfg.
+ Auction.tla's AuctionBrokenEdge.cfg
 # and AuctionBrokenDate.cfg (an illegal session transition) and
 # AuctionBrokenHalt.cfg (a halt that resumes to Continuous from a closing
 # auction) must fail the same way.
@@ -79,6 +82,10 @@ jobs:
         working-directory: spec
         run: ./check.sh MatchingEngine
 
+      - name: Check MatchingEngine at queue depth three (MatchingEngineDeep.cfg, ~2 min)
+        working-directory: spec
+        run: ./check.sh MatchingEngine MatchingEngineDeep.cfg
+
       - name: Non-vacuity checks (each injected MatchingEngine / Auction bug must be caught)
         working-directory: spec
         run: |
@@ -106,6 +113,7 @@ jobs:
           MatchingEngine MatchingEngineBrokenStp.cfg Invariant NoSelfTrade is violated
           MatchingEngine MatchingEngineBrokenModify.cfg Invariant NoEmptyRestingOrder is violated
           MatchingEngine MatchingEngineBrokenReplace.cfg Invariant FIFO_Preservation is violated
+          MatchingEngine MatchingEngineDeepBrokenSwap.cfg Invariant FIFO_Preservation is violated
           Auction AuctionBrokenEdge.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenDate.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenHalt.cfg Invariant NoReopenAfterClose is violated

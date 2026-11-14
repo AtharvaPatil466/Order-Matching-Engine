@@ -167,7 +167,9 @@ for r in $CO_RATES; do
 done
 run cold-cache     "${PIN[@]}" "$PROD/benchmarks/ColdCacheBenchmark" --orders "$CC_ORDERS" --seed 7
 run codec          "${PIN[@]}" "$PROD/benchmarks/BinaryCodecBenchmark"
-run sustained-400k "$PROD/benchmarks/SustainedLoadTest" --rate 400000 --threads 4 --duration "$SUSTAIN_SEC"
+# 400k/s is a stress point that may exceed what the box serves: recorded (its
+# output says whether the engine kept up) without failing the run (PERF-2).
+record sustained-400k "$PROD/benchmarks/SustainedLoadTest" --rate 400000 --threads 4 --duration "$SUSTAIN_SEC" || true
 run sustained-50k  "$PROD/benchmarks/SustainedLoadTest" --rate 50000 --threads 4 --duration "$SUSTAIN_SEC"
 run stress         "$PROD/tests/StressTest"
 run memory-probe   "$PROD/benchmarks/MemoryProbe"

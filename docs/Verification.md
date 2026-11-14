@@ -6,6 +6,28 @@
 
 > **New specs (2026-05-28)**: Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
 
+## Deadlock checking
+
+`spec/check.sh` runs TLC with its deadlock check on (it used to pass
+`-deadlock`, which turned the check off for every spec). A state with no
+successor fails the run with `Deadlock reached` (exit 11). A spec whose
+behaviours legitimately end says so with an explicit terminal step, and each
+terminal step is as narrow as the end it describes:
+
+| Spec | Terminal step | Why behaviours end | Kind |
+|---|---|---|---|
+| `MatchingEngine.tla` | `AllDone`: every order submitted, none resting, no aggressor | `MaxOrders` is spent | bound (modelling artefact) |
+| `Auction.tla` | `BudgetSpent`: `eventCount = MaxEvents` | the event budget is spent; with budget left every state has a move on the table | bound (modelling artefact) |
+| `EngineConsumer.tla` | `Idle`: every item consumed, worker parked, no wake pending | the producers are done; the worker waits for ever, as `workerLoop` does | real end (quiescence) |
+| `Oco.tla` | `Done`: no leg live | every leg is resolved | real end |
+| `MpscQueue.tla`, `Risk.tla`, `SnapshotLocked.tla` | none needed | some action is always enabled | — |
+
+Without the terminal steps, TLC reported a deadlock in exactly those three
+specs, each at the end named above, and nothing else. `EngineConsumerBroken.cfg`
+shows the check has teeth: with the worker sampling its wake counter after the
+empty check instead of before it, a push in that window is lost and TLC stops
+with `Deadlock reached` (the worker asleep on a non-empty queue).
+
 ## MatchingEngine.tla
 
 ### What it models
@@ -193,7 +215,8 @@ from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 | `spec/MatchingEngine.cfg` | The bounds CI checks (MaxOrders=3, MaxReplaces=1) |
 | `spec/MatchingEngineBroken*.cfg` | Seven non-vacuity variants, one injected bug each; CI requires each to fail on its property |
 | `spec/MpscQueue.tla` | MPSC ring: no item invented or duplicated, per-producer FIFO, every item eventually consumed |
-| `spec/EngineConsumer.tla` | Worker loop: no item invented or duplicated, every item eventually consumed |
+| `spec/EngineConsumer.tla` | Worker loop wake-up protocol (`MatchingEngine::workerLoop`): no item invented or duplicated, every item eventually consumed, no lost wake-up (deadlock) |
+| `spec/EngineConsumerBroken.cfg` | Non-vacuity variant: wake counter sampled after the empty check; CI requires `Deadlock reached` |
 | `spec/Snapshot.tla` / `spec/SnapshotLocked.tla` | Torn-snapshot prevention |
 | `spec/Auction.tla` | Session state machine through the enforced transition table, order admission per state, uncross (section above) |
 | `spec/Auction.cfg`, `spec/AuctionBroken*.cfg` | The bounds CI checks; four broken variants CI requires to fail |

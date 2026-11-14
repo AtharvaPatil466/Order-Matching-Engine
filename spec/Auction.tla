@@ -196,6 +196,14 @@ ReopeningUncross ==
     /\ Step("Continuous", 0)
     /\ UNCHANGED eventCount
 
+\* The event budget is spent. Every state has a move on the table (any
+\* state can halt, a halt resumes or closes), so only the bound ends a
+\* behaviour; this stuttering step says so, and TLC's deadlock check still
+\* fails any state with budget left and nothing enabled.
+BudgetSpent ==
+    /\ eventCount = MaxEvents
+    /\ UNCHANGED vars
+
 Next ==
     \/ SubmitAccumulate
     \/ SubmitContinuousRest
@@ -204,6 +212,7 @@ Next ==
     \/ \E to \in States :
            \E d \in (IF to = "PreOpen" THEN 0..MaxDate ELSE {0}) : Transition(to, d)
     \/ ReopeningUncross
+    \/ BudgetSpent
 
 \* No fairness on anything else: a halt, or a closed book, may persist.
 Spec == Init /\ [][Next]_vars /\ WF_vars(ReopeningUncross)

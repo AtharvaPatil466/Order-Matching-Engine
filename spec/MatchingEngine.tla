@@ -221,6 +221,18 @@ Replace(o, newPrice) ==
     /\ replaces' = replaces + 1
     /\ lastTrade' = NoTrade
 
+\* Every order has been submitted and none is left: the behaviour ends here
+\* (the step clears lastTrade, then repeats as a self-loop). A state with
+\* orders resting always has a Cancel; an in-flight aggressor always has
+\* Match, StpCancelIncoming or Rest. TLC's deadlock check fails any other
+\* state with nothing enabled.
+AllDone ==
+    /\ Len(orders) = MaxOrders
+    /\ aggressor = 0
+    /\ BidLevels = {} /\ AskLevels = {}
+    /\ lastTrade' = NoTrade
+    /\ UNCHANGED <<bids, asks, orders, aggressor, replaces>>
+
 Next ==
     \/ \E pt \in Participants, s \in Sides, p \in Prices, q \in 1..MaxQty :
            Submit(pt, s, p, q)
@@ -231,6 +243,7 @@ Next ==
            \/ Cancel(o)
            \/ \E q \in 0..MaxQty : Modify(o, q)
            \/ \E p \in Prices : Replace(o, p)
+    \/ AllDone
 
 Spec == Init /\ [][Next]_vars
 

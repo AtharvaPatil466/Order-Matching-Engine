@@ -19,6 +19,11 @@ name: TLA+ Model Checking
 # AuctionBrokenHalt.cfg (a halt that resumes to Continuous from a closing
 # auction) must fail the same way.
 #
+# EngineConsumerBroken.cfg (the worker samples its wake counter after the
+# empty check) must stop with "Deadlock reached": TLC's deadlock check is on
+# for every spec (spec/check.sh), and each spec that legitimately ends says
+# so with an explicit terminal step.
+#
 # A dedicated step also runs the Auction NON-VACUITY variant
 # (AuctionBroken.cfg, BUG = "no_reopen") and asserts that TLC reports a
 # counterexample to VolatilityEventuallyReopens — proving the liveness
@@ -91,6 +96,7 @@ jobs:
           Auction AuctionBrokenEdge.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenDate.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenHalt.cfg Invariant NoReopenAfterClose is violated
+          EngineConsumer EngineConsumerBroken.cfg Error: Deadlock reached.
           EOF
           exit "$fail"
 

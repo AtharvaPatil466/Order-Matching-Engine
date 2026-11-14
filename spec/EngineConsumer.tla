@@ -13,19 +13,38 @@
 \* "queue is empty" check and its descent into wait(), a producer can
 \* push and signal. atomic::wait(value) defends against this by
 \* returning immediately if the atomic's current value differs from
-\* `value` — but only if `value` was sampled after the previous successful
-\* pop (or after the previous wake). The model checks that the actual
-\* sampling discipline used by workerLoop is sufficient.
+\* `value` — but only if `value` was sampled BEFORE the empty check: after
+\* the previous successful pop, or after the previous wake, as workerLoop
+\* does (observedWake is loaded at the top of the loop, after each pop and
+\* after each wait; the failed pop and the wait are separate steps). The
+\* model checks that this sampling discipline is sufficient.
+\*
+\* Not modelled: the Shutdown request and the workersShouldStop_ backstop,
+\* the checkpoint cut (holdForCut), the spin/yield phase before parking
+\* (it only delays the wait), and memory ordering: every step is
+\* sequentially consistent, while the C++ loads and waits are relaxed.
+\*
+\* Termination: once every item is consumed the worker parks for good.
+\* That idle state is the only accepted end (Idle below); TLC's deadlock
+\* check fails any other state with nothing enabled, which is what a lost
+\* wake-up looks like when the producers are done.
+\*
+\* Non-vacuity: CONSTANT BUG
+\*   "snapshot_at_sleep"  the worker samples wakeCount after its empty
+\*                        check, just before wait(): a push in between is
+\*                        lost -> "Deadlock reached" (EngineConsumerBroken)
 \*
 \* The MPSC queue itself is modeled abstractly as a sequence here; its
-\* internal correctness is proven separately by MpscQueue.tla.
+\* internal correctness is checked separately by MpscQueue.tla.
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
+CONSTANT BUG    \* "none" in EngineConsumer.cfg; see the header
+
+ASSUME BUG \in {"none", "snapshot_at_sleep"}
+
 \* --- Bounded model ----------------------------------------------------------
-\* Default model: small enough for sub-second TLC runs. The 3-producer
-\* variant (7 items total) was validated separately at ~22k distinct
-\* states, also clean.
+\* 2 producers x 2 items: sub-second TLC runs.
 Producers == {"p1", "p2"}
 Inbox     == [p1 |-> <<"a", "b">>, p2 |-> <<"c", "d">>]
 MaxItems  == 4
@@ -36,14 +55,15 @@ VARIABLES
     queue,              \* Seq of items currently in the MPSC queue
     wakeCount,          \* shared atomic; producers increment, consumer reads
     inbox,              \* per-producer pending items
-    consumerState,      \* "running" or "sleeping"
-    consumerObserved,   \* the wakeCount snapshot the consumer is sleeping on
+    consumerState,      \* "running", "idle" (pop failed) or "sleeping"
+    consumerObserved,   \* observedWake: the value wait() will be passed
     consumerLog         \* items popped, in pop order
 
 vars == <<queue, wakeCount, inbox, consumerState, consumerObserved, consumerLog>>
 
 \* --- Init -------------------------------------------------------------------
 
+\* observedWake is loaded before the loop starts.
 Init ==
     /\ queue = << >>
     /\ wakeCount = 0
@@ -55,10 +75,9 @@ Init ==
 \* --- Producer ---------------------------------------------------------------
 
 \* A producer's atomic step: append to queue, increment wakeCount.
-\* (The C++ code does push -> fetch_add(release) -> notify_one. The model
-\* collapses these into one atomic step because TLA+ atomicity is
-\* per-action; what matters is that the increment is visible before
-\* anything else runs.)
+\* (The C++ code does push -> fetch_add -> notify_one. The model collapses
+\* these into one step; the increment follows the publish, which is the
+\* order that matters.)
 ProducerPush(p) ==
     /\ Len(inbox[p]) > 0
     /\ queue' = Append(queue, Head(inbox[p]))
@@ -68,10 +87,7 @@ ProducerPush(p) ==
 
 \* --- Consumer ---------------------------------------------------------------
 
-\* Consumer in "running" state with non-empty queue: pop one item.
-\* The C++ code, after a successful pop, refreshes observedWake to the
-\* current wakeCount (line 277). We model that here: observedWake is
-\* updated to reflect a value at-or-after this pop.
+\* A successful pop, then observedWake = load(wakeCount).
 ConsumerPop ==
     /\ consumerState = "running"
     /\ Len(queue) > 0
@@ -80,30 +96,25 @@ ConsumerPop ==
     /\ consumerObserved' = wakeCount
     /\ UNCHANGED <<wakeCount, inbox, consumerState>>
 
-\* Consumer in "running" with empty queue decides to sleep: it snapshots
-\* wakeCount (this is the value passed to atomic::wait) and transitions
-\* to sleeping. The snapshot is taken AFTER the empty check, modeling
-\* the C++ flow where observedWake is loaded on the empty path before
-\* calling wait(observedWake).
-\*
-\* CRITICAL: this is where the protocol's correctness lives. If we
-\* snapshotted observedWake BEFORE the empty check (say, at the top of
-\* the loop), a producer pushing between the check and the snapshot
-\* could be missed. Snapshotting AFTER the check means a producer push
-\* in that window also bumps wakeCount, and the resulting sleep snapshot
-\* will already be > consumerObserved, so the WakeUp action fires
-\* immediately.
-ConsumerSleep ==
+\* The pop fails: the queue is empty. Nothing is sampled here.
+ConsumerFindEmpty ==
     /\ consumerState = "running"
     /\ Len(queue) = 0
-    /\ consumerObserved' = wakeCount
+    /\ consumerState' = "idle"
+    /\ UNCHANGED <<queue, wakeCount, inbox, consumerObserved, consumerLog>>
+
+\* wait(observedWake) with the value sampled before the empty check. A push
+\* since then has moved wakeCount past it, so ConsumerWake fires at once.
+\* Under BUG the value is sampled here instead, after the check.
+ConsumerSleep ==
+    /\ consumerState = "idle"
     /\ consumerState' = "sleeping"
+    /\ consumerObserved' = IF BUG = "snapshot_at_sleep" THEN wakeCount
+                                                       ELSE consumerObserved
     /\ UNCHANGED <<queue, wakeCount, inbox, consumerLog>>
 
-\* Sleeping consumer wakes when wakeCount has moved past its observed
-\* snapshot. atomic::wait(value) returns when the underlying atomic !=
-\* value; in this model, the moment wakeCount > consumerObserved, the
-\* WakeUp action becomes ENABLED.
+\* atomic::wait(value) returns once the atomic != value; then
+\* observedWake = load(wakeCount).
 ConsumerWake ==
     /\ consumerState = "sleeping"
     /\ wakeCount > consumerObserved
@@ -111,19 +122,31 @@ ConsumerWake ==
     /\ consumerObserved' = wakeCount
     /\ UNCHANGED <<queue, wakeCount, inbox, consumerLog>>
 
+\* Everything produced has been consumed and the worker is parked with no
+\* wake pending: the behaviour ends here.
+Idle ==
+    /\ \A p \in Producers : Len(inbox[p]) = 0
+    /\ Len(queue) = 0
+    /\ consumerState = "sleeping"
+    /\ wakeCount = consumerObserved
+    /\ UNCHANGED vars
+
 \* --- Next + Fairness --------------------------------------------------------
 
 Next ==
     \/ \E p \in Producers : ProducerPush(p)
     \/ ConsumerPop
+    \/ ConsumerFindEmpty
     \/ ConsumerSleep
     \/ ConsumerWake
+    \/ Idle
 
 \* Weak fairness on every action: a producer with work eventually pushes;
-\* the consumer eventually pops, sleeps, or wakes.
+\* the consumer eventually pops, gives up, sleeps, or wakes.
 Fairness ==
     /\ \A p \in Producers : WF_vars(ProducerPush(p))
     /\ WF_vars(ConsumerPop)
+    /\ WF_vars(ConsumerFindEmpty)
     /\ WF_vars(ConsumerSleep)
     /\ WF_vars(ConsumerWake)
 
@@ -135,7 +158,7 @@ TypeOK ==
     /\ wakeCount \in 0..(MaxItems + 1)
     /\ consumerObserved \in 0..(MaxItems + 1)
     /\ consumerObserved <= wakeCount
-    /\ consumerState \in {"running", "sleeping"}
+    /\ consumerState \in {"running", "idle", "sleeping"}
 
 \* SAFETY: every popped item came from some producer.
 RangeOf(s) == { s[i] : i \in 1..Len(s) }

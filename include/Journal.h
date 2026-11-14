@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Types.h"
+#include <bit>
 #include "FaultInjector.h"
 #include "Metrics.h"
 #include "StructuredLog.h"
@@ -254,6 +255,26 @@ inline constexpr ParticipantId KILL_SWITCH_RELEASED = 2;
 inline bool countersKillSwitch(const JournalEntry& e, bool& engaged) {
     if (e.orderId != 0 || e.participantId == 0) return false;
     engaged = e.participantId == KILL_SWITCH_ENGAGED;
+    return true;
+}
+
+// An engine record (orderId 0) with participantId 0, quantity 0 (what an older
+// reader skips) and newQty GRADUATED_KILL_MARK carries one piece of the graduated
+// kill switch (MatchingEngine::getKillSwitch), its kind in displayQty. A Begin
+// starts the whole state, and the records after it add to it: a Throttle
+// (participant in minQty, fraction's bits in price), a SymbolHalt or a
+// SwitchHaltedBook (a book the switch halted, so releasing it resumes the book)
+// in symbolId, a GlobalHalt. Written on every change and by a checkpoint while
+// anything is set, so a restart keeps the participant and symbol scopes.
+inline constexpr Quantity GRADUATED_KILL_MARK = 0x4752414455415445ULL;  // "GRADUATE"
+enum class GraduatedKillRecord : uint8_t {
+    Begin = 1, Throttle = 2, SymbolHalt = 3, GlobalHalt = 4, SwitchHaltedBook = 5
+};
+inline bool countersGraduatedKill(const JournalEntry& e, GraduatedKillRecord& kind) {
+    if (e.orderId != 0 || e.participantId != 0 || e.quantity != 0 ||
+        e.newQty != GRADUATED_KILL_MARK)
+        return false;
+    kind = static_cast<GraduatedKillRecord>(e.displayQty);
     return true;
 }
 
@@ -542,6 +563,19 @@ public:
         entry.entryType = JournalEntry::Type::Counters;
         entry.timestamp = now();
         entry.participantId = engaged ? KILL_SWITCH_ENGAGED : KILL_SWITCH_RELEASED;
+        appendEntry(entry);
+    }
+
+    void logGraduatedKill(GraduatedKillRecord kind, SymbolId symbolId = 0,
+                          ParticipantId participant = 0, double fraction = 0.0) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Counters;
+        entry.timestamp = now();
+        entry.newQty = GRADUATED_KILL_MARK;
+        entry.displayQty = static_cast<Quantity>(kind);
+        entry.symbolId = symbolId;
+        entry.minQty = participant;
+        entry.price = std::bit_cast<Price>(fraction);
         appendEntry(entry);
     }
 

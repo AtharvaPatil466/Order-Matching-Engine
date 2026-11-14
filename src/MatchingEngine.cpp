@@ -163,6 +163,57 @@ void lowerCurrentThreadPriority() {
 MatchingEngine::MatchingEngine() {
     ensureDefaultSymbol();
     killSwitch_.setHaltFunction([this] { syncKillSwitchHalts(); });
+    killSwitch_.setChangeFunction([this] { journalGraduatedKill(); });
+}
+
+// Book before journal, as a checkpoint takes them. A record appended to a
+// halted journal is refused and the change stays in memory only.
+void MatchingEngine::journalGraduatedKill() {
+    std::lock_guard<std::mutex> books(bookMutex_);   // killHalted_
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (!journal_) return;
+    writeGraduatedKill(*journal_, killSwitch_.persistentState(), killHalted_);
+    journal_->flush();
+}
+
+void MatchingEngine::writeGraduatedKill(Journal& journal,
+                                        const GraduatedKillSwitch::PersistentState& state,
+                                        const std::vector<SymbolId>& switchHalted) {
+    journal.logGraduatedKill(GraduatedKillRecord::Begin);
+    for (const auto& [participant, fraction] : state.throttles)
+        journal.logGraduatedKill(GraduatedKillRecord::Throttle, 0, participant, fraction);
+    for (SymbolId s : state.haltedSymbols)
+        journal.logGraduatedKill(GraduatedKillRecord::SymbolHalt, s);
+    if (state.globalHalt) journal.logGraduatedKill(GraduatedKillRecord::GlobalHalt);
+    for (SymbolId s : switchHalted)
+        journal.logGraduatedKill(GraduatedKillRecord::SwitchHaltedBook, s);
+}
+
+// ponytail: each record rebuilds the switch's state, O(records^2) per state
+// written; a handful of throttles and halts at most.
+void MatchingEngine::restoreGraduatedKill(const JournalEntry& e, GraduatedKillRecord kind) {
+    std::lock_guard<std::mutex> books(bookMutex_);
+    GraduatedKillSwitch::PersistentState state = killSwitch_.persistentState();
+    switch (kind) {
+    case GraduatedKillRecord::Begin:
+        state = {};
+        killHalted_.clear();
+        break;
+    case GraduatedKillRecord::Throttle:
+        state.throttles.emplace_back(static_cast<ParticipantId>(e.minQty),
+                                     std::bit_cast<double>(e.price));
+        break;
+    case GraduatedKillRecord::SymbolHalt:
+        state.haltedSymbols.push_back(e.symbolId);
+        break;
+    case GraduatedKillRecord::GlobalHalt:
+        state.globalHalt = true;
+        break;
+    case GraduatedKillRecord::SwitchHaltedBook:
+        killHalted_.push_back(e.symbolId);
+        break;
+    }
+    killSwitch_.restoreState(state);
 }
 
 // GW-9: make the books say what the graduated kill switch says. A book it
@@ -973,6 +1024,7 @@ void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
     // The flag only: the sweep's cancels are journaled records of their own.
     if (bool engaged = false; countersKillSwitch(e, engaged))
         killSwitchActive_.store(engaged, std::memory_order_release);
+    if (GraduatedKillRecord kind{}; countersGraduatedKill(e, kind)) restoreGraduatedKill(e, kind);
     if (e.quantity == 0) return;
     uint64_t cur = sequenceLease_.load(std::memory_order_relaxed);
     while (cur < e.quantity &&
@@ -3171,6 +3223,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         std::vector<std::pair<SymbolId, OrderId>> pegQueue, locQueue;
         uint64_t lease = 0;
         bool killed = false;
+        GraduatedKillSwitch::PersistentState graduated;
+        std::vector<SymbolId> switchHalted;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
             if (cut) pauseWorkersForCut();
@@ -3184,6 +3238,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 lease = sequenceLease_.load(std::memory_order_acquire);
                 killed = killSwitchActive_.load(std::memory_order_acquire);
             }
+            graduated = killSwitch_.persistentState();
+            switchHalted = killHalted_;   // under bookMutex_
             for (SymbolId symbolId : symbolIds_) {
                 const OrderBook* book = getOrderBook(symbolId);
                 if (!book) {
@@ -3235,6 +3291,8 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
             }
             if (lease != 0) snapshotJournal.logCounters(0, 0, lease);
             if (killed) snapshotJournal.logKillSwitch(true);
+            if (!graduated.empty() || !switchHalted.empty())
+                writeGraduatedKill(snapshotJournal, graduated, switchHalted);
             // Before the orders: the anchored band must be in place before the
             // first one is put back, or it re-anchors on that order (JOURNAL-2).
             // The prices may go first too, since restoreOrder puts an order

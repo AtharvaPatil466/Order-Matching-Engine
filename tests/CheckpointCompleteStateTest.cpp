@@ -202,6 +202,51 @@ bool releasedKillSwitchStaysReleased() {
         false);
 }
 
+// The graduated kill switch's participant and symbol scopes survive a restart,
+// as the engine-wide switch does. Participant 1 throttled to 0 is a killed
+// participant: its next order is refused live, and was admitted after a restart.
+bool participantKillSurvives(bool takeCheckpoint) {
+    return sameAfterRestart(
+        takeCheckpoint ? "participant_kill" : "participant_kill_plain_journal",
+        [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 1, 1, Side::Buy, 100, 10, OrderType::Limit);
+            e.getKillSwitch().throttle(1, 0.0);
+        },
+        [](MatchingEngine& e) { e.submitOrder(S, 2, 1, Side::Buy, 100, 10, OrderType::Limit); },
+        takeCheckpoint);
+}
+
+// A symbol the switch halted: its book's halt was journaled already, but not
+// that the switch did it, so releasing the switch after a restart left the book
+// halted where the live engine resumed it.
+bool symbolHaltSurvives(bool takeCheckpoint) {
+    return sameAfterRestart(
+        takeCheckpoint ? "symbol_halt" : "symbol_halt_plain_journal", [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 1, 1, Side::Buy, 100, 10, OrderType::Limit);
+            e.getKillSwitch().haltSymbol(S);
+        },
+        [](MatchingEngine& e) {
+            e.getKillSwitch().unhaltSymbol(S);
+            e.submitOrder(S, 2, 2, Side::Sell, 100, 4, OrderType::Limit);
+        },
+        takeCheckpoint);
+}
+
+// Released before the restart, they stay released.
+bool releasedScopesStayReleased() {
+    return sameAfterRestart(
+        "graduated_released", [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.getKillSwitch().throttle(1, 0.0);
+            e.getKillSwitch().haltSymbol(S);
+            e.getKillSwitch().reset();
+        },
+        [](MatchingEngine& e) { e.submitOrder(S, 2, 1, Side::Buy, 100, 10, OrderType::Limit); },
+        false);
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +258,11 @@ int main() {
     ok &= killSwitchSurvives(true);
     ok &= killSwitchSurvives(false);
     ok &= releasedKillSwitchStaysReleased();
+    ok &= participantKillSurvives(true);
+    ok &= participantKillSurvives(false);
+    ok &= symbolHaltSurvives(true);
+    ok &= symbolHaltSurvives(false);
+    ok &= releasedScopesStayReleased();
     if (!ok) {
         std::puts("CheckpointCompleteStateTest FAILED: a restart from a checkpoint decided "
                   "differently from the engine that wrote it");

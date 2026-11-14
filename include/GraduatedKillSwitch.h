@@ -31,6 +31,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace OrderMatcher {
@@ -72,6 +73,19 @@ public:
     // Called, outside the switch's lock, after any halt changes: the engine
     // brings each book in line with isSymbolHalted().
     using HaltFn       = std::function<void()>;
+    // Called, outside the lock and after HaltFn, after every change but kill():
+    // the engine journals the state, so a restart keeps it.
+    using ChangeFn     = std::function<void()>;
+
+    // What a restart needs: the throttles (a fraction of 0 is a killed
+    // participant), the halted symbols and a global halt. Throttle credit is
+    // not kept; it restarts at 0. kill() ends the process and is not kept.
+    struct PersistentState {
+        std::vector<std::pair<ParticipantId, double>> throttles;
+        std::vector<SymbolId> haltedSymbols;
+        bool globalHalt{false};
+        bool empty() const { return throttles.empty() && haltedSymbols.empty() && !globalHalt; }
+    };
 
     GraduatedKillSwitch() = default;
 
@@ -95,6 +109,7 @@ public:
                 std::to_string(participant) + " at " +
                 std::to_string(static_cast<int>(throttleFraction * 100)) + "%");
         }
+        if (changeFn_) changeFn_();
     }
 
     // Check if a participant is throttled. Returns the rate fraction (1.0 = normal).
@@ -126,6 +141,7 @@ public:
             alertDispatcher_->fire(AlertLevel::Warning, "kill_switch",
                 "Symbol halt: " + std::to_string(symbol));
         }
+        if (changeFn_) changeFn_();
     }
 
     bool isSymbolHalted(SymbolId symbol) const {
@@ -151,6 +167,7 @@ public:
             alertDispatcher_->fire(AlertLevel::Critical, "kill_switch",
                 "GLOBAL HALT activated — all matching stopped");
         }
+        if (changeFn_) changeFn_();
     }
 
     bool isGloballyHalted() const {
@@ -185,18 +202,22 @@ public:
             haltedSymbols_.clear();
         }
         if (haltFn_) haltFn_();
+        if (changeFn_) changeFn_();
     }
 
     void clearThrottle(ParticipantId participant) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        throttledParticipants_.erase(
-            std::remove_if(throttledParticipants_.begin(),
-                           throttledParticipants_.end(),
-                           [participant](const ThrottleEntry& e) {
-                               return e.participant == participant;
-                           }),
-            throttledParticipants_.end());
-        lowerLevel();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            throttledParticipants_.erase(
+                std::remove_if(throttledParticipants_.begin(),
+                               throttledParticipants_.end(),
+                               [participant](const ThrottleEntry& e) {
+                                   return e.participant == participant;
+                               }),
+                throttledParticipants_.end());
+            lowerLevel();
+        }
+        if (changeFn_) changeFn_();
     }
 
     void unhaltSymbol(SymbolId symbol) {
@@ -208,6 +229,30 @@ public:
             lowerLevel();
         }
         if (haltFn_) haltFn_();
+        if (changeFn_) changeFn_();
+    }
+
+    // ─── Persistence ───────────────────────────────────────────────────
+    PersistentState persistentState() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        PersistentState out;
+        for (const auto& t : throttledParticipants_) out.throttles.emplace_back(t.participant, t.fraction);
+        out.haltedSymbols = haltedSymbols_;
+        out.globalHalt = currentLevel_.load(std::memory_order_relaxed) ==
+                         static_cast<uint8_t>(KillSwitchLevel::GlobalHalt);
+        return out;
+    }
+
+    // Replay: put a persisted state back. No HaltFn (the books' halts are
+    // journaled on their own), no alert, no ChangeFn.
+    void restoreState(const PersistentState& state) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        throttledParticipants_.clear();
+        for (const auto& [p, f] : state.throttles) throttledParticipants_.push_back({p, f, 0.0});
+        haltedSymbols_ = state.haltedSymbols;
+        currentLevel_.store(static_cast<uint8_t>(KillSwitchLevel::Normal), std::memory_order_relaxed);
+        if (state.globalHalt) raiseLevel(KillSwitchLevel::GlobalHalt);
+        else lowerLevel();
     }
 
     // ─── Configuration ─────────────────────────────────────────────────
@@ -226,6 +271,11 @@ public:
     // Set by MatchingEngine's constructor; see HaltFn.
     void setHaltFunction(HaltFn fn) {
         haltFn_ = std::move(fn);
+    }
+
+    // Set by MatchingEngine's constructor; see ChangeFn.
+    void setChangeFunction(ChangeFn fn) {
+        changeFn_ = std::move(fn);
     }
 
     // ─── State ─────────────────────────────────────────────────────────
@@ -321,6 +371,7 @@ private:
     CheckpointFn checkpointFn_;
     ShutdownFn shutdownFn_;
     HaltFn haltFn_;
+    ChangeFn changeFn_;
 };
 
 }  // namespace OrderMatcher

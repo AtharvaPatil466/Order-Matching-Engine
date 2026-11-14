@@ -433,6 +433,11 @@ history. What it keeps:
 - the engine-wide kill switch (`setKillSwitch`) while it is engaged. Each
   engage and release is also journaled when it happens, so any restart, from
   a checkpoint or from the plain journal, comes back with the switch as it was;
+- the graduated kill switch (`getKillSwitch()`) while anything is set: each
+  participant throttle (a fraction of 0 is a killed participant), each halted
+  symbol, a global halt, and which books the switch itself halted, so releasing
+  it after a restart resumes them. Every change is journaled too. Throttle
+  credit restarts at zero, and `kill()`, which ends the process, is not kept;
 - per participant per book, the net position and the orders submitted and
   trades executed (`Position` records), which `maxPositionSize` and `/otr` read.
 

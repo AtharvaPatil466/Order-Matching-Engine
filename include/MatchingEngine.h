@@ -801,6 +801,13 @@ private:
     // Books the kill switch halted, so it resumes only those. Under bookMutex_.
     std::vector<SymbolId> killHalted_;
     void syncKillSwitchHalts();
+    // The switch's participant and symbol scopes survive a restart, as
+    // setKillSwitch's flag does: journaled on every change (the ChangeFn),
+    // written by a checkpoint, put back by replay.
+    void journalGraduatedKill();
+    static void writeGraduatedKill(Journal& journal, const GraduatedKillSwitch::PersistentState& state,
+                                   const std::vector<SymbolId>& switchHalted);
+    void restoreGraduatedKill(const JournalEntry& e, GraduatedKillRecord kind);
     CapacityMonitor capacityMonitor_;
 
     // Internal helper: push to specific thread's queue with backpressure

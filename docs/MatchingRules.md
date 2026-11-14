@@ -722,38 +722,27 @@ This is the part a participant needs to know and the part the engine does not te
 **Status: Deliberate — pinned** by `GatewayExecutionReportTest` (`elections`: the
 `Triggered` report arrives before the elected stop's first fill).
 
-### Rule 5.7 — Deferral order is scan order, and scan order is arbitrary
+### Rule 5.7 — Elections execute in arrival order
 
-**Which 64 of the elected stops fire first is not time priority and is not specified by
-anything.**
+Stops elected by one print execute, and are deferred past the execution budget, in the order
+they arrived. `stopOrders_` and `trailingStopOrders_` are flat arrays scanned from index 0, and
+every removal — an execution, a cancel, an expiry — leaves with `FixedVector::erase_ordered`,
+which shifts the rest down rather than moving the last element into the gap. So the array is
+always in arrival order, and the first 64 elected are the 64 oldest. The pegged list is kept
+the same way, so pegs that move together reprice, and queue at the new price, in arrival order.
 
-`stopOrders_` is a flat array scanned from index 0. When a stop executes, `erase_swap(i)`
-removes it by **moving the last element of the array into slot `i`**
-(`include/OrderBook.h:202-207`). Cancellation and expiry do the same thing via `erase_value`
-(`include/OrderBook.h:210-218`, reached from `src/OrderBook.cpp:1843-1846`).
+They used to be swap-erased: after a single removal the newest stop sat in the oldest's slot and
+sold first, at the best price, and the order was a permutation fixed by the history of removals,
+not derivable from the book's public state. Journal replay and a checkpoint reproduced the
+permutation, so restarts agreed with it; it was still not time priority.
 
-Consequences:
+The cost is an O(n) shift per removal (n at most 16384 pointers), paid on the election and
+cancel paths only.
 
-- On a pristine book that has never removed a stop, array order equals arrival order, so the
-  first 64 elected do fire in arrival order.
-- **After a single removal of any kind — one execution, one cancel, one expiry — that stops
-  being true.** The tail element has jumped into the middle. Array order is now a permutation
-  of arrival order determined by the entire history of removals.
-- Within one sweep the permutation is still evolving: each execution swaps a new element into
-  the slot the scan is currently reading.
-
-This is not a race and it is fully deterministic given an identical input sequence — journal
-replay reproduces it, and a checkpoint re-adds the parked orders in array order, so a restart
-from one does too (`tests/CheckpointParkedOrderTest.cpp`) — but it is **not derivable from the
-order book's public state**. Two
-participants whose stops sit at the same trigger level have no way to reason about which of
-them is executed and which is deferred, and it is not the one who armed first.
-
-**Status: Undocumented — no test pins this, may be incidental.** `erase_swap` was chosen for
-O(1) removal from a flat array; there is no evidence anyone decided the resulting fairness
-properties were acceptable. A venue publishing this rulebook would have to either specify
-time-ordered deferral or state plainly that deferral order is unspecified. Right now the code
-does the latter without saying so.
+**Status: Deliberate — pinned.** `tests/StopSweepOrderTest.cpp`
+(`electionsKeepArrivalOrderAfterARemoval`: stops, trailing stops and pegs after a cancel),
+and `OrderBook::validateIntegrity` checks both stop lists are in arrival order, which
+`tests/CheckpointEquivalenceTest.cpp` now runs on the live book after every operation.
 
 ### Rule 5.8 — Elections run after the triggering order is final
 
@@ -927,9 +916,9 @@ The depth change is published as a `Delete` at the old price and an `Add` at the
 incremental subscribers can follow it.
 
 The sweep moves the pegs in `peggedOrders_` order, so pegs that land on one price queue in
-that order, and a clamp sees the pegs moved before it at their new price. Removal is
-`erase_swap`, as for stops (Rule 5.7), so after a cancel or fill that order is a permutation
-of arrival order, not the level order. A checkpoint keeps it: each peg comes back at the price
+that order, and a clamp sees the pegs moved before it at their new price. Removal keeps the
+rest in order, as for stops (Rule 5.7), so that order is the pegs' arrival order, not the
+level order. A checkpoint keeps it: each peg comes back at the price
 it rested at, not re-pegged against a book still being restored, and a Snapshot record flagged
 `SNAPSHOT_PEG_QUEUE` per peg, in sweep order, rebuilds the list
 (`tests/CheckpointPeggedOrderTest.cpp`).

@@ -252,14 +252,21 @@ public:
         return false;
     }
 
-    // Erase by value, keeping the rest in order. For lists whose order is a
-    // priority: the parked market and on-close orders cross in arrival order,
-    // and a swap moved the last arrival into the leaver's slot (MIDS-4).
+    // Erase, keeping the rest in order. For lists whose order is a priority:
+    // the parked market and on-close orders cross in arrival order (MIDS-4),
+    // stops and trailing stops elected by one print execute in it, and pegs
+    // reprice (so requeue) in it (Rule 5.7). A swap moved the last arrival
+    // into the leaver's slot. ponytail: O(n) shift per removal, n <= MaxSize.
+    void erase_ordered(size_t idx) {
+        if (idx < size_) {
+            std::move(data_ + idx + 1, data_ + size_, data_ + idx);
+            size_--;
+        }
+    }
     bool erase_value_ordered(const T& val) {
         for (size_t i = 0; i < size_; i++) {
             if (data_[i] == val) {
-                std::move(data_ + i + 1, data_ + size_, data_ + i);
-                size_--;
+                erase_ordered(i);
                 return true;
             }
         }

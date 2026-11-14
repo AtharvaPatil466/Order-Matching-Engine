@@ -2388,6 +2388,17 @@ bool OrderBook::validateIntegrity(std::string* err) const {
         });
     }
 
+    // Parked stops and trailing stops are elected in list order, which is
+    // arrival order (Rule 5.7): a removal must not reorder them.
+    auto checkArrivalOrder = [&](const auto& list, const char* label) {
+        for (size_t i = 1; problem.empty() && i < list.size(); ++i)
+            if (list[i - 1]->arrivalSeq >= list[i]->arrivalSeq)
+                problem = std::string(label) + " list out of arrival order at #" +
+                          std::to_string(list[i]->id);
+    };
+    if (problem.empty()) checkArrivalOrder(stopOrders_, "stop");
+    if (problem.empty()) checkArrivalOrder(trailingStopOrders_, "trailing-stop");
+
     if (!problem.empty()) {
         if (err) *err = problem;
         return false;
@@ -2405,13 +2416,13 @@ void OrderBook::untrackOrder(Order* order) {
         case OrderType::Stop:
         case OrderType::StopLimit:
         case OrderType::MIT:
-            stopOrders_.erase_value(order);
+            stopOrders_.erase_value_ordered(order);
             break;
         case OrderType::TrailingStop:
-            trailingStopOrders_.erase_value(order);
+            trailingStopOrders_.erase_value_ordered(order);
             break;
         case OrderType::Pegged:
-            peggedOrders_.erase_value(order);
+            peggedOrders_.erase_value_ordered(order);
             break;
         case OrderType::MOC:
             // An MOC moves from onCloseOrders_ into auctionMarketOrders_ when
@@ -2900,7 +2911,8 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
     // Elections beyond the cap are latched, not dropped — see the constant.
     size_t executed = 0;
 
-    // Index-based iteration with erase_swap (FixedVector compatible)
+    // Index-based iteration; an executed stop leaves with erase_ordered, so the
+    // rest keep arrival order and the next one slides into slot i.
     size_t i = 0;
     while (i < stopOrders_.size()) {
         Order* order = stopOrders_[i];
@@ -2944,11 +2956,11 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
                 order->type = OrderType::Market;   // Stop and MIT fire a market order
             }
 
-            stopOrders_.erase_swap(i);
+            stopOrders_.erase_ordered(i);
             sweep(order);
 
             // A triggered stop becomes an aggressor and can self-cross.
-            // erase_swap already moved the last element here, so `continue`
+            // erase_ordered already moved the next element here, so `continue`
             // without incrementing i, exactly as the tail of this block does.
             if (finalizeIfStpCancelled(order)) continue;
 
@@ -2957,7 +2969,7 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
             // L2 Add. A triggered Stop or MIT is now a Market order, so its
             // remainder is cancelled there rather than rested.
             finalizeRemainingQty(order, order->id, order->side, order->price, order->type);
-            // Don't increment i — erase_swap moved the last element here
+            // Don't increment i — erase_ordered moved the next element here
         } else {
             ++i;
         }
@@ -3018,7 +3030,7 @@ void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
 
             order->type = OrderType::Limit;
             order->price = order->stopPrice;
-            trailingStopOrders_.erase_swap(i);
+            trailingStopOrders_.erase_ordered(i);
             sweep(order);
 
             if (finalizeIfStpCancelled(order)) continue;
@@ -3040,7 +3052,7 @@ void OrderBook::updatePeggedOrders() {
         // Check if order was removed
         auto* lookupPtr = orderLookup_.find(order->id);
         if (!lookupPtr || *lookupPtr != order) {
-            peggedOrders_.erase_swap(i);
+            peggedOrders_.erase_ordered(i);
             continue;
         }
 
@@ -3068,7 +3080,7 @@ void OrderBook::updatePeggedOrders() {
                 // Off the book at its old price and not on it at the new one:
                 // finish it rather than leave it live in no level (MATCH-11).
                 notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
-                untrackOrder(order);  // erases slot i, as erase_swap(i) did
+                untrackOrder(order);  // erases slot i, as erase_ordered(i) does
                 orderLookup_.erase(order->id);
                 orderPool_.deallocate(order);
                 continue;

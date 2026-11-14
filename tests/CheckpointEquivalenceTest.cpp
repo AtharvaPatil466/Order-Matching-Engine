@@ -328,6 +328,14 @@ bool runSeed(uint64_t seed, size_t nOps, size_t forcedCut) {
             apply(a.engine, op); apply(b.engine, op); apply(c.engine, op);
         }
         const BookState sa = capture(a.engine), sb = capture(b.engine), sc = capture(c.engine);
+        // The live book's own invariants too: among them, parked stops and
+        // trailing stops stay in arrival order through removals (Rule 5.7).
+        if (std::string err; !a.engine.getOrderBook(S)->validateIntegrity(&err)) {
+            std::printf("  seed %llu: live book invalid at op %zu: %s\n",
+                        static_cast<unsigned long long>(seed), i, err.c_str());
+            ok = false;
+            break;
+        }
         const bool sameB = sa == sb && a.events == b.events;
         const bool sameC = sa == sc && a.events == c.events;
         if (sameB && sameC) continue;

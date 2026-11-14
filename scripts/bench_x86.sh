@@ -79,6 +79,8 @@ FAILED=0
 
 # record <name> <command...>: the command line, then its raw output, in
 # $OUT/<name>.txt; its exit code in exit-codes.txt. Returns that exit code.
+# A step that cannot run here (the perf counters without a PMU) is written as
+# "<name> skipped" instead.
 record() {
     local name="$1" rc=0
     shift
@@ -153,11 +155,23 @@ for i in $(seq 1 "$REPS"); do
 done
 
 # perf counters, one process per path (a counter over several paths cannot be
-# split afterwards). Best effort: a hosted VM usually exposes no PMU.
-for p in a l b c d; do
-    record "perf-prod-$p" perf stat -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles \
-        "${PIN[@]}" "$PROD/benchmarks/HonestBenchmark" "${HB[@]}" --only "$p" || true
-done
+# split afterwards). A hosted VM usually exposes no PMU: probe once, and with
+# no perf or no hardware counters record each step as SKIPPED (its file says
+# why, exit-codes.txt says "skipped") rather than as a failed command.
+PERF_EVENTS=L1-dcache-load-misses,branch-misses,branches,instructions,cycles
+pmu_probe="$(perf stat -x, -e cycles,instructions true 2>&1)" && pmu_rc=0 || pmu_rc=$?
+if [ "$pmu_rc" -ne 0 ] || printf '%s\n' "$pmu_probe" | grep -q -e '<not supported>' -e '<not counted>'; then
+    for p in a l b c d; do
+        { echo "skipped: no usable PMU (perf stat -e cycles,instructions true exited $pmu_rc):"
+          printf '%s\n' "$pmu_probe"; } > "$OUT/perf-prod-$p.txt"
+        echo "perf-prod-$p skipped" >> "$OUT/exit-codes.txt"
+    done
+else
+    for p in a l b c d; do
+        record "perf-prod-$p" perf stat -e "$PERF_EVENTS" \
+            "${PIN[@]}" "$PROD/benchmarks/HonestBenchmark" "${HB[@]}" --only "$p" || true
+    done
+fi
 
 # ─── The other benchmarks the docs quote, on the prod build ─────────────────
 run realistic-flow        "${PIN[@]}" "$PROD/benchmarks/RealisticFlowBenchmark" --events "$RF_EVENTS" --seed 42

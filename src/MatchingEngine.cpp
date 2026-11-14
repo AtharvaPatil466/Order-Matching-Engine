@@ -2845,9 +2845,13 @@ bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy 
 //
 // `recorded` is the entry's symbolId. Journals written after those records
 // began carrying one name the book directly, which is both correct and O(1).
-// Older journals left the field 0, so fall back to the scan this used to do
-// unconditionally — no worse than before for them, and exact for everything
-// written since.
+// Older journals left the field 0, so for them fall back to the scan this used
+// to do unconditionally. Only for them (MIDS-10): every journal stamped
+// NO_SEEDING was written after records carried their symbol (24ef1df precedes
+// dc807e1), so there a miss in the recorded book is a record for an order
+// already gone, and scanning on would cancel or amend a same-id order on
+// another symbol. Callers replaying records of unknown provenance
+// (TimeMachine) keep the scan.
 //
 // The scan is why duplicate order ids across symbols silently lost orders on
 // recovery: it takes whichever book it reaches first, and nothing enforces
@@ -2857,6 +2861,7 @@ OrderBook* MatchingEngine::bookHoldingOrder(SymbolId recorded, OrderId orderId) 
         book && book->getOrder(orderId)) {
         return book;
     }
+    if (!replayScansAllBooks_) return nullptr;
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId);
             book && book->getOrder(orderId)) {
@@ -2876,7 +2881,10 @@ size_t MatchingEngine::replayJournal() {
         std::lock_guard<std::mutex> lock(journalMutex_);
         entries = journal_->readAll(true, true);
     }
-    return replayEntries(entries);
+    replayScansAllBooks_ = journal_->contentEpoch() == JOURNAL_EPOCH_LEGACY;
+    const size_t applied = replayEntries(entries);
+    replayScansAllBooks_ = true;
+    return applied;
 }
 
 size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {

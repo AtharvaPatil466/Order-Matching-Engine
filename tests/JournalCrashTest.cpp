@@ -663,6 +663,70 @@ void testBytesOnDiskTracksTheRealFile() {
 // journal into Snapshot records, which DO carry symbolId, so checkpointing
 // here would mask the very path this test exists to cover — the first version
 // of this test did exactly that and passed for the wrong reason.
+// MIDS-10: a Cancel record whose own book does not hold the id is a no-op on
+// a journal written since records carried their symbol. Replay used to fall
+// back to scanning every book, so a stray record (a cancel journaled for an
+// order already gone) cancelled a same-id order on another symbol. The scan
+// stays for LEGACY journals, whose records carried no symbol.
+void testStrayCancelStaysOnItsSymbol() {
+    std::cout << "Running testStrayCancelStaysOnItsSymbol..." << std::endl;
+    cleanup();
+    constexpr SymbolId kA = 3, kB = 7;
+    constexpr OrderId kId = 5;
+    {
+        MatchingEngine original;
+        original.enableJournal(JOURNAL_PATH);
+        original.addSymbol(kA);
+        original.addSymbol(kB);
+        original.start();
+        assert(original.submitOrder(kA, kId, 100, Side::Buy, toPrice(90.0), 10,
+                                    OrderType::Limit).isAccepted());
+        assert(original.getJournal()->contentEpoch() != JOURNAL_EPOCH_LEGACY);
+        original.getJournal()->logCancelOrder(kId, kB);   // B never held #5
+        original.stop();
+    }
+    MatchingEngine replayed;
+    replayed.enableJournal(JOURNAL_PATH);
+    replayed.addSymbol(kA);
+    replayed.addSymbol(kB);
+    replayed.start();
+    (void)replayed.replayJournal();
+    assert(replayed.getOrderBook(kA)->getOrder(kId) != nullptr &&
+           "a cancel recorded on B cancelled A's order on replay");
+    replayed.stop();
+    cleanup();
+    std::cout << "testStrayCancelStaysOnItsSymbol PASSED" << std::endl;
+}
+
+// The second writer MIDS-10 named: the async worker journaled a cancel that
+// found no order. It now looks first (on the worker, which owns the book) and
+// journals only a cancel it will apply, as the sync path does.
+void testAsyncCancelOfNothingIsNotJournaled() {
+    std::cout << "Running testAsyncCancelOfNothingIsNotJournaled..." << std::endl;
+    cleanup();
+    {
+        MatchingEngine engine;
+        engine.enableJournal(JOURNAL_PATH);
+        engine.addSymbol(3);
+        engine.startAsync(1);
+        assert(engine.submitOrder(3, 5, 100, Side::Buy, toPrice(90.0), 10,
+                                  OrderType::Limit).isAccepted());
+        engine.waitForDrain();
+        const uint64_t before = engine.getJournal()->entriesAppended();
+        (void)engine.submitCancel(3, 999, 100);   // no such order
+        (void)engine.submitCancel(3, 5, 200);     // not the owner's
+        engine.waitForDrain();
+        assert(engine.getJournal()->entriesAppended() == before &&
+               "the worker journaled a cancel that did nothing");
+        (void)engine.submitCancel(3, 5, 100);
+        engine.waitForDrain();
+        assert(engine.getJournal()->entriesAppended() == before + 1);
+        engine.stopAsync();
+    }
+    cleanup();
+    std::cout << "testAsyncCancelOfNothingIsNotJournaled PASSED" << std::endl;
+}
+
 void testDuplicateIdAcrossSymbols() {
     std::cout << "Running testDuplicateIdAcrossSymbols..." << std::endl;
     cleanup();
@@ -1158,6 +1222,8 @@ int main() {
     testDeterministicReplayEquivalence();
     testBytesOnDiskTracksTheRealFile();
     testDuplicateIdAcrossSymbols();
+    testStrayCancelStaysOnItsSymbol();
+    testAsyncCancelOfNothingIsNotJournaled();
     testUnreadableJournalRefusesToAppend();
     testTornFirstRecordIsCut();
     testTornTailIsCut();

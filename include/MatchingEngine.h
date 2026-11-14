@@ -656,6 +656,9 @@ private:
     void restoreCounters(OrderBook* book, const JournalEntry& e);
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);
+    // Whether a miss in the recorded book scans the others: only for a LEGACY
+    // journal (MIDS-10); replayJournal sets it from the file's epoch.
+    bool replayScansAllBooks_ = true;
     // waitIfBusy: false skips when another checkpoint is in flight (it is
     // doing the same job); true waits for it and then runs. See the .cpp.
     void checkpointInternal(bool alreadyDrained, bool waitIfBusy = false);

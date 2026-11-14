@@ -168,6 +168,11 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
                                    Quantity remainingQty, Price lastFillPrice, RejectReason reason) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
+    // No real listener wired (the flag is set by setEventListener /
+    // setEngineListener): no update, no clock read, no dispatch (PERF-9). The
+    // sequence number is still drawn, so numbering does not depend on whether
+    // anyone listens.
+    if (!hasTradeListener_) { ++nextSequenceNumber_; return; }
     OrderUpdate u{};
     u.orderId = orderId;
     u.status = status;
@@ -177,12 +182,8 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
     u.rejectReason = reason;
     u.timestamp = nowNs();
     u.sequenceNumber = nextSequenceNumber_++;
-    // Skip the vtable dispatch when no real listener is wired (the flag is set
-    // by setEventListener/setEngineListener). Same guard as the onTrade path.
-    if (hasTradeListener_) {
-        listener_->onOrderUpdate(u);
-        engineListener_->onOrderUpdate(u);
-    }
+    listener_->onOrderUpdate(u);
+    engineListener_->onOrderUpdate(u);
 #else
     (void)orderId; (void)status; (void)filledQty; (void)remainingQty; (void)lastFillPrice; (void)reason;
 #endif
@@ -191,7 +192,10 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
 void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Price price) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
-    if (!hasTradeListener_) return;
+    // As notifyOrderUpdate: the sequence number is drawn with or without a
+    // listener (PERF-9). It used to be drawn only with one, so a book's trade
+    // sequence numbers depended on whether a feed was attached.
+    if (!hasTradeListener_) { ++nextSequenceNumber_; return; }
 
     MarketDataUpdate update{};
     update.action = action;
@@ -218,6 +222,9 @@ void OrderBook::notifyBookVisible(BookVisibleUpdate::Action action, OrderId orde
                                   Side side, Price price, Quantity quantity) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
+    // As notifyOrderUpdate: nothing built and no clock read without a
+    // listener, but the sequence number is drawn either way (PERF-9).
+    if (!hasTradeListener_) { ++nextSequenceNumber_; return; }
 
     BookVisibleUpdate update{};
     update.action = action;
@@ -231,7 +238,7 @@ void OrderBook::notifyBookVisible(BookVisibleUpdate::Action action, OrderId orde
     // Public market-data channel: same dispatch shape as notifyMarketData
     // (user listener only). engineListener_ is the internal contingent-order
     // observer and has no interest in the displayed-book projection.
-    if (hasTradeListener_) listener_->onBookVisible(update);
+    listener_->onBookVisible(update);
 #else
     (void)action; (void)orderId; (void)side; (void)price; (void)quantity;
 #endif

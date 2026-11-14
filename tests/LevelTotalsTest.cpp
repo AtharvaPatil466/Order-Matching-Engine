@@ -231,4 +231,36 @@ TEST(LevelTotals, ADeepLevelPublishesExactTotalsOnEveryAdd) {
     book->setEventListener(nullptr);
 }
 
+// PERF-9: without a listener no update is built and no clock is read, but
+// each would-be update still draws its sequence number, so the numbers the
+// trades carry do not depend on whether anyone listens.
+TEST(ListenerFreePath, TradeSequenceNumbersDoNotDependOnAListener) {
+    auto run = [](bool withListener) {
+        struct Noop : EventListener {} noop;
+        auto book = std::make_unique<OrderBook>(0, MatchAlgorithm::PriceTime);
+        if (withListener) book->setEventListener(&noop);
+        std::mt19937_64 rng(7);
+        for (OrderId id = 1; id <= 2000; ++id) {
+            if (rng() % 5 == 0) {
+                book->cancelOrder(1 + rng() % id);
+                continue;
+            }
+            book->addOrder(id, 1 + static_cast<ParticipantId>(rng() % 5),
+                           (rng() % 2) ? Side::Buy : Side::Sell,
+                           9995 + static_cast<Price>(rng() % 11), 1 + rng() % 40,
+                           (rng() % 4) ? OrderType::Limit : OrderType::Iceberg, 0,
+                           1 + rng() % 10);
+        }
+        book->setEventListener(nullptr);
+        // The ring is the only record a listener-free book keeps of its trades.
+        auto& ring = const_cast<RingBuffer<Trade>&>(book->getTradeRingBuffer());
+        std::vector<uint64_t> seqs;
+        for (Trade t{}; ring.pop(t);) seqs.push_back(t.sequenceNumber);
+        return seqs;
+    };
+    const std::vector<uint64_t> without = run(false);
+    ASSERT_FALSE(without.empty());
+    EXPECT_EQ(without, run(true));
+}
+
 }  // namespace

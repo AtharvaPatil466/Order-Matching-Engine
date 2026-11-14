@@ -524,9 +524,10 @@ logs `journal.halted`, and **keeps running with every book frozen**. Every
 request is answered `JournalHalted`, expiry and session transitions stop, and
 `/book`, `/auction` and `/audit` answer 503 (§4). Nothing clears a halt but a
 restart. Free space, then restart: replay restores everything that was
-acknowledged. The one request whose own record failed may have been applied in
-memory before the halt; it was never acknowledged, and the restart drops it
-(MatchingRules Rule 2.7).
+acknowledged. A cancel, modify or replace whose own record failed changed
+nothing: it is recorded before it is applied. A new order, a session transition
+or an uncross whose own record failed may have been applied in memory before the
+halt; it was never acknowledged, and the restart drops it (MatchingRules Rule 2.7).
 
 Stop the engine before the next section:
 
@@ -548,8 +549,8 @@ Execution reports follow unasked (V2, `clientRequestId` 0): a
 `TradeNotification` to both sides of every fill and an
 `OrderUpdateNotification` to the owner for every status change and for the
 outcome of each cancel, modify and replace (MatchingRules Rule 2.6). They leave
-only after the journal entry behind them is synced. A stop's election is not
-reported until it trades. A report for a participant with no live session is
+only after the journal entry behind them is synced. A stop's election is
+reported once, as `Triggered` (status value 7), before any fill it makes. A report for a participant with no live session is
 dropped and counted (`gateway_reports_undelivered_total`); a session that stops
 reading is disconnected at 1 MiB of queued output. Order ids are scoped by
 participant: a cancel, modify or replace names the participant that entered

@@ -315,16 +315,19 @@ reports unasked (V2 `clientRequestId` 0), so a client switches on the response
 every fill, carrying the trade id, price and quantity and the order's cumulative
 and leaves; the contra side stays anonymous. An `OrderUpdateNotification` goes
 out for every status change: `Accepted`, the cancels the engine makes (IOC, FOK
-and Market remainders, expiry, kill switch, session end, self-trade prevention)
-and a new order refused after its Ack. They reach every session that may act
+and Market remainders, expiry, kill switch, session end, self-trade prevention),
+a new order refused after its Ack, and a stop, stop-limit, MIT or trailing
+stop's election, reported once as `Triggered` (`OrderStatus` value 7, not
+terminal and not an execution) before any fill it makes. They reach every session that may act
 for the order's participant; one with no session is not told later. A session
 that stops reading is disconnected once its queued output reaches the
 per-session ceiling (`TcpGateway::kMaxWriteBufBytes`). A cancel, modify or
 replace is answered Ack once it has run; whether it took effect follows as an
-`OrderUpdateNotification`: the order restated with its new leaves, or the
-refusal's reason with the order unchanged (`Rejected`/`OrderNotFound` when there
-is no such order). Not yet reported: a stop's election before it trades (see
-MatchingRules Rule 2.6).
+`OrderUpdateNotification`: the order restated with its new leaves (a replace is
+restated before any fill its new price makes, so those fills count down from
+the new leaves), or the refusal's reason with the order unchanged
+(`Rejected`/`OrderNotFound` when there is no such order). See MatchingRules
+Rule 2.6.
 <!-- claim:gw-exec-reports -->
 
 ### Replication: removed

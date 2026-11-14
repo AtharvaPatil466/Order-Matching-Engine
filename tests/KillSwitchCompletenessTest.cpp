@@ -20,10 +20,20 @@
 // Each scenario runs against a deliberately small ring with maxPushRetries_
 // set to 1, which is what makes the pre-fix drop overwhelmingly likely rather
 // than a rare race.
+//
+// A participant kill is a one-shot cancel, not a block (Runbook §8): the
+// victim's producers keep submitting, and an order submitted after the kill
+// rests. So its invariant is about the orders submitted BEFORE it: each load
+// thread publishes how many of its submits have returned, and only those are
+// owed to the sweep. Counting every resting victim order made the test race
+// its own producers: under load, with this thread preempted between the kill
+// and the count, orders submitted after the kill were counted as survivors
+// ("round 0 left 105 survivors").
 
 #include "FaultInjector.h"
 #include "MatchingEngine.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cassert>
@@ -42,6 +52,18 @@ constexpr size_t   kSmallQueue      = 256;  // small ring => contended control
                                             // enqueue => pre-fix drop
 constexpr ParticipantId kVictim    = 7;
 constexpr ParticipantId kBystander = 8;
+// Load thread t's i-th order is (t + 1) * kThreadIdStride + i.
+constexpr OrderId  kThreadIdStride  = 10'000'000;
+
+// Per load thread: how many of its submitOrder calls have returned.
+using Returned = std::array<std::atomic<OrderId>, kLoadThreads>;
+using ReturnedSnapshot = std::array<OrderId, kLoadThreads>;
+
+ReturnedSnapshot snapshot(const Returned& returned) {
+    ReturnedSnapshot out{};
+    for (int t = 0; t < kLoadThreads; ++t) out[t] = returned[t].load(std::memory_order_acquire);
+    return out;
+}
 
 // Async engine with the volatility breaker relaxed. Scenario 2 rests a
 // bystander at 9000 and the victim at 10000; that ~11% spread trips the default
@@ -86,20 +108,36 @@ bool waitForDepth(MatchingEngine& engine, ParticipantId pid, size_t target) {
     return false;
 }
 
+// `pid`'s resting load orders whose submit had returned when `before` was
+// taken: the ones a kill issued after it must have cancelled.
+size_t owedSurvivors(MatchingEngine& engine, ParticipantId pid, const ReturnedSnapshot& before) {
+    size_t n = 0;
+    engine.getOrderBook(kSymbol)->forEachOrderLocked([&](const Order& o) {
+        if (o.participantId != pid || o.id < kThreadIdStride) return;
+        const OrderId thread = o.id / kThreadIdStride - 1;
+        if (thread < static_cast<OrderId>(kLoadThreads) && o.id % kThreadIdStride < before[thread])
+            ++n;
+    });
+    return n;
+}
+
 // Spawn load threads that submit resting buys until `stop` is set.
 // Prices stay well below any ask so nothing crosses and everything rests.
 std::vector<std::thread> startLoad(MatchingEngine& engine,
                                    std::atomic<bool>& stop,
-                                   std::atomic<int>& nextId,
+                                   std::atomic<int>& submitted,
+                                   Returned& returned,
                                    ParticipantId pid) {
     std::vector<std::thread> threads;
     for (int t = 0; t < kLoadThreads; ++t) {
-        threads.emplace_back([&engine, &stop, &nextId, pid] {
+        returned[t].store(0, std::memory_order_relaxed);
+        threads.emplace_back([&engine, &stop, &submitted, &returned, pid, t] {
             for (int i = 0; i < kOrdersPerThread && !stop.load(std::memory_order_relaxed); ++i) {
-                const OrderId id =
-                    static_cast<OrderId>(nextId.fetch_add(1, std::memory_order_relaxed));
+                const OrderId id = static_cast<OrderId>(t + 1) * kThreadIdStride + i;
                 engine.submitOrder(kSymbol, id, pid, Side::Buy,
                                    /*price=*/10000, /*qty=*/1, OrderType::Limit);
+                submitted.fetch_add(1, std::memory_order_relaxed);
+                returned[t].store(static_cast<OrderId>(i + 1), std::memory_order_release);
             }
         });
     }
@@ -112,8 +150,9 @@ void engine_kill_switch_is_complete() {
     configure(engine);
 
     std::atomic<bool> stop{false};
-    std::atomic<int>  nextId{1};
-    auto load = startLoad(engine, stop, nextId, kVictim);
+    std::atomic<int>  submitted{0};
+    Returned returned;
+    auto load = startLoad(engine, stop, submitted, returned, kVictim);
 
     // Let the book build up real depth before firing.
     if (!waitForDepth(engine, 0, 200)) std::abort();
@@ -142,7 +181,7 @@ void engine_kill_switch_is_complete() {
     }
 
     std::printf("[engine-kill] submitted~%d, survivors=0, control_spins=%llu\n",
-                nextId.load() - 1,
+                submitted.load(),
                 static_cast<unsigned long long>(engine.getControlSpinCount()));
     engine.stop();
 }
@@ -153,7 +192,8 @@ void participant_kill_is_complete_and_scoped() {
     configure(engine);
 
     std::atomic<bool> stop{false};
-    std::atomic<int>  nextId{1};
+    std::atomic<int>  submitted{0};
+    Returned returned;
 
     // A bystander rests orders that must NOT be swept.
     for (int i = 0; i < 50; ++i) {
@@ -164,13 +204,14 @@ void participant_kill_is_complete_and_scoped() {
     const size_t bystanderBefore = restingCount(engine, kBystander);
     assert(bystanderBefore == 50 && "bystander setup did not rest");
 
-    auto load = startLoad(engine, stop, nextId, kVictim);
+    auto load = startLoad(engine, stop, submitted, returned, kVictim);
     if (!waitForDepth(engine, kVictim, 200)) std::abort();
 
+    const ReturnedSnapshot before = snapshot(returned);
     engine.killSwitch(kVictim);
 
-    // Victim fully swept...
-    const size_t victimSurvivors = restingCount(engine, kVictim);
+    // Victim fully swept: every order submitted before the kill...
+    const size_t victimSurvivors = owedSurvivors(engine, kVictim, before);
     if (victimSurvivors != 0) {
         std::printf("FAIL: %zu victim orders survived killSwitch(pid)\n", victimSurvivors);
         std::abort();
@@ -203,14 +244,16 @@ void control_messages_are_never_dropped() {
     configure(engine);
 
     std::atomic<bool> stop{false};
-    std::atomic<int>  nextId{1};
-    auto load = startLoad(engine, stop, nextId, kVictim);
+    std::atomic<int>  submitted{0};
+    Returned returned;
+    auto load = startLoad(engine, stop, submitted, returned, kVictim);
     if (!waitForDepth(engine, 0, 100)) std::abort();
 
     // Fire repeatedly while the ring is hot — every one must be honoured.
     for (int round = 0; round < 5; ++round) {
+        const ReturnedSnapshot before = snapshot(returned);
         engine.killSwitch(kVictim);
-        const size_t survivors = restingCount(engine, kVictim);
+        const size_t survivors = owedSurvivors(engine, kVictim, before);
         if (survivors != 0) {
             std::printf("FAIL: round %d left %zu survivors — control message dropped\n",
                         round, survivors);

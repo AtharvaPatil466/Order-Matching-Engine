@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace OrderMatcher;
@@ -164,11 +165,8 @@ int main(int argc, char* argv[]) {
     recCold.printTable("cold");
 
     std::printf("\n── Cold penalty (cold − warm) ──\n");
-    auto d = [](uint64_t c, uint64_t w) { return (long long)c - (long long)w; };
-    std::printf("  P50   : %+lld ns\n", d(recCold.getP50(),   recWarm.getP50()));
-    std::printf("  P90   : %+lld ns\n", d(recCold.getP90(),   recWarm.getP90()));
-    std::printf("  P99   : %+lld ns\n", d(recCold.getP99(),   recWarm.getP99()));
-    std::printf("  P99.9 : %+lld ns\n", d(recCold.getP999(),  recWarm.getP999()));
+    for (const auto& [name, p] : {std::pair{"P50", 0.50}, {"P90", 0.90}, {"P99", 0.99}, {"P99.9", 0.999}})
+        std::printf("  %-6s: %s\n", name, BenchLatencyRecorder::deltaText(recCold, recWarm, p).c_str());
     std::printf("\n  Cold P50 is the honest first-touch latency after an idle gap or\n");
     std::printf("  context switch; warm P50 is the steady-state hot path. Production\n");
     std::printf("  tail SLAs must budget for the cold number, not just the warm one.\n");

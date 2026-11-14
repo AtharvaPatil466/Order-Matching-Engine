@@ -155,15 +155,9 @@ static void printResult(const PathResult& r) {
                 (unsigned long long)r.trades);
     std::printf("  Throughput: %.0f orders/sec\n",
                 r.durationSec > 0 ? static_cast<double>(n) / r.durationSec : 0);
-    std::printf("  ─────────────────────────\n");
-    std::printf("  Min:     %6llu ns\n", (unsigned long long)r.tracker.getMin());
-    std::printf("  P50:     %6llu ns\n", (unsigned long long)r.tracker.getP50());
-    std::printf("  P90:     %6llu ns\n", (unsigned long long)r.tracker.getP90());
-    std::printf("  P99:     %6llu ns\n", (unsigned long long)r.tracker.getP99());
-    std::printf("  P99.9:   %6llu ns\n", (unsigned long long)r.tracker.getP999());
-    std::printf("  P99.99:  %6llu ns\n", (unsigned long long)r.tracker.getP9999());
-    std::printf("  Max:     %6llu ns\n", (unsigned long long)r.tracker.getMax());
-    std::printf("  Mean:    %6.0f ns\n", r.tracker.getMean());
+    // The shared table: a percentile inside the sub-tick band prints "<tick",
+    // the mean says when sub-tick samples pulled it down (PERF-8).
+    r.tracker.printTable("latency");
 }
 
 // The filesystem the journal actually lands on. A Path C/D number means
@@ -422,16 +416,17 @@ int main(int argc, char* argv[]) {
     // Every line is a DIFFERENCE between two paths, so it needs both. Under
     // --only the skipped path is empty, and a subtraction from it would print a
     // confident number computed from a zero.
+    // Printed as the percentiles are: a P50 inside the sub-tick band, or a
+    // difference taken from one, is "<tick" rather than a number (PERF-8).
     auto diff = [](const PathResult& x, const PathResult& y) {
-        return static_cast<long long>(x.tracker.getP50()) -
-               static_cast<long long>(y.tracker.getP50());
+        return bench::BenchLatencyRecorder::deltaText(x.tracker, y.tracker, 0.50);
     };
-    if (a.ran) std::printf("  Core matching + compliance:   %lld ns (Path A P50)\n",
-                           static_cast<long long>(a.tracker.getP50()));
-    if (a.ran && l.ran) std::printf("  Listener attached:             %+lld ns (Path L - A)\n", diff(l, a));
-    if (l.ran && b.ran) std::printf("  Engine overhead (seq+rate):    %+lld ns (Path B - L)\n", diff(b, l));
-    if (b.ran && c.ran) std::printf("  Journal, ack before durable:   %+lld ns (Path C - B)\n", diff(c, b));
-    if (b.ran && d.ran) std::printf("  Journal, durable ack:          %+lld ns (Path D - B)\n", diff(d, b));
+    if (a.ran) std::printf("  Core matching + compliance:   %s (Path A P50)\n",
+                           a.tracker.text(0.50).c_str());
+    if (a.ran && l.ran) std::printf("  Listener attached:            %s (Path L - A)\n", diff(l, a).c_str());
+    if (l.ran && b.ran) std::printf("  Engine overhead (seq+rate):   %s (Path B - L)\n", diff(b, l).c_str());
+    if (b.ran && c.ran) std::printf("  Journal, ack before durable:  %s (Path C - B)\n", diff(c, b).c_str());
+    if (b.ran && d.ran) std::printf("  Journal, durable ack:         %s (Path D - B)\n", diff(d, b).c_str());
     if (onlyPath) std::printf("  (--only %c: differences between paths suppressed)\n", onlyPath);
 
     std::printf("\n=======================================================\n");

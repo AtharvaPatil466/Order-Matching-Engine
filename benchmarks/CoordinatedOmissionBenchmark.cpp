@@ -42,6 +42,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 
 using namespace OrderMatcher;
 using bench::BenchLatencyRecorder;
@@ -186,16 +187,12 @@ int main(int argc, char* argv[]) {
     recCorrected.printTable("co-corrected");
 
     std::printf("\n── Delta (corrected − naive) ──\n");
-    auto delta = [](uint64_t c, uint64_t n) {
-        return (long long)c - (long long)n;
-    };
     std::printf("  Backlogged samples: %llu / %llu (%.1f%%)\n",
                 (unsigned long long)backlogSamples, (unsigned long long)measuredIndex,
                 measuredIndex ? 100.0 * (double)backlogSamples / (double)measuredIndex : 0.0);
-    std::printf("  P50   : %+lld ns\n", delta(recCorrected.getP50(),   recNaive.getP50()));
-    std::printf("  P99   : %+lld ns\n", delta(recCorrected.getP99(),   recNaive.getP99()));
-    std::printf("  P99.9 : %+lld ns\n", delta(recCorrected.getP999(),  recNaive.getP999()));
-    std::printf("  P99.99: %+lld ns\n", delta(recCorrected.getP9999(), recNaive.getP9999()));
+    for (const auto& [name, p] : {std::pair{"P50", 0.50}, {"P99", 0.99}, {"P99.9", 0.999}, {"P99.99", 0.9999}})
+        std::printf("  %-6s: %s\n", name,
+                    BenchLatencyRecorder::deltaText(recCorrected, recNaive, p).c_str());
     std::printf("\n  If the offered rate is below service capacity the two tables\n");
     std::printf("  nearly coincide (little backlog). Raise --rate past what the box\n");
     std::printf("  can serve and the CO-corrected tail diverges upward: that gap is\n");

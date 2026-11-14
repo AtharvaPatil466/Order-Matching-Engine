@@ -904,6 +904,12 @@ private:
     // then applied, as the expiry sweep does. False, book untouched, when the
     // journal is or has just become halted. `appendOrdinal` takes the entry's.
     bool cancelJournaledFirst(OrderBook& book, OrderId id, uint64_t& appendOrdinal);
+    // Worker thread, async cancel/modify/replace: tell the book's listener how
+    // it ended, since its submitter was answered before it ran. None: the
+    // order's state after it took effect (nothing if the order is gone; the
+    // book reported that). Otherwise the refusal, with the order's unchanged
+    // state, or Rejected when there is no such order of the requester's.
+    void reportAmendOutcome(OrderBook& book, OrderId id, RejectReason refused);
     // P2-10's notional cap for an order valued off the book (OrderBook::
     // notionalPrice): the submit-time check cannot read a worker-owned book, so
     // this runs on the book's thread, on both paths (STP-12).

@@ -257,10 +257,18 @@ A request's reports, and the market data it produced, leave only after its journ
 are durable; if the journal refused them, nothing about that request is ever shown. A session
 whose unread output reaches 1 MiB is disconnected; matching never waits for it.
 
-Not reported, because the book emits nothing for them: a stop's election before it trades
-(Rule 5.6), a resting order shrunk by `DecreaseAndCancel`, and the outcome of a cancel, modify
-or replace (its Ack means the worker ran it, not that it took effect; a later fill's leaves can
-be stale after a modify).
+A cancel, modify or replace is answered Ack once the worker has run it, whatever it decided;
+the outcome follows as an `OrderUpdateNotification`. A modify or replace that took effect
+restates the order: its status, cumulative and new leaves, with no reject reason. A cancel that
+took effect is its `Cancelled`. A refusal carries the order's unchanged status, cumulative and
+leaves and the reason (`InvalidQuantity`, a risk or band reason, ...); a request naming no live
+order of the requester's is `Rejected` with `OrderNotFound`. A resting order shrunk by
+`DecreaseAndCancel` is restated the same way, in its own status with its new leaves. These
+restatements carry sequence id 0.
+
+Not reported: a stop's election before it trades (Rule 5.6), because the book emits nothing for
+it. A replace that crosses reports its own fills before its restatement, so those fills carry
+the leaves the order had before the replace; the restatement that follows is right.
 
 **Status: Deliberate — pinned** by `tests/GatewayExecutionReportTest.cpp` and the crossing
 rounds of `tests/CrashRecoveryE2ETest.cpp`. Sync-mode `TcpGateway` sends no reports.

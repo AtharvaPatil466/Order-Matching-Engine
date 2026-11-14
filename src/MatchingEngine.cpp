@@ -1139,7 +1139,11 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
     }
     case OrderRequest::Type::Cancel: {
         auto* book = getOrderBook(req.symbolId);
-        if (!book || !book->getOrder(req.orderId)) {
+        if (!book) {
+            return;
+        }
+        if (!book->getOrder(req.orderId)) {
+            reportAmendOutcome(*book, req.orderId, RejectReason::OrderNotFound);
             return;
         }
         // req.participantId is the requester here, not the order's owner: for
@@ -1153,6 +1157,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                              .kv("order_id",  (unsigned long long)req.orderId)
                              .kv("symbol_id", (long long)req.symbolId)
                              .kv("requester", (unsigned long long)req.participantId));
+            reportAmendOutcome(*book, req.orderId, RejectReason::NotOrderOwner);
             return;
         }
         if (journal_) {
@@ -1177,13 +1182,15 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
-        if (book->modifyOrder(req.orderId, req.newQty, req.participantId) && journal_) {
+        RejectReason refused = RejectReason::None;
+        if (book->modifyOrder(req.orderId, req.newQty, refused, req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
                 journal_->logModifyOrder(req.orderId, req.symbolId, req.newQty);
             }
             maybeTriggerAutoCheckpoint();
         }
+        reportAmendOutcome(*book, req.orderId, refused);
         break;
     }
     case OrderRequest::Type::CancelReplace: {
@@ -1192,7 +1199,8 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             return;
         }
         const TradingState stateBefore = book->getTradingState();
-        if (book->cancelReplace(req.orderId, req.newPrice, req.newQty,
+        RejectReason refused = RejectReason::None;
+        if (book->cancelReplace(req.orderId, req.newPrice, req.newQty, refused,
                                 req.participantId) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
@@ -1201,6 +1209,10 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             }
             maybeTriggerAutoCheckpoint();
         }
+        // ponytail: reported after the replace's own sweep, so the fills a
+        // crossing replace makes carry the pre-replace leaves; the book
+        // restating before its sweep is the fix (OrderBook.cpp, not this lane's).
+        reportAmendOutcome(*book, req.orderId, refused);
         // A repriced order matches as an aggressor: its OCO group and the
         // trade-driven consumers see those fills like any other (GTS-4).
         if (ocoActive_.load(std::memory_order_relaxed) ||
@@ -1461,6 +1473,31 @@ uint64_t MatchingEngine::driveOcoSync(SymbolId symbolId, OrderBook* book,
 // journal, and then this cancel never happens, so a sweep stops at the halt
 // with the book still matching the disk (DA-1). Applied first, the order was
 // gone from memory and back after a restart.
+void MatchingEngine::reportAmendOutcome(OrderBook& book, OrderId id, RejectReason refused) {
+#ifndef OB_LEAN_MODE
+    EventListener* listener = book.eventListener();
+    if (!listener) return;
+    const Order* order = book.getOrder(id);
+    OrderUpdate u{};
+    u.orderId = id;
+    u.rejectReason = refused;
+    u.timestamp = nowNs();
+    // Another participant's order is not described to the requester.
+    if (order && refused != RejectReason::NotOrderOwner) {
+        u.status = order->status;
+        u.filledQty = order->cumQty;
+        u.remainingQty = order->remainingQty;
+    } else if (refused == RejectReason::None) {
+        return;   // took effect and the order is gone: the book said Filled/Cancelled
+    } else {
+        u.status = OrderStatus::Rejected;
+    }
+    listener->onOrderUpdate(u);
+#else
+    (void)book; (void)id; (void)refused;
+#endif
+}
+
 bool MatchingEngine::cancelJournaledFirst(OrderBook& book, OrderId id, uint64_t& appendOrdinal) {
     if (journal_) {
         std::lock_guard<std::mutex> lock(journalMutex_);

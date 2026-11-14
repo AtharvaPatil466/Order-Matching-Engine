@@ -360,9 +360,12 @@ and Market remainders, expiry, kill switch, session end, self-trade prevention)
 and a new order refused after its Ack. They reach every session that may act
 for the order's participant; one with no session is not told later. A session
 that stops reading is disconnected once its queued output reaches the
-per-session ceiling (`TcpGateway::kMaxWriteBufBytes`). Not yet
-reported: a stop's election before it trades, a `DecreaseAndCancel` reduction,
-and whether a cancel, modify or replace took effect (see MatchingRules Rule 2.6).
+per-session ceiling (`TcpGateway::kMaxWriteBufBytes`). A cancel, modify or
+replace is answered Ack once it has run; whether it took effect follows as an
+`OrderUpdateNotification`: the order restated with its new leaves, or the
+refusal's reason with the order unchanged (`Rejected`/`OrderNotFound` when there
+is no such order). Not yet reported: a stop's election before it trades (see
+MatchingRules Rule 2.6).
 <!-- claim:gw-exec-reports -->
 
 ### Replication: removed

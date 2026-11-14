@@ -173,6 +173,74 @@ void engineCancelsAndLateRejects() {
     std::puts("engineCancelsAndLateRejects passed");
 }
 
+OrderRequest amend(OrderRequest::Type type, ParticipantId p, OrderId id, Quantity newQty = 0,
+                   Price newPrice = 0) {
+    OrderRequest r{};
+    r.type = type;
+    r.symbolId = kSym;
+    r.orderId = id;
+    r.participantId = p;
+    r.newQty = newQty;
+    r.newPrice = newPrice;
+    return r;
+}
+
+auto updateOf(OrderId id, OrderStatus s, Quantity leaves, RejectReason why) {
+    return [=](const GatewayResponse& r) {
+        return r.type == kUpdate && r.orderId == id && r.orderUpdate.status == s &&
+               r.orderUpdate.remainingQty == leaves && r.rejectReason == why;
+    };
+}
+
+// A modify, cancel or cancel-replace is answered Ack once a worker has run it,
+// whatever the worker decided. The outcome follows as a report: the order's
+// new leaves when it took effect, its unchanged state and the reason when it
+// was refused, Rejected/OrderNotFound when there was no such order. Before,
+// a modify or replace that took effect said nothing, so the next fill's
+// leaves were the pre-amend ones, and every refusal was silent.
+void amendOutcomesAreReported() {
+    Venue v;
+    Session maker(v.gateway.port()), taker(v.gateway.port());
+    constexpr auto kAck = GatewayResponse::Type::Ack;
+    constexpr auto kNone = RejectReason::None;
+    assert(maker.request(limit(kMaker, 1, Side::Sell, 100, 10)).type == kAck);
+
+    // Modify down: the new leaves, and the next fill counts from them.
+    assert(maker.request(amend(OrderRequest::Type::Modify, kMaker, 1, 4)).type == kAck);
+    assert(maker.await(updateOf(1, OrderStatus::Accepted, 4, kNone)) && "modify unreported");
+    assert(taker.request(limit(kTaker, 1, Side::Buy, 100, 3)).type == kAck);
+    assert(maker.await(reportOf(kTrade, 1, OrderStatus::PartiallyFilled)));
+    assert(maker.find(kTrade, 1, OrderStatus::PartiallyFilled)->orderUpdate.remainingQty == 1 &&
+           "the fill after a modify carried the pre-modify leaves");
+
+    // Refused modify (growth): the order as it stands, and why.
+    assert(maker.request(amend(OrderRequest::Type::Modify, kMaker, 1, 50)).type == kAck);
+    assert(maker.await(updateOf(1, OrderStatus::PartiallyFilled, 1, RejectReason::InvalidQuantity)) &&
+           "refused modify unreported");
+
+    // Cancel-replace: a new total of 20 with 3 executed leaves 17 working.
+    assert(maker.request(amend(OrderRequest::Type::CancelReplace, kMaker, 1, 20, 102)).type == kAck);
+    assert(maker.await(updateOf(1, OrderStatus::PartiallyFilled, 17, kNone)) && "replace unreported");
+    assert(taker.request(limit(kTaker, 2, Side::Buy, 102, 17)).type == kAck);
+    assert(maker.await(reportOf(kTrade, 1, OrderStatus::Filled)) &&
+           "the fill after a replace carried the pre-replace leaves");
+
+    // No such order, for each request type.
+    for (const auto type : {OrderRequest::Type::Cancel, OrderRequest::Type::Modify,
+                            OrderRequest::Type::CancelReplace}) {
+        maker.reports.clear();
+        assert(maker.request(amend(type, kMaker, 1, 5, 101)).type == kAck);
+        assert(maker.await(updateOf(1, OrderStatus::Rejected, 0, RejectReason::OrderNotFound)) &&
+               "a cancel/modify/replace of an order that is gone went unanswered");
+    }
+
+    // A cancel that took effect was already reported; it still is.
+    assert(maker.request(limit(kMaker, 2, Side::Sell, 110, 5)).type == kAck);
+    assert(maker.request(amend(OrderRequest::Type::Cancel, kMaker, 2)).type == kAck);
+    assert(maker.await(reportOf(kUpdate, 2, OrderStatus::Cancelled)));
+    std::puts("amendOutcomesAreReported passed");
+}
+
 // A participant's reports go to each of its sessions, and nowhere else; with
 // no session they are counted, not queued.
 void routedByParticipant() {
@@ -342,6 +410,7 @@ int main(int argc, char** argv) {
     const std::string only = argc > 1 ? argv[1] : "";
     if (only.empty() || only == "fills") fillsReachBothSides();
     if (only.empty() || only == "cancels") engineCancelsAndLateRejects();
+    if (only.empty() || only == "amends") amendOutcomesAreReported();
     if (only.empty() || only == "routing") routedByParticipant();
     if (only.empty() || only == "reset") peerResetDoesNotKillTheGateway();
     if (only.empty() || only == "slow") slowConsumerIsDisconnected();

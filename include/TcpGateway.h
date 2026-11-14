@@ -114,7 +114,10 @@ inline GatewayLoginV2 makeGatewayLogin(std::string_view user,
 //                           cancel the engine made (Cancelled for IOC/FOK/
 //                           Market remainders, expiry, kill switch, session end;
 //                           CancelledBySTP), and Rejected for a new order the
-//                           book refused after its Ack.
+//                           book refused after its Ack. Also the outcome of a
+//                           cancel, modify or replace: the order restated, or
+//                           its unchanged state with the refusal's reason, or
+//                           Rejected/OrderNotFound when there is no such order.
 //
 // orderId fields are always the client's own id (see gatewayOrderId).
 struct GatewayResponse {

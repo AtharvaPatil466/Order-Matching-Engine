@@ -1512,10 +1512,17 @@ minimum and never reads the field. An order that meets it trades, and its remain
 minimum left. **A non-crossing limit used to rest and wait**, and since matching never reads
 `minQty` its first execution, as a maker, was whatever the next aggressor brought: 1 lot of a
 minimum of 50 (MR-5). The one way an order still reaches `Continuous` with its minimum unmet is
-through an auction, which does not apply `minQty` (below); a cancel/replace of such an order
-that would cross for less than its minimum is refused with `FOKInsufficientLiquidity`, the
-liquidity screen's reason, and leaves the order as it was. As a maker it is not protected
-(decision for the author: cancel such orders at the reopen, or accept the gap).
+through an auction. **The uncross applies the rule too:** before it executes, an unexecuted
+`minQty` order that the cross would fill above zero but below its minimum (its allocation in
+the cross's own order: parked market orders, then levels at or through the price, best first,
+queue order) is cancelled untraded, and the price is discovered again without it, until no such
+order remains (`OrderBook::minQtyShortInCross`). It used to fill whatever the cross allocated.
+An order the cross does not reach at all rests into `Continuous` with its minimum unmet; a
+cancel/replace of such an order that would cross for less than its minimum is refused with
+`FOKInsufficientLiquidity`, the liquidity screen's reason, and leaves the order as it was. As a
+maker it is not protected (decision for the author: cancel such orders at the reopen, or accept
+the gap). Pinned by `tests/RestingOrderRulesTest.cpp` (`TheCrossDoesNotFillBelowAnUnmetMinimum`,
+`TheCrossFillsAMinimumItCanMeet`).
 
 It is checked against what the sweep would actually **fill**, not against everything at a
 crossing price. `sweepFillQty()` dry-runs the sweep over the opposite book, at crossing prices

@@ -17,6 +17,7 @@
 
 #include <map>
 #include <memory>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -108,6 +109,51 @@ TEST(MinQty, AReplaceDoesNotExecuteBelowAnUnmetMinimum) {
     Quantity bought = 0;
     for (const Trade& t : b.rec.trades) bought += t.quantity;
     EXPECT_EQ(bought, 55u);
+}
+
+// Rule 9.5 in the cross: an unexecuted minQty order the uncross would fill
+// below its minimum is cancelled untraded before the cross, which is then
+// re-priced without it. It used to fill whatever the cross allocated: 20 of a
+// minimum of 50.
+TEST(MinQty, TheCrossDoesNotFillBelowAnUnmetMinimum) {
+    for (MatchAlgorithm algo : {MatchAlgorithm::PriceTime, MatchAlgorithm::ProRata}) {
+        SCOPED_TRACE(algoName(algo));
+        Book b(algo);
+        b->setTradingState(TradingState::PreOpen);
+        limitWithMin(*b.book, 1, 10, Side::Buy, kPx + 100, 100, 50);
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            b->addOrder(2, 11, Side::Sell, kPx, 20, OrderType::Limit)));
+        // A plain bid behind it takes what the minQty order may not.
+        ASSERT_TRUE(std::holds_alternative<OrderId>(
+            b->addOrder(3, 12, Side::Buy, kPx, 10, OrderType::Limit)));
+        b->setTradingState(TradingState::Continuous);
+
+        for (const Trade& t : b.rec.trades)
+            EXPECT_NE(t.buyOrderId, 1u) << "the cross filled " << t.quantity << " of a minimum of 50";
+        EXPECT_EQ(b->getOrder(1), nullptr);
+        ASSERT_TRUE(b.rec.last.count(1));
+        EXPECT_EQ(b.rec.last[1].status, OrderStatus::Cancelled);
+        Quantity bought3 = 0;
+        for (const Trade& t : b.rec.trades)
+            if (t.buyOrderId == 3) bought3 += t.quantity;
+        EXPECT_EQ(bought3, 10u) << "the cross was not re-priced without the cancelled order";
+        std::string err;
+        EXPECT_TRUE(b->validateIntegrity(&err)) << err;
+    }
+}
+
+TEST(MinQty, TheCrossFillsAMinimumItCanMeet) {
+    Book b;
+    b->setTradingState(TradingState::PreOpen);
+    limitWithMin(*b.book, 1, 10, Side::Buy, kPx + 100, 100, 50);
+    ASSERT_TRUE(std::holds_alternative<OrderId>(
+        b->addOrder(2, 11, Side::Sell, kPx, 60, OrderType::Limit)));
+    b->setTradingState(TradingState::Continuous);
+    Quantity bought = 0;
+    for (const Trade& t : b.rec.trades) bought += t.quantity;
+    EXPECT_EQ(bought, 60u);
+    ASSERT_NE(b->getOrder(1), nullptr);
+    EXPECT_EQ(b->getOrder(1)->remainingQty, 40u);
 }
 
 // ─── DecreaseAndCancel tells the resting owner (MR-7) ───────────────────────

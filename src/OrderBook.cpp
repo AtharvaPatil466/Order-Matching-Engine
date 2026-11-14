@@ -3127,6 +3127,38 @@ void OrderBook::uncross() {
     uncrossLocked();
 }
 
+// The first order the cross at res would fill below an unmet minimum, or
+// null. Mirrors the cross's allocation on each side: parked market orders in
+// list order, then the levels at or through the price, best first, in queue
+// order, each taking min(its leaves, what is left of the paired volume).
+// Precondition: bookLock_ held.
+Order* OrderBook::minQtyShortInCross(const AuctionResult& res) const {
+    const Price px = res.indicativePrice;
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        Quantity left = res.pairedVolume;
+        Order* found = nullptr;
+        auto take = [&](Order* o) {
+            const Quantity alloc = std::min(o->remainingQty, left);
+            left -= alloc;
+            if (o->minQty > 0 && o->cumQty == 0 && alloc > 0 && alloc < o->minQty) found = o;
+            return left > 0 && !found;
+        };
+        bool more = true;
+        for (Order* m : auctionMarketOrders_)
+            if (more && m && m->side == side) more = take(m);
+        const FlatPriceMap& book = side == Side::Buy ? bids_ : asks_;
+        if (more)
+            book.forEachLevelWhile([&](Price p, const OrderList& level) {
+                if (side == Side::Buy ? p < px : p > px) return false;
+                for (Order* o : level)
+                    if (!take(o)) return false;
+                return true;
+            });
+        if (found) return found;
+    }
+    return nullptr;
+}
+
 // Precondition: bookLock_ held.
 void OrderBook::uncrossLocked() {
     // THR-10: an order past its expiry takes no part in the cross. Replay applies
@@ -3144,7 +3176,16 @@ void OrderBook::uncrossLocked() {
     // Discover the clearing price via the shared, non-destructive core —
     // the same logic computeAuctionState() publishes pre-cross, so the
     // indicative feed and the executed price can never disagree.
+    // Rule 9.5 in the cross: an unexecuted minQty order the cross would fill
+    // below its minimum is cancelled untraded, as on arrival, and the price is
+    // found again without it. Each pass removes one order, so it ends.
     AuctionResult res = discoverUncrossPrice();
+    while (res.hasCross) {
+        Order* shortOfMin = minQtyShortInCross(res);
+        if (!shortOfMin) break;
+        cancelOrderImpl(shortOfMin->id);
+        res = discoverUncrossPrice();
+    }
     if (!res.hasCross) {
         // Nothing crosses: empty / one-sided / non-overlapping book, or
         // parked market orders with no limit prices to anchor on. Parked

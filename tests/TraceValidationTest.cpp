@@ -202,7 +202,7 @@ std::vector<std::vector<Ev>> allTraces() {
 }  // namespace
 
 TEST(TraceValidation, EveryEngineTraceIsABehaviourOfTheSpec) {
-    if (!tlcAvailable()) GTEST_SKIP() << "needs java and spec/tla2tools.jar (spec/check.sh fetches it)";
+    if (!tlcAvailable()) GTEST_SKIP() << "needs java and spec/tla2tools.jar (spec/check.sh fetches it)";  // skip-ok: TLC is not installed with the build; tla.yml fails if this skips
     const auto traces = allTraces();
     // The generator must reach what the trace check is for.
     int fills = 0, stp = 0, replaces = 0, modifies = 0, cancels = 0, multiFillSweeps = 0;
@@ -234,7 +234,7 @@ TEST(TraceValidation, EveryEngineTraceIsABehaviourOfTheSpec) {
 // Non-vacuity: two fills of one sweep against different resting orders,
 // reported in the other order, are not a behaviour of the spec.
 TEST(TraceValidation, AReorderedSweepIsRejected) {
-    if (!tlcAvailable()) GTEST_SKIP() << "needs java and spec/tla2tools.jar (spec/check.sh fetches it)";
+    if (!tlcAvailable()) GTEST_SKIP() << "needs java and spec/tla2tools.jar (spec/check.sh fetches it)";  // skip-ok: TLC is not installed with the build; tla.yml fails if this skips
     for (auto tr : allTraces()) {
         for (size_t j = 1; j < tr.size(); ++j) {
             if (tr[j - 1].op != "fill" || tr[j].op != "fill" || tr[j - 1].rest == tr[j].rest) continue;

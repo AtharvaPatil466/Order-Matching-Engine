@@ -1142,17 +1142,18 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
-        if (!book->getOrder(req.orderId)) {
+        // This worker owns the book, so what getOrder finds here is what the
+        // cancel below acts on.
+        const Order* order = book->getOrder(req.orderId);
+        if (!order) {
             reportAmendOutcome(*book, req.orderId, RejectReason::OrderNotFound);
             return;
         }
         // req.participantId is the requester here, not the order's owner: for
         // a Cancel it is whoever asked, and kAnyParticipant when the caller is
-        // internal. A denied cancel must not journal, so bail first. The
-        // order's working quantity goes back inside the book (untrackOrder).
-        const auto exposure =
-            book->cancelOrderReleasing(req.orderId, req.participantId);
-        if (exposure.denied) [[unlikely]] {
+        // internal. A denied cancel must not journal, so bail first.
+        if (req.participantId != kAnyParticipant &&
+            order->participantId != req.participantId) [[unlikely]] {
             obSink().log(obEvent("cancel_denied_not_owner", LogSeverity::Warn)
                              .kv("order_id",  (unsigned long long)req.orderId)
                              .kv("symbol_id", (long long)req.symbolId)
@@ -1160,13 +1161,11 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             reportAmendOutcome(*book, req.orderId, RejectReason::NotOrderOwner);
             return;
         }
-        if (journal_) {
-            {
-                std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelOrder(req.orderId, req.symbolId);
-            }
-            maybeTriggerAutoCheckpoint();
-        }
+        // Recorded before it is applied: a cancel whose record the disk
+        // refuses leaves the order resting, as a restart will find it.
+        uint64_t unused = 0;
+        if (!cancelJournaledFirst(*book, req.orderId, unused)) return;
+        if (journal_) maybeTriggerAutoCheckpoint();
         if (catActive_.load(std::memory_order_relaxed)) {
             std::lock_guard<std::mutex> lock(catMutex_);
             catReporter_.recordCancel(nowNs(), req.orderId);

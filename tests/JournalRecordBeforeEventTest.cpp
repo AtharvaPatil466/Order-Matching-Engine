@@ -11,6 +11,11 @@
 // orders' AddOrder records on disk, an order update its order's AddOrder (and
 // CancelOrder, for a cancel) record. GatewayExecutionReportTest "durable" pins
 // the other half: a record the disk refuses releases nothing.
+//
+// ownRecordRefused: the request whose own record the disk refuses must not be
+// applied either (lane d's residual). A cancel is recorded before the book
+// drops the order, so a refused cancel record leaves the order resting, as a
+// restart will find it.
 
 #include "GatewayTestClient.h"
 #include "MatchingEngine.h"
@@ -20,10 +25,14 @@
 
 #include <atomic>
 #include <cassert>
+#include <csignal>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 using namespace OrderMatcher;
@@ -90,9 +99,54 @@ bool ack(TestClient& c, const OrderRequest& r) {
     return false;
 }
 
+enum Code : int { kOk = 0, kSetup = 90, kNotHalted, kApplied };
+
+// RLIMIT_FSIZE in a child, as JournalHaltTest: the file holds the sequence
+// lease and the order, and the cancel is the write the disk refuses.
+int refusedCancelChild(const std::string& path) {
+    constexpr int kWholeRecords = 2;
+    std::signal(SIGXFSZ, SIG_IGN);
+    const rlim_t bytes =
+        sizeof(JournalFileHeader) + kWholeRecords * sizeof(JournalEntry) + sizeof(JournalEntry) / 2;
+    struct rlimit rl{bytes, bytes};
+    if (setrlimit(RLIMIT_FSIZE, &rl) != 0) return kSetup;
+    MatchingEngine engine;
+    engine.addSymbol(kSym);
+    engine.enableJournal(path, Journal::SyncPolicy::Immediate);
+    engine.startAsync(1);
+    if (!engine.submitOrder(kSym, 1, kMaker, Side::Sell, 100, 10, OrderType::Limit).isAccepted())
+        return kSetup;
+    engine.waitForDrain();
+    if (engine.getJournal()->halted()) return kSetup;
+    (void)engine.submitCancel(kSym, 1, kMaker);
+    engine.waitForDrain();
+    const bool halted = engine.getJournal()->halted();
+    const bool resting = engine.getOrderBook(kSym)->getOrder(1) != nullptr;
+    engine.stopAsync();
+    if (!halted) return kNotHalted;
+    return resting ? kOk : kApplied;
+}
+
+void ownRecordRefused() {
+    const std::string path = uniqueTempPath("record_before_cancel.wal");
+    std::filesystem::remove(path);
+    std::fflush(nullptr);
+    const pid_t pid = fork();
+    if (pid == 0) _exit(refusedCancelChild(path));
+    int status = 0;
+    waitpid(pid, &status, 0);
+    std::filesystem::remove(path);
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    std::printf("  refused cancel record: child exit %d\n", rc);
+    assert(rc != kApplied && "a cancel whose record the disk refused was applied anyway");
+    assert(rc == kOk);
+    std::puts("ownRecordRefused passed");
+}
+
 }  // namespace
 
 int main() {
+    ownRecordRefused();
     const std::string path = uniqueTempPath("record_before_event.wal");
     std::filesystem::remove(path);
     Feed feed;

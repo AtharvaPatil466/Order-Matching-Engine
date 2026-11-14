@@ -17,12 +17,23 @@
 // any window's P99 crossed --p99-threshold, a number its own header called
 // uncalibrated; the CI smoke step failed on it in every local run. The
 // threshold is gone. Exit 1 now means the workload was not the one described:
-// an order rejected at submit or by its book, or processed != submitted.
+// an order rejected at submit or by its book, processed != submitted, or the
+// engine did not keep up with the offered rate (below).
+//
+// KEEPING UP (PERF-2). An async submit only queues, so a run whose engine
+// falls behind still processes every order once the producers stop and the
+// queues drain. That run used to pass: one at 400k/s offered decayed to
+// 107k/s processed by window 19, finished 57.7 s of drain after its 20 s
+// window, and printed an "average throughput" over the drain. Now each window
+// prints the backlog (admitted, not yet processed), the throughput is
+// reported over the offered window only, and the run fails when the backlog
+// left at the end of the offered window exceeds --max-backlog-ms of offered
+// load (default 100 ms): the engine processed less than it was offered.
 //
 // What the latency columns report is END-TO-END time from ingress to
 // completion, which under sustained offered load is dominated by QUEUE
-// RESIDENCY, not by service time. Measured here: ~790 ns P50 at 400k/s and
-// 25-37 us P99.
+// RESIDENCY, not by service time. Read them only for a run that kept up:
+// behind a growing backlog they measure the queue.
 //
 // There are no cancels, so every order may rest: each book's pool is sized
 // for the whole run (rate x duration / symbols, +25%) and memory grows with
@@ -109,6 +120,7 @@ int main(int argc, char* argv[]) {
     int targetRate = 200000;  // orders/sec; the pool below grows with rate x duration
     int numThreads = 4;
     int numSymbols = 8;
+    double maxBacklogMs = 100.0;
     std::string mode = "full";
 
     for (int i = 1; i < argc; ++i) {
@@ -122,6 +134,8 @@ int main(int argc, char* argv[]) {
             numThreads = std::stoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--symbols") == 0 && i + 1 < argc) {
             numSymbols = std::stoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--max-backlog-ms") == 0 && i + 1 < argc) {
+            maxBacklogMs = std::stod(argv[++i]);
         } else if (std::strcmp(argv[i], "--lean") == 0) {
             mode = "lean";
         }
@@ -134,7 +148,9 @@ int main(int argc, char* argv[]) {
                 targetRate);
     std::printf("Threads:       %d\n", numThreads);
     std::printf("Symbols:       %d\n", numSymbols);
-    std::printf("Mode:          %s\n\n", mode.c_str());
+    std::printf("Mode:          %s\n", mode.c_str());
+    std::printf("Max backlog:   %.0f ms of offered load at the end of the window\n\n",
+                maxBacklogMs);
 
     // Set up engine
     MatchingEngine engine;
@@ -197,7 +213,6 @@ int main(int argc, char* argv[]) {
         std::uniform_int_distribution<Quantity> qtyDist(1, 50);
         std::uniform_int_distribution<int> symbolDist(1, numSymbols);
 
-        uint64_t localSubmitted = 0;
         uint64_t localRejected = 0;
         OrderId nextId = static_cast<OrderId>(threadId * 100000000);
 
@@ -226,7 +241,8 @@ int main(int argc, char* argv[]) {
                     side, price, qty, OrderType::Limit);
 
                 if (result.isAccepted()) {
-                    ++localSubmitted;
+                    // Live, so the monitor can see the backlog grow.
+                    totalSubmitted.fetch_add(1, std::memory_order_relaxed);
                 } else {
                     ++localRejected;
                 }
@@ -236,7 +252,6 @@ int main(int argc, char* argv[]) {
             std::this_thread::yield();
         }
 
-        totalSubmitted.fetch_add(localSubmitted, std::memory_order_relaxed);
         totalRejected.fetch_add(localRejected, std::memory_order_relaxed);
     };
 
@@ -257,6 +272,8 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::seconds(windowSec));
 
         uint64_t nowProcessed = engine.getProcessedCount();
+        const uint64_t submittedSoFar = totalSubmitted.load(std::memory_order_relaxed);
+        const uint64_t backlog = submittedSoFar > nowProcessed ? submittedSoFar - nowProcessed : 0;
         uint64_t windowProcessed = nowProcessed - prevProcessed;
         prevProcessed = nowProcessed;
 
@@ -285,9 +302,10 @@ int main(int argc, char* argv[]) {
         ws.throughput = static_cast<double>(windowProcessed) / static_cast<double>(windowSec);
         ws.memoryKB = getCurrentMemoryKB();
 
-        std::printf("Window %2d: %7llu orders | %9.0f/s | P50=%6.0fns P99=%6.0fns P99.9=%7.0fns | Mem=%zuKB\n",
+        std::printf("Window %2d: %7llu orders | %9.0f/s | backlog %8llu | P50=%6.0fns P99=%6.0fns P99.9=%7.0fns | Mem=%zuKB\n",
                     w, static_cast<unsigned long long>(ws.ordersProcessed),
-                    ws.throughput, ws.p50Ns, ws.p99Ns, ws.p999Ns, ws.memoryKB);
+                    ws.throughput, static_cast<unsigned long long>(backlog),
+                    ws.p50Ns, ws.p99Ns, ws.p999Ns, ws.memoryKB);
 
         {
             std::lock_guard<std::mutex> lock(windowMu);
@@ -295,24 +313,35 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Stop
+    // Stop. The offered window ends here; what is processed after it is drain.
     running.store(false);
     for (auto& t : producers) {
         if (t.joinable()) t.join();
     }
+    const double offeredSec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - monitorStart).count();
+    const uint64_t offered = totalSubmitted.load();
+    const uint64_t processedInWindow = engine.getProcessedCount();
+    const uint64_t backlogAtEnd = offered > processedInWindow ? offered - processedInWindow : 0;
+    const double offeredRate = static_cast<double>(offered) / offeredSec;
+    const double achievedRate = static_cast<double>(processedInWindow) / offeredSec;
+    const double backlogMs = offeredRate > 0 ? 1e3 * static_cast<double>(backlogAtEnd) / offeredRate : 0;
     engine.waitForDrain();
-
-    auto totalDuration = std::chrono::steady_clock::now() - monitorStart;
-    double totalSec = std::chrono::duration<double>(totalDuration).count();
+    const double drainSec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - monitorStart).count() -
+        offeredSec;
 
     std::printf("\n=== Summary ===\n");
-    std::printf("Total duration:   %.1f sec\n", totalSec);
+    std::printf("Offered window:   %.1f sec, then %.1f sec of drain\n", offeredSec, drainSec);
     std::printf("Total submitted:  %llu\n", static_cast<unsigned long long>(totalSubmitted.load()));
     std::printf("Total rejected:   %llu\n", static_cast<unsigned long long>(totalRejected.load()));
     std::printf("Total processed:  %llu\n", static_cast<unsigned long long>(engine.getProcessedCount()));
     std::printf("Book rejects:     %llu\n", static_cast<unsigned long long>(bookRejects.rejects()));
-    std::printf("Avg throughput:   %.0f orders/sec\n",
-                static_cast<double>(engine.getProcessedCount()) / totalSec);
+    std::printf("Offered rate:     %.0f orders/sec (admitted over the offered window)\n", offeredRate);
+    std::printf("Achieved rate:    %.0f orders/sec (processed within the offered window, %.1f%% of offered)\n",
+                achievedRate, offeredRate > 0 ? 100.0 * achievedRate / offeredRate : 0.0);
+    std::printf("Backlog at end:   %llu orders (%.1f ms of offered load)\n",
+                static_cast<unsigned long long>(backlogAtEnd), backlogMs);
 
     // Check for memory growth (regression indicator)
     if (windows.size() >= 2) {
@@ -339,6 +368,14 @@ int main(int argc, char* argv[]) {
                     static_cast<unsigned long long>(totalSubmitted.load()));
         return 1;
     }
-    std::printf("\nWorkload check OK: every order admitted, processed and accepted by its book\n");
+    if (backlogMs > maxBacklogMs) {
+        std::printf("\nWORKLOAD CHECK FAILED: the engine fell behind — %llu orders (%.1f ms of "
+                    "offered load) were still queued when the offered window ended (limit %.0f ms); "
+                    "the latency columns measure the queue\n",
+                    static_cast<unsigned long long>(backlogAtEnd), backlogMs, maxBacklogMs);
+        return 1;
+    }
+    std::printf("\nWorkload check OK: every order admitted, processed and accepted by its book, "
+                "and the engine kept up with the offered rate\n");
     return 0;
 }

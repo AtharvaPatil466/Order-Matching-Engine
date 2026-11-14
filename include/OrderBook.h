@@ -1097,6 +1097,7 @@ private:
     void expireMaker(Order* o);
     size_t expireDueLocked(uint64_t currentTime, const std::function<void(OrderId)>& onExpire);
     void checkStopOrders(Price lowPrint, Price highPrint);
+    void latchElection(Order& order);   // latch + report Triggered, once
     void updateTrailingStops(Price firstPrint, Price lastPrint);
     void updatePeggedOrders();
     // Cancel any market orders parked during an auction without

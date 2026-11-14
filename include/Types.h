@@ -53,11 +53,16 @@ enum class OrderStatus : uint8_t {
     // STP-cancelled order report Filled at full quantity, which then won its
     // OCO group and cancelled innocent siblings.
     //
-    // Placed here rather than appended because OrderStatus — unlike
-    // RejectReason — is never cast to an integer, serialized, journalled, or
-    // put on the wire, so renumbering is not observable. Verified repo-wide before moving it.
+    // Placed here rather than appended when OrderStatus was never cast to an
+    // integer, serialized, journalled, or put on the wire. The gateway's
+    // execution reports now carry it, so new statuses are appended.
     CancelledBySTP,
-    Rejected
+    Rejected,
+    // A stop, stop-limit, MIT or trailing stop was elected: its trigger
+    // printed. Reported once, when the election is latched and before any fill
+    // it makes; not a fill and not terminal. Appended, not inserted: the
+    // execution reports now carry this enum on the gateway wire.
+    Triggered
 };
 
 // Did this status represent an actual execution? The ONLY statuses that may

@@ -263,12 +263,15 @@ restates the order: its status, cumulative and new leaves, with no reject reason
 took effect is its `Cancelled`. A refusal carries the order's unchanged status, cumulative and
 leaves and the reason (`InvalidQuantity`, a risk or band reason, ...); a request naming no live
 order of the requester's is `Rejected` with `OrderNotFound`. A resting order shrunk by
-`DecreaseAndCancel` is restated the same way, in its own status with its new leaves. These
-restatements carry sequence id 0.
+`DecreaseAndCancel` is restated the same way, in its own status with its new leaves. A
+replace that took effect is restated by the book itself, before the sweep its new price may
+cause, so a crossing replace's own fills count down from the new leaves. Refusals and "no such
+order" are told by the engine and carry sequence id 0.
 
-Not reported: a stop's election before it trades (Rule 5.6), because the book emits nothing for
-it. A replace that crosses reports its own fills before its restatement, so those fills carry
-the leaves the order had before the replace; the restatement that follows is right.
+A stop, stop-limit, MIT or trailing stop that is elected is reported once, as `Triggered` with
+its cumulative and leaves, when the election is latched and before any fill it makes; an
+election deferred by the execution budget or by a non-Continuous state is reported then too
+(Rule 5.6). `Triggered` is not terminal and is not an execution.
 
 **Status: Deliberate — pinned** by `tests/GatewayExecutionReportTest.cpp` and the crossing
 rounds of `tests/CrashRecoveryE2ETest.cpp`. Sync-mode `TcpGateway` sends no reports.
@@ -698,14 +701,13 @@ none lost. `tests/StopCascadeBoundTest.cpp:187` pins the identical bound on trai
 
 This is the part a participant needs to know and the part the engine does not tell them.
 
-- **No message is sent at election time.** The deferral branch emits no order update, no
-  execution report, nothing. The first thing the owner hears is the fill when the stop
-  eventually runs (`src/OrderBook.cpp:2257-2263`).
-- **The order still looks armed.** `getOrder()` returns it with `status == Accepted` (set once
-  at `src/OrderBook.cpp:700` and not touched by election) and `type` still `Stop`/`StopLimit`/
-  `MIT` — the type is only rewritten at execution. The `isStopTriggered` latch is a private
-  field carried on no wire protocol (`include/Order.h:71`; grep confirms it is read only
-  inside `OrderBook`).
+- **The election is reported, once.** `OrderBook::latchElection` emits an order update with
+  status `Triggered` when the latch goes from clear to set, whether the stop executes in this
+  sweep or is deferred; the gateway passes it to the owner as an `OrderUpdateNotification`.
+  A latch restored from a checkpoint is not reported again.
+- **The order object still looks armed.** `getOrder()` returns it with `status == Accepted`
+  (not touched by election) and `type` still `Stop`/`StopLimit`/`MIT` — the type is only
+  rewritten at execution. The `Triggered` report is what tells the owner.
 - **It remains cancellable, and a cancel wins.** A cancel arriving before the deferred
   execution removes the order and discards the election, silently
   (`src/OrderBook.cpp:1879` → `src/OrderBook.cpp:1843-1846`). The owner is never told their
@@ -717,13 +719,8 @@ This is the part a participant needs to know and the part the engine does not te
   expiry sweeps and uncrosses do **not** drain the backlog. If order flow stops, a latched
   stop sits latched indefinitely.
 
-So from the outside, a deferred stop is indistinguishable from an un-elected one. A
-participant cannot tell whether their stop is armed or already committed.
-
-**Status: Undocumented consequence of a deliberate design.** The bound itself is documented
-and pinned; the client-observable consequence of it is not stated anywhere, and no test
-asserts what a deferred stop's owner sees. This is worth a wire-protocol field — a "triggered,
-pending execution" state — and there is not one.
+**Status: Deliberate — pinned** by `GatewayExecutionReportTest` (`elections`: the
+`Triggered` report arrives before the elected stop's first fill).
 
 ### Rule 5.7 — Deferral order is scan order, and scan order is arbitrary
 

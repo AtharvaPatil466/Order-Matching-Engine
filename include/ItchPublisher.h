@@ -318,6 +318,7 @@ public:
         case OrderStatus::PartiallyFilled:
         case OrderStatus::Rejected:
         case OrderStatus::New:
+        case OrderStatus::Triggered:   // a parked stop was never 'A'-announced
             // No wire event — see header comment.
             break;
         }

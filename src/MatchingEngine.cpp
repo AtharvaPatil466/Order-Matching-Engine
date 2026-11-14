@@ -1264,10 +1264,9 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             }
             maybeTriggerAutoCheckpoint();
         }
-        // ponytail: reported after the replace's own sweep, so the fills a
-        // crossing replace makes carry the pre-replace leaves; the book
-        // restating before its sweep is the fix (OrderBook.cpp, not this lane's).
-        reportAmendOutcome(*book, req.orderId, refused);
+        // A replace that took effect was restated by the book, before its own
+        // sweep, so its fills count from the new leaves. Refusals are told here.
+        if (refused != RejectReason::None) reportAmendOutcome(*book, req.orderId, refused);
         // A repriced order matches as an aggressor: its OCO group and the
         // trade-driven consumers see those fills like any other (GTS-4).
         if (ocoActive_.load(std::memory_order_relaxed) ||

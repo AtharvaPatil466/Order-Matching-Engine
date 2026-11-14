@@ -241,6 +241,55 @@ void amendOutcomesAreReported() {
     std::puts("amendOutcomesAreReported passed");
 }
 
+// A stop's election is the owner's news: the book says Triggered before the
+// fills the elected order makes. Before, a stop went from Accepted straight to
+// fills with nothing in between, and a latched election (out of budget, or in
+// an auction) said nothing at all. A crossing replace restates the order's new
+// leaves before its own sweep, so the fills it makes count from them: they
+// used to carry the pre-replace leaves, then the restatement came after.
+void electionsAndCrossingReplace() {
+    Venue v;
+    Session maker(v.gateway.port()), taker(v.gateway.port());
+    constexpr auto kAck = GatewayResponse::Type::Ack;
+    assert(maker.request(limit(kMaker, 1, Side::Sell, 100, 5)).type == kAck);
+    assert(maker.request(limit(kMaker, 2, Side::Sell, 101, 5)).type == kAck);
+    assert(taker.request(limit(kTaker, 1, Side::Buy, 100, 1)).type == kAck);   // prints 100
+
+    // A buy stop at 101, elected by the next print at 101.
+    OrderRequest stop = limit(kTaker, 2, Side::Buy, 0, 3, OrderType::Stop);
+    stop.stopPrice = 101;
+    assert(taker.request(stop).type == kAck);
+    assert(taker.request(limit(kTaker, 3, Side::Buy, 101, 5)).type == kAck);  // prints 100, 101
+    assert(taker.await(reportOf(kUpdate, 2, OrderStatus::Filled)) && "the elected stop never filled");
+    const GatewayResponse* elected = taker.find(kUpdate, 2, OrderStatus::Triggered);
+    assert(elected && "the stop's election was not reported");
+    assert(elected->orderUpdate.filledQty == 0 && elected->orderUpdate.remainingQty == 3);
+    // Reported before its first fill.
+    size_t electedAt = 0, firstFill = 0;
+    for (size_t i = 0; i < taker.reports.size(); ++i) {
+        const GatewayResponse& r = taker.reports[i];
+        if (r.orderId != 2) continue;
+        if (r.type == kUpdate && r.orderUpdate.status == OrderStatus::Triggered) electedAt = i;
+        if (r.type == kTrade && firstFill == 0) firstFill = i;
+    }
+    assert(electedAt < firstFill && "the election was reported after the fills it caused");
+
+    // Crossing replace: the maker's 10 at 105 replaced to a total of 4 at 101
+    // crosses the taker's resting bid at 101 for 2. The fill's leaves are 2
+    // (4 - 2), not 8 (10 - 2).
+    assert(taker.request(limit(kTaker, 4, Side::Buy, 99, 2)).type == kAck);
+    assert(maker.request(limit(kMaker, 3, Side::Sell, 105, 10)).type == kAck);
+    assert(maker.request(amend(OrderRequest::Type::CancelReplace, kMaker, 3, 4, 99)).type == kAck);
+    assert(maker.await(reportOf(kTrade, 3, OrderStatus::PartiallyFilled)) && "the replace never traded");
+    const GatewayResponse* fill = maker.find(kTrade, 3, OrderStatus::PartiallyFilled);
+    std::printf("  crossing replace fill: cum %llu leaves %llu\n",
+                (unsigned long long)fill->orderUpdate.filledQty,
+                (unsigned long long)fill->orderUpdate.remainingQty);
+    assert(fill->orderUpdate.remainingQty == 2 &&
+           "a crossing replace's fill carried the pre-replace leaves");
+    std::puts("electionsAndCrossingReplace passed");
+}
+
 // A participant's reports go to each of its sessions, and nowhere else; with
 // no session they are counted, not queued.
 void routedByParticipant() {
@@ -411,6 +460,7 @@ int main(int argc, char** argv) {
     if (only.empty() || only == "fills") fillsReachBothSides();
     if (only.empty() || only == "cancels") engineCancelsAndLateRejects();
     if (only.empty() || only == "amends") amendOutcomesAreReported();
+    if (only.empty() || only == "elections") electionsAndCrossingReplace();
     if (only.empty() || only == "routing") routedByParticipant();
     if (only.empty() || only == "reset") peerResetDoesNotKillTheGateway();
     if (only.empty() || only == "slow") slowConsumerIsDisconnected();

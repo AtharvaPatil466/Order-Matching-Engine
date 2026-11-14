@@ -2685,6 +2685,10 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
         order->remainingQty = newLeaves;
         order->arrivalSeq = nextArrival_++;
         const Quantity cumBefore = order->cumQty;
+        // The new leaves are told before the sweep below, so the fills it
+        // makes count down from them. Told after (by the engine), those fills
+        // carried the pre-replace leaves.
+        notifyOrderUpdate(orderId, order->status, order->cumQty, order->remainingQty);
 
         // Check if new price crosses — if so, match first
         bool wouldCross = false;
@@ -2745,6 +2749,7 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
         }
         if (!order->isHidden)
             notifyMarketData(MarketDataUpdate::Action::Modify, order->side, order->price);
+        notifyOrderUpdate(orderId, order->status, order->cumQty, order->remainingQty);
     }
 
     return true;
@@ -2854,6 +2859,16 @@ void OrderBook::expireMaker(Order* o) {
 
 // ─── Stop Order Triggers ─────────────────────────────────────────────────────
 
+// The election is the owner's news, told once: when the latch goes from clear
+// to set, before any fill the elected order makes. A latched election that
+// waits for budget or for Continuous was already told. A restored latch
+// (restoreStopElection) sets the flag directly and tells nobody again.
+void OrderBook::latchElection(Order& order) {
+    if (order.isStopTriggered) return;
+    order.isStopTriggered = true;
+    notifyOrderUpdate(order.id, OrderStatus::Triggered, order.cumQty, order.remainingQty);
+}
+
 void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
     if (stopOrders_.empty()) [[unlikely]] return;
 
@@ -2893,7 +2908,7 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
         if (triggered) {
             // Latch the election before deciding whether there is budget to act
             // on it, so the deferred ones are the SAME set this print elected.
-            order->isStopTriggered = true;
+            latchElection(*order);
 
             if (executed >= kMaxStopExecutionsPerSweep ||
                 tradingState_ != TradingState::Continuous) [[unlikely]] {
@@ -2977,7 +2992,7 @@ void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
         }
 
         if (triggered) {
-            order->isStopTriggered = true;
+            latchElection(*order);
 
             if (executed >= kMaxStopExecutionsPerSweep ||
                 tradingState_ != TradingState::Continuous) [[unlikely]] {  // as checkStopOrders

@@ -166,7 +166,7 @@ What that leaves:
 - What TLA+ does not give: a refinement proof. The specs model the design at small bounds; the trace check is sampled, not exhaustive.
 - **`tla.yml` has not run on any commit of this branch** (nothing has been pushed). All figures above are from one local TLC run on 2026-11-14.
 
-**The documents are checked too.** `ClaimsCheckTest` ties each `<!-- claim:ID -->` marker in README, Compliance, Verification and ProductionReadiness to a row of `docs/CLAIMS.md`, and checks only that each test the row names exists, not that it tests the claim. `DocPerfNumbersSourced` requires every performance number in this file and four others to have a source row; it accepts "withdrawn", "unrecorded" and "estimate" as sources.
+**The documents are checked too.** `ClaimsCheckTest` ties each `<!-- claim:ID -->` marker in this file and four others to a row of `docs/CLAIMS.md`, and requires each test the row names to exist and its source to contain one of the calls the row's evidence entry lists. That catches a test that never reaches the claim's subject; it cannot show that the test asserts the claim. `DocPerfNumbersSourced` requires every performance number in this file and four others to have a source row; it accepts "withdrawn", "unrecorded" and "estimate" as sources.
 
 ---
 

@@ -2,12 +2,14 @@
 
 Roadmap 2.4: no guarantee goes in a doc without a test that would fail if it
 were false. Each guarantee in [README.md](../README.md),
+[Project_Overview.md](../Project_Overview.md),
 [Compliance.md](Compliance.md), [Verification.md](Verification.md) and
 [ProductionReadiness.md](ProductionReadiness.md) carries an invisible marker,
 `<!-- claim:ID -->`, and has a row here naming that test.
 `scripts/check_claims.py` (ctest `ClaimsCheckTest`, label `project`, so every
-CI lane runs it) fails when a marker has no row, a row has no marker, or a row
-names a test that does not exist.
+CI lane runs it) fails when a marker has no row, a row has no marker, a row
+names a test that does not exist, or a named test's source contains none of
+the calls the [Evidence](#evidence) table lists for its row.
 
 **What counts as a guarantee.** A sentence promising behaviour that someone
 would rely on for correctness, durability, safety or security: durability and
@@ -79,3 +81,63 @@ should be narrowed.
 | `itch-ring-drop-resync` | README | A dropped async ITCH event is signalled and followed by a full resync in priority order | `ItchReconstructionTest` | No resync marker, or the re-adds are out of priority order (library code, roadmap J3) |
 | `mold-gap-detection` | README | The MoldUDP64 subscriber detects gaps, including silent ones via heartbeat, and reports a session mismatch | `MoldUDP64Test` | A gap or mismatched session is delivered as if in order (library code, roadmap J3) |
 | `itch-gap-recovery` | README | A subscriber gap is recovered by SoupBinTCP re-request from the packet journal, byte for byte | `ItchRetransmissionTest` | Replayed messages differ from the journaled ones (library code, roadmap J3) |
+| `journal-halt-freeze` | Overview | Once the journal halts, no book changes: cancels, modifies, replaces, the kill switch, expiry and session transitions are refused or suspended until a restart, and the admin book views refuse | `JournalHaltFreezeTest` | After the halt, a kill, expiry sweep, session transition or session end changes a book (sync or async), the sync gateway answers a kill with Ack, an admin book view is served, or a restart restores other than the orders on disk · the request whose own record failed stays applied in memory (MatchingRules Rule 2.7) |
+
+## Evidence
+
+What each row's tests must exercise. `scripts/check_claims.py` requires every
+non-TLA+ test a row names to contain at least one of these strings in its
+source (the gtest file defining the case, the executable's sources, or the
+script ctest runs), and every row to have an entry. It is a text search: it
+cannot show that a test asserts the claim, only catch one that never reaches
+its subject, as `checkpoint-restore` once cited a test with no checkpoint in it.
+
+| ID | Each named test's source contains one of |
+|---|---|
+| `admin-auth` | `Authorization`, `Bearer` |
+| `admin-loopback` | `--admin-bind`, `127.0.0.1` |
+| `admin-readyz` | `/readyz` |
+| `auction-uncross` | `uncross`, `indicative` |
+| `boot-requires-controls` | `--no-price-band`, `--no-risk-limits`, `--no-journal`, `position_limit` |
+| `capacity-monitor` | `CapacityMonitor` |
+| `checkpoint-atomic` | `rewriteAtomically`, `checkpoint(` |
+| `checkpoint-restore` | `checkpoint(`, `gracefulShutdown(` |
+| `circuit-breaker` | `VolatilityAuction` |
+| `gtd-replay` | `setExpiryClock` |
+| `gw-auth-required` | `--participant-credentials`, `--no-participant-auth` |
+| `gw-credentials-malformed` | `loadFromFile` |
+| `gw-durable-ack` | `SIGKILL`, `JournalHalted` |
+| `gw-durable-events` | `enableDurableClientAcks` |
+| `gw-exec-reports` | `TradeNotification`, `OrderUpdateNotification` |
+| `gw-ids-per-participant` | `gatewayOrderId`, `kMaxParticipants` |
+| `gw-login` | `sendLogin`, `GATEWAY_FLAG_LOGIN`, `NotOrderOwner` |
+| `gw-proto-compat` | `GATEWAY_PROTOCOL_V2` |
+| `gw-reject-responses` | `rejectReason` |
+| `ingress-reject-reasons` | `SubmitResult` |
+| `itch-32bit-admission` | `InvalidPrice`, `InvalidQuantity` |
+| `itch-gap-recovery` | `ItchRetransmissionService` |
+| `itch-ring-drop-resync` | `esync` |
+| `journal-crc` | `crc`, `CRC`, `orrupt`, `could not be opened safely` |
+| `journal-halt-freeze` | `halted()`, `JournalHalted` |
+| `journal-replay-on-boot` | `--journal`, `replayJournal`, `restart on its own journal` |
+| `journal-torn-tail` | `.torn` |
+| `kill-participant` | `killSwitch`, `KillSwitch` |
+| `market-collar` | `ollar` |
+| `md-l2-sequence` | `sequenceNumber` |
+| `md-shm-gap-reset` | `Gap`, `Reset`, `PollResult`, `MarketDataPublisher`, `ThreadSanitizer` |
+| `md-shm-no-torn-read` | `poll(` |
+| `moc-loc` | `MOC`, `LOC` |
+| `mold-gap-detection` | `Gap`, `gap` |
+| `otr` | `OTR`, `Otr`, `otr` |
+| `peg-never-crosses` | `Peg` |
+| `price-range` | `setPriceRange`, `min_price` |
+| `prorata-lmm-floor` | `DMM`, `LMM` |
+| `rate-limit` | `RateLimit`, `rateLimit` |
+| `rate-limit-reload` | `reconfigure` |
+| `repl-refuses-role` | `--role`, `OB_NODE_ROLE` |
+| `replay-determinism` | `replayJournal` |
+| `risk-limits` | `RiskLimits`, `setPositionLimit`, `otional` |
+| `session-schedule` | `session-schedule`, `SessionScheduler` |
+| `shadow-mode` | `Shadow` |
+| `stp-default-cancel-incoming` | `CancelledBySTP` |
+| `submit-field-validation` | `InvalidFieldValue` |

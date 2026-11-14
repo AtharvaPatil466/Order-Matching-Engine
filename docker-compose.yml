@@ -13,11 +13,13 @@ services:
     ipc: shareable
     volumes:
       - journal-primary:/app/journal
-      - ./config/engine.conf.example:/app/config/engine.conf:ro
+      # Loaded through the image's OB_CONFIG_PATH. Every participant id in the
+      # credentials file needs a position limit here, or the engine refuses to
+      # start; the example covers 100 and 101.
+      - ${OB_ENGINE_CONFIG:-./config/engine.conf.example}:/app/config/engine.conf:ro
       # Fail-closed, like the admin token: no credentials file, no engine.
       - ${OB_PARTICIPANT_CREDENTIALS_FILE:?set OB_PARTICIPANT_CREDENTIALS_FILE — a file of user:secret:id[,id...] lines}:/app/config/participants.cred:ro
     environment:
-      - OB_THREADS=4
       - OB_PARTICIPANT_CREDENTIALS=/app/config/participants.cred
       - OB_JOURNAL_PATH=/app/journal/primary.wal
       # A single node that recovers from its journal. There is no replication
@@ -39,7 +41,11 @@ services:
     container_name: orderengine-mdsub
     entrypoint: ["/app/MdSubscriber"]
     command: ["orderbook_md"]
+    # Reads the orderbook_md segment the engine creates, in the engine's IPC
+    # namespace. Not its network one: the image's /health check would fail here.
     ipc: "service:engine-primary"
+    healthcheck:
+      disable: true
     depends_on:
       engine-primary:
         condition: service_healthy

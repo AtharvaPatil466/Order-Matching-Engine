@@ -52,11 +52,15 @@ WORKDIR /app
 COPY --from=builder /src/build/OrderEngine /app/
 COPY --from=builder /src/build/MdSubscriber /app/
 
-# Copy config template
+# The config the engine loads: bands for symbols 0-3 and position limits for
+# participants 100 and 101. Mount your own over it. OB_CONFIG_PATH, not
+# --config, because the book sizing keys are read only from that variable.
 COPY config/engine.conf.example /app/config/engine.conf
+ENV OB_CONFIG_PATH=/app/config/engine.conf
 
-# Journal volume
+# The journal, on a volume. OrderEngine refuses to start without one.
 VOLUME /app/journal
+ENV OB_JOURNAL_PATH=/app/journal/engine.wal
 
 # Admin HTTP. OrderEngine listens on 127.0.0.1 unless told otherwise, and a
 # published port or a k8s probe arrives on the container's interface, not its

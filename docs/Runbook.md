@@ -616,15 +616,22 @@ WantedBy=multi-user.target
 ### Docker
 
 The image (`Dockerfile`) runs `OrderEngine --threads 4 --port 8080 --symbols 4`
-and sets `OB_ADMIN_BIND=0.0.0.0`. `docker-compose.yml` adds
-`OB_JOURNAL_PATH=/app/journal/primary.wal` on a volume and requires
-`OB_ADMIN_TOKEN`. It mounts `config/engine.conf.example` at
-`/app/config/engine.conf` but passes no `--config` or `OB_CONFIG_PATH`, so that
-file is not loaded.
+and sets `OB_ADMIN_BIND=0.0.0.0`, `OB_CONFIG_PATH=/app/config/engine.conf` (a
+copy of `config/engine.conf.example`: bands for symbols 0-3, position limits for
+participants 100 and 101) and `OB_JOURNAL_PATH=/app/journal/engine.wal` on a
+volume. `docker-compose.yml` uses `/app/journal/primary.wal`, mounts
+`OB_ENGINE_CONFIG` (default `config/engine.conf.example`) over the image's
+config, publishes 8080 and 9001, and requires `OB_ADMIN_TOKEN` and
+`OB_PARTICIPANT_CREDENTIALS_FILE`. Every participant id in the credentials file
+needs a position limit in that config, or the engine refuses to start (§3). Its
+`md-subscriber` shares the engine's IPC namespace and reads the `orderbook_md`
+segment the engine creates.
 
 <!-- runbook-smoke: skip — needs a Docker daemon -->
 ```bash
-OB_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up -d engine-primary
+OB_ADMIN_TOKEN=$(openssl rand -hex 32) \
+OB_PARTICIPANT_CREDENTIALS_FILE=/etc/orderengine/participants.cred \
+    docker compose up -d
 curl -sf http://localhost:8080/health
 ```
 

@@ -20,6 +20,19 @@ uint64_t steadyNs() {
 // These tests run fixed workloads and assert that p99 latency stays below
 // conservative thresholds. Thresholds are generous to avoid CI flakiness.
 //
+// WHAT THIS CAN CATCH (PERF-7): gross breakage only, not a doubling. Measured
+// p99 on Apple M3 (3 runs, identical): add 84, match 125, cancel 292, snapshot
+// 84 ns against 2,000 / 5,000 / 1,000 / 500 — 6x to 40x headroom, and a hosted
+// x86 VM is ~2x slower than M3 on Path A. The thresholds are not tightened to
+// catch a 2x regression because a single run's p99 on a shared runner moves
+// +102% on unchanged code (benchmark-gate's 40-run noise measurement, see
+// scripts/check_benchmark_regression.py), so an absolute p99 bound tight
+// enough to catch a doubling fails byte-identical builds. A doubling is the
+// job of the A/B gate (benchmark-gate.yml: head and merge base on one runner,
+// min-of-5, p50 +10% / p99 +25%), which runs through MatchingEngine and so
+// with a listener attached. That gate is advisory until "benchmark" is a
+// required status check. The workloads here are listener-free.
+//
 // Thresholds are calibrated for an optimized Release build on x86 bare metal.
 // Debug runs 3-5x slower and fault injection adds per-op hot-path overhead, so
 // enforcing them there yields meaningless false failures. CMake defines

@@ -154,7 +154,7 @@ done
 
 # perf counters, one process per path (a counter over several paths cannot be
 # split afterwards). Best effort: a hosted VM usually exposes no PMU.
-for p in a b c d; do
+for p in a l b c d; do
     record "perf-prod-$p" perf stat -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles \
         "${PIN[@]}" "$PROD/benchmarks/HonestBenchmark" "${HB[@]}" --only "$p" || true
 done

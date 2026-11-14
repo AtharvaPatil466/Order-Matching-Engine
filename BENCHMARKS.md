@@ -136,9 +136,12 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | Components |
 |------|------------|
-| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority |
-| **B** | Path A + `MatchingEngine::submitOrder()` — sequence allocation, rate limiter check |
+| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority; **no listener attached** (no shipped book runs like this) |
+| **L** | Path A with a listener attached that only counts its callbacks — the book-side cost of the shipped configuration (OrderEngine attaches its market-data listener to every book) |
+| **B** | Path L's book + `MatchingEngine::submitOrder()` — sequence allocation, rate limiter check; the listener is the engine's internal OCO observer |
 | **C** | Path B + `Journal` — GroupCommit (batch=64) with `fdatasync` per batch |
+
+RealisticFlow, CoordinatedOmission and ColdCache attach a listener too (`bench::TerminalTracker`), so they compare with Path L, not Path A; each benchmark's header says which listener it runs with.
 
 ### What is NOT Measured
 

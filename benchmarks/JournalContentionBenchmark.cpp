@@ -1,4 +1,6 @@
 // JournalContentionBenchmark — measures audit finding H6:
+// LISTENER: attached (bench::BookOutcomes), plus the engine's internal OCO
+// observer every MatchingEngine book carries.
 //   "all appends still serialise on one global journalMutex_"
 //
 // Two experiments, both scanning worker-thread count N:

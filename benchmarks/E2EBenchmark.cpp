@@ -1,3 +1,8 @@
+// E2EBenchmark — end-to-end latency through MatchingEngine.
+//
+// LISTENER: attached (bench::BookOutcomes), plus the engine's internal OCO
+// observer every MatchingEngine book carries.
+
 #include "MatchingEngine.h"
 #include "LatencyTracker.h"
 #include "RealisticWorkload.h"  // bench::BookOutcomes

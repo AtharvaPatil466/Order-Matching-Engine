@@ -1,5 +1,9 @@
 // SustainedLoadTest — sustained throughput and latency degradation test.
 //
+// LISTENER: attached (BookRejectCounter), plus the engine's internal OCO
+// observer every MatchingEngine book carries — the shipped configuration's
+// book-side cost, as OrderEngine attaches its market-data listener.
+//
 // Roadmap Phase 5, Week 17: Sustained Load Test
 //
 // Runs a continuous workload for a configurable duration (default 30s),

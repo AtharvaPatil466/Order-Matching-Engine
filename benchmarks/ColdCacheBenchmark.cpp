@@ -1,5 +1,9 @@
 // ColdCacheBenchmark (P2-20) — warm-cache vs cold-cache latency.
 //
+// LISTENER: attached (bench::TerminalTracker). Every timed op pays the book's
+// listener work and the tracker's callbacks, and under a cold cache the
+// tracker's array is evicted too. Compare with HonestBenchmark Path L, not A.
+//
 // Steady-state benchmarks keep the order book's hot structures resident in L1/L2,
 // so they report the *warm* path. But the first order after an idle gap, a cache
 // eviction, or a context switch pays to pull those lines back from LLC/DRAM. This

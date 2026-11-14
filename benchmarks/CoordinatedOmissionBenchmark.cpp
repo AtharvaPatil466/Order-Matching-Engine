@@ -1,5 +1,9 @@
 // CoordinatedOmissionBenchmark (P2-19) — CO-naive vs CO-corrected latency.
 //
+// LISTENER: attached (bench::TerminalTracker). Every timed op pays the book's
+// listener work and the tracker's callbacks. Compare with HonestBenchmark
+// Path L, not Path A.
+//
 // Closed-loop benchmarks measure latency = completion − actual_start, where
 // actual_start is whenever the harness *got around to* issuing the op. When the
 // system stalls, the harness stalls with it and simply issues the next op late —

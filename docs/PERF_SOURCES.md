@@ -68,93 +68,93 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 | Where | Numbers | Source | Raw artifact |
 |---|---|---|---|
 | BENCHMARKS.md:20 | 237 ns · 3.10M ops/s · 261 ns | X86-D2E688C | pending `honest-pgo-*.txt`, `honest-native-*.txt` |
-| BENCHMARKS.md:21,251,480 | 615 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| BENCHMARKS.md:21,254,483 | 615 ns | X86-D2E688C | pending `honest-native-*.txt` Path C |
 | BENCHMARKS.md:25 | 10× | ARITH | pending `cold-cache.txt` (x86 counterpart) |
 | BENCHMARKS.md:55 | 237 ns | X86-D2E688C | pending `honest-pgo-*.txt` |
 | BENCHMARKS.md:56 | 910 ns · 3.8× | X86-D2E688C | pending `honest-pgo-*.txt` |
 | BENCHMARKS.md:66 | 208 ns · 709 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:81,339 | 64 MB | PARAM | n/a: not a measurement |
+| BENCHMARKS.md:81,342 | 64 MB | PARAM | n/a: not a measurement |
 | BENCHMARKS.md:107 | ~2.6× | ARITH | pending `realistic-flow-sparse.txt` (x86 counterpart) |
 | BENCHMARKS.md:122 | 250 ns · 375 ns · 417 ns · 227 ns | ARM-M3 | pending `realistic-flow-sparse.txt` (x86 counterpart) |
-| BENCHMARKS.md:156 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| BENCHMARKS.md:157 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
-| BENCHMARKS.md:158 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
-| BENCHMARKS.md:161 | 237 ns · 910 ns | X86-D2E688C | pending `honest-pgo-*.txt` |
-| BENCHMARKS.md:162 | 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
-| BENCHMARKS.md:169 | 1.34 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
-| BENCHMARKS.md:170 | 17.8 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
-| BENCHMARKS.md:171 | 152 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
-| BENCHMARKS.md:172 | 12,638 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
-| BENCHMARKS.md:190 | 12,638 instructions · ~9,430 cycles · ~3.25 µs | ARITH | none |
-| BENCHMARKS.md:191,200,476 | 261 ns | X86-D2E688C | pending `honest-native-*.txt` |
-| BENCHMARKS.md:202,403 | 10 ns · 62 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
-| BENCHMARKS.md:215 | 41 ns · 42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| BENCHMARKS.md:219 | ~41.67 ns · 208 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| BENCHMARKS.md:220,236,278,279 | 42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| BENCHMARKS.md:232 | 174 ns · 135 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:234 | ~0.34 ns · 120× | ARITH | n/a: not a measurement |
-| BENCHMARKS.md:235 | 41.67 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| BENCHMARKS.md:242 | 250 ns · 542 ns · 1,166 ns · 1,709 ns · 91,917 ns · 2.76M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| BENCHMARKS.md:243 | 250 ns · 500 ns · 791 ns · 1,208 ns · 43,292 ns · 2.95M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| BENCHMARKS.md:244 | 1,750 ns · 4,096 ns · 1,761,280 ns · 3,899,392 ns · 10,773,458 ns · 24,603 ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| BENCHMARKS.md:249,349 | 250 ns | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| BENCHMARKS.md:250,385,477 | 8 ns | ARITH | pending `honest-native-*.txt` |
-| BENCHMARKS.md:254 | ~125 ns | WITHDRAWN | none |
-| BENCHMARKS.md:272 | 42 ns · 375 ns · 667 ns · 792 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:273 | 208 ns · 583 ns · 708 ns · 1,416 ns · 8,583 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:274 | 208 ns · 375 ns · 791 ns · 1,792 ns · 4,792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:275 | 292 ns · 667 ns · 1,125 ns · 1,750 ns · 2,625 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:276 | 208 ns · 458 ns · 709 ns · 1,250 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:285 | 208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:288 | 18 µs · 792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
-| BENCHMARKS.md:308 | 100K/s · 1,166 ns · 1,250 ns · 4,192 ns · 5,280 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:309 | 500K/s · 834 ns · 1,000 ns · 2,334 ns · 5,536 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:310 | 1M/s · 750 ns · 1,000 ns · 1,958 ns · 6,016 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:311,330 | 2M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:312,329,386 | 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:313 | 4M/s · 583 ns · 27,136 ns · 1,458 ns · 56,576 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:314 | 6M/s · 500 ns · 16,777,216 ns · 1,333 ns · 17,039,360 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:316,319,373,424 | 1M/s | PARAM | n/a: not a measurement |
-| BENCHMARKS.md:318 | 1.26× · 100K/s · 2.37× · 500K/s · 3.07× · 1M/s | ARITH | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:320 | 834 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:321 | 1,208 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:324 | 6M/s · 500 ns · 16.8 ms | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:331 | 2.6 ms · 10.4 ms · 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:335 | 1M/s · 4M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
-| BENCHMARKS.md:343 | 250 ns · 500 ns · 958 ns · 4,832 ns · 36,542 ns · 302 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
-| BENCHMARKS.md:344 | 2,625 ns · 7,648 ns · 12,416 ns · 34,560 ns · 3,531,875 ns · 3,855 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
-| BENCHMARKS.md:345 | 2,375 ns · 7,148 ns · 11,458 ns · 29,728 ns | ARITH | pending `cold-cache.txt` (x86 counterpart) |
-| BENCHMARKS.md:347 | 10× · 41 ns | ARITH | pending `cold-cache.txt` (x86 counterpart) |
-| BENCHMARKS.md:355 | 30 s | PARAM | n/a: not a measurement |
-| BENCHMARKS.md:358 | 30.2 s · 999,987 orders/sec | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:359 | 843,520 KB · 1,186,016 KB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:367 | ~780 ms · ~48 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:369 | 1,073,741,824 ns | ARITH | n/a: not a measurement |
-| BENCHMARKS.md:374 | 999,987/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:384 | 41 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| BENCHMARKS.md:405 | 3,568 ns · 167 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
-| BENCHMARKS.md:406 | 5-400x · ~185us · 9.9us · 240us · ~10us | ARM-M3 | none: an A/B of a past change; bench-x86 measures HEAD only |
-| BENCHMARKS.md:416 | 780 ms · 48 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:425 | 250k/s | PARAM | n/a: not a measurement |
-| BENCHMARKS.md:426 | ~1M/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:427 | 400k/s · 400,000/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:429 | 400k/s · 1 s | PARAM | n/a: not a measurement |
-| BENCHMARKS.md:434 | 10,688 ns · 10.4 ms · 953 MB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:435 | ~790 ns · 7–11 µs · 953 MB · 1,186 MB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:436 | ~850 ns · 330–415 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:438 | 402k/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:439 | ~6 s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:443 | ~790 ns · 400k/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:444 | ~4,500 ns · 50k/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
-| BENCHMARKS.md:452 | 5 µs | PARAM | n/a: not a measurement |
-| BENCHMARKS.md:462 | 1μs | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| BENCHMARKS.md:463 | 2.7ms | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
-| BENCHMARKS.md:469 | 4x | ARITH | n/a: not a measurement |
-| BENCHMARKS.md:478 | 346 ns | ARITH | pending `honest-native-*.txt` |
-| BENCHMARKS.md:482 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
-| BENCHMARKS.md:496 | 16 s | NOT-PERF | n/a: not a measurement |
-| BENCHMARKS.md:531 | 36 B · 34.1 · 29.36 · 1.06 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
-| BENCHMARKS.md:539 | 5.97x | WITHDRAWN | none |
+| BENCHMARKS.md:159 | 261 ns · 620 ns · 1,010 ns · 2.80M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| BENCHMARKS.md:160 | 269 ns · 620 ns · 1,001 ns · 2.74M ops/s | X86-D2E688C | pending `honest-native-*.txt` |
+| BENCHMARKS.md:161 | 615 ns · 1,048 ns · 3,568 ns · 1.28M ops/s | X86-D2E688C | pending `honest-native-*.txt` Path C |
+| BENCHMARKS.md:164 | 237 ns · 910 ns | X86-D2E688C | pending `honest-pgo-*.txt` |
+| BENCHMARKS.md:165 | 3.10M ops/s | X86-D2E688C | pending `honest-pgo-*.txt` |
+| BENCHMARKS.md:172 | 1.34 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
+| BENCHMARKS.md:173 | 17.8 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
+| BENCHMARKS.md:174 | 152 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
+| BENCHMARKS.md:175 | 12,638 | WITHDRAWN | pending `perf-prod-*.txt` (best effort: a hosted runner may expose no PMU) |
+| BENCHMARKS.md:193 | 12,638 instructions · ~9,430 cycles · ~3.25 µs | ARITH | none |
+| BENCHMARKS.md:194,203,479 | 261 ns | X86-D2E688C | pending `honest-native-*.txt` |
+| BENCHMARKS.md:205,406 | 10 ns · 62 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
+| BENCHMARKS.md:218 | 41 ns · 42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| BENCHMARKS.md:222 | ~41.67 ns · 208 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| BENCHMARKS.md:223,239,281,282 | 42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| BENCHMARKS.md:235 | 174 ns · 135 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:237 | ~0.34 ns · 120× | ARITH | n/a: not a measurement |
+| BENCHMARKS.md:238 | 41.67 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| BENCHMARKS.md:245 | 250 ns · 542 ns · 1,166 ns · 1,709 ns · 91,917 ns · 2.76M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| BENCHMARKS.md:246 | 250 ns · 500 ns · 791 ns · 1,208 ns · 43,292 ns · 2.95M ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| BENCHMARKS.md:247 | 1,750 ns · 4,096 ns · 1,761,280 ns · 3,899,392 ns · 10,773,458 ns · 24,603 ops/s | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| BENCHMARKS.md:252,352 | 250 ns | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| BENCHMARKS.md:253,388,480 | 8 ns | ARITH | pending `honest-native-*.txt` |
+| BENCHMARKS.md:257 | ~125 ns | WITHDRAWN | none |
+| BENCHMARKS.md:275 | 42 ns · 375 ns · 667 ns · 792 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:276 | 208 ns · 583 ns · 708 ns · 1,416 ns · 8,583 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:277 | 208 ns · 375 ns · 791 ns · 1,792 ns · 4,792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:278 | 292 ns · 667 ns · 1,125 ns · 1,750 ns · 2,625 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:279 | 208 ns · 458 ns · 709 ns · 1,250 ns · 18,208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:288 | 208 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:291 | 18 µs · 792 ns | ARM-M3 | pending `realistic-flow.txt` (x86 counterpart) |
+| BENCHMARKS.md:311 | 100K/s · 1,166 ns · 1,250 ns · 4,192 ns · 5,280 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:312 | 500K/s · 834 ns · 1,000 ns · 2,334 ns · 5,536 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:313 | 1M/s · 750 ns · 1,000 ns · 1,958 ns · 6,016 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:314,333 | 2M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:315,332,389 | 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:316 | 4M/s · 583 ns · 27,136 ns · 1,458 ns · 56,576 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:317 | 6M/s · 500 ns · 16,777,216 ns · 1,333 ns · 17,039,360 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:319,322,376,427 | 1M/s | PARAM | n/a: not a measurement |
+| BENCHMARKS.md:321 | 1.26× · 100K/s · 2.37× · 500K/s · 3.07× · 1M/s | ARITH | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:323 | 834 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:324 | 1,208 ns | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:327 | 6M/s · 500 ns · 16.8 ms | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:334 | 2.6 ms · 10.4 ms · 3M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:338 | 1M/s · 4M/s | ARM-M3 | pending `co-*.txt` (x86 counterpart) |
+| BENCHMARKS.md:346 | 250 ns · 500 ns · 958 ns · 4,832 ns · 36,542 ns · 302 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
+| BENCHMARKS.md:347 | 2,625 ns · 7,648 ns · 12,416 ns · 34,560 ns · 3,531,875 ns · 3,855 ns | ARM-M3 | pending `cold-cache.txt` (x86 counterpart) |
+| BENCHMARKS.md:348 | 2,375 ns · 7,148 ns · 11,458 ns · 29,728 ns | ARITH | pending `cold-cache.txt` (x86 counterpart) |
+| BENCHMARKS.md:350 | 10× · 41 ns | ARITH | pending `cold-cache.txt` (x86 counterpart) |
+| BENCHMARKS.md:358 | 30 s | PARAM | n/a: not a measurement |
+| BENCHMARKS.md:361 | 30.2 s · 999,987 orders/sec | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:362 | 843,520 KB · 1,186,016 KB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:370 | ~780 ms · ~48 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:372 | 1,073,741,824 ns | ARITH | n/a: not a measurement |
+| BENCHMARKS.md:377 | 999,987/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:387 | 41 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| BENCHMARKS.md:408 | 3,568 ns · 167 ns | X86-D2E688C | none: an A/B of a past change; bench-x86 measures HEAD only |
+| BENCHMARKS.md:409 | 5-400x · ~185us · 9.9us · 240us · ~10us | ARM-M3 | none: an A/B of a past change; bench-x86 measures HEAD only |
+| BENCHMARKS.md:419 | 780 ms · 48 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:428 | 250k/s | PARAM | n/a: not a measurement |
+| BENCHMARKS.md:429 | ~1M/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:430 | 400k/s · 400,000/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:432 | 400k/s · 1 s | PARAM | n/a: not a measurement |
+| BENCHMARKS.md:437 | 10,688 ns · 10.4 ms · 953 MB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:438 | ~790 ns · 7–11 µs · 953 MB · 1,186 MB | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:439 | ~850 ns · 330–415 µs | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:441 | 402k/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:442 | ~6 s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:446 | ~790 ns · 400k/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:447 | ~4,500 ns · 50k/s | ARM-M3 | pending `sustained-400k.txt`, `sustained-50k.txt` (x86 counterpart) |
+| BENCHMARKS.md:455 | 5 µs | PARAM | n/a: not a measurement |
+| BENCHMARKS.md:465 | 1μs | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| BENCHMARKS.md:466 | 2.7ms | ARM-M3 | pending `honest-*.txt` (x86 counterpart); the ARM rows need a quiet-Mac rerun |
+| BENCHMARKS.md:472 | 4x | ARITH | n/a: not a measurement |
+| BENCHMARKS.md:481 | 346 ns | ARITH | pending `honest-native-*.txt` |
+| BENCHMARKS.md:485 | ~42 ns | ARM-M3 | none: a property of the M3 clock; re-measure on a quiet Mac |
+| BENCHMARKS.md:499 | 16 s | NOT-PERF | n/a: not a measurement |
+| BENCHMARKS.md:534 | 36 B · 34.1 · 29.36 · 1.06 | ARM-M3 | pending `codec.txt` (x86 counterpart) |
+| BENCHMARKS.md:542 | 5.97x | WITHDRAWN | none |
 
 ### PerformanceWhitepaper.md
 

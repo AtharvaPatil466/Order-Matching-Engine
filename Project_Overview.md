@@ -18,36 +18,36 @@ Compared with `main` (`adc7b5b`), this branch **deleted** the second binary (`Ga
 
 "Yes" means `src/main.cpp` turns it on in `OrderEngine`. "Library" means the code exists and has tests, and nothing in the binary reaches it.
 
-| Capability | In `OrderEngine` | Test that fails if it is false | Where |
-|---|---|---|---|
-| Order entry, native binary protocol (V1 and V2 frames) over TCP | Yes, `--gateway-port` (default 9001) | `GatewayIntegrationTest`, `OrderEngineGatewayTest` | `src/TcpGateway.cpp`, `src/main.cpp` |
-| Participant login and authorisation | Yes; refuses to boot without credentials unless `--no-participant-auth` | `GatewayLoginTest`, `GatewayRequiresCredentialsTest` | `include/ParticipantAuth.h` |
-| Order ids scoped by participant | Yes | `GatewayParticipantIsolationTest` | `src/TcpGateway.cpp` |
-| Execution reports (fills, engine cancels, post-ack rejects, amend outcomes) | Yes, **except a stop's election** | `GatewayExecutionReportTest` | `src/TcpGateway.cpp`, MatchingRules Rule 2.6 |
-| Ack only after the order's journal entry is synced | Yes, with `--journal` | `GatewayJournalRestartTest`, `CrashRecoveryE2ETest` | `src/main.cpp` (`SyncPolicy::Immediate`) |
-| Reports and market data only after the entry behind them is synced | Yes | `GatewayExecutionReportTest` (`durable`), `JournalRecordBeforeEventTest` | `src/TcpGateway.cpp` |
-| Journal replay on boot; any refused entry stops the boot | Yes | `EngineReplaysJournalTest`, `ReplayRefusedEntryTest` | `include/JournalBoot.h` |
-| Checkpoint that restores the complete matching state | Yes (size trigger, compiled-in triggers, shutdown) | `CheckpointEquivalenceTest`, `CheckpointCompleteStateTest` | `src/MatchingEngine.cpp` |
-| A halted journal freezes every book | Yes | `JournalHaltFreezeTest` | MatchingRules Rule 2.7 |
-| Price band per symbol, required at boot | Yes, unless `--no-price-band` | `EngineRequiresControlsTest`, `PriceRangeTest` | `include/ConfigValidator.h` |
-| Position limit per participant, required at boot | Yes, unless `--no-risk-limits` | `EngineRequiresControlsTest` | `src/main.cpp` |
-| Volatility breaker on every continuous print | Yes, fixed threshold (no setter is called) | `PrintBandTest`, `VolatilityBreakerTest` | `src/OrderBook.cpp` (`PrintBand`) |
-| Market-order collar | Yes, fixed default | `MarketCollarTest` | `include/OrderBook.h` |
-| Self-trade prevention, cancel the incoming order | Yes, the default for every participant | `StpSemanticsTest` | `src/OrderBook.cpp` |
-| Participant kill (one-shot cancel of all its orders) | Yes, a gateway message | `KillSwitchCompletenessTest`, `KillJournalTest` | `src/MatchingEngine.cpp` |
-| Graduated kill switch (throttle, symbol and global halts) | Consulted at admission; **nothing in the binary can engage it** | `CheckpointCompleteStateTest` (persistence only) | `include/GraduatedKillSwitch.h` |
-| Per-participant rate limit | Off unless `rate_limit.default_rate`/`default_burst` are set; applied at boot and on SIGHUP | `EngineRateLimitConfigTest` | `src/main.cpp` |
-| Sessions, auctions, closing cross | Only with `--session-schedule` | `SessionSchedulerTest`, `EngineSessionScheduleConfigTest`, `UncrossOracleTest` | `src/SessionScheduler.cpp` |
-| MOC / LOC | Execute only with `--session-schedule`; without it nothing refuses them and nothing reaches the close (read from code, not tested) | `MocLocTest` | `src/OrderBook.cpp` |
-| GTD / DAY expiry | Yes: a sweep every second plus a maker-side check; DAY needs a schedule or an expiry | `EngineExpiresGtdTest`, `GatewayExpiresGtdTest`, `AdmissionTifTest` | MatchingRules §8 |
-| Shared-memory L2 feed `/orderbook_md` | Yes, published from the order port's event thread after durability | `MarketDataGapTest`, `GatewayMarketDataThreadTest` | `include/MarketDataPublisher.h` |
-| Admin HTTP port | Yes, loopback by default, bearer token required | `AdminAuthTest`, `AdminBindsLoopbackTest` | `src/AdminServer.cpp` |
-| Webhook alerts | Plain HTTP only; `CapacityMonitor` can fire, the graduated switch cannot be engaged | `AlertDispatcherTest` | `src/main.cpp` |
-| Pro-rata matching, LMM/DMM roles | Library | `ProRataLevelTest`, `LmmDmmTest` | `src/OrderBook.cpp` |
-| OCO links | Library: no gateway message or admin route registers one | `OcoScopeTest` | `include/ContingencyManager.h` |
-| Hierarchical risk, fees, CAT trail, queue backpressure | Library; their admin endpoints were deleted because they always answered zero | — | `include/HierarchicalRiskManager.h`, `include/FeeEngine.h`, `include/CatReporter.h` |
-| ITCH 5.0, MoldUDP64, SoupBinTCP retransmission | Library | `ItchPublisherTest`, `MoldUDP64Test`, `ItchRetransmissionTest` | `include/Itch*.h`, `include/MoldUDP64.h` |
-| Replication, FIX, OUCH, SBE, DPDK, `GatewayServer` | Deleted | `EngineRefusesReplicationRoleTest` (a role refuses to boot) | — |
+| Capability | In `OrderEngine` | Test that fails if it is false · code |
+|---|---|---|
+| Order entry, native binary protocol (V1 and V2 frames) over TCP | Yes, `--gateway-port` (default 9001) | `GatewayIntegrationTest`, `OrderEngineGatewayTest` · `src/TcpGateway.cpp`, `src/main.cpp` |
+| Participant login and authorisation | Yes; refuses to boot without credentials unless `--no-participant-auth` | `GatewayLoginTest`, `GatewayRequiresCredentialsTest` · `include/ParticipantAuth.h` |
+| Order ids scoped by participant | Yes | `GatewayParticipantIsolationTest` · `src/TcpGateway.cpp` |
+| Execution reports (fills, engine cancels, post-ack rejects, amend outcomes) | Yes, **except a stop's election** | `GatewayExecutionReportTest` · `src/TcpGateway.cpp`, MatchingRules Rule 2.6 |
+| Ack only after the order's journal entry is synced | Yes, with `--journal` | `GatewayJournalRestartTest`, `CrashRecoveryE2ETest` · `src/main.cpp` (`SyncPolicy::Immediate`) |
+| Reports and market data only after the entry behind them is synced | Yes | `GatewayExecutionReportTest` (`durable`), `JournalRecordBeforeEventTest` · `src/TcpGateway.cpp` |
+| Journal replay on boot; any refused entry stops the boot | Yes | `EngineReplaysJournalTest`, `ReplayRefusedEntryTest` · `include/JournalBoot.h` |
+| Checkpoint that restores the complete matching state | Yes (size trigger, compiled-in triggers, shutdown) | `CheckpointEquivalenceTest`, `CheckpointCompleteStateTest` · `src/MatchingEngine.cpp` |
+| A halted journal freezes every book | Yes | `JournalHaltFreezeTest` · MatchingRules Rule 2.7 |
+| Price band per symbol, required at boot | Yes, unless `--no-price-band` | `EngineRequiresControlsTest`, `PriceRangeTest` · `include/ConfigValidator.h` |
+| Position limit per participant, required at boot | Yes, unless `--no-risk-limits` | `EngineRequiresControlsTest` · `src/main.cpp` |
+| Volatility breaker on every continuous print | Yes, fixed threshold (no setter is called) | `PrintBandTest`, `VolatilityBreakerTest` · `src/OrderBook.cpp` (`PrintBand`) |
+| Market-order collar | Yes, fixed default | `MarketCollarTest` · `include/OrderBook.h` |
+| Self-trade prevention, cancel the incoming order | Yes, the default for every participant | `StpSemanticsTest` · `src/OrderBook.cpp` |
+| Participant kill (one-shot cancel of all its orders) | Yes, a gateway message | `KillSwitchCompletenessTest`, `KillJournalTest` · `src/MatchingEngine.cpp` |
+| Graduated kill switch (throttle, symbol and global halts) | Consulted at admission; **nothing in the binary can engage it** | `CheckpointCompleteStateTest` (persistence only) · `include/GraduatedKillSwitch.h` |
+| Per-participant rate limit | Off unless `rate_limit.default_rate`/`default_burst` are set; applied at boot and on SIGHUP | `EngineRateLimitConfigTest` · `src/main.cpp` |
+| Sessions, auctions, closing cross | Only with `--session-schedule` | `SessionSchedulerTest`, `EngineSessionScheduleConfigTest`, `UncrossOracleTest` · `src/SessionScheduler.cpp` |
+| MOC / LOC | Execute only with `--session-schedule`; without it nothing refuses them and nothing reaches the close (read from code, not tested) | `MocLocTest` · `src/OrderBook.cpp` |
+| GTD / DAY expiry | Yes: a sweep every second plus a maker-side check; DAY needs a schedule or an expiry | `EngineExpiresGtdTest`, `GatewayExpiresGtdTest`, `AdmissionTifTest` · MatchingRules §8 |
+| Shared-memory L2 feed `/orderbook_md` | Yes, published from the order port's event thread after durability | `MarketDataGapTest`, `GatewayMarketDataThreadTest` · `include/MarketDataPublisher.h` |
+| Admin HTTP port | Yes, loopback by default, bearer token required | `AdminAuthTest`, `AdminBindsLoopbackTest` · `src/AdminServer.cpp` |
+| Webhook alerts | Plain HTTP only; `CapacityMonitor` can fire, the graduated switch cannot be engaged | `AlertDispatcherTest` · `src/main.cpp` |
+| Pro-rata matching, LMM/DMM roles | Library | `ProRataLevelTest`, `LmmDmmTest` · `src/OrderBook.cpp` |
+| OCO links | Library: no gateway message or admin route registers one | `OcoScopeTest` · `include/ContingencyManager.h` |
+| Hierarchical risk, fees, CAT trail, queue backpressure | Library; their admin endpoints were deleted because they always answered zero | `include/HierarchicalRiskManager.h`, `include/FeeEngine.h`, `include/CatReporter.h` |
+| ITCH 5.0, MoldUDP64, SoupBinTCP retransmission | Library | `ItchPublisherTest`, `MoldUDP64Test`, `ItchRetransmissionTest` · `include/Itch*.h`, `include/MoldUDP64.h` |
+| Replication, FIX, OUCH, SBE, DPDK, `GatewayServer` | Deleted | `EngineRefusesReplicationRoleTest` (a role refuses to boot) |
 
 ### Codebase
 

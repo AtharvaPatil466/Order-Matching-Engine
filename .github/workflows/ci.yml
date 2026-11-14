@@ -356,3 +356,16 @@ jobs:
             -e OB_ADMIN_TOKEN=ci -e OB_NO_PARTICIPANT_AUTH=1 ob-engine:ci
           for _ in $(seq 1 30); do curl -sf localhost:8080/health && exit 0; sleep 1; done
           docker logs ob; exit 1
+
+  runbook-smoke:
+    name: Runbook smoke
+    # docs/Runbook.md says every bash block in it is executed; this is what
+    # executes them (SURF-8). It builds OrderEngine in ubuntu:24.04 and runs
+    # the blocks top to bottom, and fails on a table flag --help lacks.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run every Runbook bash block
+        run: scripts/runbook_smoke.sh

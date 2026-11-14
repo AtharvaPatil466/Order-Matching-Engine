@@ -46,7 +46,7 @@ This project is a low-latency matching-engine implementation for research and po
 - `Journal` constructor unlinks any stale `<path>.tmp` from a crashed `rewriteAtomically()`.
 - MOC/LOC on-close orders: `cancelLocOrders()` correctly triggered on both the `!hasCross` early-return path and normal uncross completion. Price validation exclusion for MOC (price=0 is valid). Verified by `MocLocTest` and `OnCloseSessionEndTest`. <!-- claim:moc-loc -->
 - LMM/DMM ProRata floor guarantee: 40% floor allocation with correct redistribution (does not inflate `allocated` counter, preventing unsigned underflow). Verified by the `LmmDmm` cases in `TestLmmDmmAllocation.cpp`. <!-- claim:prorata-lmm-floor -->
-- Config SIGHUP hot-reload: `RateLimiterReconfigureTest` covers the `reconfigure()` a reload calls. No ctest sends SIGHUP to the binary; Runbook §6 under `scripts/runbook_smoke.sh` does. <!-- claim:rate-limit-reload -->
+- Config SIGHUP hot-reload: `RateLimiterReconfigureTest` covers the `reconfigure()` a reload calls. No ctest sends SIGHUP to the binary; Runbook §6 under `scripts/runbook_smoke.sh` (CI job `runbook-smoke`) does. <!-- claim:rate-limit-reload -->
 
 ## Admin Endpoints
 

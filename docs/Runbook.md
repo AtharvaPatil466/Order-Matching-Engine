@@ -11,7 +11,8 @@ through this page would. A block preceded by a `runbook-smoke: skip` marker is
 not run, and the marker says why (it needs systemd, Docker, a real NIC, or it
 is a config file or sample output rather than a command). The script prints
 every block it skips. It also fails if a flag listed in a table here is not in
-`OrderEngine --help`.
+`OrderEngine --help`. CI runs it on every push and pull request (the
+`runbook-smoke` job in `.github/workflows/ci.yml`).
 
 ---
 

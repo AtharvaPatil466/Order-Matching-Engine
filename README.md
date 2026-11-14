@@ -20,7 +20,7 @@
 [![TLA+](https://img.shields.io/badge/TLA%2B-8_specs-blueviolet.svg)](#formal-verification)
 [![Order entry](https://img.shields.io/badge/Order_entry-native_binary_over_TCP-blueviolet.svg)](#order-entry)
 
-A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, one binary (`OrderEngine`) speaking one order-entry protocol (the native binary protocol over TCP), an ITCH 5.0 / MoldUDP64 market-data codec with gap recovery that is library code with tests, TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **8 TLA+ specifications.**
+A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, one binary (`OrderEngine`) speaking one order-entry protocol (the native binary protocol over TCP), an ITCH 5.0 / MoldUDP64 market-data codec with gap recovery that is library code with tests, TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **7 TLA+ specifications** (5 of them model code `OrderEngine` runs).
 
 ## 🔬 Research
 
@@ -89,7 +89,7 @@ In `OrderEngine`, self-match prevention (cancel-incoming), the 5% circuit breake
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for a single node with health checks and a journal volume; `.dockerignore` excludes host build artifacts
 
 ### Formal Verification & Fault Injection
-- **TLA+ Specifications**: 8 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> Plus `MpscQueue`, `EngineConsumer`, `Snapshot` / `SnapshotLocked`, `Auction`, `Oco`, `Risk`.
+- **TLA+ Specifications**: 7 specs total. `MatchingEngine.tla` — price-time matching with STP, modify and replace; 0 violations, 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail (see [docs/Verification.md](./docs/Verification.md)). <!-- claim:tla-matching-engine --> Plus `MpscQueue`, `EngineConsumer`, `SnapshotLocked`, `Auction`, and `Oco` / `Risk` (library code `OrderEngine` never calls).
 - **Shadow Mode**: Dual-book divergence detection — validated against deliberate FIFO violations with trade-level and snapshot-level comparison <!-- claim:shadow-mode -->
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; compiled out unless built with `ENABLE_FAULT_INJECTION` (`OB_ENABLE_FAULT_INJECTION`)
 - **Coverage-Guided Fuzzing**: a libFuzzer target, `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
@@ -390,17 +390,17 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 
 ### Formal Verification (TLA+)
 
-**8 TLA+ specifications**, model-checked with TLC:
+**7 TLA+ specifications**, model-checked with TLC (scope, and which run in `OrderEngine`: [docs/Verification.md](./docs/Verification.md)):
 
 | Specification | States | Invariants |
 |--------------|--------|------------|
 | `MatchingEngine.tla` | **2,726,157 distinct, 0 violations** (`MatchingEngine.cfg`: 3 orders, 1 replace, 2 participants, 2 prices, qty 1-3; checked in CI) | PricePriority, FIFOExecution, ExecPriceIsPassive, NoCrossedBookAfterStep, NoSelfTrade, NoEmptyRestingOrder, FIFO_Preservation, MatchingConservation, NoNegativeQuantity. Limit orders, default STP, modify and replace only; each of seven broken cfgs must fail. See [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-matching-engine --> |
 | `MpscQueue.tla` | 3,672 distinct | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) <!-- claim:tla-concurrency-specs --> |
-| `EngineConsumer.tla` | 252 distinct | Worker loop: no item invented or duplicated, every item eventually consumed <!-- claim:tla-concurrency-specs --> |
-| `Snapshot.tla` / `SnapshotLocked.tla` | 515,380 / 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots (lock spec verifies the fix found via the lockless spec) <!-- claim:tla-concurrency-specs --> |
+| `EngineConsumer.tla` | 323 distinct | Worker loop: no item invented or duplicated, every item eventually consumed, no lost wake-up (a broken cfg that samples the wake counter too late must deadlock) <!-- claim:tla-concurrency-specs --> |
+| `SnapshotLocked.tla` | 221,140 distinct | Holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots; a broken cfg without the lock must produce a torn one <!-- claim:tla-concurrency-specs --> |
 | `Auction.tla` | **199,348 distinct, 0 violations** (`Auction.cfg`) | Every session transition goes through the table `OrderBook::transitionAllowed` enforces (Rule 7.7); no match outside Continuous except the uncross; no trade while halted or closed; volatility auction ends; once a session reaches its closing auction or close, nothing trades or auctions until the next PreOpen (a halt resumes only to the state it paused). Three broken cfgs with an illegal transition or a halt detour must fail, and one that never reopens a volatility auction; see [docs/Verification.md](./docs/Verification.md) <!-- claim:tla-auction --> |
-| `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity <!-- claim:tla-small-specs --> |
-| `Risk.tla` | 8 distinct | Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. <!-- claim:tla-small-specs --> |
+| `Oco.tla` | 198 distinct | OCO one-cancels-other atomicity. Library only: `OrderEngine` never registers an OCO pair <!-- claim:tla-small-specs --> |
+| `Risk.tla` | 800 distinct | Library only (`OrderEngine` sets no tier or position limit). Pre-trade risk cap enforcement + tier aggregation, modelled as a reduced two-tier (Firm/Trader) abstraction. The C++ `HierarchicalRiskManager` is four-tier (Trader/Strategy/Account/Firm); the extra tiers are additional instances of the same per-tier check. <!-- claim:tla-small-specs --> |
 
 ### Shadow Mode Validation
 - Dual `OrderBook` instances fed identical order streams
@@ -441,4 +441,4 @@ The market-data codecs (ITCH, SoupBinTCP, MoldUDP64, retransmission) exist as li
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 39.4K LOC engine (73.5K with tests) · 9 TLA+ specifications · MatchingEngine.tla checked in CI*
+*C++20 · 39.4K LOC engine (73.5K with tests) · 7 TLA+ specifications · MatchingEngine.tla checked in CI*

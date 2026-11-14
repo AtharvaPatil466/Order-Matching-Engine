@@ -4,7 +4,29 @@
 
 > **Auction.tla** (session state machine through the enforced transition table): zero violations at `Auction.cfg`, `NoReopenAfterClose` included — 478,401 states generated, 199,348 distinct · four broken cfgs fail as required · 2026-10-22 <!-- claim:tla-auction -->
 
-> **New specs (2026-05-28)**: Oco.tla · Risk.tla — each verified with broken-variant sanity check (TLC finds violation in <1000 states) <!-- claim:tla-small-specs -->
+> **Library-only specs**: Oco.tla · Risk.tla — each verified with a broken-variant sanity check (TLC finds a violation in under 1,000 states); 198 and 800 distinct states. They model code `OrderEngine` never calls (see Scope) <!-- claim:tla-small-specs -->
+
+## Scope: what each spec models, and whether OrderEngine runs it
+
+"Runs" means the shipped binary `OrderEngine` (`src/main.cpp`) executes that
+code in a production-shaped configuration, not that some test reaches it.
+Checked by reading every caller in `src/` on 2026-11-14.
+
+| Spec | Code it models | Run by `OrderEngine`? |
+|---|---|---|
+| `MatchingEngine.tla` | `OrderBook::match`, `modifyOrder`, `cancelReplace` (Limit orders, default STP) | Yes: every order the gateway accepts |
+| `Auction.tla` | `OrderBook::transitionAllowed`, `setTradingStateLocked`, the uncross | Partly by default: the volatility breaker (on, 5%) enters and leaves `VolatilityAuction`; the session table runs only with `--session-schedule` |
+| `MpscQueue.tla` | `include/MpscQueue.h`, the per-worker request queue | Yes: `startAsync` (`main.cpp`) |
+| `EngineConsumer.tla` | `MatchingEngine::workerLoop` wake-up protocol | Yes |
+| `SnapshotLocked.tla` | `OrderBook::getSnapshot` under `bookLock_` | Yes, when the admin server serves `GET /book` or `/audit` |
+| `Oco.tla` | `ContingencyManager` behind `MatchingEngine::registerOco` | **No.** Nothing in `src/` outside `MatchingEngine.cpp` calls `registerOco`; no gateway message or admin route creates an OCO pair. Library code, exercised by tests |
+| `Risk.tla` | `HierarchicalRiskManager` and the position ledger (`tryReserveWorking`) | **No.** `mapParticipant`, `setRiskTierLimits` and `setPositionLimit` have no caller in `src/`, so `riskActive_` and `positionLimitsActive_` stay false and the checks return at their first line. Library code, exercised by tests. The spec has two tiers; the code has four |
+
+`Oco.tla` and `Risk.tla` stay in CI, in their own step labelled library-only,
+because they are cheap and the code they model is public API with tests; they
+say nothing about the binary. `Snapshot.tla`, which modelled the lockless
+`getSnapshot` that no longer exists, is deleted; `SnapshotLockedBroken.cfg`
+(`BUG = "reader_unlocked"`) is that model now, and CI requires it to fail.
 
 ## Deadlock checking
 
@@ -217,17 +239,18 @@ from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 | `spec/MpscQueue.tla` | MPSC ring: no item invented or duplicated, per-producer FIFO, every item eventually consumed |
 | `spec/EngineConsumer.tla` | Worker loop wake-up protocol (`MatchingEngine::workerLoop`): no item invented or duplicated, every item eventually consumed, no lost wake-up (deadlock) |
 | `spec/EngineConsumerBroken.cfg` | Non-vacuity variant: wake counter sampled after the empty check; CI requires `Deadlock reached` |
-| `spec/Snapshot.tla` / `spec/SnapshotLocked.tla` | Torn-snapshot prevention |
+| `spec/SnapshotLocked.tla` | Torn-snapshot prevention: `getSnapshot` under `bookLock_` |
+| `spec/SnapshotLockedBroken.cfg` | Non-vacuity variant: no lock; CI requires `SnapshotIsPointInTime` to fail |
 | `spec/Auction.tla` | Session state machine through the enforced transition table, order admission per state, uncross (section above) |
 | `spec/Auction.cfg`, `spec/AuctionBroken*.cfg` | The bounds CI checks; four broken variants CI requires to fail |
-| `spec/Oco.tla` | OCO (one-cancels-other) atomicity — cancel sibling on fill |
+| `spec/Oco.tla` | OCO (one-cancels-other) atomicity — cancel sibling on fill. Library only |
 | `spec/Oco.cfg` / `spec/OcoBroken.cfg` | Config + broken variant |
-| `spec/Risk.tla` | Risk limit enforcement, two tiers: one Firm over Traders T1, T2 |
+| `spec/Risk.tla` | Risk limit enforcement, two tiers: one Firm over Traders T1, T2. Library only |
 | `spec/Risk.cfg` / `spec/RiskBroken.cfg` | Config + broken variant |
 
-## New Specs (2026-05-28)
+## Library-only specs: Oco and Risk
 
-Each new spec has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. The bounds are small: the correct cfgs reach 8 (Risk) and 198 (Oco) distinct states. <!-- claim:tla-small-specs -->
+Each has a committed broken cfg, with one safety property's enforcement removed, that `tla.yml` requires to fail on that property, so the correct spec's pass is not vacuous for it. The bounds are small: the correct cfgs reach 800 (Risk) and 198 (Oco) distinct states. Neither models code `OrderEngine` runs (Scope, above). <!-- claim:tla-small-specs -->
 
 | Spec | Property Verified | Broken Variant |
 |------|------------------|----------------|

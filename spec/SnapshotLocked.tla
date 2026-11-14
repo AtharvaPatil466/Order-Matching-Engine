@@ -14,9 +14,20 @@
 \* express — a reader excludes every writer for its whole 2-step read —
 \* is provided by both forms, so the verification carries over unchanged.
 \*
+\* Code modelled: OrderBook::getSnapshot (src/OrderBook.cpp), which
+\* OrderEngine runs for the admin server's GET /book and /audit through
+\* MatchingEngine::getSnapshot, against the book's mutators.
+\*
+\* Non-vacuity: CONSTANT BUG
+\*   "reader_unlocked"  getSnapshot reads without bookLock_ (the code before
+\*                      the lock) -> SnapshotIsPointInTime
+\*                      (SnapshotLockedBroken.cfg, required by tla.yml)
+\*
 \* Closes the formal-verification cycle:
-\*   1. spec/Snapshot.tla found the bug (counterexample trace shipping
-\*      an order on both sides of the snapshot)
+\*   1. the lockless Snapshot.tla (deleted: the code it modelled is gone;
+\*      BUG = "reader_unlocked" here is that model) found the bug
+\*      (counterexample trace shipping an order on both sides of the
+\*      snapshot)
 \*   2. include/OrderBook.h adds bookLock_; both mutators and getSnapshot
 \*      hold it for the whole operation
 \*   3. tests/SnapshotConsistencyTest.cpp empirically validates 32k+
@@ -25,6 +36,10 @@
 \*      property hold for every reachable state.
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
+
+CONSTANT BUG    \* "none" in SnapshotLocked.cfg; see the header
+
+ASSUME BUG \in {"none", "reader_unlocked"}
 
 OrderIds == {"o1", "o2", "o3"}
 MaxWriterOps == 6
@@ -118,7 +133,7 @@ ReaderStart ==
     /\ readerPC' = "readBids"
     /\ readerBids' = {}
     /\ readerAsks' = {}
-    /\ readerHoldsLock' = TRUE       \* acquire bookLock_
+    /\ readerHoldsLock' = (BUG /= "reader_unlocked")   \* acquire bookLock_
     /\ UNCHANGED <<bids, asks, history, writerOpsLeft>>
 
 ReaderReadBids ==

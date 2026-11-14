@@ -87,17 +87,17 @@ All endpoints are on OrderEngine's admin port (`src/main.cpp:473`).
 
 ## Formal Verification
 
-9 TLA+ specifications model parts of the engine at small bounds. None is linked to the C++ by a refinement proof; see [Verification.md](Verification.md) for what each checks.
+7 TLA+ specifications model parts of the engine at small bounds. None is linked to the C++ by a refinement proof. Five model code `OrderEngine` runs; `Oco.tla` and `Risk.tla` model library code it never calls. See [Verification.md](Verification.md) ("Scope") for what each checks and covers.
 
 | Component | Spec File | Invariants Verified |
 |-----------|-----------|-------------------|
 | MPSC Queue | `spec/MpscQueue.tla` | No item invented or duplicated, per-producer FIFO, every item eventually consumed (not linearizability) <!-- claim:tla-concurrency-specs --> |
-| Engine Consumer Loop | `spec/EngineConsumer.tla` | No item invented or duplicated, every item eventually consumed <!-- claim:tla-concurrency-specs --> |
-| Snapshot Consistency | `spec/SnapshotLocked.tla` | No torn reads: with `bookLock_` held, a snapshot is one point in time. `spec/Snapshot.tla`, without the lock, checks only that each entry was really in the book <!-- claim:tla-concurrency-specs --> |
+| Engine Consumer Loop | `spec/EngineConsumer.tla` | No item invented or duplicated, every item eventually consumed, no lost wake-up <!-- claim:tla-concurrency-specs --> |
+| Snapshot Consistency | `spec/SnapshotLocked.tla` | No torn reads: with `bookLock_` held, a snapshot is one point in time; without the lock (`SnapshotLockedBroken.cfg`) TLC finds a torn one <!-- claim:tla-concurrency-specs --> |
 | Matching Engine | `spec/MatchingEngine.tla` | Price priority, time priority, execution at the passive price, no crossed book, no self-trade (default STP), no empty resting order, FIFO queues, quantity conservation — Limit orders, modify and replace, at `MatchingEngine.cfg` bounds; each property but conservation and non-negativity has a broken cfg that CI requires to fail <!-- claim:tla-matching-engine --> |
 | Auction Protocol | `spec/Auction.tla` | Session transitions only through the enforced table, no trade outside Continuous but the uncross, one clearing price per uncross, a volatility auction always reopens <!-- claim:tla-auction --> |
-| OCO Atomicity | `spec/Oco.tla` | No double-fill on OCO pairs <!-- claim:tla-small-specs --> |
-| Risk Hierarchy | `spec/Risk.tla` | Limit enforcement, two tiers (Firm over Traders) <!-- claim:tla-small-specs --> |
+| OCO Atomicity | `spec/Oco.tla` | No double-fill on OCO pairs. Library only: `OrderEngine` never registers an OCO pair <!-- claim:tla-small-specs --> |
+| Risk Hierarchy | `spec/Risk.tla` | Limit enforcement, two tiers (Firm over Traders). Library only: `OrderEngine` sets no tier or position limit <!-- claim:tla-small-specs --> |
 
 ## Audit Contact
 

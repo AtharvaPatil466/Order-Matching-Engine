@@ -178,14 +178,14 @@ Before sending execution reports to the client, the engine writes the state muta
 - `Checkpointing`: Periodically, the engine writes a compressed snapshot of the entire resting book to disk and prunes the old journal to bound recovery time.
 
 ### 4.2 Formal Verification
-Concurrency is notoriously difficult to test. We rely on **8 TLA+ Specifications**:
+Concurrency is notoriously difficult to test. We rely on **7 TLA+ Specifications** (what each models and whether `OrderEngine` runs it: [docs/Verification.md](docs/Verification.md)):
 - `MatchingEngine.tla`: price-time matching with STP, modify and replace; 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. Properties and scope: [docs/Verification.md](docs/Verification.md).
 - `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
-- `EngineConsumer.tla`: Verifies worker thread shutdown safety.
-- `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.
+- `EngineConsumer.tla`: the worker loop's wake-up protocol (`MatchingEngine::workerLoop`): every pushed item is consumed and no wake-up is lost. Shutdown is not modelled.
+- `SnapshotLocked.tla`: holding `bookLock_` across the whole 2-step snapshot read (`OrderBook::getSnapshot`, reached from the admin server) prevents torn snapshots; its broken cfg drops the lock, as the code once did, and must produce a torn one.
 - `Auction.tla`: the session state machine through the enforced transition table (Rule 7.7), order admission per state, and the uncross. It models no price collar. `NoReopenAfterClose` holds: a halt resumes only to the state it paused (see docs/Verification.md).
-- `Oco.tla`: OCO one-cancels-other atomicity.
-- `Risk.tla`: Hierarchical risk limit enforcement.
+- `Oco.tla`: OCO one-cancels-other atomicity. Library only: `OrderEngine` never registers an OCO pair.
+- `Risk.tla`: risk limit enforcement, two tiers of the four. Library only: `OrderEngine` sets no tier or position limit.
 
 ---
 

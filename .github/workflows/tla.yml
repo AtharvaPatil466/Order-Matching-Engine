@@ -2,15 +2,18 @@ name: TLA+ Model Checking
 
 # Model-checks the project's TLA+ specifications with TLC on every push / PR.
 #
-# Only the FAST specs that exhaust their (bounded) state space in a few
-# seconds are gated here:
-#   - Auction         : exchange auction / session state machine
-#   - Oco              : One-Cancels-Other contingent-order safety
-#   - Risk             : multi-tier risk-limit aggregation safety
-#   - MpscQueue        : lock-free ring-buffer linearizability
-#   - EngineConsumer   : worker-loop wake-up protocol
-#   - Snapshot         : lockless snapshot (properties that hold)
-#   - SnapshotLocked   : locked snapshot (strong-consistency properties)
+# What each spec models, and whether the shipped binary (OrderEngine)
+# runs that code by default, is in docs/Verification.md ("Scope"). In short:
+#   - MatchingEngine   : OrderBook::match / modifyOrder / cancelReplace  (runs)
+#   - Auction          : session table, volatility auction, uncross      (runs:
+#                        the breaker by default, sessions with --session-schedule)
+#   - MpscQueue        : the per-worker request queue (include/MpscQueue.h)  (runs)
+#   - EngineConsumer   : MatchingEngine::workerLoop wake-up protocol      (runs)
+#   - SnapshotLocked   : OrderBook::getSnapshot under bookLock_   (runs: admin /book)
+#   - Oco, Risk        : ContingencyManager, HierarchicalRiskManager + the
+#                        position ledger: LIBRARY ONLY. OrderEngine never calls
+#                        registerOco, mapParticipant, setRiskTierLimits or
+#                        setPositionLimit, so it never executes this code.
 #
 # MatchingEngine.tla is checked at MatchingEngine.cfg (a few minutes), and
 # each of its seven MatchingEngineBroken*.cfg variants must fail with the
@@ -56,7 +59,17 @@ jobs:
         working-directory: spec
         run: |
           set -e
-          for module in Auction Oco Risk MpscQueue EngineConsumer Snapshot SnapshotLocked; do
+          for module in Auction MpscQueue EngineConsumer SnapshotLocked; do
+            echo "::group::TLC $module"
+            ./check.sh "$module"
+            echo "::endgroup::"
+          done
+
+      - name: Check library-only specs (code OrderEngine does not run)
+        working-directory: spec
+        run: |
+          set -e
+          for module in Oco Risk; do
             echo "::group::TLC $module"
             ./check.sh "$module"
             echo "::endgroup::"
@@ -97,6 +110,7 @@ jobs:
           Auction AuctionBrokenDate.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenHalt.cfg Invariant NoReopenAfterClose is violated
           EngineConsumer EngineConsumerBroken.cfg Error: Deadlock reached.
+          SnapshotLocked SnapshotLockedBroken.cfg Invariant SnapshotIsPointInTime is violated
           EOF
           exit "$fail"
 

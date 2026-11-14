@@ -2641,15 +2641,12 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
         return false;
     }
     const Quantity newLeaves = newQty - order->cumQty;
-    if (const RejectReason r = admitAmend(*order, newPrice, newQty, newLeaves);
-        r != RejectReason::None) [[unlikely]] {
-        reason = r;
-        return false;
-    }
     // Rule 9.5 on a replace (MR-5). An order that has not executed and carries
     // a minimum (one that rested through an auction, which does not apply it)
     // trades at least that much on the replace's sweep, or nothing: a sweep
     // that would fill less is refused with the liquidity screen's reason.
+    // Screened before admitAmend, which reserves any growth: refused after it,
+    // the growth stayed reserved with nothing working behind it.
     if (order->minQty > 0 && order->cumQty == 0 && newPrice != order->price &&
         !inAuctionState()) [[unlikely]] {
         Order probe = *order;
@@ -2660,6 +2657,11 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
             reason = RejectReason::FOKInsufficientLiquidity;
             return false;
         }
+    }
+    if (const RejectReason r = admitAmend(*order, newPrice, newQty, newLeaves);
+        r != RejectReason::None) [[unlikely]] {
+        reason = r;
+        return false;
     }
     if (newLeaves < order->remainingQty) releaseWorking(*order, order->remainingQty - newLeaves);
 

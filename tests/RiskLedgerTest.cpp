@@ -684,6 +684,31 @@ TEST_P(RiskPath, ReplaceAdjustsTheReservationByTheDelta) {
     EXPECT_EQ(engine.getPosition(kA), 140);
 }
 
+// A replace that grows an unexecuted minQty order (one that rested through an
+// auction) is screened for its minimum after the engine reserved the growth.
+// Refused there (it would fill 5 of a minimum of 50), the growth comes back.
+TEST_P(RiskPath, ReplaceRefusedForItsMinimumReleasesItsGrowth) {
+    engine.setPositionLimit(kA, 1000);
+    ASSERT_EQ(engine.setTradingStateBatch({kSym}, TradingState::PreOpen), 1u);
+    ASSERT_TRUE(engine.submitOrder(kSym, 1, kA, Side::Buy, kPx - 10000, 100, OrderType::Limit,
+                                   0, 0, TimeInForce::GTC, 0, 0, PegType::None, 0, 0,
+                                   /*minQty=*/50).isAccepted());
+    drain();
+    ASSERT_EQ(engine.setTradingStateBatch({kSym}, TradingState::Continuous), 1u);
+    ASSERT_TRUE(add(2, kB, Side::Sell, kPx, 5).isAccepted());
+    drain();
+    ASSERT_EQ(leaves(1), 100u);
+    ASSERT_EQ(engine.getWorkingQty(kA, Side::Buy), 100);
+
+    expectRefused(engine.submitCancelReplace(kSym, 1, kPx, 300),
+                  RejectReason::FOKInsufficientLiquidity);
+    drain();
+    EXPECT_EQ(leaves(1), 100u) << "the replace took effect";
+    EXPECT_EQ(leaves(2), 5u) << "the replace traded below its minimum";
+    EXPECT_EQ(engine.getWorkingQty(kA, Side::Buy), 100)
+        << "a refused replace kept the growth it reserved";
+}
+
 TEST_P(RiskPath, ReplaceThatTradesDoesNotCountTwice) {
     engine.setPositionLimit(kA, 100);
     ASSERT_TRUE(add(1, kA, Side::Buy, kPx - 100, 10).isAccepted());

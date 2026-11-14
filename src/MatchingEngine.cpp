@@ -194,6 +194,10 @@ void MatchingEngine::writeGraduatedKill(Journal& journal,
 void MatchingEngine::restoreGraduatedKill(const JournalEntry& e, GraduatedKillRecord kind) {
     std::lock_guard<std::mutex> books(bookMutex_);
     GraduatedKillSwitch::PersistentState state = killSwitch_.persistentState();
+    // By value: JournalEntry is packed, so a reference to one of its fields
+    // (bit_cast's and push_back's parameters) is a misaligned reference.
+    const Price rateBits = e.price;
+    const SymbolId symbol = e.symbolId;
     switch (kind) {
     case GraduatedKillRecord::Begin:
         state = {};
@@ -201,16 +205,16 @@ void MatchingEngine::restoreGraduatedKill(const JournalEntry& e, GraduatedKillRe
         break;
     case GraduatedKillRecord::Throttle:
         state.throttles.emplace_back(static_cast<ParticipantId>(e.minQty),
-                                     std::bit_cast<double>(e.price));
+                                     std::bit_cast<double>(rateBits));
         break;
     case GraduatedKillRecord::SymbolHalt:
-        state.haltedSymbols.push_back(e.symbolId);
+        state.haltedSymbols.push_back(symbol);
         break;
     case GraduatedKillRecord::GlobalHalt:
         state.globalHalt = true;
         break;
     case GraduatedKillRecord::SwitchHaltedBook:
-        killHalted_.push_back(e.symbolId);
+        killHalted_.push_back(symbol);
         break;
     }
     killSwitch_.restoreState(state);

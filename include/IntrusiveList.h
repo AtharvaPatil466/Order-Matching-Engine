@@ -4,12 +4,27 @@
 
 namespace OrderMatcher {
 
-// Intrusive List specifically for Order struct
+// Intrusive List specifically for Order struct. It is also the price level, so
+// it carries the level's displayed totals: the visible quantity and the count
+// of displayed (non-hidden) orders, the two numbers an L2 update publishes.
+// They are maintained on every change rather than recomputed by walking the
+// level, which made each add, fill and cancel cost O(orders at the price) as
+// soon as a listener was attached (PERF-1).
+//
+// The rule that keeps them right: the totals always hold displayQuantity() of
+// every linked non-hidden order AS IT IS NOW. push_back adds an order's
+// current display, remove subtracts it, and whoever changes a linked order's
+// remainingQty or visibleQty in place calls restate() with what it displayed
+// before. OrderBook::validateIntegrity checks them against a full walk.
 class OrderList {
 public:
     OrderList() : head(nullptr), tail(nullptr) {}
 
     void push_back(Order* order) {
+        if (!order->isHidden) {
+            visibleQty_ += displayQuantity(*order);
+            ++visibleCount_;
+        }
         order->next = nullptr;
         order->prev = tail;
         if (tail) {
@@ -21,6 +36,10 @@ public:
     }
 
     void remove(Order* order) {
+        if (!order->isHidden) {
+            visibleQty_ -= displayQuantity(*order);
+            --visibleCount_;
+        }
         if (order->prev) {
             order->prev->next = order->next;
         } else {
@@ -36,6 +55,16 @@ public:
         order->next = nullptr;
         order->prev = nullptr;
     }
+
+    // A linked order's displayed size changed in place (a fill, a reduction,
+    // an iceberg slice refreshed or clamped); `displayBefore` is what it
+    // displayed before the change.
+    void restate(const Order& order, Quantity displayBefore) {
+        if (!order.isHidden) visibleQty_ += displayQuantity(order) - displayBefore;
+    }
+
+    Quantity visibleQty() const { return visibleQty_; }
+    uint32_t visibleCount() const { return visibleCount_; }
 
     Order* front() const {
         return head;
@@ -62,6 +91,8 @@ public:
 private:
     Order* head;
     Order* tail;
+    Quantity visibleQty_ = 0;
+    uint32_t visibleCount_ = 0;
 };
 
 } // namespace OrderMatcher

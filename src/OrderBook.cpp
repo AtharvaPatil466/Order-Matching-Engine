@@ -191,9 +191,6 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
 void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Price price) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
-    // Early-out before the O(level) walk below. The walk used to run even with
-    // no listener attached, only to discard the result at the dispatch check —
-    // pure waste on the benchmark configuration, which runs listener-free.
     if (!hasTradeListener_) return;
 
     MarketDataUpdate update{};
@@ -201,23 +198,17 @@ void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Pri
     update.side = side;
     update.timestamp = nowNs();
     update.sequenceNumber = nextSequenceNumber_++;
-
-    PriceLevel lvl{};
-    lvl.price = price;
-
-    auto& book = (side == Side::Buy) ? bids_ : asks_;
-    const OrderList* list = book.at(price);
-    if (list) {
-        for (Order* o = list->front(); o; o = o->next) {
-            if (!o->isHidden) {
-                lvl.totalQuantity += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
-                lvl.orderCount++;
-            }
-        }
+    update.level.price = price;
+    // The level's totals are maintained by OrderList on every change, so this
+    // is O(1). It used to walk every order at the price, which made each add,
+    // fill and cancel O(level depth) whenever a listener was attached — and
+    // the shipped binary always attaches one (PERF-1).
+    const auto& book = (side == Side::Buy) ? bids_ : asks_;
+    if (const OrderList* list = book.at(price)) {
+        update.level.totalQuantity = list->visibleQty();
+        update.level.orderCount = list->visibleCount();
     }
-
-    update.level = lvl;
-    if (hasTradeListener_) listener_->onMarketData(update);
+    listener_->onMarketData(update);
 #else
     (void)action; (void)side; (void)price;
 #endif
@@ -339,6 +330,14 @@ void OrderBook::removeFromBook(Order* order) {
     stpNoteRemoved(order);  // leaving the book: drop STP occupancy
     auto& book = (order->side == Side::Buy) ? bids_ : asks_;
     book.remove(order->price, order);
+}
+
+// A resting order's displayed size changed in place: carry it into its level's
+// maintained totals (OrderList::restate). A parked order is on no level.
+void OrderBook::restateLevel(const Order& order, Quantity displayBefore) {
+    if (!order.inBook) return;
+    auto& book = (order.side == Side::Buy) ? bids_ : asks_;
+    if (OrderList* level = book.at(order.price)) level->restate(order, displayBefore);
 }
 
 // ─── Risk & Validation ──────────────────────────────────────────────────────
@@ -1380,6 +1379,7 @@ bool OrderBook::stpDecreaseBoth(Order* incoming, Order* resting) {
     // Keep visibleQty <= remainingQty or a later fill underflows
     // remainingQty to UINT64_MAX (no-op for a non-iceberg).
     resting->visibleQty = std::min(resting->visibleQty, resting->remainingQty);
+    restateLevel(*resting, displayBefore);
     // Its owner hears of it, in its own status with the new leaves, as a
     // restatement; the order-level feed hears of the displayed shrink. The
     // owner used to keep seeing 100 while the engine held 70 (MR-7). The L2
@@ -1479,8 +1479,8 @@ Price OrderBook::match(Order* incoming) {
     // republish them: fills change displayed depth, and nothing in the match
     // path used to say so, leaving every incremental subscriber holding
     // pre-trade quantities forever. Published once per level after the sweep
-    // rather than once per fill — notifyMarketData recomputes the whole level,
-    // so per-fill would be O(depth) work repeated for each order consumed.
+    // rather than once per fill, so a subscriber sees each level once, at its
+    // final state (the totals themselves are maintained, so each is O(1)).
     // Bounded by kMaxFillsPerOrder: a level needs at least one fill to appear.
     std::array<Price, kMaxFillsPerOrder> touchedPrices;
     int touchedCount = 0;
@@ -1661,6 +1661,7 @@ Price OrderBook::match(Order* incoming) {
         bookOrder->remainingQty -= fillQty;
         bookOrder->cumQty += fillQty;
         if (bookOrder->type == OrderType::Iceberg) [[unlikely]] bookOrder->visibleQty -= fillQty;
+        level->restate(*bookOrder, available);  // the level's displayed total drops by the fill
 
         if (firstPrint == 0) [[unlikely]] {
             firstPrint = bestPrice;
@@ -1727,9 +1728,11 @@ Price OrderBook::match(Order* incoming) {
             // any orders that arrived after the original iceberg
             // placement (but before the slice was refilled) fill ahead of
             // it. Tested in IcebergPriority_PriceTime_LosesPriorityOnRefresh.
+            // Unlinked with the empty slice it displays now, relinked with the
+            // new one, so the level's displayed total gains exactly the slice.
+            level->remove(bookOrder);
             bookOrder->visibleQty = std::min(bookOrder->remainingQty, bookOrder->displayQty);
             bookOrder->status = OrderStatus::PartiallyFilled;
-            level->remove(bookOrder);
             level->push_back(bookOrder);
             if (!bookOrder->isHidden) {
                 // Drain the buffered fills BEFORE publishing the replenished
@@ -1850,6 +1853,12 @@ Price OrderBook::matchProRata(Order* incoming) {
                     // Both shrink; see match() (MATCH-10).
                     if (stpDecreaseBoth(incoming, o))
                         stpCancelRestingOrder(o, &level, opposite);
+                    else if (!o->isHidden)
+                        // It shrank in place. Pro-rata publishes a level only
+                        // after fills from it, and an incoming order the
+                        // decrease used up never fills: the feed kept the old
+                        // size (price-time marks the level touched first).
+                        notifyMarketData(MarketDataUpdate::Action::Modify, o->side, o->price);
                     if (incoming->remainingQty == 0) {
                         incoming->status = OrderStatus::CancelledBySTP;
                         return firstPrint;
@@ -1993,6 +2002,7 @@ Price OrderBook::matchProRata(Order* incoming) {
             if (allocs[i].qty == 0) continue;
             Order* bookOrder = allocs[i].order;
             Quantity fillQty = allocs[i].qty;
+            const Quantity shownBefore = displayQuantity(*bookOrder);
 
             incoming->remainingQty -= fillQty;
             incoming->cumQty += fillQty;
@@ -2057,6 +2067,7 @@ Price OrderBook::matchProRata(Order* incoming) {
             } else {
                 bookOrder->status = OrderStatus::PartiallyFilled;
             }
+            level.restate(*bookOrder, shownBefore);  // the fill, and a refreshed slice
         }
 
         for (const ProRataAlloc& a : allocs) {
@@ -2263,6 +2274,24 @@ bool OrderBook::validateIntegrity(std::string* err) const {
 
     auto checkSide = [&](const FlatPriceMap& book, Side side, const char* label) {
         book.forEachLevel([&](Price levelPrice, const OrderList& level) {
+            // The level's maintained displayed totals must equal a walk of it
+            // (PERF-1): every path that changes a resting order's display
+            // has to tell its level, and this is where one that forgot shows.
+            Quantity shownQty = 0;
+            uint32_t shownCount = 0;
+            for (const Order* o = level.front(); o; o = o->next) {
+                if (o->isHidden) continue;
+                shownQty += displayQuantity(*o);
+                ++shownCount;
+            }
+            if (problem.empty() &&
+                (shownQty != level.visibleQty() || shownCount != level.visibleCount())) {
+                problem = std::string(label) + " level " + std::to_string(levelPrice)
+                        + " carries displayed totals " + std::to_string(level.visibleQty())
+                        + " in " + std::to_string(level.visibleCount())
+                        + " orders, but its orders display " + std::to_string(shownQty)
+                        + " in " + std::to_string(shownCount);
+            }
             for (Order* o = level.front(); o; o = o->next) {
                 if (!problem.empty()) return;
                 auto fail = [&](const std::string& why) {
@@ -2474,6 +2503,7 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
         // current slice leaves the order displaying more than it can deliver.
         if (order->type == OrderType::Iceberg)
             order->visibleQty = std::min(order->visibleQty, order->remainingQty);
+        restateLevel(*order, displayBefore);
         const Quantity displayAfter = displayQuantity(*order);
 
         if (!order->isHidden) {
@@ -2684,6 +2714,7 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
             order->remainingQty = newLeaves;
             if (order->type == OrderType::Iceberg)
                 order->visibleQty = std::min(order->visibleQty, order->remainingQty);
+            restateLevel(*order, displayBefore);
             const Quantity displayAfter = displayQuantity(*order);
             if (!order->isHidden && displayAfter < displayBefore)
                 notifyBookVisible(BookVisibleUpdate::Action::Reduce, order->id,
@@ -3148,6 +3179,8 @@ void OrderBook::uncrossLocked() {
         assert(!checkSMP(*buyer, *seller) && "self-cross plan missed a pair");
 
         Quantity fillQty = std::min({buyer->remainingQty, seller->remainingQty, remainingVolume});
+        const Quantity buyerShown = displayQuantity(*buyer);
+        const Quantity sellerShown = displayQuantity(*seller);
 
         buyer->remainingQty -= fillQty;
         buyer->cumQty += fillQty;
@@ -3184,6 +3217,9 @@ void OrderBook::uncrossLocked() {
         // by the lambda's own guard.
         resliceIceberg(buyer);
         resliceIceberg(seller);
+        // Into the levels' displayed totals; a parked order is on no level.
+        if (bidLevel) bidLevel->restate(*buyer, buyerShown);
+        if (askLevel) askLevel->restate(*seller, sellerShown);
 
         // Both sides' levels changed. Published per fill rather than batched:
         // an auction runs once per session, so the repeated level walk costs
@@ -3686,14 +3722,7 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
 
     bids_.forEachLevelWhile([&](Price price, const OrderList& level) -> bool {
         if (snap.bidCount >= maxDepth) return false;
-        PriceLevel pl{};
-        pl.price = price;
-        for (Order* o = level.front(); o; o = o->next) {
-            if (!o->isHidden) {
-                pl.totalQuantity += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
-                pl.orderCount++;
-            }
-        }
+        const PriceLevel pl{price, level.visibleQty(), level.visibleCount()};
         if (pl.orderCount > 0) {
             snap.bids[snap.bidCount++] = pl;
         }
@@ -3702,14 +3731,7 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
 
     asks_.forEachLevelWhile([&](Price price, const OrderList& level) -> bool {
         if (snap.askCount >= maxDepth) return false;
-        PriceLevel pl{};
-        pl.price = price;
-        for (Order* o = level.front(); o; o = o->next) {
-            if (!o->isHidden) {
-                pl.totalQuantity += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
-                pl.orderCount++;
-            }
-        }
+        const PriceLevel pl{price, level.visibleQty(), level.visibleCount()};
         if (pl.orderCount > 0) {
             snap.asks[snap.askCount++] = pl;
         }
@@ -3843,7 +3865,9 @@ void OrderBook::restoreIcebergSlice(OrderId orderId, Quantity visibleQty) {
     Order** found = orderLookup_.find(orderId);
     Order* o = found ? *found : nullptr;
     if (!o || o->type != OrderType::Iceberg || !o->inBook || visibleQty == 0) return;
+    const Quantity shownBefore = displayQuantity(*o);
     o->visibleQty = std::min(visibleQty, o->remainingQty);
+    restateLevel(*o, shownBefore);
 }
 
 // ponytail: a linear find per record, O(pegs^2) per restore; carry each

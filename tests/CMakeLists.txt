@@ -1669,6 +1669,17 @@ set_tests_properties(RateLimiterReconfigureTest PROPERTIES TIMEOUT 15
 
 # One volatility check for every continuous print: fresh orders, replaces,
 # elected and latched stops; the reference comes from a print (MR-1, MR-2, FORMAL-1).
+# A price level's displayed totals are maintained, not recomputed by a walk,
+# and every published L2 level equals a recomputation (PERF-1).
+add_executable(LevelTotalsTest LevelTotalsTest.cpp)
+target_link_libraries(LevelTotalsTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(LevelTotalsTest)
+gtest_discover_tests(LevelTotalsTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project")
+
 add_executable(PrintBandTest PrintBandTest.cpp)
 target_link_libraries(PrintBandTest PRIVATE OrderMatcher gtest_main)
 enable_assertions(PrintBandTest)

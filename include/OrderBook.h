@@ -1228,6 +1228,7 @@ private:
     // C1: remove a resting order under STP, reporting CancelledBySTP. Shared
     // by match(), matchProRata() and uncross(). `lvl` must be book's best level.
     void stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMap& book);
+    void restateLevel(const Order& order, Quantity displayBefore);
 
     bool finalizeIfStpCancelled(Order* order);
 

@@ -16,11 +16,13 @@
 #include "TempPath.h"
 
 #include <cassert>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <thread>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -423,11 +425,22 @@ int refusedWriteChild(const std::string& path) {
         engine.waitForDrain();
         maker.c.setRecvTimeout(1);
         maker.await(reportOf(kUpdate, 1, OrderStatus::Accepted));   // the durable rest
-        const int depthBefore = feed.depth.load();
+        // The gateway delivers a request's events one after another, so the
+        // Accepted report can reach the maker before the feed has the rest's
+        // depth update (248 of 400 loaded Linux runs). Take the baseline once
+        // the feed has that update and holds still.
+        int depthBefore = 0;
+        for (int still = 0; still < 50;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            const int now = feed.depth.load();
+            still = now > 0 && now == depthBefore ? still + 1 : 0;
+            depthBefore = now;
+        }
         if (taker.request(limit(kTaker, 1, Side::Buy, 100, 10)).type == GatewayResponse::Type::Ack)
             return kSetup;   // JournalHaltTest's concern; here it only sets the scene
-        if (feed.trades.load() != 0 || feed.depth.load() != depthBefore) return kFeedTold;
+        // The maker's wait comes first: it gives a leak a second to show.
         if (maker.await(reportOf(kTrade, 1, OrderStatus::Filled))) return kMakerTold;
+        if (feed.trades.load() != 0 || feed.depth.load() != depthBefore) return kFeedTold;
         if (gateway.reportsWithheld() == 0) return kNotWithheld;
     }
     gateway.stop();

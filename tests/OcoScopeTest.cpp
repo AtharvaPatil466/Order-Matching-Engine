@@ -57,6 +57,30 @@ TEST(OcoScope, ALinkDiesWithItsOrderSoAReusedIdDoesNotInheritIt) {
     EXPECT_NE(e.getOrderBook(0)->getOrder(8), nullptr) << "P1's #8 cancelled by P2's fill";
 }
 
+// A sweep on the caller's thread (session-end DAY cancels) is followed by no
+// request, so a link that waited for the next drain to end was still there —
+// and the drain then ended whatever pair had been linked under those ids since.
+TEST(OcoScope, ASweptLegsLinkEndsAtOnceSoARelinkedPairStillWorks) {
+    MatchingEngine e;
+    e.addSymbol(0);
+    e.start();
+    quietBreakers(e, {0});
+    const auto day = [&e](OrderId id, Price px) {
+        e.submitOrder(0, id, 1, Side::Sell, px, 10, OrderType::Limit, 0, 0, TimeInForce::DAY);
+    };
+    day(7, PX + 100);
+    day(8, PX + 200);
+    e.registerOco(0, 7, 8);
+    ASSERT_EQ(e.endTradingSession({0}), 2u);
+    e.registerOco(0, 7, 8);  // the next session links the same ids up front
+    ASSERT_EQ(e.beginTradingSession({0}, 20261116), 1u);
+    e.setTradingStateBatch({0}, TradingState::Continuous);
+    day(7, PX + 100);
+    day(8, PX + 200);
+    e.submitOrder(0, 100, 4, Side::Buy, PX + 100, 10, OrderType::Limit);  // #7 fills
+    EXPECT_EQ(e.getOrderBook(0)->getOrder(8), nullptr) << "the sweep's stale cancel unlinked the new pair";
+}
+
 TEST(OcoScope, AnOcoCancelledSiblingReleasesItsReservedPosition) {
     MatchingEngine e;
     e.addSymbol(0);

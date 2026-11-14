@@ -891,16 +891,14 @@ private:
         // book's live orders, not across books, so a link is scoped to the
         // book. Guarded by contingencyMutex_.
         ContingencyManager oco;
-        // An OCO-relevant event, in book order: a leg's first execution, or a
-        // leg leaving unfilled (any cancel, expiry, STP), which ends its link
-        // so a later order reusing the id does not inherit it.
-        struct OcoEvent { OrderId id; bool executed; };
-        // Appended under the book's lock by whichever thread ends the order:
-        // the book's worker, or a caller-thread sweep (session-end DAY
-        // cancels, kill switch). Drained by the worker outside that lock, so
-        // it has its own. Only taken while OCO is active.
+        // Legs that executed, in book order, for driveOco to cancel their
+        // siblings. (A leg leaving unfilled ends its link in onOrderUpdate.)
+        // Appended under the book's lock by whichever thread reports the
+        // order: the book's worker, or a caller-thread sweep cancelling a
+        // part-filled order (session end, kill switch). Drained by the worker
+        // outside that lock, so it has its own. Only taken while OCO is active.
         std::mutex executedMutex;
-        std::vector<OcoEvent> executed;
+        std::vector<OrderId> executed;
         std::vector<Trade>   trades;
         // Persistent drain buffers reused across driveOco cycles. The drain
         // swaps these with executed/trades and clear()s them (keeping
@@ -908,7 +906,7 @@ private:
         // into executed/trades — eliminating the per-cycle reallocation the
         // old swap-with-a-local pattern incurred. Touched only by the symbol's
         // owning worker thread (matching + drain run on the same thread).
-        std::vector<OcoEvent> firedScratch;
+        std::vector<OrderId> firedScratch;
         std::vector<Trade>   tradesScratch;
         void onOrderUpdate(const OrderUpdate& u) override;
         void onTrade(const Trade& t) override;

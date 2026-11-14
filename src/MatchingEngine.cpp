@@ -1335,11 +1335,18 @@ void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
     // order cut short after real fills ends Cancelled / CancelledBySTP with
     // filledQty > 0 (GTDIFF-4), and a zero-fill STP kill still cannot win (C1).
     if (!ocoActive || !ocoActive->load(std::memory_order_relaxed)) return;
-    const bool left = u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP;
-    // Not Rejected: a refused duplicate carries the live order's id.
-    if (u.filledQty == 0 && !left) return;
-    std::lock_guard<std::mutex> lock(executedMutex);
-    executed.push_back({u.orderId, u.filledQty > 0});
+    if (u.filledQty > 0) {
+        std::lock_guard<std::mutex> lock(executedMutex);
+        executed.push_back(u.orderId);
+    } else if (u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP) {
+        // A leg leaving unfilled ends its link here, not at the next drain: a
+        // caller-thread sweep (session end, kill switch) and an expiry are
+        // followed by no drain, and the ids may be linked again before one
+        // comes. Not Rejected: a refused duplicate carries the live order's
+        // id. contingencyMutex_ is a leaf lock, safe under the book's.
+        std::lock_guard<std::mutex> lock(engine->contingencyMutex_);
+        oco.onCanceled(u.orderId);
+    }
 }
 
 void MatchingEngine::OcoBookListener::onTrade(const Trade& t) {
@@ -1382,12 +1389,11 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
             std::lock_guard<std::mutex> lock(obs->executedMutex);
             obs->firedScratch.swap(obs->executed);
         }
-        for (const OcoBookListener::OcoEvent& ev : obs->firedScratch) {
+        for (const OrderId id : obs->firedScratch) {
             std::vector<OrderId> siblings;
             {
                 std::lock_guard<std::mutex> lock(contingencyMutex_);
-                if (!ev.executed) { obs->oco.onCanceled(ev.id); continue; }
-                siblings = obs->oco.onExecuted(ev.id);
+                siblings = obs->oco.onExecuted(id);
             }
             uint64_t unused = 0;
             for (OrderId sib : siblings) {

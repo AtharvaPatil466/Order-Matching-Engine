@@ -14,8 +14,6 @@
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![CI](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml)
-[![Latency](https://img.shields.io/badge/Matching_P50_PGO-237ns-green.svg)](#performance)
-[![Throughput](https://img.shields.io/badge/Throughput-3.10M_ops/s-blue.svg)](#performance)
 [![Tests](https://img.shields.io/badge/Tests-CTest_suite-brightgreen.svg)](#verification)
 [![TLA+](https://img.shields.io/badge/TLA%2B-8_specs-blueviolet.svg)](#formal-verification)
 [![Order entry](https://img.shields.io/badge/Order_entry-native_binary_over_TCP-blueviolet.svg)](#order-entry)
@@ -94,63 +92,24 @@ In `OrderEngine`, self-match prevention (cancel-incoming), the 5% circuit breake
 - **Fault Injection**: `FaultInjector` singleton with 10+ injection points — journal short-writes, bit-flips, fsync failures, pool exhaustion, gateway fragmentation, spurious queue failures; compiled out unless built with `ENABLE_FAULT_INJECTION` (`OB_ENABLE_FAULT_INJECTION`)
 - **Coverage-Guided Fuzzing**: a libFuzzer target, `fuzz_gateway_engine`, which feeds a client's bytes through `TcpGateway`'s framer into `MatchingEngine::submitOrder` and requires `validateIntegrity` on every book; CI's `gateway-engine-fuzz` job runs it for 10 minutes on every push and PR. See [fuzz/README.md](./fuzz/README.md)
 
-## 📊 Performance Benchmarks
+## 📊 Performance
 
-Measured using `HonestBenchmark` — a single deterministic order flow (50K orders, seed=42) fed through three paths on Apple Silicon ARM64, Clang C++20 -O3 -march=native (Release). Each order individually timed with `nowNs()` (`std::chrono::high_resolution_clock`).
+**No benchmark has been run on this branch, so this README quotes no latency or
+throughput figure.** [Project_Overview.md](./Project_Overview.md) §5 gives the
+one recent x86 run, which is of `main` at `adc7b5b` on a shared GitHub-hosted
+VM, labelled as such, and says what has changed since. [BENCHMARKS.md](./BENCHMARKS.md)
+keeps earlier measurements with their provenance, and
+[docs/PERF_SOURCES.md](./docs/PERF_SOURCES.md) gives every number in these
+documents its source; none has a raw artifact in this repository.
 
-> [!IMPORTANT]
-> **Two machines:** the rows below are labelled x86 (AWS c6in.metal, commit `d2e688c`) or ARM (a single-socket Apple M-series dev machine), and must not be compared across that line. (This note used to say every number here was measured on Apple M-series, and quoted a 125 ns core-matching figure that is withdrawn.) Multi-thread scaling bounds do not factor in cross-NUMA cache coherence traffic.
-> 
-> These are **per-order processing latencies** on the matching thread. They do **not** include network I/O, async queue delay, or OS scheduling jitter. See [BENCHMARKS.md](./BENCHMARKS.md) for full methodology and caveats.
-
-### Four benchmarks, four workload regimes
-
-Four benchmarks characterize the engine and are complementary rather than competing. The two below cover the closed-loop latency floor and venue-shaped flow; `CoordinatedOmissionBenchmark` (open-loop, reports CO-naive *and* CO-corrected latency at a fixed offered rate) and `ColdCacheBenchmark` (working set evicted before each timed op) cover the two regimes a closed-loop steady-state benchmark structurally cannot see. Results for all four, with the ARM measurement-floor caveats, are in [BENCHMARKS.md](./BENCHMARKS.md).
-
-| Benchmark | Platform | Workload | P50 | P99 | Ratio |
-| :--- | :--- | :--- | ---: | ---: | ---: |
-| **HonestBenchmark** | x86, PGO, commit `d2e688c` | 50K orders, seed=42, no cancels — dense resting book, predictable clustering (its "100% fill" counts accepted orders; the fill rate is unmeasured) | **237 ns** | 910 ns | 3.8× |
-| **RealisticFlowBenchmark** | **ARM, indicative** | 500K events, 44% cancel / 46% new / 8% IOC / 2% modify, mean resting depth 2,418 | 208 ns combined | 709 ns | 3.4× |
-
-> [!WARNING]
-> **These two rows are measured on different machines and must not be compared to each other.** The 208 ns ARM figure is *not* evidence that realistic flow is faster than the 237 ns x86 floor — it is a different CPU with a coarser clock. `RealisticFlowBenchmark` has never been run on x86.
-
-`HonestBenchmark` is the controlled reproducible baseline — the floor on matching latency under favourable conditions, and the flow every three-path figure below is measured on. It is **closed-loop with no cancels**, so it is a floor rather than an expected operating number. `RealisticFlowBenchmark` models venue-shaped flow against a sustaining resting book, with no empty-book cancels (0 of 217,256) — though cancels of ids an IOC already filled are timed as real cancels and not counted; its cancel P50 sits *at* the ~42 ns ARM clock tick and is therefore not a measurement on this box (the published run's recorder dropped the 26.4% of cancels that finished inside one tick; `6c93b11` now counts them), and x86 TSC resolves it. It was rewritten from a prior version whose cancel fraction exceeded its new-order fraction, draining the resting pool to empty and measuring an empty book at venue-shaped labels.
-
-> [!NOTE]
-> None of the four benchmarks represents a **cancel-heavy sparse-book regime** (cancel-to-trade ratios north of 20:1, price levels churn, book depth near zero). That regime stresses `FlatPriceMap` traversal over sparse slots, cancel-path hash lookups on recently-consumed IDs, and object pool churn. It is the planned next workload addition. See [BENCHMARKS.md](./BENCHMARKS.md).
-
-### Three-Path Latency (identical order flow, x86 AWS c6in.metal, commit `d2e688c`)
-
-| Path | What's Included | P50 | P90 | P99 | Throughput |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core matching** | OrderBook + STP | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
-| **Engine wrapper** | + sequence alloc, rate-limiter check (limiter disabled, its default) | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
-| **Full-stack journal** | + async io_uring ack (batch=64; journal on `/tmp`, backing not recorded; timing stops before durability) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
-
-> [!NOTE]
-> x86 figures (AWS c6in.metal, dual Xeon Platinum 8375C, 50K orders seed=42) measured at commit `d2e688c`, 340 commits before this revision; no raw log is committed and they have not been re-run since. The Apple M3 Pro reference of ~125 ns P50 that used to sit here did not reproduce and is withdrawn. See [BENCHMARKS.md](./BENCHMARKS.md).
->
-> The full-stack journal path now uses the **async io_uring ack** (`onDurable` fires on the completion reaper, not on submit): Path C P99 dropped **32.8%** (5,312 → 3,568 ns) versus the synchronous `fdatasync` path, trading ~167 ns of added P50.
->
-> **PGO:** Clang IR-based profile-guided optimization (profiled on the seed=42 HonestBenchmark workload) takes Path A core matching to **P50 237 ns / P99 910 ns / 3.10M ops/s** — the headline figure above. The three-path table is the standard (non-PGO) Release build.
-
-### Multi-Threaded Stress Test (4 threads)
-| Scenario | Orders | Trades | Result |
-| :--- | :--- | :--- | :--- |
-| Concurrent Producers | 20,000 | ~6,300 | ✅ |
-| Mixed Workload | 20,000 | ~5,800 | ✅ |
-| Kill Switch Under Load | 11,000 | — | ✅ |
-| Multi-Symbol (4 symbols) | 12,000 | ~5,900 | ✅ |
-| High-Throughput Burst | 50,000 | ~19,500 | ✅ 5M ops/s |
-
-### Binary Codec Performance
-
-`./bin/BinaryCodecBenchmark` — pure encode microbench, no engine, no transport. 2M iterations, Apple M3 Pro, Clang `-O3 -march=native`.
-
-| Codec | Message | ns/op | M ops/s |
-| :--- | :--- | --: | --: |
-| ITCH 5.0 | AddOrder encode (36B) | 34.1 | 29.4 |
+The benchmarks: `HonestBenchmark` (Path A the book, L the book with a counting
+listener, B the engine, C with a group-commit journal, D with a durable ack),
+`RealisticFlowBenchmark` (venue-shaped flow with cancels), `CoordinatedOmissionBenchmark`
+(open-loop), `ColdCacheBenchmark` (working set evicted before each operation) and
+`SustainedLoadTest`. Every latency figure any of them has produced is for a
+book with no listener, or with one that only counts; `OrderEngine` attaches one
+to every book and syncs one journal entry per request, so its own latency and
+throughput have not been measured.
 
 ## 🏗️ Architecture
 

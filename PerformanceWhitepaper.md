@@ -1,5 +1,9 @@
 # Order Matching Engine — Performance Whitepaper
 
+> **Nothing in this document describes the current branch.** No benchmark has
+> been run on it; [Project_Overview.md](./Project_Overview.md) §5 says what is
+> known.
+>
 > **Platform.** The x86 numbers are from AWS c6in.metal (dual Intel Xeon
 > Platinum 8375C @ 2.90 GHz), hyperthreading disabled, NUMA-pinned, Clang C++20.
 > §3.1-§3.4 are Apple Silicon ARM64 dev-machine runs; more are in
@@ -14,7 +18,7 @@
 
 This document records performance measurements for the C++20 order matching engine. All numbers come from a single benchmark binary (`HonestBenchmark`) that feeds an identical, deterministic order flow through three progressively heavier execution paths. The numbers are machine-specific and should not be treated as a portable latency SLA.
 
-**Key Result (authoritative, x86 bare metal — AWS c6in.metal)**: Core matching latency is **261 ns P50** including STP; full-stack with the async io_uring journal is **615 ns P50**. That 615 ns is the io_uring async-ack result, not the earlier synchronous `fdatasync` figure — the async path returns before durability, so the completion-reaper's overhead surfaces in P50 while P99 falls by a third. Journal I/O still dominates tail latency at P99+. (An earlier revision quoted ~125 ns P50 on the Apple Silicon dev machine, "~2.2× faster than x86". [BENCHMARKS.md](./BENCHMARKS.md) reports that figure did not reproduce and withdraws it; §3.1 keeps the old run for the record.)
+**Earlier result, withdrawn as a headline (one unlogged x86 session at `d2e688c`; nothing has been measured on the current branch)**: Core matching latency is **261 ns P50** including STP; full-stack with the async io_uring journal is **615 ns P50**. That 615 ns is the io_uring async-ack result, not the earlier synchronous `fdatasync` figure — the async path returns before durability, so the completion-reaper's overhead surfaces in P50 while P99 falls by a third. Journal I/O still dominates tail latency at P99+. (An earlier revision quoted ~125 ns P50 on the Apple Silicon dev machine, "~2.2× faster than x86". [BENCHMARKS.md](./BENCHMARKS.md) reports that figure did not reproduce and withdraws it; §3.1 keeps the old run for the record.)
 
 ## 2. Methodology
 
@@ -54,7 +58,7 @@ Record: CPU model, OS version, compiler version, power mode, thermal state, and 
 
 ## 3. Results
 
-### 3.0 Authoritative — x86 bare metal (AWS c6in.metal)
+### 3.0 x86 bare metal (AWS c6in.metal) — one unlogged session at `d2e688c`, not this branch
 
 Dual Intel Xeon Platinum 8375C @ 2.90GHz, 64 cores (`nosmt`), Ubuntu 26.04,
 Clang C++20 `-O3 -march=native`, `numactl --cpunodebind=0 --membind=0`,
@@ -73,17 +77,8 @@ Clang IR-based PGO, profiled on this same seed=42 flow, takes Path A to
 **237 ns P50 / 910 ns P99 / 3.10M ops/s** — the headline figure; the table above
 is the standard non-PGO Release build.
 
-`perf` (**mis-scoped — see the correction below**, 50K orders seed=42):
-
-| Counter | Per-order mean |
-|---|---:|
-| IPC | 1.34 |
-| Branch-misses / order | 17.8 |
-| L1-dcache-misses / order | 152 |
-| Instructions / order | 12,638 |
-
-**These figures are withdrawn. The table above is retained only so the
-correction has something to point at; do not cite the numbers.**
+Per-order `perf` counters from that session are **withdrawn** and no longer
+printed here: they were whole-process totals divided by the order count.
 
 They were labelled "Path A" and they are not Path A. `scripts/aws_benchmark.sh`
 runs `perf stat` around the **entire HonestBenchmark process** — its own echo
@@ -120,7 +115,7 @@ granularity quantizes per-path P50s (Path A/B read equal or swap run-to-run;
 Path B can show ~84 ns), and the Path C ~1,040 ns figure is a macOS/APFS
 `fdatasync` artifact — the same path is 615 ns on Linux x86 with the async io_uring ack.
 
-### 3.1 Path A — Core Matching
+### 3.1 Path A — Core Matching (its 125 ns P50 is withdrawn: it did not reproduce)
 
 ```
 OrderBook::addOrder() — includes STP and price-time priority
@@ -173,7 +168,7 @@ MatchingEngine + Journal — GroupCommit (batch=64, fdatasync per batch)
   Mean:     44,768 ns
 ```
 
-### 3.4 Overhead Breakdown (P50)
+### 3.4 Overhead Breakdown (P50; withdrawn with the 125 ns figure)
 
 ```
 Core matching + compliance:     125 ns  (Path A)
@@ -201,7 +196,7 @@ This is the correct production configuration. The P99 spike is **not** matching 
 
 ## 5. Architectural Analysis
 
-### Why Core Matching is Fast (~261ns x86 at `d2e688c`)
+### Why Core Matching is Fast
 
 - **O(1) price lookup**: `FlatPriceMap` — flat array indexed by tick offset. No tree traversal.
 - **O(1) order lookup**: `FlatHashMap` — Robin Hood open-addressing. No chaining.
@@ -209,7 +204,7 @@ This is the correct production configuration. The P99 spike is **not** matching 
 - **Intrusive lists**: Orders at each price level are in an intrusive doubly-linked list. Insert/remove is pointer arithmetic.
 - **Branch-friendly**: Price-time FIFO matching loop is a tight `while` with predictable branching.
 
-### Why Journal Dominates Tail Latency
+### Why Journal Dominates Tail Latency (device latencies below are estimates, not measured here)
 
 `fdatasync()` forces data from the OS page cache to physical media. On NVMe SSD:
 - Best case: ~20μs (4KB random write)

@@ -4,7 +4,7 @@
 
 ---
 
-## 1. Memory Sizing
+## 1. Memory Sizing (estimates; one measured figure, labelled)
 
 ### Per-Order Memory
 | Component | Size | Notes |
@@ -19,7 +19,7 @@
 ```
 Memory = (max_live_orders × 248 bytes)
        + (price_range × 8 bytes × num_symbols)      # FlatPriceMap
-       + (num_symbols × 64KB)                         # per-book overhead
+       + (num_symbols × 64KB)                         # per-book overhead (withdrawn)
        + (queue_capacity × sizeof(OrderRequest))      # MPSC queues
        + 256MB                                        # framework overhead
 ```
@@ -27,7 +27,7 @@ Memory = (max_live_orders × 248 bytes)
 > **This formula does not describe the engine.** A book is allocated in full
 > when its symbol is added, whether or not an order ever arrives: measured
 > **10.3 MiB per empty book** at the defaults (10,000 order slots, 65,536-trade
-> ring — see `config/engine.conf.example`), not 64 KB. Memory scales with
+> ring — see `config/engine.conf.example`), not the withdrawn 64 KB. Memory scales with
 > `symbols × order_pool_capacity`, not with live orders; the ~248 B above is
 > only the marginal cost of one more order (Runbook §6).
 
@@ -46,7 +46,7 @@ for 2,000, before any other overhead.
 
 ---
 
-## 2. CPU Sizing
+## 2. CPU Sizing (estimates)
 
 ### Thread Allocation
 | Thread | Count | CPU Affinity |
@@ -94,12 +94,12 @@ taskset -c 2-5 ./bin/OrderEngine --threads 4   # or worker_cores = 2,3,4,5 (Runb
 
 ---
 
-## 3. Disk Sizing (Journal)
+## 3. Disk Sizing (Journal; estimates unless a row names its measurement)
 
 ### Journal Entry Size
 Every record is a packed `JournalEntry` of **134 bytes**, whatever its type
 (`include/Journal.h`); the file starts with a 24-byte header. An earlier table
-here gave 24-100 bytes by type.
+here gave 24-100 bytes by type (withdrawn).
 
 | Entry Type | Size | Notes |
 |------------|------|-------|
@@ -132,7 +132,7 @@ first.
 ### Disk IOPS Requirements
 | Sync Policy | IOPS Needed | Latency Impact |
 |-------------|-------------|----------------|
-| `GroupCommit` (library default) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the ~1-5 µs this table used to give |
+| `GroupCommit` (library default) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the withdrawn ~1-5 µs this table used to give |
 | `Immediate` (OrderEngine) | 10K-100K | one `fdatasync` per entry |
 
 There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
@@ -180,7 +180,7 @@ something else is, and there is no replication.
 
 ---
 
-## 4. Network Sizing
+## 4. Network Sizing (estimates)
 
 ### Bandwidth per Protocol
 | Protocol | Message Size | At 10K msg/s | At 100K msg/s |
@@ -200,7 +200,7 @@ something else is, and there is no replication.
 
 ---
 
-## 5. Quick Sizing Calculator
+## 5. Quick Sizing Calculator (estimates)
 
 For a given target:
 

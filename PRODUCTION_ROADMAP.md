@@ -39,7 +39,7 @@ Handling institutional money requires rigorous pre-trade and post-trade guardrai
 
 ## 5. Formal Verification & QA
 Unit tests are insufficient for lock-free concurrency. The engine must survive mathematical and adversarial scrutiny.
-- [x] **TLA+ Modeling:** 8 specs. `MatchingEngine.tla` (price-time matching with STP, modify and replace): 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. `MpscQueue.tla` proves linearizability. `Snapshot.tla` + `SnapshotLocked.tla` proved the snapshot fix. Also `EngineConsumer`, `Auction`, `Oco`, `Risk`. Details: docs/Verification.md.
+- [x] **TLA+ Modeling:** 7 specs. `MatchingEngine.tla` (price-time matching with STP, modify and replace), checked in CI with broken variants that must fail. `MpscQueue.tla` checks no invented or duplicated item, per-producer FIFO and eventual consumption under sequentially consistent interleavings (not linearizability). `SnapshotLocked.tla` checks the snapshot fix. Also `EngineConsumer`, `Auction`, and the library-only `Oco`, `Risk`. Details and scope: docs/Verification.md.
 - [ ] **Long-Running Soak Tests:** Harness exists (`scripts/tsan_soak.sh`); 24h+ runs still clock time bound.
 - [x] **Coverage-Guided Fuzzing (partial):** `fuzz_gateway_engine` drives client bytes through `TcpGateway` into the engine (10 minutes in CI). Journal replay fuzzer in `tools/`.
 - [ ] **Jepsen-Style Multi-Node Fault Injection:** Removed with replication: the multi-container suite only exercised that path. In-process fault injection (`FaultInjector`) remains.

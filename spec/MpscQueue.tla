@@ -17,6 +17,14 @@
 \*                         consumer log in submission order
 \*   - EventuallyDrained : under fairness, every submitted item is
 \*                         eventually popped (liveness)
+\*
+\* What this is NOT: a linearizability proof, and not a memory-model
+\* proof. Every step is sequentially consistent, while the C++ uses
+\* relaxed loads and a relaxed CAS on writePos_ with acquire/release on
+\* the slot sequence; whether those orderings are enough is not checked
+\* here (TSan and the stress tests are the evidence for that). Not
+\* modelled either: FaultInjector's spurious-empty pop, and RingBuffer.h.
+\* Bound: 2 producers x 2 items, 2 slots.
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 

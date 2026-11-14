@@ -454,12 +454,13 @@ from its size (see [rule 9.2](#rule-92--cancelreplace-loses-priority-on-a-price-
 
 > `include/Types.h:50-60` — why the status exists
 > `include/Types.h:64-71` — `isExecution()`, the single predicate for "did this order trade?"
-> `src/OrderBook.cpp:1047-1087` — `stpCancelRestingOrder`, shared by all three matching paths
-> `src/OrderBook.cpp:1088-1104` — `finalizeIfStpCancelled`
+> `src/OrderBook.cpp` `stpCancelRestingOrder` — shared by all three matching paths
+> `src/OrderBook.cpp` `finalizeIfStpCancelled`
 
-An order that traded against *other* participants before hitting the self-cross reports
-`PartiallyFilled` with its genuine executed quantity. Only a zero-fill STP termination reports
-`CancelledBySTP` (`src/OrderBook.cpp:1092-1099`).
+An order that traded against *other* participants before hitting the self-cross also reports
+`CancelledBySTP`, a terminal status, with `cumQty` carrying its genuine executed quantity: it
+used to report `PartiallyFilled` with nothing left, a status that never closes (GTDIFF-4,
+`finalizeIfStpCancelled`).
 
 **Status: Deliberate — commented and pinned.** `tests/StpSemanticsTest.cpp` covers all five
 modes on all three paths.
@@ -1406,11 +1407,13 @@ trade as a maker, and the sweep's interval only bounds how long it stays display
 
 ### Rule 8.6 — Absolute expiry timestamps are in an unspecified epoch
 
-`expiryTime` is compared against `high_resolution_clock::now().time_since_epoch().count()`.
+`expiryTime` is nanoseconds since the Unix epoch: `expiryNow()` reads `system_clock` on every
+platform, unless a test injects a clock with `setExpiryClock()`.
 
-> `src/MatchingEngine.cpp:491-497` (`expiryNow`), `include/LatencyTracker.h:12-15` (`nowNs`)
+> `src/MatchingEngine.cpp` `expiryNow`; pinned against the real binary by `GatewayExpiresGtdTest`
 
-See [defect B6](#b6--gtd-expiry-timestamps-are-compared-against-a-platform-dependent-epoch).
+See [defect B6](#b6--gtd-expiry-timestamps-are-compared-against-a-platform-dependent-epoch) for
+what it used to be.
 
 ---
 
@@ -1641,12 +1644,12 @@ elects; its prints are bounded by the breaker, and if its sweep empties the book
 its remainder can rest as a quote outside the band. Decision for the author: refuse it at
 election (`OutsidePriceBand`), or leave it as a quote.
 
-### B6 — GTD expiry timestamps are compared against a platform-dependent epoch
+### B6 — GTD expiry timestamps are compared against a platform-dependent epoch (fixed)
 
-`expiryNow()` and `nowNs()` both return
+**Fixed** (`7a651ed`): `expiryNow()` reads `system_clock`, so `expiryTime` is Unix-epoch
+nanoseconds on every platform (Rule 8.6). The rest of this entry describes the defect as it
+was. `expiryNow()` and `nowNs()` both returned
 `std::chrono::high_resolution_clock::now().time_since_epoch().count()`.
-
-> `src/MatchingEngine.cpp:491-497`, `include/LatencyTracker.h:12-15`
 
 `high_resolution_clock` is an alias whose target is implementation-defined:
 

@@ -1,5 +1,6 @@
-// SnapshotConsistencyTest — proves the torn-read window documented in
-// spec/Snapshot.tla is closed by bookLock_ (a shared_mutex when this test
+// SnapshotConsistencyTest — proves the torn-read window that the deleted
+// spec/Snapshot.tla modelled (now SnapshotLocked.tla's BUG = "reader_unlocked")
+// is closed by bookLock_ (a shared_mutex when this test
 // was written, a plain std::mutex now; the reader excludes the writer for
 // the whole snapshot either way, which is the only part this test exercises).
 //

@@ -94,7 +94,7 @@ banner "STEP 2/4 — perf stat on HonestBenchmark (per path)"
 # Counters are still whole-PROCESS totals for the path that ran: order
 # generation, the timing loop and teardown are all included. Treat them as an
 # upper bound on that path, not as its cost.
-for _p in a b c d; do
+for _p in a l b c d; do
     echo ""
     echo "--- perf stat: path ${_p} (whole-process totals for THIS path only;"
     echo "    divide by the order count for a per-order upper bound) ---"

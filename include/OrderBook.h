@@ -1311,7 +1311,8 @@ private:
     // (getSnapshot, computeAuctionState) all take an exclusive lock. Without
     // this, a snapshot read could observe a side-flipping cancelReplace
     // mid-flight and return a torn view (an order on both sides) — exactly
-    // the scenario the Snapshot.tla spec produced as a counterexample.
+    // the scenario the deleted Snapshot.tla spec produced as a counterexample
+    // (SnapshotLockedBroken.cfg reproduces it).
     //
     // A plain std::mutex (not shared_mutex) because the engine's
     // single-writer-per-book worker-thread model has no writer-vs-writer

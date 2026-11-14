@@ -15,16 +15,16 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
 [![CI](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/AtharvaPatil466/Order-Matching-Engine/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/Tests-CTest_suite-brightgreen.svg)](#verification)
-[![TLA+](https://img.shields.io/badge/TLA%2B-8_specs-blueviolet.svg)](#formal-verification)
+[![TLA+](https://img.shields.io/badge/TLA%2B-7_specs-blueviolet.svg)](#formal-verification)
 [![Order entry](https://img.shields.io/badge/Order_entry-native_binary_over_TCP-blueviolet.svg)](#order-entry)
 
-A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, one binary (`OrderEngine`) speaking one order-entry protocol (the native binary protocol over TCP), an ITCH 5.0 / MoldUDP64 market-data codec with gap recovery that is library code with tests, TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §11). **7 TLA+ specifications** (5 of them model code `OrderEngine` runs).
+A C++20 low-latency matching engine drawing on exchange design principles: O(1) price-level lookup via `FlatPriceMap`, lock-free MPSC queues, thread-per-symbol horizontal scaling, CRC-32 journaling with deterministic replay, one binary (`OrderEngine`) speaking one order-entry protocol (the native binary protocol over TCP), an ITCH 5.0 / MoldUDP64 market-data codec with gap recovery that is library code with tests, TLA+ model checking (`MatchingEngine.tla`: price-time matching with STP and modify/replace, 2.7M distinct states at small bounds <!-- claim:tla-matching-engine -->), a token-authenticated order injection endpoint for tests, and an operational stack (config management, Prometheus metrics, `/version` build-metadata endpoint, Docker deployment; `AlertDispatcher` is implemented but has no TLS client, so it cannot deliver to any `https://` webhook — see Project_Overview §7). **7 TLA+ specifications** (5 of them model code `OrderEngine` runs).
 
 ## 🔬 Research
 
 This engine served as the experimental substrate for a published market microstructure paper testing the **Budish–Cramton–Shim (BCS) theory of the HFT arms race** — the argument that continuous limit-order-book markets structurally incentivize a socially-wasteful race for speed. Read it on SSRN: [**Experimental Evidence for the HFT Arms Race: Welfare Decomposition and Market Fragility on a Formally Verified Limit Order Book**](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6994722).
 
-The experiment code lives in [`bcs_research/`](./bcs_research/). The matching core's FIFO and conservation invariants are [model-checked](#formal-verification) at small bounds <!-- claim:tla-matching-engine -->, and the engine passes its CTest suite, including property and shadow-mode divergence checks. That is **not** a proof that the experiments are artifact-free, and an earlier version of this line claimed it was: the verified configuration is `MaxOrders=4`, two participants, two prices, with no STP, icebergs, pro-rata, auctions, pegs or stops — while the experiments drive millions of orders through market-maker and HFT agents, latency models and batch auctions, essentially none of which is in the model. What supports the results is the test suite and the finding that every qualitative result survives recalibration, not the state count.
+The experiment code lives in [`bcs_research/`](./bcs_research/). The matching core's FIFO and conservation invariants are [model-checked](#formal-verification) at small bounds <!-- claim:tla-matching-engine -->, and the engine passes its CTest suite, including property and shadow-mode divergence checks. That is **not** a proof that the experiments are artifact-free, and an earlier version of this line claimed it was: the verified configurations are three orders, two participants and two prices (`MatchingEngine.cfg`) and four orders at one price (`MatchingEngineDeep.cfg`), limit orders with default STP, modify and replace only, with no icebergs, pro-rata, auctions, pegs or stops — while the experiments drive millions of orders through market-maker and HFT agents, latency models and batch auctions, essentially none of which is in the model. What supports the results is the test suite and the finding that every qualitative result survives recalibration, not the state count.
 
 ## 🚀 Key Features
 
@@ -37,7 +37,7 @@ The experiment code lives in [`bcs_research/`](./bcs_research/). The matching co
 ### Concurrency & Networking
 - **Thread-Per-Symbol Partitioning**: N worker threads with independent lock-free `MpscQueue` ring buffers, routed by `hash(symbolId) % numThreads`
 - **TCP Gateway**: the native binary protocol (`TcpGateway.h`) with non-blocking I/O via `epoll`/`kqueue` — the only order-entry protocol, served by `OrderEngine` on `--gateway-port` (default 9001)
-- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer at a time: `OrderEngine` publishes each book's updates from the worker that owns it, and a lock hands the ring between workers. It publishes no L2 snapshots, so a subscriber that gaps has no snapshot to resync from until one is added (roadmap 1.10). Each slot is a seqlock, so a lapped reader never takes a torn entry. <!-- claim:md-shm-no-torn-read --> `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). <!-- claim:md-shm-gap-reset --> The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
+- **Shared Memory IPC**: `MarketDataPublisher` using POSIX `shm_open` with versioned `ShmHeader` (magic/version/entrySize) for prefix-compatible rolling upgrades. One writer: `OrderEngine` publishes each book's updates from the order port's thread, once the journal entry behind them is synced, under a lock. It publishes no L2 snapshots, so a subscriber that gaps has no snapshot to resync from until one is added (roadmap 1.10). Each slot is a seqlock, so a lapped reader never takes a torn entry. <!-- claim:md-shm-no-torn-read --> `ShmHeader::epoch` names the publisher session, and `MarketDataSubscriber::poll()` returns `PollResult` — `Entry`, `Empty`, `Gap` (entries lost; resync from a snapshot) or `Reset` (publisher restarted or stopped; `connect()` again). <!-- claim:md-shm-gap-reset --> The segment is mode 0640 and owned by the publisher's user, so `MdSubscriber` runs as that user or in its group
 - **Binary Protocol Versioning**: `TcpGateway.h` — a bare V1 `OrderRequest` frame or a V2 frame with a 24-byte header, answered in the same framing; a version the gateway does not know is refused <!-- claim:gw-proto-compat -->
 
 ### Order Entry
@@ -83,7 +83,7 @@ In `OrderEngine`, self-match prevention (cancel-incoming), the 5% circuit breake
 - **Webhook Alerting**: `AlertDispatcher` — background thread delivery to Slack, PagerDuty, or generic HTTP webhooks with configurable severity filtering
 - **Config Management**: `Config` key-value loader with env var override (`OB_` prefix), type-safe getters, registered-listener callbacks on set/loadFile/loadMap. Hot-reload via SIGHUP wired — `--config PATH` flag, async-signal-safe `g_reload_config` atomic flag, config reloaded on signal receipt; only `rate_limit.default_rate` / `rate_limit.default_burst` take effect (they also apply at startup), and many keys in `config/engine.conf.example` are read by nothing
 - **End-to-End Latency Tracking**: Ingress timestamps on every order; per-thread `LatencyTracker` histograms for real P50/P99/P99.9 including queue delay
-- **Hardware Timing**: `DeterministicBenchmark` reads the cycle counter — `rdtsc` (x86) / `cntvct_el0` (ARM) — for sub-clock-quantum micro-measurement. The headline `HonestBenchmark` numbers below use `nowNs()`, which is `std::chrono::high_resolution_clock`
+- **Hardware Timing**: `DeterministicBenchmark` reads the cycle counter — `rdtsc` (x86) / `cntvct_el0` (ARM) — for sub-clock-quantum micro-measurement. The benchmarks time with `bench::nowNs()`, which is `std::chrono::steady_clock` (`NoWallClockTimingTest` enforces it)
 - **Docker Deployment**: Multi-stage `Dockerfile` + `docker-compose.yml` for a single node with health checks and a journal volume; `.dockerignore` excludes host build artifacts
 
 ### Formal Verification & Fault Injection
@@ -337,7 +337,7 @@ The CTest suite[^1] (`ctest -N` lists every target), by category:
 | Category | Tests | Description |
 |----------|-------|-------------|
 | **Functional** | ManualTest, UnitTests (GTest) | All order types, matching, cancellation, edge cases |
-| **Stress** | StressTest, SustainedLoadTest | 5 multi-threaded scenarios, 4 concurrent producers, sustained load degradation detection |
+| **Stress** | StressTest | 5 multi-threaded scenarios, 4 concurrent producers (`SustainedLoadTest` is a benchmark, not a ctest) |
 | **Property** | PropertyTest, JournalReplayPropertyTest, SnapshotConsistencyTest | Randomized invariant checks, replay determinism |
 | **Chaos** | FaultInjectorTest, PoolExhaustionTest, JournalChaosTest, JournalCorruptionTest, GatewayChaosTest, QueueChaosTest, CheckpointChaosTest, CombinedChaosTest | 10+ fault-injection points, short-writes, bit-flips, EAGAIN |
 | **Integration** | OrderEngineGatewayTest, GatewayIntegrationTest, AdminServerEndpointsTest, ItchUdpTransportTest, ItchMarketDataFeedTest | The real binary over its order port, real-loopback TCP/UDP round-trip, HTTP endpoints |
@@ -397,10 +397,10 @@ The market-data codecs (ITCH, SoupBinTCP, MoldUDP64, retransmission) exist as li
 | Wire-to-wire latency measurement | E2E bench exists | Multi-host test rig |
 | Auction uncross price discovery | ✅ Auction state machines implemented (PreOpen, AuctionOpen, AuctionClose, Halted, VolatilityAuction) and cross verified <!-- claim:auction-uncross --> | Volume-maximization algorithm: max-qty uncross implemented |
 | TSan coverage | CI runs the project tests under TSan. 24h+ soak still pending | Clock time |
-| TLS + full auth on admin port | Token auth on `/chaos/order` only | Design decision: token-everywhere vs reverse-proxy vs mTLS |
+| TLS on the admin port | Bearer token on every endpoint but `/health` and `/readyz`; plain HTTP, loopback by default | Design decision: reverse proxy vs mTLS |
 | Regulatory submission (CAT / MiFID RTS 22) | Event pipeline + journal in place | Broker-dealer / venue registration |
 | Clearing integration (DTCC / OCC / CME) | Trade event surface in place | Clearing membership |
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · 39.4K LOC engine (73.5K with tests) · 7 TLA+ specifications · MatchingEngine.tla checked in CI*
+*C++20 · one binary, single node · 7 TLA+ specifications, all in `tla.yml` (which has not run on this branch)*

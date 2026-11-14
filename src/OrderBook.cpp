@@ -3236,6 +3236,11 @@ void OrderBook::uncrossLocked() {
         seller->remainingQty -= fillQty;
         seller->cumQty += fillQty;
         remainingVolume -= fillQty;
+        // As a continuous fill does; retireFilled makes an exhausted one Filled.
+        // Left Accepted, a part-filled survivor said Accepted live and
+        // PartiallyFilled after a restore (restoreExecutedQty).
+        buyer->status = OrderStatus::PartiallyFilled;
+        seller->status = OrderStatus::PartiallyFilled;
 
         lastTradePrice_ = bestUncrossPrice;
         if (referencePrice_ == 0) referencePrice_ = bestUncrossPrice;  // an auction result (MR-1)

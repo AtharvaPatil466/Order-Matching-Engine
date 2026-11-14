@@ -159,12 +159,10 @@ struct Recorder : EventListener {
     void clear() { trades.clear(); updates.clear(); }
 };
 
-// Not Order::status: nothing decides on a resting order's status, and the live
-// engine leaves an aggressor that rested after a partial fill at Accepted,
-// where a restore says PartiallyFilled. The statuses clients see are in the
-// order updates, which are compared.
+// Order::status too: a status query (and an amend's restatement, which reads
+// it) must say the same after a restart as before it.
 using OrderKey = std::tuple<OrderId, ParticipantId, int, int, Price, Quantity, Quantity, Quantity,
-                            Price, bool, Price, uint64_t>;
+                            Price, bool, Price, uint64_t, int>;
 
 struct BookState {
     std::vector<OrderKey> orders;   // forEachOrderLocked order: levels front to back, then lists
@@ -189,7 +187,7 @@ BookState capture(MatchingEngine& e) {
                               o.type == OrderType::Iceberg ? o.visibleQty : 0,
                               stop ? o.stopPrice : 0, stop && o.isStopTriggered,
                               o.type == OrderType::TrailingStop ? o.trailRefPrice : 0,
-                              o.arrivalSeq);
+                              o.arrivalSeq, static_cast<int>(o.status));
     });
     b->forEachPeggedOrderLocked([&](const Order& o) { s.pegs.push_back(o.id); });
     s.state = b->getTradingState();
@@ -250,7 +248,7 @@ void printBook(const char* tag, const BookState& s) {
                 static_cast<long long>(s.reference));
     for (const auto& o : s.orders)
         std::printf("        #%llu p%llu side=%d type=%d px=%lld rem=%llu cum=%llu vis=%llu stop=%lld "
-                    "trig=%d ref=%lld age=%llu\n",
+                    "trig=%d ref=%lld age=%llu st=%d\n",
                     static_cast<unsigned long long>(std::get<0>(o)),
                     static_cast<unsigned long long>(std::get<1>(o)), std::get<2>(o),
                     std::get<3>(o), static_cast<long long>(std::get<4>(o)),
@@ -259,7 +257,7 @@ void printBook(const char* tag, const BookState& s) {
                     static_cast<unsigned long long>(std::get<7>(o)),
                     static_cast<long long>(std::get<8>(o)), std::get<9>(o),
                     static_cast<long long>(std::get<10>(o)),
-                    static_cast<unsigned long long>(std::get<11>(o)));
+                    static_cast<unsigned long long>(std::get<11>(o)), std::get<12>(o));
 }
 
 void printEvents(const char* tag, const Recorder& r) {

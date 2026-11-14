@@ -222,17 +222,17 @@ not reproduce the ARM figure, which needs a rerun on a quiet Mac.
 
 | Where | Numbers | Source | Raw artifact |
 |---|---|---|---|
-| Project_Overview.md:98 | 1 MiB | CODE | `TcpGateway::kMaxWriteBufBytes` |
-| Project_Overview.md:124 | 10 ns | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: clock grid observed in the outputs |
-| Project_Overview.md:128 | 280 ns · 1.1 µs | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `honest-prod-*.txt` Path A |
-| Project_Overview.md:129 | 391 ns · 4.0 µs · 441 ns · 251 ns | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `realistic-flow.txt` |
-| Project_Overview.md:130 | 4.96 µs · 450 ns | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `cold-cache.txt` |
-| Project_Overview.md:131 | 451 ns · 224 µs · 37–147k orders/s | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `honest-*.txt` Path C |
-| Project_Overview.md:132 | 173 µs · 1.2–3 ms · 1.7–3.5k orders/s | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `honest-*.txt` Path D |
-| Project_Overview.md:133 | 50k/s · 400k/s · 107k/s · 9 s | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `sustained-50k.txt`, `sustained-400k.txt` |
-| Project_Overview.md:140,239 | 100 ms · 400k/s | PARAM | n/a: `SustainedLoadTest --max-backlog-ms` default and the offered rate |
-| Project_Overview.md:144 | ~41 ns | ARM-M3 | none: a property of the M3 clock |
-| Project_Overview.md:159 | 95% · 86% | NOT-PERF | line and branch coverage of `OrderBook.cpp`, measured by the adversarial review on `main` (its §8) |
+| Project_Overview.md:99 | 1 MiB | CODE | `TcpGateway::kMaxWriteBufBytes` |
+| Project_Overview.md:127 | 10 ns | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: clock grid observed in the outputs |
+| Project_Overview.md:131 | 280 ns · 1.1 µs | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `honest-prod-*.txt` Path A |
+| Project_Overview.md:132 | 391 ns · 4.0 µs · 441 ns · 251 ns | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `realistic-flow.txt` |
+| Project_Overview.md:133 | 4.96 µs · 450 ns | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `cold-cache.txt` |
+| Project_Overview.md:134 | 451 ns · 224 µs · 37–147k orders/s | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `honest-*.txt` Path C |
+| Project_Overview.md:135 | 173 µs · 1.2–3 ms · 1.7–3.5k orders/s | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `honest-*.txt` Path D |
+| Project_Overview.md:136 | 50k/s · 400k/s · 107k/s · 9 s | X86-ADC7B5B-VM | review copy `benchx86/bench-x86-adc7b5b…/`, outside the repository: `sustained-50k.txt`, `sustained-400k.txt` |
+| Project_Overview.md:144,242 | 100 ms · 400k/s | PARAM | n/a: `SustainedLoadTest --max-backlog-ms` default and the offered rate |
+| Project_Overview.md:148 | ~41 ns | ARM-M3 | none: a property of the M3 clock |
+| Project_Overview.md:163 | 95% · 86% | NOT-PERF | line and branch coverage of `OrderBook.cpp`, measured by the adversarial review on `main` (its §8) |
 
 ### docs/CapacityPlanning.md
 

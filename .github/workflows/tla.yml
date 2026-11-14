@@ -20,7 +20,10 @@ name: TLA+ Model Checking
 # three deep; about two minutes), and each of its eight broken variants must
 # fail with the counterexample its injected bug produces;
 # MatchingEngineDeepBrokenSwap.cfg's bug passes at MatchingEngine.cfg.
- Auction.tla's AuctionBrokenEdge.cfg
+#
+# Trace validation: TraceValidationTest (C++) records what OrderBook does on
+# Limit/Cancel/Modify/Replace flows, and TLC checks every trace is a
+# behaviour of MatchingEngine.tla (spec/TraceMatchingEngine.tla). Auction.tla's AuctionBrokenEdge.cfg
 # and AuctionBrokenDate.cfg (an illegal session transition) and
 # AuctionBrokenHalt.cfg (a halt that resumes to Continuous from a closing
 # auction) must fail the same way.
@@ -85,6 +88,22 @@ jobs:
       - name: Check MatchingEngine at queue depth three (MatchingEngineDeep.cfg, ~2 min)
         working-directory: spec
         run: ./check.sh MatchingEngine MatchingEngineDeep.cfg
+
+      - name: Trace validation (the C++ book's traces are behaviours of MatchingEngine.tla)
+        # tests/TraceValidationTest.cpp runs 300 seeded Limit/Cancel/Modify/
+        # Replace flows on OrderBook and has TLC check each is a behaviour of
+        # spec/MatchingEngine.tla (spec/TraceMatchingEngine.tla), then that a
+        # sweep reported out of order is rejected. It SKIPs without java and
+        # spec/tla2tools.jar, so here a skip is a failure.
+        run: |
+          set -o pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=OFF
+          cmake --build build --parallel 4 --target TraceValidationTest
+          ./build/tests/TraceValidationTest | tee trace_validation.log
+          if grep -q "SKIPPED" trace_validation.log; then
+            echo "::error::TraceValidationTest skipped: java or spec/tla2tools.jar missing"
+            exit 1
+          fi
 
       - name: Non-vacuity checks (each injected MatchingEngine / Auction bug must be caught)
         working-directory: spec

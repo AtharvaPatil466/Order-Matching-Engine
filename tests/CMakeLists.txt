@@ -1759,3 +1759,16 @@ gtest_discover_tests(AdmissionTifTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;unit")
+
+# The C++ book's Limit/Cancel/Modify/Replace traces checked by TLC to be
+# behaviours of spec/MatchingEngine.tla (spec/TraceMatchingEngine.tla). SKIPs
+# without java and spec/tla2tools.jar; the TLA+ workflow runs it with both.
+add_executable(TraceValidationTest TraceValidationTest.cpp)
+target_link_libraries(TraceValidationTest PRIVATE OrderMatcher gtest_main)
+target_compile_definitions(TraceValidationTest PRIVATE SPEC_DIR="${CMAKE_SOURCE_DIR}/spec")
+enable_assertions(TraceValidationTest)
+gtest_discover_tests(TraceValidationTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit" TIMEOUT 300)

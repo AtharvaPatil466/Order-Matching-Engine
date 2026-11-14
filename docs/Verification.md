@@ -166,6 +166,51 @@ sides). Price priority across levels stays `MatchingEngine.cfg`'s job. A
 two-price, four-order bound was not run: one price at four orders already
 takes two minutes.
 
+### Trace validation (first cut)
+
+`tests/TraceValidationTest.cpp` runs 300 seeded flows on a real `OrderBook`:
+Limit orders from two participants at prices 100 and 200, quantity 1–3, up
+to 6 orders and 2 replaces per flow, with Cancel, Modify (reduce) and
+Replace (new price, same total), default STP and the breaker out of the way.
+For each request it records the spec action it corresponds to; for each
+arrival (a submit, or a replace that re-aggresses) it records the fills in
+the order the book printed them, then whether the order rested or was
+STP-cancelled. Everything comes from the `EventListener` and `getOrder`, so
+nothing is added to the book. The traces are written as a TLA+ module of
+records, and TLC runs `spec/TraceMatchingEngine.tla` over all of them: each
+step of `MatchingEngine.tla` may fire only as the trace's next event, with
+the same arguments and, for a fill, the same aggressor, resting order, price
+and quantity. An event the spec cannot take leaves a state with no
+successor, and TLC stops with `Deadlock reached`.
+
+- `TraceValidation.EveryEngineTraceIsABehaviourOfTheSpec`: all 300 traces
+  are behaviours of the spec (exit 0). The run also counts what the flows
+  reached (2026-11-14: 322 fills, 29 multi-fill sweeps, 314 STP cancels,
+  522 replaces, 409 modifies, 411 cancels) and fails if the generator stops
+  reaching them.
+- `TraceValidation.AReorderedSweepIsRejected`: the same trace with two fills
+  of one sweep reported in the other order is rejected (`Deadlock reached`,
+  exit 11), so the check has teeth.
+
+Wired: `tla.yml` builds the test and runs it after the jar is fetched, and
+fails on a skip. Elsewhere it SKIPs (it needs `java` and
+`spec/tla2tools.jar`). Not yet done, and what a second cut would add:
+
+- Coverage is sampled, not exhaustive, and small: 6 orders, 2 replaces.
+- Only what the spec models: no Market, IOC, FOK, iceberg, stops, other STP
+  modes, quantity-changing replaces, the band or the breaker.
+- `OrderBook` is driven directly, not `MatchingEngine` or the gateway, so
+  the async path, the journal and the risk layer are outside it.
+- Time is not compared: the spec's `Now` counter is abstract, and priority
+  is checked through which order each fill takes.
+- The trace is TLA+ records, not the JSON lines the review suggested: TLC's
+  `Json` and `IOUtils` modules are in the CommunityModules jar, which CI does
+  not fetch.
+- Its own generator, not `tests/DifferentialFuzzFlow.h`: that flow has no
+  replace. Joining them, so one corpus feeds both the RefMatcher comparison
+  and the trace check, is the obvious next step.
+- Not run on GitHub Actions yet (this branch has not been pushed).
+
 ### Earlier figures
 
 README and other documents used to cite 171,187,419 distinct states
@@ -178,9 +223,10 @@ were deleted with them.
 
 ### What it does NOT show
 
-- That the C++ does what the spec does. No refinement mapping links the two.
-  `Refinement.tla`, which claimed to be one, never parsed and has been
-  deleted.
+- That the C++ does what the spec does, in general. No refinement mapping
+  links the two (`Refinement.tla`, which claimed to be one, never parsed and
+  has been deleted). Trace validation (below) checks sampled runs of the
+  C++ book against the spec; it is testing, not proof.
 - Anything about the price band or the volatility breaker. The spec's
   Replace re-aggresses through the same Match steps as Submit, and since
   3697f79 so does the code: a replace that crosses goes through the same
@@ -284,6 +330,7 @@ from (or the session ends), `NoReopenAfterClose` is in `Auction.cfg`, and
 | `spec/MatchingEngine.cfg` | The bounds CI checks (MaxOrders=3, MaxReplaces=1) |
 | `spec/MatchingEngineDeep.cfg` | One price, MaxOrders=4: a fill reaches a level three deep |
 | `spec/MatchingEngineDeepBrokenSwap.cfg` | A fill swap-erases: fails at the deep bound, passes at `MatchingEngine.cfg` |
+| `spec/TraceMatchingEngine.tla` | Trace validation: `MatchingEngine.tla` constrained to follow a recorded C++ trace (`tests/TraceValidationTest.cpp`) |
 | `spec/MatchingEngineBroken*.cfg` | Seven non-vacuity variants, one injected bug each; CI requires each to fail on its property |
 | `spec/MpscQueue.tla` | MPSC ring: no item invented or duplicated, per-producer FIFO, every item eventually consumed |
 | `spec/EngineConsumer.tla` | Worker loop wake-up protocol (`MatchingEngine::workerLoop`): no item invented or duplicated, every item eventually consumed, no lost wake-up (deadlock) |

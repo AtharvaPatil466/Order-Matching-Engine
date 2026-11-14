@@ -401,8 +401,10 @@ session; they are not replayed on reconnect).
 A write or sync error halts the journal (`journal_write_failures_total`, a
 `journal.halted` log line). From then on the books are frozen: every request,
 the kill switch included, is answered `JournalHalted`, and expiry, DAY and
-session sweeps do not run. Fix the disk and restart; replay restores what was
-acknowledged (MatchingRules Rule 2.7).
+session sweeps do not run. The admin port's `/book`, `/audit` and `/auction`
+answer 503 `journal_halted` until the restart: the book in memory may hold the
+request whose record failed. Read the journal for the durable state. Fix the
+disk and restart; replay restores what was acknowledged (MatchingRules Rule 2.7).
 
 ### Checkpoints
 

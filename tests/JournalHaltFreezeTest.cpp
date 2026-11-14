@@ -14,6 +14,8 @@
 // and halts the journal. Then every other mutating path is driven, and the book
 // must still hold exactly what it held at the halt.
 
+#include "AdminServer.h"
+#include "GatewayProcess.h"
 #include "GatewayTestClient.h"
 #include "MatchingEngine.h"
 #include "OrderBook.h"
@@ -50,6 +52,8 @@ enum Code : int {
     kSessionMoved,       // a session transition changed the trading state
     kSessionEndMoved,    // endTradingSession closed the book
     kGatewayKillAcked,   // TcpGateway answered the kill switch Ack
+    kBookServed,         // the admin port served a book view while halted
+    kSnapshotChanged,    // getSnapshot did not show the book in memory
 };
 
 const char* describe(int code) {
@@ -63,6 +67,8 @@ const char* describe(int code) {
     case kSessionMoved:     return "a session transition moved a book on a halted journal";
     case kSessionEndMoved:  return "endTradingSession closed a book on a halted journal";
     case kGatewayKillAcked: return "TcpGateway acked a kill switch the journal could not record";
+    case kBookServed:       return "the admin port served a book view on a halted journal";
+    case kSnapshotChanged:  return "getSnapshot did not serve the book as it stands in memory";
     default:                return "?";
     }
 }
@@ -200,9 +206,39 @@ void runGatewayKill() {
     assert(rc == kOk && "the gateway acked a kill switch on a halted journal");
 }
 
+// Reads while halted (Rule 2.7). The sync engine applied order 4 before its
+// record failed, so memory holds 4 orders and the disk 3. The admin port's
+// views of the book refuse; getSnapshot, an in-process call whose caller can
+// ask getJournal()->halted(), serves what is in memory.
+void runReadsWhileHalted() {
+    const std::string path = uniqueTempPath("halt_freeze_reads.wal");
+    std::filesystem::remove(path);
+    const int rc = inChild("reads while halted", [&]() -> int {
+        if (!limitFileSize(midFourthRecord())) return kSetup;
+        MatchingEngine e;
+        e.enableJournal(path, Journal::SyncPolicy::Immediate);
+        if (const int r = restThenHalt(e, false); r != kOk) return r;
+        if (e.getSnapshot(kSym, 10).bidCount != kDurable + 1) return kSnapshotChanged;
+        AdminServer admin(e, 0);
+        admin.setAuthDisabled(true);
+        if (!admin.start()) return kSetup;
+        for (const char* view : {"/book", "/audit", "/auction"}) {
+            const std::string body =
+                gwtest::httpGet(admin.port(), std::string(view) + "?symbolId=" + std::to_string(kSym));
+            if (body.find("journal_halted") == std::string::npos) return kBookServed;
+        }
+        if (gwtest::httpGet(admin.port(), "/health").find("ok") == std::string::npos) return kSetup;
+        admin.stop();
+        return kOk;
+    });
+    std::filesystem::remove(path);
+    assert(rc == kOk && "a book view was served on a halted journal");
+}
+
 }  // namespace
 
 int main() {
+    runReadsWhileHalted();
     runCase("sync", false);
     runCase("async", true);
     runGatewayKill();

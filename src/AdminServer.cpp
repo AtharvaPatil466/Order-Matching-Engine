@@ -351,6 +351,14 @@ void AdminServer::handleConnection(int clientSocket) {
     } else if (path == "/otr") {
         ParticipantId pid = parseQueryUInt<ParticipantId>(query, "participantId");
         body = generateOtrResponse(pid);
+    } else if ((path == "/book" || path == "/auction" || path == "/audit") &&
+               engine_.getJournal() && engine_.getJournal()->halted()) [[unlikely]] {
+        // Rule 2.7: a halted engine's books may hold the one request whose
+        // record the disk refused, which a restart will not have. The views
+        // of the book refuse rather than show it; the journal is the truth.
+        const std::string resp = serviceUnavailable("{\"status\":\"journal_halted\"}");
+        ::send(clientSocket, resp.c_str(), resp.size(), MSG_NOSIGNAL);
+        return;
     } else if (path == "/book") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateBookResponse(sym);
@@ -408,7 +416,10 @@ std::string AdminServer::generateReadyzResponse() const {
     if (ready_.load(std::memory_order_acquire)) {
         return buildHttpResponse("{\"status\":\"ready\"}");
     }
-    const std::string body = "{\"status\":\"not_ready\"}";
+    return serviceUnavailable("{\"status\":\"not_ready\"}");
+}
+
+std::string AdminServer::serviceUnavailable(const std::string& body) {
     return "HTTP/1.1 503 Service Unavailable\r\n"
            "Content-Type: application/json\r\n"
            "Content-Length: " + std::to_string(body.size()) + "\r\n"

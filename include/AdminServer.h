@@ -75,6 +75,8 @@ private:
     std::string generateJournalHeadResponse() const;
     std::string generateVersionResponse() const;
     std::string generateReadyzResponse() const;
+    // A whole 503 response carrying `body` (buildHttpResponse always says 200).
+    static std::string serviceUnavailable(const std::string& body);
     // Chaos-only order injection (guarded by OB_CHAOS_INJECT=1 env
     // AND, if OB_CHAOS_TOKEN is set, a matching X-Chaos-Token header).
     // Not exposed unless the env var is set at process start — the

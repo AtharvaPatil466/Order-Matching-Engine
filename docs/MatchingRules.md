@@ -296,8 +296,15 @@ write-ahead; Rule 2.6), so that request's effect is in memory. It is answered `J
 nothing it produced is shown, nothing can trade against it, and a restart drops it. An expiry sweep that halts partway also finishes cancelling its expired orders
 in memory; their cancels are never shown and a restart's next sweep expires them again.
 
-**Status: Deliberate — pinned** by `tests/JournalHaltTest.cpp` and
-`tests/JournalHaltFreezeTest.cpp`. Recovery is a restart.
+Reads while halted: the admin port's views of a book (`/book`, `/audit`, `/auction`) answer
+503 `{"status":"journal_halted"}`, because the book in memory may hold that one request and a
+restart will not. `/health`, `/metrics` and `/journal/head` still answer. The library's
+`MatchingEngine::getSnapshot` serves the book as it stands in memory; an in-process caller
+asks `getJournal()->halted()` to know it may be ahead of the disk.
+
+**Status: Deliberate — pinned** by `tests/JournalHaltTest.cpp`,
+`tests/JournalHaltFreezeTest.cpp` and `tests/JournalRecordBeforeEventTest.cpp`. Recovery is a
+restart.
 
 ---
 

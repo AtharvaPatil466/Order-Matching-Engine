@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 
 using namespace OrderMatcher;
@@ -55,13 +56,17 @@ using Setup = std::function<void(MatchingEngine&)>;
 // `before` runs, then a checkpoint, then `after`. Live: on one engine. Restarted:
 // `before` and the checkpoint on one engine, `after` on a fresh one replayed
 // from that checkpoint (or from the plain journal, without one).
+// The engines live on the heap: std::mutex has no destructor TSan can see, so
+// successive stack engines at overlapping addresses read as one engine taking
+// its locks in conflicting orders. Freeing the block resets that.
 bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
                       const Step& after, bool takeCheckpoint = true) {
     const std::string path = uniqueTempPath(std::string("ckpt_complete_") + name + ".wal");
     std::remove(path.c_str());
     BookState live, restarted;
     {
-        MatchingEngine e;
+        const auto owned = std::make_unique<MatchingEngine>();
+        MatchingEngine& e = *owned;
         e.addSymbol(S);
         setup(e);
         e.start();
@@ -71,7 +76,8 @@ bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
         e.stop();
     }
     {
-        MatchingEngine e;
+        const auto owned = std::make_unique<MatchingEngine>();
+        MatchingEngine& e = *owned;
         e.addSymbol(S);
         setup(e);
         assert(e.enableJournal(path, Journal::SyncPolicy::Immediate));
@@ -81,7 +87,8 @@ bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
         e.stop();
     }
     {
-        MatchingEngine e;
+        const auto owned = std::make_unique<MatchingEngine>();
+        MatchingEngine& e = *owned;
         e.addSymbol(S);
         setup(e);
         assert(e.enableJournal(path, Journal::SyncPolicy::Immediate));

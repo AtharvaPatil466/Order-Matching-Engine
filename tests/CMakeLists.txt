@@ -419,7 +419,8 @@ add_executable(CheckpointEquivalenceTest CheckpointEquivalenceTest.cpp)
 target_link_libraries(CheckpointEquivalenceTest PRIVATE OrderMatcher)
 enable_assertions(CheckpointEquivalenceTest)
 add_test(NAME CheckpointEquivalenceTest COMMAND CheckpointEquivalenceTest)
-set_tests_properties(CheckpointEquivalenceTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+# 300: it runs every seed twice (breaker off, then a tight band).
+set_tests_properties(CheckpointEquivalenceTest PROPERTIES TIMEOUT 300 LABELS "project;recovery")
 
 # A journal entry applied live and refused on replay stops the boot.
 add_executable(ReplayRefusedEntryTest ReplayRefusedEntryTest.cpp)

@@ -11,8 +11,18 @@
 // the very requests that should show the worst latency are the ones omitted.
 //
 // The fix (open-loop load generation): pin an INTENDED start time for every op
-// at a fixed rate (--rate ops/sec → intended[i] = t0 + i / rate). Spin until the
-// intended time, then process. Report BOTH:
+// from an arrival process at --rate ops/sec, spin until the intended time, then
+// process. Two arrival models (--arrivals), and the run prints which one ran:
+//
+//   fixed    intended[i] = t0 + i / rate. A deterministic cadence (D/G/1): the
+//            best case for the queue, since no two arrivals ever bunch.
+//   poisson  intended[i] = t0 + the workload's own exponential gaps (M/G/1).
+//            Bursts queue behind each other, so below the knee its corrected
+//            tail is 2-4x the fixed cadence's at the same rate (PERF-6, a
+//            Lindley simulation fitted to the x86 service times). Real order
+//            flow is burstier still.
+//
+// Report BOTH:
 //
 //   CO-naive     latency = completion − actual_start   (hides the backlog)
 //   CO-corrected latency = completion − intended_start (charges the backlog)
@@ -23,6 +33,7 @@
 //
 // Usage:
 //   CoordinatedOmissionBenchmark [--orders N] [--warmup N] [--seed S] [--rate R]
+//                                [--arrivals fixed|poisson]
 
 #include "OrderBook.h"
 #include "BenchLatencyRecorder.h"
@@ -43,7 +54,8 @@ int main(int argc, char* argv[]) {
     cfg.newOrders = 50000;
     cfg.seed = 7;
     size_t warmup = 5000;
-    double ratePerSec = 100000.0; // fixed offered rate (100k/s)
+    double ratePerSec = 100000.0; // offered rate (100k/s)
+    bool poisson = false;         // --arrivals: fixed cadence unless asked
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--orders") == 0 && i + 1 < argc)
@@ -54,15 +66,23 @@ int main(int argc, char* argv[]) {
             cfg.seed = std::stoull(argv[++i]);
         else if (std::strcmp(argv[i], "--rate") == 0 && i + 1 < argc)
             ratePerSec = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--arrivals") == 0 && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v != "fixed" && v != "poisson") {
+                std::fprintf(stderr, "--arrivals takes fixed or poisson (got \"%s\")\n", v.c_str());
+                return 2;
+            }
+            poisson = v == "poisson";
+        }
         else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf("Usage: CoordinatedOmissionBenchmark [--orders N] [--warmup N] "
-                        "[--seed S] [--rate R]\n");
+                        "[--seed S] [--rate R] [--arrivals fixed|poisson]\n");
             return 0;
         }
     }
 
-    // The workload's own Poisson gaps are irrelevant here — CO correction needs
-    // a FIXED cadence — so we override arrivals with the fixed rate below.
+    // The workload's exponential gaps have mean 1/rate; --arrivals poisson
+    // schedules by them, fixed ignores them.
     cfg.lambdaPerSec = ratePerSec;
 
     std::printf("=======================================================\n");
@@ -72,7 +92,10 @@ int main(int argc, char* argv[]) {
     std::printf("  Ops:          %zu (New+Cancel realistic mix)\n", cfg.newOrders);
     std::printf("  Warmup:       %zu\n", warmup);
     std::printf("  Seed:         %llu\n", (unsigned long long)cfg.seed);
-    std::printf("  Offered rate: %.0f ops/sec (fixed cadence)\n", ratePerSec);
+    std::printf("  Offered rate: %.0f ops/sec\n", ratePerSec);
+    std::printf("  Arrivals:     %s\n", poisson
+                    ? "poisson (exponential gaps from the workload, M/G/1)"
+                    : "fixed cadence (deterministic, D/G/1: the queue's best case)");
 
     WorkloadGenerator gen(cfg);
     const auto& ops = gen.ops();
@@ -97,6 +120,7 @@ int main(int argc, char* argv[]) {
     // We still process warmup ops (to fill the book) but do not time them.
     uint64_t scheduleBase = 0;
     size_t measuredIndex = 0;
+    uint64_t poissonOffsetNs = 0;  // sum of the measured ops' gaps after the first
 
     for (size_t i = 0; i < ops.size(); ++i) {
         const WorkloadOp& op = ops[i];
@@ -120,8 +144,10 @@ int main(int argc, char* argv[]) {
         }
 
         if (scheduleBase == 0) scheduleBase = bench::nowNs();
-        uint64_t intended =
-            scheduleBase + static_cast<uint64_t>(periodNs * static_cast<double>(measuredIndex));
+        if (poisson && measuredIndex > 0) poissonOffsetNs += op.gapNs;
+        const uint64_t intended = scheduleBase +
+            (poisson ? poissonOffsetNs
+                     : static_cast<uint64_t>(periodNs * static_cast<double>(measuredIndex)));
 
         // Open-loop: spin until the intended issue time. If we are already
         // behind (service slower than the offered rate) this does not wait —

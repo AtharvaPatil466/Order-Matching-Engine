@@ -164,6 +164,7 @@ run realistic-flow        "${PIN[@]}" "$PROD/benchmarks/RealisticFlowBenchmark" 
 run realistic-flow-sparse "${PIN[@]}" "$PROD/benchmarks/RealisticFlowBenchmark" --sparse --events "$RF_SPARSE_EVENTS" --seed 42
 for r in $CO_RATES; do
     run "co-$r" "${PIN[@]}" "$PROD/benchmarks/CoordinatedOmissionBenchmark" --orders "$CO_ORDERS" --seed 7 --rate "$r"
+    run "co-poisson-$r" "${PIN[@]}" "$PROD/benchmarks/CoordinatedOmissionBenchmark" --orders "$CO_ORDERS" --seed 7 --rate "$r" --arrivals poisson
 done
 run cold-cache     "${PIN[@]}" "$PROD/benchmarks/ColdCacheBenchmark" --orders "$CC_ORDERS" --seed 7
 run codec          "${PIN[@]}" "$PROD/benchmarks/BinaryCodecBenchmark"

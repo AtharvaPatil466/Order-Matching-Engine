@@ -13,9 +13,9 @@
 // the other half: a record the disk refuses releases nothing.
 //
 // ownRecordRefused: the request whose own record the disk refuses must not be
-// applied either (lane d's residual). A cancel is recorded before the book
-// drops the order, so a refused cancel record leaves the order resting, as a
-// restart will find it.
+// applied either (lane d's residual). A cancel, a modify and a cancel-replace
+// are recorded before the book applies them, on both engine paths, so a
+// refused record leaves the order as it was, as a restart will find it.
 
 #include "GatewayTestClient.h"
 #include "MatchingEngine.h"
@@ -101,9 +101,15 @@ bool ack(TestClient& c, const OrderRequest& r) {
 
 enum Code : int { kOk = 0, kSetup = 90, kNotHalted, kApplied };
 
+enum class Op { Cancel, Modify, Replace };
+const char* opName(Op op) {
+    return op == Op::Cancel ? "cancel" : op == Op::Modify ? "modify" : "replace";
+}
+
 // RLIMIT_FSIZE in a child, as JournalHaltTest: the file holds the sequence
-// lease and the order, and the cancel is the write the disk refuses.
-int refusedCancelChild(const std::string& path) {
+// lease and the order, and the request under test is the write the disk
+// refuses. The order must stand exactly as it did, as a restart will find it.
+int refusedRecordChild(const std::string& path, Op op, bool async) {
     constexpr int kWholeRecords = 2;
     std::signal(SIGXFSZ, SIG_IGN);
     const rlim_t bytes =
@@ -113,33 +119,43 @@ int refusedCancelChild(const std::string& path) {
     MatchingEngine engine;
     engine.addSymbol(kSym);
     engine.enableJournal(path, Journal::SyncPolicy::Immediate);
-    engine.startAsync(1);
+    if (async) engine.startAsync(1); else engine.start();
     if (!engine.submitOrder(kSym, 1, kMaker, Side::Sell, 100, 10, OrderType::Limit).isAccepted())
         return kSetup;
-    engine.waitForDrain();
+    if (async) engine.waitForDrain();
     if (engine.getJournal()->halted()) return kSetup;
-    (void)engine.submitCancel(kSym, 1, kMaker);
-    engine.waitForDrain();
+    switch (op) {
+    case Op::Cancel:  (void)engine.submitCancel(kSym, 1, kMaker); break;
+    case Op::Modify:  (void)engine.submitModify(kSym, 1, 4, kMaker); break;
+    case Op::Replace: (void)engine.submitCancelReplace(kSym, 1, 101, 20, kMaker); break;
+    }
+    if (async) engine.waitForDrain();
     const bool halted = engine.getJournal()->halted();
-    const bool resting = engine.getOrderBook(kSym)->getOrder(1) != nullptr;
-    engine.stopAsync();
+    const Order* o = engine.getOrderBook(kSym)->getOrder(1);
+    const bool unchanged = o && o->remainingQty == 10 && o->price == 100;
+    if (async) engine.stopAsync(); else engine.stop();
     if (!halted) return kNotHalted;
-    return resting ? kOk : kApplied;
+    return unchanged ? kOk : kApplied;
 }
 
 void ownRecordRefused() {
-    const std::string path = uniqueTempPath("record_before_cancel.wal");
-    std::filesystem::remove(path);
-    std::fflush(nullptr);
-    const pid_t pid = fork();
-    if (pid == 0) _exit(refusedCancelChild(path));
-    int status = 0;
-    waitpid(pid, &status, 0);
-    std::filesystem::remove(path);
-    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    std::printf("  refused cancel record: child exit %d\n", rc);
-    assert(rc != kApplied && "a cancel whose record the disk refused was applied anyway");
-    assert(rc == kOk);
+    for (const bool async : {true, false}) {
+        for (const Op op : {Op::Cancel, Op::Modify, Op::Replace}) {
+            const std::string path = uniqueTempPath("record_before_amend.wal");
+            std::filesystem::remove(path);
+            std::fflush(nullptr);
+            const pid_t pid = fork();
+            if (pid == 0) _exit(refusedRecordChild(path, op, async));
+            int status = 0;
+            waitpid(pid, &status, 0);
+            std::filesystem::remove(path);
+            const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            std::printf("  refused %s %s record: child exit %d\n", async ? "async" : "sync",
+                        opName(op), rc);
+            assert(rc != kApplied && "a request whose record the disk refused was applied anyway");
+            assert(rc == kOk);
+        }
+    }
     std::puts("ownRecordRefused passed");
 }
 

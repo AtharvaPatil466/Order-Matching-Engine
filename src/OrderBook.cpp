@@ -2119,7 +2119,8 @@ void OrderBook::cancelOrder(OrderId orderId, ParticipantId requester) {
 }
 
 OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId,
-                                                         ParticipantId requester) {
+                                                         ParticipantId requester,
+                                                         RecordFn record) {
     std::unique_lock<std::mutex> lock(bookLock_);
     OrderExposure e;
     if (!ownedBy(orderId, requester)) {
@@ -2132,6 +2133,10 @@ OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId,
         e.side          = o->side;
         e.remainingQty  = o->remainingQty;
         e.found         = true;
+        if (record && !record()) [[unlikely]] {
+            e.refused = true;
+            return e;
+        }
     }
     cancelOrderImpl(orderId);
     return e;
@@ -2487,7 +2492,7 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty,
 }
 
 bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
-                            ParticipantId requester) {
+                            ParticipantId requester, RecordFn record) {
     std::unique_lock<std::mutex> lock(bookLock_);
     reason = RejectReason::None;
 
@@ -2521,6 +2526,10 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
         if (const RejectReason r = admitAmend(*order, order->price, order->initialQty - cut, newQty);
             r != RejectReason::None) [[unlikely]] {
             reason = r;
+            return false;
+        }
+        if (record && !record()) [[unlikely]] {   // a reduce reserved nothing
+            reason = RejectReason::JournalHalted;
             return false;
         }
         releaseWorking(*order, cut);
@@ -2566,17 +2575,20 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 }
 
 bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
-                              RejectReason& reason, ParticipantId requester) {
+                              RejectReason& reason, ParticipantId requester,
+                              RecordFn record) {
     std::unique_lock<std::mutex> lock(bookLock_);
     const uint64_t arrivalBefore = nextArrival_;
-    const bool applied = cancelReplaceLocked(orderId, newPrice, newQty, reason, requester);
+    const bool applied =
+        cancelReplaceLocked(orderId, newPrice, newQty, reason, requester, record);
     // Not journaled when refused, so no age used, as addOrder.
     if (!applied) [[unlikely]] nextArrival_ = arrivalBefore;
     return applied;
 }
 
 bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity newQty,
-                                    RejectReason& reason, ParticipantId requester) {
+                                    RejectReason& reason, ParticipantId requester,
+                                    RecordFn record) {
     sweepNow_ = 0;
     reason = RejectReason::OrderNotFound;
 
@@ -2685,6 +2697,12 @@ bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity ne
     if (const RejectReason r = admitAmend(*order, newPrice, newQty, newLeaves);
         r != RejectReason::None) [[unlikely]] {
         reason = r;
+        return false;
+    }
+    if (record && !record()) [[unlikely]] {
+        // Refused after admitAmend reserved any growth: give it back.
+        if (newLeaves > order->remainingQty) releaseWorking(*order, newLeaves - order->remainingQty);
+        reason = RejectReason::JournalHalted;
         return false;
     }
     if (newLeaves < order->remainingQty) releaseWorking(*order, order->remainingQty - newLeaves);

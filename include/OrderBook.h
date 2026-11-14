@@ -289,6 +289,20 @@ private:
     size_t size_;
 };
 
+// The write-ahead hook of OrderBook's amends and cancel (see modifyOrder).
+// A non-owning callable reference (no allocation, the cancel is hot): the
+// callable it names must outlive the call it is passed to.
+struct RecordFn {
+    bool (*fn)(void*) = nullptr;
+    void* ctx = nullptr;
+    template <typename F>
+    static RecordFn of(F& f) {
+        return {[](void* c) { return (*static_cast<F*>(c))(); }, &f};
+    }
+    explicit operator bool() const { return fn != nullptr; }
+    bool operator()() const { return fn(ctx); }
+};
+
 class OrderBook {
 public:
     // orderPoolCapacity: number of Order slots to pre-allocate. 0 = engine
@@ -316,6 +330,11 @@ public:
     // caller. kAnyParticipant means "no check": internal sweeps act for the
     // venue, not for a participant.
     void cancelOrder(OrderId orderId, ParticipantId requester = kAnyParticipant);
+    // Write-ahead for an amend: called under bookLock_ once every refusal
+    // check has passed and before anything changes. It journals the request;
+    // false (the journal refused or is halted) refuses it with JournalHalted
+    // and leaves the order exactly as it was, as a restart will find it.
+    using RecordFn = OrderMatcher::RecordFn;
     bool modifyOrder(OrderId orderId, Quantity newQty,
                      ParticipantId requester = kAnyParticipant);
     // Same, but reports why it failed. A modify can fail because the order is
@@ -325,7 +344,8 @@ public:
     // Unlike cancelReplace, newQty here is the new LEAVES; the order's total
     // drops by the same amount, so nothing executed is misreported.
     bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
-                     ParticipantId requester = kAnyParticipant);
+                     ParticipantId requester = kAnyParticipant,
+                     RecordFn record = {});
 
 private:
     // addOrder and cancelReplace with bookLock_ held; the public ones give a
@@ -337,7 +357,8 @@ private:
                                   Price trailAmount, Quantity minQty, bool hidden,
                                   bool riskChecksBypassed);
     bool cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity newQty,
-                             RejectReason& reason, ParticipantId requester);
+                             RejectReason& reason, ParticipantId requester,
+                             RecordFn record);
 
     // Roadmap 1.9 I2: tell the engine's reservation ledger that `qty` of this
     // order's working quantity is gone without trading. A fill goes back through
@@ -412,7 +433,8 @@ public:
     // wrong thing. Mirrors modifyOrder's reason-reporting overload above.
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                        RejectReason& reason,
-                       ParticipantId requester = kAnyParticipant);
+                       ParticipantId requester = kAnyParticipant,
+                       RecordFn record = {});
 
     // Kill switch: cancel all orders for a participant
     uint64_t cancelAllForParticipant(ParticipantId participantId);
@@ -776,6 +798,8 @@ public:
         // false — nothing was cancelled, so there is no exposure to release
         // and a caller that only checks `found` still does the right thing.
         bool          denied{false};
+        // Found and owned, but its record was refused: nothing was cancelled.
+        bool          refused{false};
     };
 
     // Cancel the order and report the exposure it was holding, both inside the
@@ -783,8 +807,12 @@ public:
     // getOrder()-then-cancelOrder() pattern: the read now provably happens
     // while the order is still alive, and it costs one lock acquisition rather
     // than the two a separate locked getter would add to the cancel hot path.
+    // `record` as for modifyOrder: called once the order is found and owned,
+    // before it is cancelled; false leaves it resting (found stays true,
+    // refused is set).
     OrderExposure cancelOrderReleasing(OrderId orderId,
-                                       ParticipantId requester = kAnyParticipant);
+                                       ParticipantId requester = kAnyParticipant,
+                                       RecordFn record = {});
     size_t getBidLevelsCount() const;
     size_t getAskLevelsCount() const;
     SymbolId getSymbolId() const { return symbolId_; }

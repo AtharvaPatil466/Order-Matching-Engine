@@ -920,6 +920,9 @@ private:
     // book reported that). Otherwise the refusal, with the order's unchanged
     // state, or Rejected when there is no such order of the requester's.
     void reportAmendOutcome(OrderBook& book, OrderId id, RejectReason refused);
+    // Write-ahead for a request the book has decided to apply (RecordFn).
+    template <typename Append>
+    bool appendFirst(Append&& append, uint64_t& appendOrdinal);
     // P2-10's notional cap for an order valued off the book (OrderBook::
     // notionalPrice): the submit-time check cannot read a worker-owned book, so
     // this runs on the book's thread, on both paths (STP-12).

@@ -1089,6 +1089,19 @@ void MatchingEngine::holdForCut() {
     --workersAtCut_;
 }
 
+// The write-ahead a request hands its book (OrderBook::RecordFn): append under
+// journalMutex_ (bookLock_ -> journalMutex_, the documented order), report the
+// append ordinal, and say whether the record stands. A halted journal, or an
+// append that halts it, refuses the request.
+template <typename Append>
+bool MatchingEngine::appendFirst(Append&& append, uint64_t& appendOrdinal) {
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (journal_->halted()) return false;
+    append(*journal_);
+    appendOrdinal = journal_->entriesAppended();
+    return !journal_->halted();
+}
+
 void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req) {
     // A halted journal writes nothing more, so nothing may move a book either:
     // a cancel, modify, replace, kill, session change or expiry queued before
@@ -1238,13 +1251,18 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             return;
         }
         RejectReason refused = RejectReason::None;
-        if (book->modifyOrder(req.orderId, req.newQty, refused, req.participantId) && journal_) {
-            {
-                std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logModifyOrder(req.orderId, req.symbolId, req.newQty);
-            }
+        // Recorded before it is applied, as the cancel: the book calls this
+        // once it has decided to apply, and a refused record leaves it as it was.
+        uint64_t unused = 0;
+        auto append = [&] {
+            return appendFirst([&](Journal& j) {
+                j.logModifyOrder(req.orderId, req.symbolId, req.newQty);
+            }, unused);
+        };
+        const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+        if (book->modifyOrder(req.orderId, req.newQty, refused, req.participantId, record) &&
+            journal_)
             maybeTriggerAutoCheckpoint();
-        }
         reportAmendOutcome(*book, req.orderId, refused);
         break;
     }
@@ -1255,11 +1273,17 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         }
         const TradingState stateBefore = book->getTradingState();
         RejectReason refused = RejectReason::None;
+        uint64_t unused = 0;
+        auto append = [&] {
+            return appendFirst([&](Journal& j) {
+                j.logCancelReplace(req.orderId, req.symbolId, req.newPrice, req.newQty);
+            }, unused);
+        };
+        const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
         if (book->cancelReplace(req.orderId, req.newPrice, req.newQty, refused,
-                                req.participantId) && journal_) {
+                                req.participantId, record) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelReplace(req.orderId, req.symbolId, req.newPrice, req.newQty);
                 logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
             }
             maybeTriggerAutoCheckpoint();
@@ -2369,7 +2393,16 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     // submitOrder does — not only new orders (D7). Same for modify, replace,
     // the expiry sweep and the kill and DAY sweeps.
     durabilityGate_.beginOrder();
-    const auto exposure = book->cancelOrderReleasing(orderId, requester);
+    // Recorded before it is applied: the book calls `record` once it has found
+    // the requester's order, under its lock, and a refused record leaves the
+    // order resting, as a restart will find it.
+    uint64_t appendOrdinal = 0;
+    auto append = [&] {
+        return appendFirst([&](Journal& j) { j.logCancelOrder(orderId, symbolId); },
+                           appendOrdinal);
+    };
+    const auto exposure = book->cancelOrderReleasing(
+        orderId, requester, journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{});
     if (exposure.denied) [[unlikely]] {
         holdUntilDurable(0);
         return rejectedAsync(RejectReason::NotOrderOwner);
@@ -2377,12 +2410,6 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     if (!exposure.found) [[unlikely]] {
         holdUntilDurable(0);
         return rejectedAsync(RejectReason::OrderNotFound);
-    }
-    uint64_t appendOrdinal = 0;
-    if (journal_) {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        journal_->logCancelOrder(orderId, symbolId);
-        appendOrdinal = journal_->entriesAppended();
     }
     holdUntilDurable(appendOrdinal);
     if (journal_) maybeTriggerAutoCheckpoint();
@@ -2507,13 +2534,14 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     }
     RejectReason modifyReason = RejectReason::None;
     durabilityGate_.beginOrder();
-    bool modified = book->modifyOrder(orderId, newQty, modifyReason, requester);
     uint64_t appendOrdinal = 0;
-    if (modified && journal_) {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        journal_->logModifyOrder(orderId, symbolId, newQty);
-        appendOrdinal = journal_->entriesAppended();
-    }
+    auto append = [&] {
+        return appendFirst([&](Journal& j) { j.logModifyOrder(orderId, symbolId, newQty); },
+                           appendOrdinal);
+    };
+    const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+    bool modified = book->modifyOrder(orderId, newQty, modifyReason, requester, record);
+    // A refused record halted the journal: appendOrdinal says so below.
     holdUntilDurable(appendOrdinal);
     if (appendOrdinal) maybeTriggerAutoCheckpoint();
     if (appendOrdinal && journalHalted()) [[unlikely]] {
@@ -2579,12 +2607,17 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
     RejectReason replaceReason = RejectReason::None;
     durabilityGate_.beginOrder();
     const TradingState stateBefore = book->getTradingState();
-    bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
-                                        requester);
     uint64_t appendOrdinal = 0;
+    auto append = [&] {
+        return appendFirst([&](Journal& j) {
+            j.logCancelReplace(orderId, symbolId, newPrice, newQty);
+        }, appendOrdinal);
+    };
+    const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+    bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
+                                        requester, record);
     if (replaced && journal_) {
         std::lock_guard<std::mutex> lock(journalMutex_);
-        journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
         logBreakerTrip(symbolId, stateBefore, book->getTradingState());
         appendOrdinal = journal_->entriesAppended();
     }

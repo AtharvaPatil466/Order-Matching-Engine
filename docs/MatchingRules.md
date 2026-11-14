@@ -291,10 +291,12 @@ would undo it:
 - an engine-initiated cancel (kill, DAY, OCO sibling) is journaled before it is applied, so a
   sweep the halt interrupts stops with the book still matching the disk.
 
-One request is the exception: the one whose own record failed. A cancel on the async engine
-(`OrderEngine`'s) is recorded before it is applied, so a cancel whose record fails leaves the
-order resting, as a restart finds it. A new order, a modify, a replace, a session transition,
-and a cancel on the synchronous engine are applied before their record is written (not
+One request is the exception: the one whose own record failed. A cancel, a modify and a
+cancel-replace, on both engines, are recorded before they are applied: the book runs every
+refusal check, then calls the engine's write-ahead hook (`OrderBook::RecordFn`) under its lock,
+and only a record that stands lets it change anything. A refused record leaves the order
+exactly as it was, as a restart finds it, and gives back any growth a replace had reserved.
+A new order and a session transition are still applied before their record is written (not
 write-ahead; Rule 2.6), so that request's effect is in memory. It is answered `JournalHalted`,
 nothing it produced is shown, nothing can trade against it, and a restart drops it. An expiry sweep that halts partway also finishes cancelling its expired orders
 in memory; their cancels are never shown and a restart's next sweep expires them again.

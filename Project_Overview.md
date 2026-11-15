@@ -2,9 +2,9 @@
 
 > **What this is.** A C++20 order matching engine: one binary, `OrderEngine`, that takes orders over TCP in its own binary protocol, matches them on per-symbol worker threads, journals them, and publishes an L2 feed to shared memory. It is a single node with no replication. It is **not production-ready**, and §9 and §10 list why.
 >
-> **What this document describes.** Branch `round8/integration` as of commit `5738418`, which has every fix lane of this round (the second follow-up lane, `j2-followups`, included), and the documentation updates on top of it. Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
+> **What this document describes.** Branch `round8/integration` as of commit `a48cc27`, which has every fix lane of this round and its documentation; after it come one added test case and edits to this document, and no source file changed. Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
 >
-> **State of this branch, plainly.** None of these commits has been pushed. No CI workflow has run on any of them. No benchmark has been run on this branch on x86, so **no latency or throughput figure in this document describes this code** (§5). The Linux build and sanitizer lanes were run by hand on earlier commits of the branch, not on its head (§11).
+> **State of this branch, plainly.** None of these commits has been pushed. No CI workflow has run on any of them. No benchmark has been run on this branch on x86, so **no latency or throughput figure in this document describes this code** (§5). The full suite passes on macOS, and the Linux Release, TSan, fault-injection and ASan/UBSan lanes pass in a local container, all at `a48cc27` and all run by hand (§11); that is evidence, not CI.
 
 ---
 
@@ -57,7 +57,7 @@ Compared with `main` (`adc7b5b`), this branch **deleted** the second binary (`Ga
 | Sources in `src/` | 11 (`OrderBook.cpp` and `MatchingEngine.cpp` are each over 3,000 lines) |
 | Binaries | `OrderEngine`, plus `MdSubscriber` (a feed reader) and the research library `OrderMatcherResearch` |
 | TLA+ specifications | 7, plus one trace-validation module; all 7 in `tla.yml` |
-| Tests | `ctest -N` lists them; 715 on macOS at `399706c` (§11) |
+| Tests | `ctest -N` lists them; 715 on macOS at `a48cc27` (§11) |
 
 ---
 
@@ -74,7 +74,7 @@ Compared with `main` (`adc7b5b`), this branch **deleted** the second binary (`Ga
 **Self-trade prevention** <!-- claim:stp-default-cancel-incoming -->: four modes; the binary uses the default, cancel the incoming order, for everyone. `DecreaseAndCancel` now reports the resting order's new size to its owner.
 
 **Volatility breaker.** The band is checked at **every fill** inside the match loop, so a fresh order, a crossing replace and an elected stop are all held to it. <!-- claim:circuit-breaker --> A print outside the band does not happen: the book enters a volatility auction, the order keeps its in-band fills, and the rest joins the auction. The reference price is set only by a print, an uncross, configuration or a checkpoint; a rejected order can no longer seed it. (`PrintBandTest`) The threshold is fixed: `setCircuitBreakerThreshold` has no caller in `src/`.
-- Elections latched while the book could not execute them, and stops the reopening cross printed through, elect at the transition into Continuous (the open, the end of a volatility auction, a halt resumed), and pegs reprice there. (`PrintBandTest`) If those elections trip the breaker again, the trip is journaled after the transition; that case is **not tested** through journal and replay.
+- Elections latched while the book could not execute them, and stops the reopening cross printed through, elect at the transition into Continuous (the open, the end of a volatility auction, a halt resumed), and pegs reprice there. (`PrintBandTest`) If those elections trip the breaker again, the trip is journaled after the transition, and a restart lands in the same state from a checkpoint and from the plain journal (`CheckpointCompleteStateTest`, `reopen_trips_breaker`).
 - Stops elected by one print execute, and are deferred past the 64-per-sweep budget, in arrival order: the stop, trailing-stop and peg lists keep arrival order when one is removed (they used to swap-remove). (`StopSweepOrderTest`; `validateIntegrity` checks the stop lists.)
 - **Decision recorded, not settled:** an elected stop-limit is not re-screened against the admission band; only its prints are bounded by the breaker.
 
@@ -109,7 +109,7 @@ Compared with `main` (`adc7b5b`), this branch **deleted** the second binary (`Ga
 - **Journal.** A CRC-32-checked log of requests with a 24-byte header (magic, version, record size, epoch). `OrderEngine` runs it with Immediate sync: each entry is synced before the order port answers. <!-- claim:gw-durable-ack --> A torn final write is cut and kept in `<journal>.torn`; anything else that does not decode refuses boot. <!-- claim:journal-torn-tail --> A new journal file's directory is synced before its first record.
 - **Not write-ahead.** The book applies a request before its entry is appended. Since this round the effect of that is contained but not removed:
   - a write or sync error halts the journal, and from then on **nothing changes a book**: cancels, modifies, replaces, the kill switch, expiry and session transitions are refused or suspended until a restart, and the admin book views answer 503; <!-- claim:journal-halt-freeze -->
-  - engine-initiated cancels (kill, DAY close, OCO siblings, expiry) are journaled before they are applied, and so are client cancels, modifies and replaces on both engines: the book runs its refusal checks, then the journal write under its lock, and a refused write leaves the order as it was and gives back a replace's reserved growth (`JournalRecordBeforeEventTest`, six refused-write cases; three of them were never seen failing before the fix, §10);
+  - engine-initiated cancels (kill, DAY close, OCO siblings, expiry) are journaled before they are applied, and so are client cancels, modifies and replaces on both engines: the book runs its refusal checks, then the journal write under its lock, and a refused write leaves the order as it was and gives back a replace's reserved growth (`JournalRecordBeforeEventTest`, six refused-write cases; run against the code from before the fix, the five that fix covers each report the request applied anyway);
   - **open (MEDIUM):** a new order, a session transition or an uncross whose *own* record fails is already applied in memory. Nothing can observe it (reports and the feed are withheld, the admin views refuse, nothing trades), and a restart drops it. An expiry sweep that halts partway also finishes that book's expiries in memory.
 - **Replay on boot.** Both the plain journal and a checkpoint are replayed before any port opens. <!-- claim:journal-replay-on-boot --> Replay now counts entries *applied*: any entry the live engine applied and replay refuses stops the boot with `replay_entry_refused` (a legacy journal under `--replay-legacy-journal` only warns). A cancel, modify or replace record whose own book lacks the order is a no-op; only a legacy journal falls back to searching the other books (`MIDS-10`). This closes the review's most severe finding, that a checkpoint of a closed or halted book restored zero orders and logged success.
 - **Checkpoints** replace the journal atomically <!-- claim:checkpoint-atomic --> and now carry everything later matching depends on: each order's age, the anchored band, the reference and last-trade price, the volatility auction's dwell clock, the engine kill switch and the graduated switch's scopes, stop latches and trail references, peg and LOC queue order, and session state. <!-- claim:checkpoint-restore --> `CheckpointEquivalenceTest` runs a random 400-operation flow, cuts it at a random point three ways (live, checkpoint, plain journal) and requires identical trades, updates and books after every later operation.
@@ -280,8 +280,7 @@ Open on this commit.
 
 **Matching**
 - An order the uncross does not reach rests into Continuous with its minimum quantity unmet and can execute below it as a maker (MEDIUM). Nothing tests a parked minimum-quantity market order in the cross; that path is unexercised.
-- A reopen whose elections trip the breaker again is not tested through journal and replay.
-- The released-LOC list still swap-removes, so after a removal its order is not arrival order (not reviewed).
+- The released-LOC list still swap-removes (LOW). The list only decides the order in which released LOC orders are cancelled at the close; their priority comes from the book's level queues, so matching is unaffected, but after a removal those cancel events are not in arrival order.
 - MOC/LOC are accepted with no session schedule and can never execute (MEDIUM).
 - A market order's notional with the collar off is valued at the reference price, an underestimate for a buy that walks the book.
 - Pro-rata and market-maker roles cannot be enabled in the binary.
@@ -294,7 +293,6 @@ Open on this commit.
 
 **Durability**
 - A new order, a session transition or an uncross whose own record fails stays applied in memory until restart (MEDIUM: contained by the halt freeze, and dropped by the restart). A new order needs `addOrder` split around its inline expiry of makers; a transition needs the record inside `setTradingStateLocked`.
-- Of the six refused-write cases in `JournalRecordBeforeEventTest`, three (sync modify, sync replace, async replace) were never seen failing before the fix: the test stopped at the first failure. They pass now and the code reads as having applied before journaling, but their red was not observed.
 - An expiry sweep that halts partway finishes that book's expiries in memory.
 - The plain journal does not record the volatility dwell start.
 - Only one write-and-fdatasync chain can be outstanding under GroupCommit (`PERF-4`); `OrderEngine` uses Immediate and is not affected.
@@ -325,12 +323,24 @@ Open on this commit.
 
 ## 11. Verification record of this branch
 
-From the coordinator's record (updated 2026-11-15), unchanged:
-- macOS, full suite, at `399706c` (every lane, a through j2): 715/715; `WorkerPinTest` skips by design on macOS. After it: `5738418` (one test changed) and the documentation updates.
-- Linux (`ubuntu:24.04`, GCC 13), by hand, at `a158566` (lanes a, b, c, d, f): TSan 699/699; ASan/UBSan 696/696 through ctest plus four container-slow tests passing when run directly. Release 700/700 and fault injection 699/699 at `bc9dac2`.
-- Linux at `4b1269e` (adds lanes g, h, j pass 1): TSan 703/704, Release 704/705, fault injection 703/704, each failure `NoTestSuppressionsTest` (two untagged skips, fixed in `c2fa857`). ASan/UBSan had three failures: that one; `CheckpointCompleteStateTest`, a real UBSan abort, fixed in `2bb87f5`; and `AdminServerEndpointsTest`, a timeout, not re-run directly. The four slow tests passed directly.
-- Linux at `2bb87f5` (adds lanes e and i): Release 709/710; the failure was a race in a test, fixed in `5738418`. The TSan, fault-injection and ASan/UBSan lanes of that run were stopped, not finished.
-- **The final head, lane j2 included, has not been through any Linux lane.**
+All of it was run by hand on one machine; none of it is CI.
+
+**At `a48cc27`, the commit this document describes:**
+- macOS (Apple clang, Release), full suite: 715/715; `WorkerPinTest` skips by design on macOS.
+- Linux (`ubuntu:24.04` container, GCC 13), all four lanes:
+  - Release: 715/715.
+  - ThreadSanitizer: 714/714.
+  - Fault injection: 714/714.
+  - ASan/UBSan: 710/710 through ctest, plus five tests that time out in this slow container and pass when run directly without a time limit (`PropertyTest`, `CheckpointEquivalenceTest`, `SessionControlRaceTest`, `MarketDataTornReadTest`, `AdminServerEndpointsTest`).
+- After `a48cc27`: one added test case (`7214ac6`, the reopen-trips-the-breaker restart in `CheckpointCompleteStateTest`), which passes on macOS and under ASan/UBSan on Linux, and edits to this document. No source file changed.
+
+**What integration and the Linux lanes caught on the way** (each fixed before the run above):
+- a client that reset its connection killed the engine with `SIGPIPE` (on `main` too; missed by the review);
+- a data race on the OCO event list between a session-end sweep and the book's worker, introduced by this round's own OCO fix;
+- references bound to misaligned fields of packed structs in two places (the gateway's request handling, the kill-switch restore), which UBSan aborts on;
+- a latched trailing stop losing its trail reference across a checkpoint, found when the equivalence test was also run with a tight price band;
+- two tests that were wrong rather than the engine: a lock-order report caused by stack address reuse, and a race in the "nothing ahead of the journal" test, which failed in 248 of 400 loaded runs before its fix and in 0 of 300 after (a diagnostic build showed no trade ever reached the feed early).
+
 - **Not done:** any push; any CI workflow run (`ci.yml`, `tla.yml`, `bench-x86.yml`, `benchmark-gate.yml`, the new `runbook-smoke` job); any x86 benchmark on this branch.
 
 ---

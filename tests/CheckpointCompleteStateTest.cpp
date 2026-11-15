@@ -56,6 +56,8 @@ using Setup = std::function<void(MatchingEngine&)>;
 // `before` runs, then a checkpoint, then `after`. Live: on one engine. Restarted:
 // `before` and the checkpoint on one engine, `after` on a fresh one replayed
 // from that checkpoint (or from the plain journal, without one).
+// `trades` compares the trades `after` made: getTradeCount() is a statistic
+// since construction that a checkpoint does not carry (a plain replay recounts).
 // The engines live on the heap: std::mutex has no destructor TSan can see, so
 // successive stack engines at overlapping addresses read as one engine taking
 // its locks in conflicting orders. Freeing the block resets that.
@@ -71,8 +73,10 @@ bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
         setup(e);
         e.start();
         before(e);
+        const uint64_t tradesBefore = e.getOrderBook(S)->getTradeCount();
         after(e);
         live = capture(e);
+        live.trades -= tradesBefore;
         e.stop();
     }
     {
@@ -95,8 +99,10 @@ bool sameAfterRestart(const char* name, const Setup& setup, const Step& before,
         e.replayJournal();
         const bool refused = e.restoreRefusals() != 0;
         e.start();
+        const uint64_t tradesBefore = e.getOrderBook(S)->getTradeCount();
         after(e);
         restarted = capture(e);
+        restarted.trades -= tradesBefore;
         e.stop();
         if (refused) std::printf("    restore refused %zu order(s)\n", e.restoreRefusals());
     }
@@ -247,6 +253,35 @@ bool releasedScopesStayReleased() {
         false);
 }
 
+// A reopen runs the elections it owes. One whose fill would print outside the
+// band trips the breaker again: the book goes Continuous and straight into a
+// volatility auction, with the stop's order parked in it. A restart has to
+// land in the same place, from a checkpoint and from the plain journal.
+bool reopenThatTripsTheBreakerSurvives(bool takeCheckpoint) {
+    constexpr Price kRef = 100000;
+    return sameAfterRestart(
+        takeCheckpoint ? "reopen_trips_breaker" : "reopen_trips_breaker_plain_journal",
+        [](MatchingEngine&) {},
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 1, 1, Side::Sell, kRef, 1, OrderType::Limit);
+            e.submitOrder(S, 2, 2, Side::Buy, kRef, 1, OrderType::Limit);    // the reference print
+            e.submitOrder(S, 3, 3, Side::Buy, 94000, 10, OrderType::Limit);  // a bid below the band
+            e.submitOrder(S, 500, 4, Side::Sell, 0, 5, OrderType::Stop, 99500);
+            e.setTradingStateBatch({S}, TradingState::AuctionOpen);
+            e.submitOrder(S, 4, 5, Side::Buy, 99000, 3, OrderType::Limit);
+            e.submitOrder(S, 5, 6, Side::Sell, 99000, 3, OrderType::Limit);
+            // Crosses 3 at 9.90, which elects #500; its only bid is out of band.
+            e.setTradingStateBatch({S}, TradingState::Continuous);
+            assert(e.getOrderBook(S)->getTradingState() == TradingState::VolatilityAuction &&
+                   "the scenario no longer trips the breaker at the reopen");
+        },
+        [](MatchingEngine& e) {
+            e.submitOrder(S, 6, 7, Side::Buy, 98500, 5, OrderType::Limit);  // an auction arrival
+            e.setTradingStateBatch({S}, TradingState::Continuous);
+        },
+        takeCheckpoint);
+}
+
 }  // namespace
 
 int main() {
@@ -263,6 +298,8 @@ int main() {
     ok &= symbolHaltSurvives(true);
     ok &= symbolHaltSurvives(false);
     ok &= releasedScopesStayReleased();
+    ok &= reopenThatTripsTheBreakerSurvives(true);
+    ok &= reopenThatTripsTheBreakerSurvives(false);
     if (!ok) {
         std::puts("CheckpointCompleteStateTest FAILED: a restart from a checkpoint decided "
                   "differently from the engine that wrote it");

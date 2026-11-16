@@ -153,7 +153,16 @@ jobs:
             echo "::error::AuctionBroken.cfg unexpectedly PASSED — VolatilityEventuallyReopens is vacuous"
             exit 1
           fi
-          if ! grep -q "Temporal property VolatilityEventuallyReopens was violated" broken.log; then
+          # TLC 2.19 (the pinned v1.7.4 jar) says "Temporal properties were
+          # violated" without naming one; newer builds name it. AuctionBroken.cfg
+          # checks exactly one property and no invariant, so either wording can
+          # only mean VolatilityEventuallyReopens. The first grep keeps that true.
+          if [ "$(grep -c "^    [A-Za-z]" <(sed -n '/^PROPERTIES/,$p' AuctionBroken.cfg))" -ne 1 ] ||
+             grep -q "^INVARIANTS\?" AuctionBroken.cfg; then
+            echo "::error::AuctionBroken.cfg must check VolatilityEventuallyReopens and nothing else"
+            exit 1
+          fi
+          if ! grep -Eq "Temporal property VolatilityEventuallyReopens was violated|Temporal properties were violated" broken.log; then
             echo "::error::AuctionBroken.cfg failed for the wrong reason (expected a VolatilityEventuallyReopens counterexample)"
             exit 1
           fi

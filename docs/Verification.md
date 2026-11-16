@@ -303,7 +303,7 @@ Finished in 26s   (exit 0)
 
 | Cfg | TLC result | Distinct states when it stopped | Exit |
 |---|---|---:|---:|
-| `AuctionBroken.cfg` | Temporal property VolatilityEventuallyReopens was violated | 48,209 | 13 |
+| `AuctionBroken.cfg` | Temporal property VolatilityEventuallyReopens was violated (TLC 2.19 prints "Temporal properties were violated"; the cfg checks only this one) | 48,209 | 13 |
 | `AuctionBrokenEdge.cfg` | Action property ValidTransitions is violated | 127 | 13 |
 | `AuctionBrokenDate.cfg` | Action property ValidTransitions is violated | 1,395 | 13 |
 | `AuctionBrokenHalt.cfg` | Invariant NoReopenAfterClose is violated: `Continuous -> AuctionClose -> Halted -> Continuous` | 509 | 12 |

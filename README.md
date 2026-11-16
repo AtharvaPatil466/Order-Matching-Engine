@@ -406,4 +406,4 @@ The market-data codecs (ITCH, SoupBinTCP, MoldUDP64, retransmission) exist as li
 
 ---
 *Developed for professional quantitative trading systems.*
-*C++20 · one binary, single node · 7 TLA+ specifications, all in `tla.yml` (which has not run on this branch)*
+*C++20 · one binary, single node · 7 TLA+ specifications, all in `tla.yml`*

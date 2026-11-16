@@ -4,7 +4,7 @@
 >
 > **What this document describes.** Branch `round8/integration` as of commit `a48cc27`, which has every fix lane of this round and its documentation; after it come one added test case and edits to this document, and no source file changed. Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
 >
-> **State of this branch, plainly.** None of these commits has been pushed. No CI workflow has run on any of them. No benchmark has been run on this branch on x86, so **no latency or throughput figure in this document describes this code** (§5). The full suite passes on macOS, and the Linux Release, TSan, fault-injection and ASan/UBSan lanes pass in a local container, all at `a48cc27` and all run by hand (§11); that is evidence, not CI.
+> **State of this branch, plainly.** The branch is pushed as a pull request to `main` and has been through CI (§11); it is not merged. No benchmark has been run on this branch on x86, so **no latency or throughput figure in this document describes this code** (§5). The full suite passes on macOS, and the Linux Release, TSan, fault-injection and ASan/UBSan lanes pass in a local container, all at `a48cc27` and all run by hand. CI then ran on the pull request: at `88b8e32` every job passed except one of two ThreadSanitizer runs, which timed out in one test; that test is fixed in the commit after (§11).
 
 ---
 
@@ -168,7 +168,7 @@ What that leaves:
 - `Oco` (198) and `Risk` (800) model library code the binary never calls. <!-- claim:tla-small-specs -->
 - **Trace validation, first cut.** `TraceValidationTest` runs 300 seeded `OrderBook` flows (limit orders, cancel, modify, replace) and has TLC check each trace against `MatchingEngine.tla`; a reordered sweep is rejected. It covers only what the spec models, drives `OrderBook` directly, and skips without Java.
 - What TLA+ does not give: a refinement proof. The specs model the design at small bounds; the trace check is sampled, not exhaustive.
-- **`tla.yml` has not run on any commit of this branch** (nothing has been pushed). All figures above are from one local TLC run on 2026-11-14.
+- `tla.yml` passed on the pull request at `88b8e32`, trace validation included, with the pinned `v1.7.4` TLC jar. Its first two runs failed for reasons in the workflow, not the specs: the hash first pinned was of a `v1.8.0` pre-release jar that is rebuilt in place, and one check expected a newer TLC's wording. The figures above are from one local run on 2026-11-14 and were reproduced with the pinned jar.
 
 **The documents are checked too.** `ClaimsCheckTest` ties each `<!-- claim:ID -->` marker in this file and four others to a row of `docs/CLAIMS.md`, and requires each test the row names to exist and its source to contain one of the calls the row's evidence entry lists. That catches a test that never reaches the claim's subject; it cannot show that the test asserts the claim. `DocPerfNumbersSourced` requires every performance number in this file and four others (percentages and per-order ratios included) to have a source row, and a withdrawn, unrecorded or estimated number to say so in the document where it appears.
 
@@ -181,7 +181,7 @@ What that leaves:
 - **Admin HTTP** (`--port`, default 8080): binds 127.0.0.1 unless `--admin-bind` <!-- claim:admin-loopback -->; every endpoint except `/health` and `/readyz` needs the bearer token <!-- claim:admin-auth -->; the port opens after replay. Endpoints: `/health`, `/readyz`, `/metrics`, `/prometheus`, `/book`, `/auction`, `/audit`, `/otr` (symbol 0 only), `/journal/head`, `/version`, and the test-only `/chaos/order` (off unless armed). `/fees`, `/risk` and `/cat` were deleted.
 - **SIGHUP** re-reads the config; only the rate limit takes effect.
 - **Docker.** The image loads `config/engine.conf.example` and journals to a volume; `docker compose up` was checked once by hand. No CI step runs compose.
-- **Runbook.** `docs/Runbook.md`. A CI job, `runbook-smoke`, runs its bash blocks; **that job has never run** (nothing pushed); the script passed once in a local `ubuntu:24.04` container.
+- **Runbook.** `docs/Runbook.md`. A CI job, `runbook-smoke`, runs its bash blocks; it passed on the pull request at `88b8e32`.
 
 ---
 
@@ -287,6 +287,7 @@ Open on this commit.
 
 **Order entry**
 - No drop copy or replay on reconnect; reports to an absent session are lost.
+- Admin reads of a book (`/book`, `/audit`, `/auction`, `/otr`) take that book's lock and wait behind its worker. While the worker is saturated a read is slowed by orders of magnitude, though not starved (seen once in a local flood on Linux, not recorded as a measurement).
 - Refusal and "no such order" updates from the engine carry sequence id 0.
 - An early return in `main` after `startAsync` destroys the gateway before the workers stop (error paths only).
 - Each report scans all sessions; one MPSC queue serves all workers.
@@ -314,7 +315,6 @@ Open on this commit.
 **Formal methods**
 - The two-price, four-order `MatchingEngine` bound has not been run; `MpscQueue` has no broken configuration.
 - Trace validation is sampled, limited to limit orders and their amendments, and drives `OrderBook` only.
-- `tla.yml`, the trace check included, has never run on GitHub Actions for this branch.
 
 **Research**
 - The BCS paper's Exp 4 does not reproduce on the current engine, and its headline is gross of fees (§8).
@@ -341,7 +341,12 @@ All of it was run by hand on one machine; none of it is CI.
 - a latched trailing stop losing its trail reference across a checkpoint, found when the equivalence test was also run with a tight price band;
 - two tests that were wrong rather than the engine: a lock-order report caused by stack address reuse, and a race in the "nothing ahead of the journal" test, which failed in 248 of 400 loaded runs before its fix and in 0 of 300 after (a diagnostic build showed no trade ever reached the feed early).
 
-- **Not done:** any push; any CI workflow run (`ci.yml`, `tla.yml`, `bench-x86.yml`, `benchmark-gate.yml`, the new `runbook-smoke` job); any x86 benchmark on this branch.
+**CI, on the pull request to `main`:**
+- At `88b8e32`: `ci.yml` (macOS Release, Ubuntu Debug Sanitizers, Fault Injection, io_uring Journal, Lean Mode, Release Latency Gate, libFuzzer, Wide Differential Fuzz, Docker image, Runbook smoke), `tla.yml` and `benchmark-gate.yml` passed. Of the two ThreadSanitizer runs of that commit, one passed and one timed out in `AdminServerEndpointsTest`.
+- The timeout was a test that could not finish on a slow runner, not a race. Under TSan a saturated worker hands the book's lock to the admin thread rarely, so a fixed number of scrapes that took seconds on one runner passed the limit on another. The test now runs a minimum number of scrapes and then stops at a time budget (`1bd383c`); in a container held to two CPUs with competing load it finishes inside the budget with no TSan report.
+- The two earlier failures were in the TLA+ job's own setup and are described in §6.
+
+- **Not done:** a merge to `main`; any x86 benchmark on this branch (`bench-x86.yml` runs only when dispatched and has not been).
 
 ---
 

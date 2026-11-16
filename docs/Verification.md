@@ -212,7 +212,8 @@ fails on a skip. Elsewhere it SKIPs (it needs `java` and
 - Its own generator, not `tests/DifferentialFuzzFlow.h`: that flow has no
   replace. Joining them, so one corpus feeds both the RefMatcher comparison
   and the trace check, is the obvious next step.
-- Not run on GitHub Actions yet (this branch has not been pushed).
+- First run on GitHub Actions was on the round-8 pull request, with the pinned
+  `v1.7.4` jar; it passed.
 
 ### Earlier figures
 

@@ -12,10 +12,8 @@ not run, and the marker says why (it needs systemd, Docker, a real NIC, or it
 is a config file or sample output rather than a command). The script prints
 every block it skips. It also fails if a flag listed in a table here is not in
 `OrderEngine --help`. The `runbook-smoke` job in `.github/workflows/ci.yml` is
-set to run it on every push and pull request, but that job was added in round 8
-and **has never run**: nothing from that round has been pushed. The script last
-passed in a local `ubuntu:24.04` container. Until the job has run on CI,
-"executed" means executed by hand, as of that local run.
+runs it on every push and pull request. The job was added in round 8 and first
+ran, and passed, on that round's pull request.
 
 ---
 

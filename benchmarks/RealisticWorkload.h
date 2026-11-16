@@ -6,7 +6,10 @@
 //
 // The stream models a single symbol with:
 //   • Poisson arrivals            — inter-arrival gap ~ Exponential(lambda),
-//                                    lambda in orders/sec (configurable).
+//                                    lambda in orders/sec (configurable). Only
+//                                    CoordinatedOmissionBenchmark --arrivals
+//                                    poisson schedules by them; the other
+//                                    benchmarks run closed-loop and ignore them.
 //   • Power-law order sizes       — Pareto(alpha) sizes, clamped to [1, maxQty];
 //                                    most orders small, a heavy tail of big ones.
 //   • Random-walk mid price       — mid takes bounded ± steps each event.

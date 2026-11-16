@@ -6,7 +6,7 @@ This document details the architectural decisions, component lifecycles, failure
 
 ## 1. Design Philosophy & Key Trade-offs
 
-The architecture is driven by three primary constraints: **predictable low latency**, **deterministic execution**, and **high availability**.
+The architecture is driven by three primary constraints: **predictable low latency**, **deterministic execution**, and **crash recovery from a journal**.
 
 ### Why Not One Contended Mutex?
 A naive matching engine protects one order book with one `std::mutex` that every thread fights over. Under high load, threads spend more time context-switching and contending than executing trades. 
@@ -26,11 +26,8 @@ Using `std::list` or `std::vector` for orders at a price level requires dynamic 
 
 ```mermaid
 graph TD
-    subgraph "Order Entry — Four Protocols, One Engine"
-        FIX[FIX 4.2 / 4.4 Session]
-        OUCH[OUCH 4.2 + SoupBinTCP]
-        SBE[SBE Schema-Driven]
-        OuchGW[OuchTcpGateway - real TCP]
+    subgraph "Order Entry — One Binary, One Protocol"
+        GW[TcpGateway - native binary over TCP, login per connection]
     end
 
     subgraph "Ingress Layer"
@@ -45,16 +42,14 @@ graph TD
     end
 
     subgraph "Worker Thread (Core Affinity)"
-        CB[LULD / Circuit Breakers]
+        CB[Circuit Breakers]
         OB[OrderBook Core]
         OB --> |Bids/Asks| FPM[FlatPriceMap]
         FPM --> |Levels| IL[IntrusiveList of Orders]
     end
 
-    subgraph "Persistence & HA"
+    subgraph "Persistence"
         WAL[CRC-32 Journal / WAL]
-        REP[Replication Coordinator]
-        BK[Backup Node]
     end
 
     subgraph "Market Data Egress"
@@ -67,15 +62,12 @@ graph TD
         Admin[Admin Server :8080]
     end
 
-    FIX --> RL
-    OUCH --> OuchGW --> RL
-    SBE --> RL
+    GW --> RL
     RL --> BR --> Hash
     Hash -->|BTC/ETH| Q1
     Hash -->|SOL/AVAX| Q2
     Q1 --> CB --> OB
     OB --> WAL
-    WAL --> REP --> BK
     OB --> MUX
     MUX --> ITCH
     MUX --> SHM
@@ -87,12 +79,12 @@ graph TD
 ### The Component Lifecycle
 
 **Order entry**:
-1. **Wire framing**: bytes arrive on TCP. The connection's session class (`FixSession` for FIX 4.2/4.4 text, `OuchSession` for NASDAQ OUCH binary, `SbeSession` for FIX-TG SBE) handles framing. OUCH is additionally wrapped in `SoupBinTcpSession` (3-byte length+type envelope, login/heartbeat/logout).
-2. **Ingress checks**: `MatchingEngine::submitOrder`, which every protocol calls, refuses a participant id or an enum field (side, order type, time in force, peg type) outside its range (`InvalidFieldValue`) and a GTD order, or a DAY order where no session end is scheduled, without an `expiryTime` (`MissingRequiredField`). Then the `RateLimiter` (off by default) and the pre-trade risk gate (fat-finger, position, order-to-trade; skipped entirely while none is configured).
+1. **Wire framing**: bytes arrive on `OrderEngine`'s order port. `TcpGateway` frames them (a 4-byte length, then a bare V1 `OrderRequest` or a V2 header and payload), requires a login frame before the first order when credentials are configured, and checks the claimed participant against the credential.
+2. **Ingress checks**: `MatchingEngine::submitOrder`, which every ingress calls, refuses a participant id or an enum field (side, order type, time in force, peg type) outside its range (`InvalidFieldValue`) and a GTD order, or a DAY order where no session end is scheduled, without an `expiryTime` (`MissingRequiredField`). Then the `RateLimiter` (off by default) and the pre-trade risk gate (fat-finger, position, order-to-trade; skipped entirely while none is configured).
 3. **Routing**: `MatchingEngine` hashes `SymbolId` and pushes the order into the appropriate thread's `MpscQueue`.
-4. **Dequeue & admit**: the worker thread pops the order and `OrderBook::addOrder` admits it: trading state, price, quantity and trigger fields, the configured price range, pool pressure, risk limits, the percentage price band, PostOnly, peg placement and parked-list capacity. `LULDManager` is not called ([docs/MatchingRules.md](docs/MatchingRules.md) Rule 7.6).
-5. **Matching**: `OrderBook` matches against resting liquidity, applying self-trade prevention (`SelfTradeProtection`) as the sweep reaches each of the participant's own orders. `WashTradeDetector` is not called.
-6. **Persistence**: the order is appended to the `Journal` after the book has applied it, so the journal is not write-ahead (see the README).
+4. **Dequeue & admit**: the worker thread pops the order and `OrderBook::addOrder` admits it: trading state, price, quantity and trigger fields, the configured price range, pool pressure, risk limits, the percentage price band, PostOnly, peg placement and parked-list capacity.
+5. **Matching**: `OrderBook` matches against resting liquidity, applying self-trade prevention (`SelfTradeProtection`) as the sweep reaches each of the participant's own orders.
+6. **Persistence**: the order is appended to the `Journal` after the book has applied it, so the journal is not write-ahead (see the README). `OrderEngine` syncs each append (`Immediate`), and `TcpGateway` answers the client only once the worker has run the request (`waitForDrain`), so an Ack means the entry is on disk.
 
 **Market data egress** (parallel to order entry):
 7. **Fan-out**: every engine event reaches `MultiplexListener`, which dispatches to all registered `EventListener`s simultaneously.
@@ -109,9 +101,9 @@ The `AdminServer` exposes a lightweight HTTP interface for ops tooling and conta
 | Endpoint | Auth required | Description |
 | :--- | :--- | :--- |
 | `GET /health` | No | Liveness probe: returns 200 while the process is running. |
-| `GET /readyz` | No | Readiness probe (k8s `readinessProbe`): returns HTTP 503 until `admin.setReady(true)` is called after warmup (or backup replay-mode entry), then 200. Auth-exempt so k8s can poll it without credentials. |
+| `GET /readyz` | No | Readiness probe (k8s `readinessProbe`): returns HTTP 503 until `admin.setReady(true)` is called once the engine is up, then 200. Auth-exempt so k8s can poll it without credentials. |
 | `GET /metrics` | Yes | JSON snapshot of internal counters and gauges. |
-| `GET /prometheus` | Yes | Prometheus text-exposition format: `journal_entries_committed_total`, `replication_entries_shipped_total`, `replication_bytes_sent_total`, etc. |
+| `GET /prometheus` | Yes | Prometheus text-exposition format: `journal_entries_committed_total`, etc. |
 | `GET /version` | Yes | Returns `gitSha` (12-char), UTC `buildTime`, and `engineVersion` captured at CMake configure time. |
 | `POST /kill-switch` | Yes | Toggles the graduated kill-switch for a participant. |
 
@@ -143,8 +135,6 @@ The engine emits structured events through the `StructuredSink` interface define
 `OrderBook.cpp` wires **7 typed call sites** through the sink: order accepted (×2 paths — new and replace), order cancelled, order rejected (risk limit), trade fill, circuit breaker trip, and trading state change. Swapping the backend (e.g. from `NullSink` to `JsonStderrSink`) requires no changes to call sites. Verified by `StructuredLogTest`.
 
 ### 3.5 Regulatory & Compliance Controls
-- **WashTradeDetector (SMP)**: Prevents participants from matching against themselves.
-- **LULDManager**: Dynamically updates acceptable price bands based on recent trade prices, halting matching if prices gap too quickly.
 - **GraduatedKillSwitch**: Automatically disables trading for participants who breach soft/hard risk limits.
 - **MOC/LOC On-Close Orders**: `TradingState`-aware admission — MOC/LOC orders park in `onCloseOrders_` during Continuous/PreOpen/AuctionOpen; released to the book at `AuctionClose`; LOC remainder cancelled via `cancelLocOrders()` after uncross. Enables closing cross participation without continuous-session cross risk.
 - **LMM/DMM Floor Guarantee**: `ParticipantRole` per participant (`Regular`, `LMM`, `DMM`). ProRata allocation redistributes from Regular participants to ensure LMM/DMM orders receive at least 40% of their available qty; rounding remainders distributed to privileged roles before Regular participants.
@@ -154,24 +144,17 @@ The engine emits structured events through the `StructuredSink` interface define
 
 ### 3.6 Wire Protocol Stack
 
-Four wire protocols dispatch into the same `MatchingEngine`. The session class is the only thing that changes between them; the engine doesn't know which codec it's driving.
+One order-entry protocol, served by the one binary: the native binary protocol
+in `TcpGateway.h`. FIX, OUCH, SBE and the DPDK path were deleted (roadmap 1.2):
+no binary served them, and they carried open findings.
 
-| Protocol | Spec family | Wire format | Endianness | Session layer | Used by |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **FIX 4.2 / 4.4** | FIX Trading Community | ASCII tag=value with SOH delimiter + checksum | n/a (text) | `FixSession.h` — Logon/Heartbeat/ResendRequest state machine, OrdRejReason mapping, TransactTime validation on 4.4 inbound | Most B-Ds and retail brokers |
-| **OUCH 4.2** | NASDAQ | Fixed-width binary, big-endian, ASCII-decimal slots | BE | `OuchSession.h` + `SoupBinTcpSession.h` (3-byte envelope, login, heartbeat, logout) | NASDAQ direct order entry |
-| **ITCH 5.0** | NASDAQ | Fixed-width binary, big-endian | BE | One-way feed (publish only) — `ItchPublisher.h` + `ItchUdpTransport.h` wrapping `MoldUDP64.h` for multicast | NASDAQ market data |
-| **SBE** | FIX-TG | Schema-driven binary, length-prefixed blocks, **forward-compatible** | LE (native) | `SbeSession.h` — versioned `MessageHeader`, `templateId` dispatch | CME, ICE, several modern venues |
+| Protocol | Direction | Wire format | Session layer | Served by `OrderEngine` |
+| :--- | :--- | :--- | :--- | :--- |
+| **Native binary** | Order entry | 4-byte big-endian length, then a bare V1 `OrderRequest` or a 24-byte V2 header (`OBGW` magic, version, flags, client request id) and its payload | `TcpGateway` — login frame (`GATEWAY_FLAG_LOGIN`) checked against `ParticipantAuth`, one Ack or Error per request | Yes, `--gateway-port` |
+| **ITCH 5.0** | Market data | Fixed-width binary, big-endian | One-way feed (publish only) — `ItchPublisher.h` + `ItchUdpTransport.h` wrapping `MoldUDP64.h` for multicast; SoupBinTCP retransmission | No (library) |
 
-**SBE forward-compatibility, in detail**: every SBE message starts with an 8-byte `MessageHeader` that includes the `blockLength` of the fixed-size block that follows. When a v2 schema adds a field at the end of a block:
-- v2 publishers emit `blockLength=v2_size`. Their messages include the new field.
-- v1 readers ignore the unknown trailing bytes (they only read up to `v1_size`).
-- v1 readers see the original fields **byte-identically** because the v1 block IS a prefix of the v2 block. No codec branch, no version dispatch — just `read up to my known size`.
-- v2 readers handle a v1 message by using `blockLength=v1_size` from the header to skip the absent new fields; they fill in documented defaults.
-
-This is proven byte-exactly via test in `SbeProtocolTest`: encoding a struct with the v2 codec, then byte-comparing the first `v1_size` bytes against the v1 encoding of the same field set, asserts equality. This is the property that makes SBE viable for incremental schema evolution at production scale.
-
-**Wire versioning**: `ProtocolVersion.h` provides a single source-of-truth for wire format version numbers. Backward and forward compatibility are asserted by `ProtocolVersioningTest` — every version bump triggers a compile-time check that both an old decoder and a new decoder can round-trip each other's messages without data loss.
+An unknown V2 version or flag bit is refused rather than ignored, so a frame can
+never be downgraded into one the gateway reads differently.
 
 **Gap-recovery flow** (market data side):
 1. `MoldUDP64Publisher` assigns a sequence number to each ITCH frame as it enters the batch.
@@ -184,9 +167,9 @@ This is proven byte-exactly via test in `SbeProtocolTest`: encoding a struct wit
 
 ---
 
-## 4. Resilience & High Availability
+## 4. Resilience
 
-To achieve institutional-grade uptime, the engine implements a Primary-Backup HA model.
+The engine is a single node with no failover: durability is the journal, and recovery is a restart that replays it. Primary/backup replication was deleted rather than finished (it had no fencing, a promoted backup kept applying the old primary's stream, and its send blocked the commit path); `--role` / `OB_NODE_ROLE` refuse to boot.
 
 ### 4.1 Write-Ahead Logging (CRC-32 Journal)
 Before sending execution reports to the client, the engine writes the state mutation to a binary `Journal`. 
@@ -194,28 +177,15 @@ Before sending execution reports to the client, the engine writes the state muta
 - A virtual clock (GTD/DAY expirations) ensures time-based events replay deterministically.
 - `Checkpointing`: Periodically, the engine writes a compressed snapshot of the entire resting book to disk and prunes the old journal to bound recovery time.
 
-### 4.2 Replication Coordinator & Epoch Fencing (wired end-to-end)
-The `ReplicationCoordinator` is instantiated in `src/main.cpp` when `OB_NODE_ROLE` is set (`primary` or `backup`). Primary listens on `OB_REPLICATION_PORT`; backup connects to `OB_PRIMARY_HOST:OB_PRIMARY_REPLICATION_PORT`. It manages TCP log-shipping between primary and backup, with the following mechanisms — all empirically verified by the 19-scenario chaos suite in `deploy/chaos/`:
-
-- **Journal commit hook**: Primary's `Journal::onCommit` fires for every fsync-durable batch, calling `coord->replicateEntry()` per entry. Backup's `applyReplicatedEntry` writes incoming entries to its own local journal so the replica is durable across its own restarts.
-- **Heartbeats**: 100 ms interval, 500 ms timeout. `HeartbeatMonitor` exposes `isAlive()` to the coordinator and admin endpoints.
-- **LeaderLease + LeaseGrant propagation**: Primary broadcasts a `LeaseGrant` with `durationMs` payload every heartbeat tick. Backup's local lease state is refreshed by the same-epoch-from-same-holder path in `acceptRemoteLease`. `BackupPromote` is gated on BOTH heartbeat-miss AND local-lease-expiry — prevents split brain under partial network failure (asymmetric partition, packet loss, clock skew).
-- **Transport auto-reconnect**: `receiveLoop` retries `connectTo()` against saved host/port after socket loss. ~3 ms recovery measured in chaos tests. Reconnect retries use **exponential backoff** (500 ms → 1 s → 2 s → … → 30 s cap), resetting to 500 ms on successful connect, to avoid hammering the primary socket during sustained outages.
-- **Snapshot catchup on join**: Primary's `setOnPeerJoined` hook fires after `acceptOne` succeeds; iterates engine state via `MatchingEngine::streamSnapshot` and ships every resting order as a `JournalEntry::Snapshot`. Idempotent on receiver — safe to overlap with live replication.
-- **Atomic teardown**: `peerFd_`, `listenFd_`, `sendSeq_` are `std::atomic`; `stop()` calls `shutdown(2)` before `close()` to wake blocked `recv`. `ReplicationProtocolTest` runs TSan-clean under CI.
-
-### 4.3 Formal Verification
-Concurrency is notoriously difficult to test. We rely on **11 TLA+ Specifications**:
-- `MatchingEngine.tla`: price-time matching with STP, modify and replace; 2,726,157 distinct states at `MatchingEngine.cfg` (MaxOrders=3), checked in CI with seven broken variants that must fail. Properties and scope: [docs/Verification.md](docs/Verification.md).
-- `Replication.tla`: Realistic lease-propagation model. `BackupPromote` requires heartbeat-miss AND local-lease-expiry; no god-mode `~primaryAlive` guard. Zero violations at `MaxEntries=10` / `LeaseTimeout=7`, but vacuously: under both cfgs the backup can never promote. A bug-injected variant (lease check stripped from `BackupPromote`) is the only configuration where promotion happens, and it splits the brain in 188 states.
-- `MpscQueue.tla`: Verifies linearizability and lack of race conditions in our lock-free ring buffer.
-- `EngineConsumer.tla`: Verifies worker thread shutdown safety.
-- `Snapshot.tla` / `SnapshotLocked.tla`: Verifies that holding `bookLock_` across the whole 2-step snapshot read prevents torn snapshots. `Snapshot.tla` is the lockless negative control that found the bug.
+### 4.2 Formal Verification
+Concurrency is notoriously difficult to test. We rely on **7 TLA+ Specifications** (what each models and whether `OrderEngine` runs it: [docs/Verification.md](docs/Verification.md)):
+- `MatchingEngine.tla`: price-time matching with STP, modify and replace; 2,732,033 distinct states at `MatchingEngine.cfg` (MaxOrders=3) and 10,637,301 at `MatchingEngineDeep.cfg` (four orders at one price, so a fill reaches a level three deep), checked in CI with eight broken variants that must fail. CI also checks that 300 seeded traces of the C++ book (Limit, Cancel, Modify, Replace) are behaviours of the spec (`TraceValidationTest`, `spec/TraceMatchingEngine.tla`): testing, not a refinement proof. Properties and scope: [docs/Verification.md](docs/Verification.md).
+- `MpscQueue.tla`: the request queue's algorithm (`include/MpscQueue.h`, the Vyukov sequence-number ring) invents and duplicates no item, keeps each producer's items in order, and eventually delivers every item, over every interleaving of its atomic steps at 2 producers x 2 items x 2 slots. That is not linearizability, and every step is sequentially consistent: the relaxed and acquire/release orderings the C++ uses are not checked by the spec.
+- `EngineConsumer.tla`: the worker loop's wake-up protocol (`MatchingEngine::workerLoop`): every pushed item is consumed and no wake-up is lost. Shutdown is not modelled.
+- `SnapshotLocked.tla`: holding `bookLock_` across the whole 2-step snapshot read (`OrderBook::getSnapshot`, reached from the admin server) prevents torn snapshots; its broken cfg drops the lock, as the code once did, and must produce a torn one.
 - `Auction.tla`: the session state machine through the enforced transition table (Rule 7.7), order admission per state, and the uncross. It models no price collar. `NoReopenAfterClose` holds: a halt resumes only to the state it paused (see docs/Verification.md).
-- `EpochDurability.tla`: Epoch-store durability invariant under crash.
-- `FixSession.tla`: FIX session state machine safety (logon/heartbeat/gap-fill).
-- `Oco.tla`: OCO one-cancels-other atomicity.
-- `Risk.tla`: Hierarchical risk limit enforcement.
+- `Oco.tla`: OCO one-cancels-other atomicity. Library only: `OrderEngine` never registers an OCO pair.
+- `Risk.tla`: risk limit enforcement, two tiers of the four. Library only: `OrderEngine` sets no tier or position limit.
 
 ---
 
@@ -226,10 +196,10 @@ Designing for low latency means knowing exactly how the system behaves when unde
 | Failure Mode | Impact | Mitigation |
 | :--- | :--- | :--- |
 | **Microburst / News Event** | High ingress rate overwhelms matching thread. | `MpscQueue` depth triggers **Queue Backpressure**. Gateway immediately replies with `RejectReason::QueueFull`. Rate limiting throttles at the ingress edge. |
-| **Disk I/O Stall** | Journal fsync() blocks the matching thread. | Journal uses `SyncPolicy::GroupCommit` or asynchronous OS buffers. Engine relies on network HA replication for strict durability rather than local fsync. |
-| **Primary Server Crash** | Connection dropped, engine stops. | Backup detects missing heartbeats within ~400 ms (chaos-measured); promotion is then gated on local-lease-expiry (~5 s) — see `deploy/chaos/test_failover_detection.py`. Backup `setReplayModeAllBooks(false)` flips it into a writable primary. Clients reconnect to backup gateway. **Verified empirically**: 200 orders → 192 primary-committed → 192 on backup, **0 lost across SIGKILL** (`test_committed_loss.py`). |
+| **Disk I/O Stall** | Journal fsync() blocks the matching thread. | Journal uses `SyncPolicy::GroupCommit` or asynchronous OS buffers, so a crash can lose what the batch had not yet synced. `SyncPolicy::Immediate` syncs every entry, at one fsync per order. |
+| **Server Crash** | Connection dropped, engine stops. | No failover: the node is down until it restarts. A restart replays the journal, so what was synced survives; clients reconnect to the restarted node. |
 | **Memory Exhaustion** | System runs out of RAM under load. | `ObjectPool` pre-allocates everything at startup. `CapacityMonitor` triggers soft-rejects if pool utilization exceeds 90%, preventing OS OOM killer. |
-| **Corrupted Disk / Bit Flip** | Journal file is mutated by hardware failure. | CRC-32 validation on every read. `JournalReplay` halts exactly before the corrupted entry. Data is recovered from the replication peer. |
+| **Corrupted Disk / Bit Flip** | Journal file is mutated by hardware failure. | CRC-32 validation on every read. `JournalReplay` halts exactly before the corrupted entry. Anything after it has to come from the operator's own copy of the journal. |
 
 ## 6. Microstructure Research Infrastructure
 

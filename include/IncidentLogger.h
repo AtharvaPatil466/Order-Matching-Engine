@@ -25,12 +25,9 @@ enum class IncidentType : uint8_t {
     SymbolHalt     = 2,
     GlobalHalt     = 3,
     KillSwitch     = 4,
-    LULDPause      = 5,
-    LULDResume     = 6,
+    // 5, 6 (LULD pause/resume) and 8 (wash trade flagged) were for deleted code.
     STPTriggered   = 7,
-    WashTradeFlagged = 8,
     CapacityAlert  = 9,
-    ReplicationLag = 10
 };
 
 inline const char* incidentTypeStr(IncidentType t) {
@@ -39,12 +36,8 @@ inline const char* incidentTypeStr(IncidentType t) {
         case IncidentType::SymbolHalt:       return "symbol_halt";
         case IncidentType::GlobalHalt:       return "global_halt";
         case IncidentType::KillSwitch:       return "kill_switch";
-        case IncidentType::LULDPause:        return "luld_pause";
-        case IncidentType::LULDResume:       return "luld_resume";
         case IncidentType::STPTriggered:     return "stp_triggered";
-        case IncidentType::WashTradeFlagged: return "wash_trade_flagged";
         case IncidentType::CapacityAlert:    return "capacity_alert";
-        case IncidentType::ReplicationLag:   return "replication_lag";
     }
     return "unknown";
 }
@@ -155,20 +148,6 @@ public:
         r.type = IncidentType::KillSwitch;
         r.symbolId = symbol;
         r.triggerCondition = "kill_switch_" + level;
-        log(r);
-    }
-
-    // Convenience: log LULD pause
-    void logLULDPause(SymbolId symbol, Price refPrice,
-                      Price bestBid, Price bestAsk) {
-        IncidentRecord r;
-        r.timestampNs = nowNs();
-        r.type = IncidentType::LULDPause;
-        r.symbolId = symbol;
-        r.triggerCondition = "luld_band_breach";
-        r.bestBid = bestBid;
-        r.bestAsk = bestAsk;
-        r.referencePrice = refPrice;
         log(r);
     }
 

@@ -17,6 +17,10 @@ set -u
 
 unset OB_WORKER_CORES OB_SESSION_SCHEDULE OB_JOURNAL_PATH OB_CONFIG_PATH OB_NODE_ROLE \
       OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_CHAOS_INJECT OB_CHAOS_TOKEN OB_LOG_SINK
+# The order port is not what this test is about: no credentials, any free port.
+export OB_NO_PARTICIPANT_AUTH=1 OB_GATEWAY_PORT=0
+# Nor are the band, journal and position limits (engine_requires_controls.sh).
+export OB_NO_PRICE_BAND=1 OB_NO_JOURNAL=1 OB_NO_RISK_LIMITS=1
 
 ENGINE="$1"
 TMP="${TMPDIR:-/tmp}/ob_worker_cores_$$"

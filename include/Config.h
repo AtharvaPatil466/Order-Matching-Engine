@@ -29,47 +29,48 @@ class Config {
 public:
     Config() = default;
 
-    // Load from a key=value file. Returns false if the file can't be opened.
+    // Load from a key=value file. All or nothing: false, with nothing stored,
+    // if the file can't be opened or any line is not `key = value` (the line
+    // is named on stderr). A half-read file used to load around a bad line, so
+    // a typo dropped one setting and the engine started without it.
     // Can be called multiple times; later loads override earlier keys.
     bool loadFile(const std::string& path) {
         std::ifstream in(path);
         if (!in.is_open()) return false;
 
         std::vector<std::pair<std::string, std::string>> changed;
+        std::string line;
+        int lineNum = 0;
+        while (std::getline(in, line)) {
+            ++lineNum;
+            // Strip leading/trailing whitespace
+            auto start = line.find_first_not_of(" \t\r");
+            if (start == std::string::npos) continue;
+            line = line.substr(start);
+
+            // Skip comments and blank lines
+            if (line.empty() || line[0] == '#') continue;
+
+            auto eq = line.find('=');
+            std::string key = eq == std::string::npos ? "" : trim(line.substr(0, eq));
+            if (key.empty()) {
+                std::cerr << "[Config] ERROR: line " << lineNum << " of " << path
+                          << " is not key = value: " << line << "\n";
+                return false;
+            }
+            std::string val = trim(line.substr(eq + 1));
+
+            // Strip optional quotes around value
+            if (val.size() >= 2 &&
+                ((val.front() == '"' && val.back() == '"') ||
+                 (val.front() == '\'' && val.back() == '\''))) {
+                val = val.substr(1, val.size() - 2);
+            }
+            changed.emplace_back(std::move(key), std::move(val));
+        }
         {
             std::lock_guard<std::mutex> lock(mu_);
-            std::string line;
-            int lineNum = 0;
-            while (std::getline(in, line)) {
-                ++lineNum;
-                // Strip leading/trailing whitespace
-                auto start = line.find_first_not_of(" \t");
-                if (start == std::string::npos) continue;
-                line = line.substr(start);
-
-                // Skip comments and blank lines
-                if (line.empty() || line[0] == '#') continue;
-
-                auto eq = line.find('=');
-                if (eq == std::string::npos) {
-                    std::cerr << "[Config] WARNING: no '=' on line " << lineNum
-                              << " of " << path << ": " << line << "\n";
-                    continue;
-                }
-
-                std::string key = trim(line.substr(0, eq));
-                std::string val = trim(line.substr(eq + 1));
-
-                // Strip optional quotes around value
-                if (val.size() >= 2 &&
-                    ((val.front() == '"' && val.back() == '"') ||
-                     (val.front() == '\'' && val.back() == '\''))) {
-                    val = val.substr(1, val.size() - 2);
-                }
-
-                store_[key] = val;
-                changed.emplace_back(key, val);
-            }
+            for (const auto& [k, v] : changed) store_[k] = v;
         }
         // Fire listener outside the lock so callbacks can call back into
         // Config (e.g. has()/getString()) without self-deadlocking.
@@ -190,47 +191,5 @@ private:
     std::unordered_map<std::string, std::string> store_;
     Listener listener_;
 };
-
-// ── Cross-DC / WAN replication tuning ─────────────────────────────────────
-// OB_REPLICATION_ASYNC_MODE     0|1    (default: 0)
-//   When 1, replicateEntry() returns immediately without waiting for the
-//   remote write to complete. Use for cross-DC where synchronous ack would
-//   add RTT to the matching hot path. Accept the corresponding RPO window.
-//
-// OB_REPLICATION_WAN_BUFFER_KB  int    (default: 256)
-//   TCP SO_SNDBUF size in kilobytes for the replication socket. 256 KB
-//   is suitable for same-rack; increase to 4096+ for cross-DC to absorb
-//   BDP (bandwidth-delay product) on WAN links.
-//
-// OB_REPLICATION_ACK_TIMEOUT_MS int    (default: 500)
-//   How long replicateEntry() waits for a TCP send to complete (via
-//   SO_SNDTIMEO) before declaring the peer dead. 500ms is correct for
-//   same-rack; for WAN set to 3000+ to tolerate jitter without false
-//   failovers.
-//
-// OB_REPLICATION_HEARTBEAT_MS   int    (default: 100)
-//   Interval between primary→backup heartbeat messages. Lower values
-//   reduce RTO but increase replication bandwidth.
-//
-// OB_REPLICATION_TIMEOUT_MS     int    (default: 500)
-//   Heartbeat miss threshold after which backup considers primary dead.
-//   Must be > OB_REPLICATION_HEARTBEAT_MS * 2. For WAN, set to 2000+.
-
-// Convenience getters for replication WAN config
-inline bool replicationAsyncMode(const Config& cfg) {
-    return cfg.getBool("OB_REPLICATION_ASYNC_MODE", false);
-}
-inline int replicationWanBufferKb(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_WAN_BUFFER_KB", 256);
-}
-inline int replicationAckTimeoutMs(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_ACK_TIMEOUT_MS", 500);
-}
-inline int replicationHeartbeatMs(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_HEARTBEAT_MS", 100);
-}
-inline int replicationTimeoutMs(const Config& cfg) {
-    return cfg.getInt("OB_REPLICATION_TIMEOUT_MS", 500);
-}
 
 }  // namespace OrderMatcher

@@ -2,12 +2,14 @@
 
 Roadmap 2.4: no guarantee goes in a doc without a test that would fail if it
 were false. Each guarantee in [README.md](../README.md),
+[Project_Overview.md](../Project_Overview.md),
 [Compliance.md](Compliance.md), [Verification.md](Verification.md) and
 [ProductionReadiness.md](ProductionReadiness.md) carries an invisible marker,
 `<!-- claim:ID -->`, and has a row here naming that test.
 `scripts/check_claims.py` (ctest `ClaimsCheckTest`, label `project`, so every
-CI lane runs it) fails when a marker has no row, a row has no marker, or a row
-names a test that does not exist.
+CI lane runs it) fails when a marker has no row, a row has no marker, a row
+names a test that does not exist, or a named test's source contains none of
+the calls the [Evidence](#evidence) table lists for its row.
 
 **What counts as a guarantee.** A sentence promising behaviour that someone
 would rely on for correctness, durability, safety or security: durability and
@@ -21,8 +23,7 @@ more than any test shows was rewritten, not marked.
 a gtest case under its discovered name (`Suite.Case`). `tla:Cfg` is a TLC run
 of `spec/Cfg.cfg` that `.github/workflows/tla.yml` performs; a `Broken` cfg
 there must fail. `no test — pending decision 1.x` is accepted only for the IDs
-the script allowlists: replication (roadmap 1.1, delete or finish) and the
-unshipped protocol stacks (1.2).
+the script allowlists; there are none today.
 
 **Adding a guarantee.** Write the test, put the marker next to the sentence,
 add the row. A row whose "Not covered" cell grows long is a sign the sentence
@@ -30,54 +31,115 @@ should be narrowed.
 
 | ID | Where | Claim | Test | Fails when · not covered |
 |---|---|---|---|---|
-| `gw-durable-ack` | README | `GatewayServer --journal` syncs each order before acknowledging it; an acked order survives `kill -9` | `GatewayJournalRestartTest`, `CrashRecoveryE2ETest` | The real binary is SIGKILLed the moment an ack arrives (and at a random point of a pipelined stream) and an acked order or cancel is missing after restart |
-| `gw-durable-events` | README | `GatewayServer` holds fills and order updates until their journal entry is durable | `DurableGateCoverageTest`, `DurableAckTest` | An event for a cancel, modify, replace, expiry or kill is released before the journal flush (in-process engine with durable acks) |
-| `journal-replay-on-boot` | README, Compliance | The journal is replayed on boot, so resting orders survive a restart | `EngineReplaysJournalTest`, `GatewayJournalRestartTest` | The real `OrderEngine` restarted on its journal shows a different `/book` level, or `GatewayServer` loses a resting order across a clean restart |
+| `gw-durable-ack` | README | `OrderEngine --journal` syncs each order before acknowledging it on the order port; an acked order survives `kill -9` | `GatewayJournalRestartTest`, `CrashRecoveryE2ETest`, `OrderEngineGatewayTest`, `JournalHaltTest` | The real binary is SIGKILLed the moment an ack arrives (and at a random point of a pipelined stream) and an acked order or cancel is missing after restart, or a write the journal refused is acked |
+| `gw-durable-events` | README | The synchronous engine with durable client acks holds fills and order updates until their journal entry is durable (library; `OrderEngine` runs async, where the gate is refused) | `DurableGateCoverageTest`, `DurableAckTest` | An event for a cancel, modify, replace, expiry or kill is released before the journal flush (in-process engine with durable acks) |
+| `gw-exec-reports` | README | `OrderEngine` sends every fill to both owners and every engine cancel, post-ack reject, stop election (`Triggered`, before its fills) and cancel/modify/replace outcome to the owner, and neither these nor its market data leave before the journal entry behind them is durable; a session that stops reading is disconnected | `GatewayExecutionReportTest`, `CrashRecoveryE2ETest` | A maker or aggressor is not told of a fill, a modify, replace or refused cancel goes unreported, a fill reported before kill -9 is not in the replayed journal, a refused write's trade reaches a session or the feed, or a non-reading session stalls matching |
+| `journal-replay-on-boot` | README, Compliance | The journal is replayed on boot, so resting orders survive a restart; an entry applied live that replay refuses stops the boot | `EngineReplaysJournalTest`, `GatewayJournalRestartTest`, `ReplayRefusedEntryTest` | The real `OrderEngine` restarted on its journal shows a different `/book` level, or loses an order entered on its order port across a clean restart |
 | `journal-torn-tail` | README | A journal that does not decode is refused; a torn final write is cut and kept in `<journal>.torn`, never appended behind | `EngineRefusesUnreadableJournalTest` | The real binary boots on undecodable bytes, refuses a torn tail, or loses an order taken after cutting one |
 | `journal-crc` | ProductionReadiness | CRC-validated replay stops at truncated or corrupted records | `JournalCorruptionTest`, `EngineRefusesUnreadableJournalTest` | Recovery under injected bit flips and fsync failures returns a corrupted entry |
 | `checkpoint-atomic` | README | A checkpoint replaces the journal atomically | `CheckpointChaosTest` | Under injected faults the file after `rewriteAtomically` is neither the before nor the after state, or fails its CRC |
-| `checkpoint-restore` | ProductionReadiness | Checkpoint replay restores time priority, last trade and reference price, stop latches and session state | `CheckpointTimePriorityTest`, `CheckpointPriceStateTest`, `StopLatchCheckpointTest`, `SessionTransitionTest` | Any of those differs between the live book and one replayed from a checkpoint |
+| `checkpoint-restore` | ProductionReadiness | Checkpoint replay restores every resting and parked order in every trading state, time priority, each order's age (arrival sequence), last trade and reference price, an anchored price band, a volatility auction's dwell clock, the kill switch and the graduated switch's participant and symbol scopes, stop latches, pegs' prices and reprice order, and session state; an order it cannot put back stops the boot | `CheckpointEquivalenceTest`, `CheckpointCompleteStateTest`, `CheckpointTradingStateTest`, `CheckpointRestoreRefusedTest`, `CheckpointTimePriorityTest`, `CheckpointPriceStateTest`, `StopLatchCheckpointTest`, `CheckpointPeggedOrderTest`, `SessionTransitionTest` | Any of those differs between the live book and one replayed from a checkpoint (or after the next transitions), in any of the 13 states the state test walks, or a checkpoint order the restart refuses still lets `bootJournal` return 0 |
 | `replay-determinism` | ProductionReadiness | Randomized command streams replay to the same final book | `JournalReplayPropertyTest` | `replayJournal()` on an engine-written journal, sync and async, holds different resting orders |
 | `gtd-replay` | README | DAY/GTD expiries are journaled and replay identically under the virtual clock | `GTDReplayTest` | The replayed engine's final state differs from the live one |
-| `repl-refuses-role` | README, Compliance | Replication stays off: a role refuses to boot without `--allow-unsafe-replication` | `EngineRefusesReplicationRoleTest` | The real `OrderEngine` with `--role` or `OB_NODE_ROLE` and no acknowledgement starts serving |
-| `repl-snapshot-ordering` | ProductionReadiness | A backup drops entries that raced ahead of `SnapshotStart` and replays the buffered window at `SnapshotEnd` | `ReplicationProtocolTest` | `TEST(SnapshotOrdering)`'s drop-and-replay expectations fail |
-| `tsan-replication-transport` | README, ProductionReadiness | The replication transport is free of data races | `ReplicationProtocolTest` | The ThreadSanitizer lane reports a race while running it · only the races its scenarios reach |
-| `repl-lease-promotion` | README, ProductionReadiness | A backup promotes only after a heartbeat miss and local lease expiry | no test — pending decision 1.1 | Exercised only by the live chaos suite (`deploy/chaos`, PR and nightly), which ends every fault inside the lease |
-| `repl-chaos` | README, ProductionReadiness | Live chaos-suite results: no committed loss as a journal count, no promotion inside the lease, snapshot catch-up, reconnect, `/chaos/order` token, replication counters | no test — pending decision 1.1 | `deploy/chaos` runs on PRs and nightly, not in ctest; roadmap 1.1 deletes or rebuilds replication and these scenarios with it |
-| `tla-matching-engine` | README, Compliance, Verification | `MatchingEngine.tla` holds price and time priority, passive execution price, no crossed book, no self-trade, conservation; each broken cfg fails | `tla:MatchingEngine`, `tla:MatchingEngineBroken`, `tla:MatchingEngineBrokenPrice`, `tla:MatchingEngineBrokenExecPrice`, `tla:MatchingEngineBrokenCross`, `tla:MatchingEngineBrokenStp`, `tla:MatchingEngineBrokenModify`, `tla:MatchingEngineBrokenReplace` | TLC finds a violation at `MatchingEngine.cfg`, or a broken cfg passes or fails on the wrong property · conservation and non-negativity have no broken cfg; no refinement links the spec to the C++ |
+| `repl-refuses-role` | README, Compliance | Replication was removed: a role refuses to boot, and the old opt-in opens nothing | `EngineRefusesReplicationRoleTest` | The real `OrderEngine` with `--role` or `OB_NODE_ROLE`, with or without `OB_ALLOW_UNSAFE_REPLICATION`, starts serving, or does not start without a role |
+| `tla-matching-engine` | README, Compliance, Verification | `MatchingEngine.tla` holds price and time priority, passive execution price, no crossed book, no self-trade, conservation; each broken cfg fails | `tla:MatchingEngine`, `tla:MatchingEngineBroken`, `tla:MatchingEngineBrokenPrice`, `tla:MatchingEngineBrokenExecPrice`, `tla:MatchingEngineBrokenCross`, `tla:MatchingEngineBrokenStp`, `tla:MatchingEngineBrokenModify`, `tla:MatchingEngineBrokenReplace`, `tla:MatchingEngineDeep`, `tla:MatchingEngineDeepBrokenSwap` | TLC finds a violation at `MatchingEngine.cfg`, or a broken cfg passes or fails on the wrong property · conservation and non-negativity have no broken cfg; no refinement links the spec to the C++ |
 | `tla-auction` | README, Compliance, Verification | `Auction.tla` holds the transition table, no trade outside Continuous but the uncross, `NoReopenAfterClose`, and volatility auctions reopen | `tla:Auction`, `tla:AuctionBroken`, `tla:AuctionBrokenEdge`, `tla:AuctionBrokenDate`, `tla:AuctionBrokenHalt` | As above |
-| `tla-small-specs` | README, Compliance, Verification | `Oco`, `Risk`, `FixSession` and `EpochDurability` hold their safety properties, and each broken cfg fails | `tla:Oco`, `tla:OcoBroken`, `tla:Risk`, `tla:RiskBroken`, `tla:FixSession`, `tla:FixSessionBroken`, `tla:EpochDurability`, `tla:EpochDurabilityBroken` | As above · 4 to 198 distinct states |
-| `tla-concurrency-specs` | README, Compliance | `MpscQueue` and `EngineConsumer` invent and duplicate nothing and drain; `SnapshotLocked` snapshots are point-in-time | `tla:MpscQueue`, `tla:EngineConsumer`, `tla:Snapshot`, `tla:SnapshotLocked` | TLC finds a violation · no broken cfg shows any of these properties can fail |
+| `tla-small-specs` | README, Compliance, Verification | `Oco` and `Risk` hold their safety properties, and each broken cfg fails | `tla:Oco`, `tla:OcoBroken`, `tla:Risk`, `tla:RiskBroken` | As above · 198 and 800 distinct states · library only: `OrderEngine` never calls `registerOco`, `mapParticipant`, `setRiskTierLimits` or `setPositionLimit`, so neither spec covers code the binary runs |
+| `tla-concurrency-specs` | README, Compliance | `MpscQueue` and `EngineConsumer` invent and duplicate nothing and drain; `EngineConsumer` loses no wake-up; `SnapshotLocked` snapshots are point-in-time | `tla:MpscQueue`, `tla:EngineConsumer`, `tla:EngineConsumerBroken`, `tla:SnapshotLocked`, `tla:SnapshotLockedBroken` | TLC finds a violation, or a broken cfg passes or fails on the wrong property · sequentially consistent interleavings only (the C++ uses relaxed and acquire/release atomics); `MpscQueue` has no broken cfg |
 | `auction-uncross` | README | An auction uncrosses at one clearing price chosen by maximum volume, then minimum imbalance, then reference proximity, and the indicative price matches it | `AuctionSessionTest` | The executed price differs from the indicative one or a tie-break is applied out of order |
 | `peg-never-crosses` | README | A pegged order never rests at or through the opposite touch | `PegOrderTest` | A peg at or through the touch is admitted, or a reprice reaches it |
 | `prorata-lmm-floor` | README, Compliance, ProductionReadiness | Pro-rata gives LMM/DMM orders a 40% floor and the rounding remainder first | `LmmDmm.ProRata_DmmFloorGuarantee_SmallIncoming`, `LmmDmm.ProRata_DmmFloorGuarantee_LargeIncoming`, `LmmDmm.ProRata_LmmFloor`, `LmmDmm.ProRata_DmmGetsRemainderFirst` | An allocation below the floor, or the remainder to a regular order first |
 | `stp-default-cancel-incoming` | README, Compliance | Self-trade prevention cancels the incoming order by default, reports `CancelledBySTP` and leaves the resting order | `StpSemantics.ModeNoneSelfCrossReportsCancelledBySTPNotFilled`, `StpSemantics.ModeNoneSelfCrossLeavesRestingOrderIntact`, `StpProRata.DefaultCancelIncomingKillsTakerAndReportsCancelledBySTP` | An unconfigured self-cross trades, reports a fill, or touches the resting order |
-| `circuit-breaker` | README, Compliance, ProductionReadiness | The 5% breaker trips on an order's first fill, starts a volatility auction, and reopens with a cross after the dwell | `VolatilityBreakerTest` | A far passive order trips it, an out-of-band first fill prints, or the auction does not reopen on the engine's clock |
+| `circuit-breaker` | README, Compliance, ProductionReadiness | The 5% breaker tests every continuous print (fresh, replace, elected stop), starts a volatility auction, and reopens with a cross after the dwell | `VolatilityBreakerTest` | A far passive order trips it, any out-of-band print happens, or the auction does not reopen on the engine's clock |
+| `market-collar` | Compliance, ProductionReadiness | Every book stops a market order 5% from the opposite touch, under both algorithms | `BothAlgorithms/Collar.MarketBuyStopsAtDefaultCollar/PriceTime`, `BothAlgorithms/Collar.MarketBuyStopsAtDefaultCollar/ProRata`, `CollarDefault.IsFivePercent` | A market order trades past the collar, or the default is off |
 | `price-range` | Compliance, ProductionReadiness | With a config file each symbol's static price range is required and enforced at admission | `PriceRangeTest`, `EngineRequiresPriceBandTest` | An order or replace outside the range is accepted, or the real `OrderEngine` starts with a symbol missing its range |
 | `session-schedule` | ProductionReadiness | `--session-schedule` drives the scheduled auction states | `SessionSchedulerTest`, `EngineSessionScheduleConfigTest` | The scheduler does not move books through the timetable, or the binary ignores `session_schedule` |
 | `moc-loc` | Compliance, ProductionReadiness | MOC/LOC orders release at `AuctionClose`, fill at the uncross price, and an unfilled LOC is cancelled; none outlives its session | `MocLocTest.MOC_ReleasedOnAuctionCloseTransition`, `MocLocTest.MOC_FillsAtUncrossPrice`, `MocLocTest.LOC_ParticipatesInCloseAtLimitPrice`, `MocLocTest.LOC_OutsideClearingPrice_CancelledAfterUncross`, `OnCloseSessionEndTest` | Release, price or cancellation differ from the rule |
 | `otr` | README, Compliance | Order-to-trade ratio is tracked per participant and a cancel does not inflate it | `AuditFixes.CancelDoesNotInflateOrderToTradeRatio`, `RiskFixture.OtrEngagesThenReleasesAfterWindow` | The ratio counts a cancel, or the throttle neither engages nor releases · no test requests `/otr` |
 | `kill-participant` | README, Compliance | A participant kill cancels every resting order of that participant on every symbol, journaled, before it returns; only a matching credential can send it | `KillSwitchCompletenessTest`, `KillJournalTest`, `GatewayLoginTest` | An order survives the kill under a contended queue, a killed order returns on restart, or another firm's session can kill |
-| `risk-limits` | README | Per-participant max order size, notional and position limits reject at admission | `OrderBookTest.RiskLimits_MaxOrderSize`, `CriticalFixes.NotionalOverflowDoesNotBypassRiskLimit`, `RiskFixture.PositionRejectsOverLimitLong`, `RiskFixture.PositionRejectsOverLimitShort` | An order over a limit is accepted |
+| `risk-limits` | README | Per-participant max order size, notional and position limits reject at admission, a market or stop order valued at the price it can reach | `OrderBookTest.RiskLimits_MaxOrderSize`, `CriticalFixes.NotionalOverflowDoesNotBypassRiskLimit`, `BookNotional.MarketBuyAtTheCollar`, `BookNotional.StopAndMitFromTheirTrigger`, `RiskFixture.PositionRejectsOverLimitLong`, `RiskFixture.PositionRejectsOverLimitShort` | An order over a limit is accepted, or a market or stop order is valued at 0 |
 | `rate-limit` | README | Token-bucket rate limiting rejects at ingress | `SubmitResultTest`, `RateLimiterReconfigureTest` | The second order inside the bucket is accepted |
 | `rate-limit-reload` | Compliance, ProductionReadiness | A reload reconfigures the default rate and burst and clears every bucket | `RateLimiterReconfigureTest` | `reconfigure()` leaves an old bucket or the old rate in force · no ctest sends SIGHUP to the binary |
 | `capacity-monitor` | Compliance | `OrderEngine` runs the capacity monitor with live queue-depth and disk sources | `CapacityMonitorIntegrationTest` | The monitor is not started by the engine or never sees a breach |
 | `submit-field-validation` | README | `submitOrder` refuses an undefined side, order type, time in force or peg type with `InvalidFieldValue` | `EngineFieldValidationTest` | Such a value reaches the book in sync or async mode |
 | `ingress-reject-reasons` | ProductionReadiness | Submit returns explicit reasons for a stopped engine, unknown symbol, bad order and rate limit | `SubmitResultTest` | A reject carries the wrong reason |
 | `gw-reject-responses` | ProductionReadiness | The gateway answers an ingress reject with an error carrying the reason | `GatewayIntegrationTest` | An order for an unknown symbol is acked |
-| `admin-auth` | README, ProductionReadiness | Every admin endpoint but `/health` and `/readyz` needs the bearer token; no token and no opt-out never binds | `AdminAuthTest` | A protected endpoint answers without the right token, or the server binds with neither |
+| `admin-auth` | README, ProductionReadiness | Every admin endpoint but `/health` and `/readyz` needs the bearer token; no token and no opt-out never binds; `/chaos/order` is off unless armed with `OB_CHAOS_TOKEN` and also needs that token | `AdminAuthTest` | A protected endpoint answers without the right token, the server binds with neither, or `/chaos/order` takes a request with a missing or wrong `X-Chaos-Token` |
 | `admin-loopback` | README, ProductionReadiness | The admin port binds 127.0.0.1 unless `--admin-bind` widens it | `AdminBindsLoopbackTest` | The real binary answers on a non-loopback address by default |
 | `admin-readyz` | README, ProductionReadiness | `/readyz` is 503 until the engine is ready and 200 after, without auth | `AdminAuthTest` | Either answer is wrong or needs a token · that `main` opens the port only after replay is not tested |
-| `gw-auth-required` | README | `GatewayServer` refuses to start without credentials unless auth is explicitly off | `GatewayRequiresCredentialsTest` | The real binary serves with an absent, empty, comments-only or unreadable credentials file |
+| `gw-auth-required` | README | `OrderEngine` refuses to start without order-port credentials unless auth is explicitly off | `GatewayRequiresCredentialsTest` | The real binary serves with an absent, empty, comments-only or unreadable credentials file |
+| `boot-requires-controls` | README | `OrderEngine` refuses to start without a price band for every symbol, a journal, and a position limit for every participant its credentials name, unless each is waived by name; a config file that cannot be read is fatal; configured position limits are applied | `EngineRequiresControlsTest`, `ConfigValidationTest` | The real binary serves with any of them missing and unwaived, starts on an unreadable or half-parsed config, or rests an order over a configured position limit · a participant not named by credentials under `--no-participant-auth` is unlimited unless listed |
 | `gw-credentials-malformed` | README | A malformed credentials line, or a participant id of 1024 or more, fails the whole load | `ParticipantAuthTest` | A bad line is skipped or half-applied |
-| `gw-login` | README | A session logs in before its first order, may act only as the participants its credential covers, and a failed login closes it | `GatewayLoginTest`, `OrderOwnershipTest` | An order before login is served, a session claims or cancels for another firm, or a bad secret stays connected |
-| `gw-proto-compat` | README | The native protocol's V1 and V2 payloads are forward and backward compatible | `GatewayProtocolTest` | A V1 payload fails the V2 reader or a V2 payload the V1-compatible one |
+| `gw-login` | README | A session logs in before its first order, may act only as the participants its credential covers, and a failed login closes it | `GatewayLoginTest`, `OrderOwnershipTest`, `OrderEngineGatewayTest` | An order before login is served, a session claims or cancels for another firm, or a bad secret stays connected |
+| `gw-ids-per-participant` | README | Order ids are scoped by participant on the order port, and a participant id of 1024 or more (the kill-all sentinel among them) is refused on every request type | `GatewayParticipantIsolationTest` | Two participants' orders with one id do not both rest, one participant's cancel reaches the other's order, or an out-of-range kill switch cancels anything |
+| `gw-proto-compat` | README | The gateway answers a bare V1 frame and a V2 frame each in its own framing, and refuses an unknown version | `GatewayIntegrationTest` | A V1 or V2 order goes unanswered or is answered in the other framing, or an unknown version is served |
 | `md-shm-no-torn-read` | README | A lapped shared-memory reader never accepts a torn entry | `MarketDataTornReadTest` | An accepted entry's fields disagree with its own sequence |
-| `md-shm-gap-reset` | README, Compliance | The shared-memory feed reports lost entries (`Gap`) and a restarted publisher (`Reset`); `GatewayServer` publishes from one thread | `MarketDataGapTest`, `GatewayMarketDataThreadTest`, `MarketDataSchemaTest` | A lapped subscriber gets an entry instead of `Gap`, a restart goes unnoticed, or a second thread writes the ring |
+| `md-shm-gap-reset` | README, Compliance | The shared-memory feed reports lost entries (`Gap`) and a restarted publisher (`Reset`); `OrderEngine` writes the ring from one thread at a time (the order port's, behind the durability gate) | `MarketDataGapTest`, `GatewayMarketDataThreadTest`, `MarketDataSchemaTest` | A lapped subscriber gets an entry instead of `Gap`, a restart goes unnoticed, or two workers write the ring at once (under TSan) |
 | `md-l2-sequence` | README | A book's `MarketDataUpdate` sequence numbers strictly increase and rebuild its depth | `MarketDataL2ReconstructionTest` | A sequence repeats or goes back, or the rebuilt depth differs from the book |
 | `shadow-mode` | README | Shadow mode flags a FIFO violation and a snapshot divergence, and stays silent on identical streams | `ShadowMode.DetectsFIFOViolationViaTradeDivergence`, `ShadowMode.DetectsBookStateDivergenceViaSnapshot`, `ShadowMode.LargeIdenticalStreamProducesZeroDivergence` | Either detection misses or the 200-order clean run diverges |
-| `sbe-forward-compat` | README | The first 24 bytes of an SBE v2 block equal the v1 encoding | `SbeProtocolTest` | The prefixes differ (library code, roadmap 1.2) |
-| `itch-32bit-admission` | README | A book with an ITCH publisher rejects prices and quantities ITCH cannot carry | `ItchPublisherTest` | A 2^32 price or quantity is accepted (library code, roadmap 1.2) |
-| `itch-ring-drop-resync` | README | A dropped async ITCH event is signalled and followed by a full resync in priority order | `ItchReconstructionTest` | No resync marker, or the re-adds are out of priority order (library code, roadmap 1.2) |
-| `mold-gap-detection` | README | The MoldUDP64 subscriber detects gaps, including silent ones via heartbeat, and reports a session mismatch | `MoldUDP64Test` | A gap or mismatched session is delivered as if in order (library code, roadmap 1.2) |
-| `itch-gap-recovery` | README | A subscriber gap is recovered by SoupBinTCP re-request from the packet journal, byte for byte | `ItchRetransmissionTest` | Replayed messages differ from the journaled ones (library code, roadmap 1.2) |
+| `itch-32bit-admission` | README | A book with an ITCH publisher rejects prices and quantities ITCH cannot carry | `ItchPublisherTest` | A 2^32 price or quantity is accepted (library code, roadmap J3) |
+| `itch-ring-drop-resync` | README | A dropped async ITCH event is signalled and followed by a full resync in priority order | `ItchReconstructionTest` | No resync marker, or the re-adds are out of priority order (library code, roadmap J3) |
+| `mold-gap-detection` | README | The MoldUDP64 subscriber detects gaps, including silent ones via heartbeat, and reports a session mismatch | `MoldUDP64Test` | A gap or mismatched session is delivered as if in order (library code, roadmap J3) |
+| `itch-gap-recovery` | README | A subscriber gap is recovered by SoupBinTCP re-request from the packet journal, byte for byte | `ItchRetransmissionTest` | Replayed messages differ from the journaled ones (library code, roadmap J3) |
+| `journal-halt-freeze` | Overview | Once the journal halts, no book changes: cancels, modifies, replaces, the kill switch, expiry and session transitions are refused or suspended until a restart, and the admin book views refuse | `JournalHaltFreezeTest` | After the halt, a kill, expiry sweep, session transition or session end changes a book (sync or async), the sync gateway answers a kill with Ack, an admin book view is served, or a restart restores other than the orders on disk · the request whose own record failed stays applied in memory (MatchingRules Rule 2.7) |
+
+## Evidence
+
+What each row's tests must exercise. `scripts/check_claims.py` requires every
+non-TLA+ test a row names to contain at least one of these strings in its
+source (the gtest file defining the case, the executable's sources, or the
+script ctest runs), and every row to have an entry. It is a text search: it
+cannot show that a test asserts the claim, only catch one that never reaches
+its subject, as `checkpoint-restore` once cited a test with no checkpoint in it.
+A term written `Test=call` is required of that one test, in addition: it pins
+the assertion a row depends on, so editing it out of the test fails the check.
+
+| ID | Each named test's source contains one of |
+|---|---|
+| `admin-auth` | `Authorization`, `Bearer` |
+| `admin-loopback` | `--admin-bind`, `127.0.0.1` |
+| `admin-readyz` | `/readyz` |
+| `auction-uncross` | `uncross`, `indicative` |
+| `boot-requires-controls` | `--no-price-band`, `--no-risk-limits`, `--no-journal`, `position_limit` |
+| `capacity-monitor` | `CapacityMonitor` |
+| `checkpoint-atomic` | `rewriteAtomically`, `checkpoint(` |
+| `checkpoint-restore` | `checkpoint(`, `gracefulShutdown(`, `CheckpointEquivalenceTest=static_cast<int>(o.status)` |
+| `circuit-breaker` | `VolatilityAuction` |
+| `gtd-replay` | `setExpiryClock` |
+| `gw-auth-required` | `--participant-credentials`, `--no-participant-auth` |
+| `gw-credentials-malformed` | `loadFromFile` |
+| `gw-durable-ack` | `SIGKILL`, `JournalHalted` |
+| `gw-durable-events` | `enableDurableClientAcks` |
+| `gw-exec-reports` | `TradeNotification`, `OrderUpdateNotification`, `GatewayExecutionReportTest=OrderStatus::Triggered` |
+| `gw-ids-per-participant` | `gatewayOrderId`, `kMaxParticipants` |
+| `gw-login` | `sendLogin`, `GATEWAY_FLAG_LOGIN`, `NotOrderOwner` |
+| `gw-proto-compat` | `GATEWAY_PROTOCOL_V2` |
+| `gw-reject-responses` | `rejectReason` |
+| `ingress-reject-reasons` | `SubmitResult` |
+| `itch-32bit-admission` | `InvalidPrice`, `InvalidQuantity` |
+| `itch-gap-recovery` | `ItchRetransmissionService` |
+| `itch-ring-drop-resync` | `esync` |
+| `journal-crc` | `crc`, `CRC`, `orrupt`, `could not be opened safely` |
+| `journal-halt-freeze` | `halted()`, `JournalHalted` |
+| `journal-replay-on-boot` | `--journal`, `replayJournal`, `restart on its own journal` |
+| `journal-torn-tail` | `.torn` |
+| `kill-participant` | `killSwitch`, `KillSwitch` |
+| `market-collar` | `ollar` |
+| `md-l2-sequence` | `sequenceNumber` |
+| `md-shm-gap-reset` | `Gap`, `Reset`, `PollResult`, `MarketDataPublisher`, `ThreadSanitizer` |
+| `md-shm-no-torn-read` | `poll(` |
+| `moc-loc` | `MOC`, `LOC` |
+| `mold-gap-detection` | `Gap`, `gap` |
+| `otr` | `OTR`, `Otr`, `otr` |
+| `peg-never-crosses` | `Peg` |
+| `price-range` | `setPriceRange`, `min_price` |
+| `prorata-lmm-floor` | `DMM`, `LMM` |
+| `rate-limit` | `RateLimit`, `rateLimit` |
+| `rate-limit-reload` | `reconfigure` |
+| `repl-refuses-role` | `--role`, `OB_NODE_ROLE` |
+| `replay-determinism` | `replayJournal` |
+| `risk-limits` | `RiskLimits`, `setPositionLimit`, `otional` |
+| `session-schedule` | `session-schedule`, `SessionScheduler` |
+| `shadow-mode` | `Shadow` |
+| `stp-default-cancel-incoming` | `CancelledBySTP` |
+| `submit-field-validation` | `InvalidFieldValue` |

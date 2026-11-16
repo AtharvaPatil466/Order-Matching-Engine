@@ -3,37 +3,41 @@
 // ConfigValidator — startup config validation with fail-fast semantics (P3-7).
 //
 // A production venue must NEVER start in a silently-degraded state. This module
-// validates the engine's declared instruments, participants and journal path
-// against hard invariants, and on ANY failure the caller prints every specific
-// problem and exit(1)s. There is no partial / best-effort start.
+// checks what OrderEngine applies from its config, and on ANY failure the
+// caller prints every specific problem and exit(1)s. There is no partial /
+// best-effort start, and nothing is validated that the engine then ignores
+// (SURF-4: tick, lot and OTR keys were certified and never applied).
 //
 // Config schema (key=value; see Config.h for the file/env format):
 //
-//   instruments = 1,2,3                      # comma-separated SymbolIds
-//   instrument.<id>.min_price  = <int64>     # fixed-point (PRICE_PRECISION)
-//   instrument.<id>.max_price  = <int64>
-//   instrument.<id>.tick_size  = <int64>     # must be > 0
-//   instrument.<id>.lot_size   = <int64>     # must be > 0
+//   instrument.<s>.min_price  = <int64>     # symbol s's band, in ticks of 0.0001;
+//   instrument.<s>.max_price  = <int64>     # every s in 0 .. --symbols-1
 //
-//   participants = 10,20                     # comma-separated ParticipantIds
+//   participants = 10,20                    # comma-separated ParticipantIds
 //   participant.<id>.position_limit = <int64>   # must be set AND > 0
-//   participant.<id>.otr_limit      = <double>  # must be set AND > 0
 //
-//   journal_path = /var/lib/orderengine/journal.wal   # parent dir must be writable
+//   rate_limit.default_rate  = <int64>      # both > 0, or neither
+//   rate_limit.default_burst = <int64>
 //
-//   worker_cores = 2,3,4,5                   # validateWorkerCores(), below
+//   worker_cores = 2,3,4,5                  # validateWorkerCores(), below
 //
 // Validated invariants:
-//   * per instrument: min_price < max_price, tick_size > 0, lot_size > 0,
-//     and (max_price - min_price) < FlatPriceMap capacity (band fits the map).
-//   * per participant: BOTH position_limit and otr_limit present and > 0.
-//   * journal_path (if set): its parent directory is writable.
+//   * per symbol: both band keys, unless the band is waived (--no-price-band);
+//     0 < min_price < max_price; and the band fits a book's price map. Every
+//     book has a fixed tick of 0.0001 over FlatPriceMap::DEFAULT_CAPACITY
+//     (200,001) levels, so the widest band is 200,000 ticks = 20.0000.
+//     instrument.<s>.tick_size / lot_size are refused: nothing applies them.
+//   * participants: non-empty unless risk limits are waived (--no-risk-limits);
+//     each id below kMaxParticipants with a position_limit > 0.
+//     participant.<id>.otr_limit is refused: the engine's OTR throttle is one
+//     engine-wide setting, not per participant, and the file does not set it.
 
 #include "Config.h"
 #include "FlatPriceMap.h"
 #include "Types.h"
 #include "Utils.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <string>
@@ -50,6 +54,13 @@ struct ConfigValidationResult {
         ok = false;
         errors.push_back(msg);
     }
+};
+
+// Controls OrderEngine may start without, each only when waived by name. A
+// waiver allows the control to be absent; one that is configured still applies.
+struct ControlWaivers {
+    bool priceBand = false;   // --no-price-band / OB_NO_PRICE_BAND=1
+    bool riskLimits = false;  // --no-risk-limits / OB_NO_RISK_LIMITS=1
 };
 
 namespace detail {
@@ -71,12 +82,46 @@ inline std::vector<std::string> splitCsv(const std::string& s) {
     return out;
 }
 
-// The directory that would contain `path`. "" (no slash) maps to "." (cwd).
-inline std::string parentDir(const std::string& path) {
-    auto slash = path.find_last_of('/');
-    if (slash == std::string::npos) return ".";
-    if (slash == 0) return "/";
-    return path.substr(0, slash);
+inline void validateBand(const Config& cfg, size_t symbol, bool waived, size_t capacity,
+                         ConfigValidationResult& result) {
+    const std::string prefix = "instrument." + std::to_string(symbol) + ".";
+    const std::string label = "symbol " + std::to_string(symbol);
+    for (const char* unapplied : {"tick_size", "lot_size"}) {
+        if (cfg.has(prefix + unapplied)) {
+            result.fail(label + ": " + prefix + unapplied + " is not applied: every book "
+                        "has a fixed tick of 0.0001 and no lot size; remove the key");
+        }
+    }
+    const bool hasMin = cfg.has(prefix + "min_price");
+    const bool hasMax = cfg.has(prefix + "max_price");
+    if (!hasMin && !hasMax) {
+        if (!waived) {
+            result.fail(label + " has no price band: set " + prefix + "min_price and " +
+                        prefix + "max_price, or pass --no-price-band (OB_NO_PRICE_BAND=1) to "
+                        "let its first resting order centre the band");
+        }
+        return;
+    }
+    if (!hasMin || !hasMax) {
+        result.fail(label + ": set both " + prefix + "min_price and " + prefix + "max_price");
+        return;
+    }
+    const int64_t minPrice = cfg.getInt64(prefix + "min_price");
+    const int64_t maxPrice = cfg.getInt64(prefix + "max_price");
+    if (minPrice <= 0 || minPrice >= maxPrice) {
+        result.fail(label + ": need 0 < min_price (" + std::to_string(minPrice) +
+                    ") < max_price (" + std::to_string(maxPrice) + ")");
+        return;
+    }
+    const uint64_t span = static_cast<uint64_t>(maxPrice) - static_cast<uint64_t>(minPrice);
+    if (span >= static_cast<uint64_t>(capacity)) {
+        result.fail(label + ": band [" + std::to_string(minPrice) + ", " +
+                    std::to_string(maxPrice) + "] is " + std::to_string(span + 1) +
+                    " price levels; a book holds " + std::to_string(capacity) +
+                    " levels at a fixed tick of 0.0001 (FlatPriceMap), so the widest band is " +
+                    std::to_string(capacity - 1) + " ticks. Narrow the band; per-instrument "
+                    "tick sizes are not supported");
+    }
 }
 
 }  // namespace detail
@@ -85,70 +130,64 @@ inline std::string parentDir(const std::string& path) {
 // directory exists and is writable. Does NOT create the file.
 inline bool isJournalPathWritable(const std::string& path) {
     if (path.empty()) return false;
-    const std::string dir = detail::parentDir(path);
+    const auto slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "." : slash == 0 ? "/" : path.substr(0, slash);
     return ::access(dir.c_str(), W_OK) == 0;
 }
 
-// Validate startup config. Pure — returns every problem found (does not exit),
-// so the caller can print them all at once. `priceMapCapacity` defaults to the
-// engine's real FlatPriceMap band width; overridable for tests.
+// The ids `participants` names; each bad entry is reported in `result`.
+inline std::vector<ParticipantId> configuredParticipants(const Config& cfg,
+                                                         ConfigValidationResult& result) {
+    std::vector<ParticipantId> ids;
+    for (const std::string& tok : detail::splitCsv(cfg.getString("participants", ""))) {
+        uint32_t id = 0;
+        const auto [end, ec] = std::from_chars(tok.data(), tok.data() + tok.size(), id);
+        if (ec != std::errc() || end != tok.data() + tok.size() || id >= kMaxParticipants) {
+            result.fail("participants: '" + tok + "' is not a participant id below " +
+                        std::to_string(kMaxParticipants));
+            continue;
+        }
+        ids.push_back(static_cast<ParticipantId>(id));
+    }
+    return ids;
+}
+
+// rate_limit.default_rate / default_burst: both > 0, or neither set. The
+// default token bucket for every participant (messages a second, and how many
+// it may send at once); unset, there is no rate limit.
+inline void validateRateLimit(const Config& cfg, ConfigValidationResult& result) {
+    if (!cfg.has("rate_limit.default_rate") && !cfg.has("rate_limit.default_burst")) return;
+    if (cfg.getInt64("rate_limit.default_rate") <= 0 ||
+        cfg.getInt64("rate_limit.default_burst") <= 0) {
+        result.fail("rate_limit.default_rate and rate_limit.default_burst must both be set "
+                    "and > 0 (messages a second per participant, and the burst it may send "
+                    "at once), or neither");
+    }
+}
+
+// Validate startup config for an engine of `numSymbols` books. Pure — returns
+// every problem found (does not exit), so the caller can print them all at
+// once. `priceMapCapacity` defaults to the engine's real FlatPriceMap size;
+// overridable for tests.
 inline ConfigValidationResult validateStartupConfig(
-    const Config& cfg,
+    const Config& cfg, size_t numSymbols, ControlWaivers waivers,
     size_t priceMapCapacity = FlatPriceMap::DEFAULT_CAPACITY) {
     ConfigValidationResult result;
 
-    // ── Instruments ──────────────────────────────────────────────────────
-    for (const std::string& idStr : detail::splitCsv(cfg.getString("instruments", ""))) {
-        const std::string prefix = "instrument." + idStr + ".";
-        const std::string label = "instrument " + idStr;
-
-        auto requireKey = [&](const char* field) -> bool {
-            if (!cfg.has(prefix + field)) {
-                result.fail(label + ": missing required field '" + field + "'");
-                return false;
-            }
-            return true;
-        };
-
-        const bool hasMin  = requireKey("min_price");
-        const bool hasMax  = requireKey("max_price");
-        const bool hasTick = requireKey("tick_size");
-        const bool hasLot  = requireKey("lot_size");
-        if (!(hasMin && hasMax && hasTick && hasLot)) continue;
-
-        const int64_t minPrice = cfg.getInt64(prefix + "min_price");
-        const int64_t maxPrice = cfg.getInt64(prefix + "max_price");
-        const int64_t tick     = cfg.getInt64(prefix + "tick_size");
-        const int64_t lot      = cfg.getInt64(prefix + "lot_size");
-
-        if (minPrice >= maxPrice) {
-            result.fail(label + ": min_price (" + std::to_string(minPrice) +
-                        ") must be < max_price (" + std::to_string(maxPrice) + ")");
-        }
-        if (tick <= 0) {
-            result.fail(label + ": tick_size (" + std::to_string(tick) +
-                        ") must be > 0");
-        }
-        if (lot <= 0) {
-            result.fail(label + ": lot_size (" + std::to_string(lot) +
-                        ") must be > 0");
-        }
-        if (maxPrice > minPrice) {
-            const uint64_t span = static_cast<uint64_t>(maxPrice) -
-                                  static_cast<uint64_t>(minPrice);
-            if (span >= static_cast<uint64_t>(priceMapCapacity)) {
-                result.fail(label + ": price range span (" + std::to_string(span) +
-                            ") does not fit FlatPriceMap capacity (" +
-                            std::to_string(priceMapCapacity) + ")");
-            }
-        }
+    for (size_t s = 0; s < numSymbols; ++s) {
+        detail::validateBand(cfg, s, waivers.priceBand, priceMapCapacity, result);
     }
 
-    // ── Participants ─────────────────────────────────────────────────────
-    for (const std::string& idStr : detail::splitCsv(cfg.getString("participants", ""))) {
-        const std::string prefix = "participant." + idStr + ".";
-        const std::string label = "participant " + idStr;
-
+    const size_t errorsBefore = result.errors.size();
+    const std::vector<ParticipantId> participants = configuredParticipants(cfg, result);
+    if (participants.empty() && result.errors.size() == errorsBefore && !waivers.riskLimits) {
+        result.fail("no per-participant risk limits: set participants = <id,...> and "
+                    "participant.<id>.position_limit for each, or pass --no-risk-limits "
+                    "(OB_NO_RISK_LIMITS=1) to trade without position limits");
+    }
+    for (const ParticipantId id : participants) {
+        const std::string prefix = "participant." + std::to_string(id) + ".";
+        const std::string label = "participant " + std::to_string(id);
         if (!cfg.has(prefix + "position_limit")) {
             result.fail(label + ": position_limit not set");
         } else if (cfg.getInt64(prefix + "position_limit") <= 0) {
@@ -156,24 +195,31 @@ inline ConfigValidationResult validateStartupConfig(
                         std::to_string(cfg.getInt64(prefix + "position_limit")) +
                         ") must be > 0");
         }
-
-        if (!cfg.has(prefix + "otr_limit")) {
-            result.fail(label + ": otr_limit not set");
-        } else if (cfg.getDouble(prefix + "otr_limit") <= 0.0) {
-            result.fail(label + ": otr_limit must be > 0");
+        if (cfg.has(prefix + "otr_limit")) {
+            result.fail(label + ": otr_limit is not applied: the order-to-trade throttle "
+                        "is engine-wide, not per participant; remove the key");
         }
     }
-
-    // ── Journal path ─────────────────────────────────────────────────────
-    if (cfg.has("journal_path")) {
-        const std::string jpath = cfg.getString("journal_path");
-        if (!isJournalPathWritable(jpath)) {
-            result.fail("journal_path '" + jpath +
-                        "': parent directory does not exist or is not writable");
-        }
-    }
-
+    validateRateLimit(cfg, result);
     return result;
+}
+
+// Every participant the order port will serve as must have a position limit,
+// unless risk limits are waived. `credentialed` is ParticipantAuth's ids.
+inline void validateRiskCoverage(const Config& cfg,
+                                 const std::vector<ParticipantId>& credentialed,
+                                 bool waived, ConfigValidationResult& result) {
+    if (waived) return;
+    ConfigValidationResult ignored;  // validateStartupConfig reported these
+    const std::vector<ParticipantId> limited = configuredParticipants(cfg, ignored);
+    for (const ParticipantId id : credentialed) {
+        if (std::find(limited.begin(), limited.end(), id) == limited.end()) {
+            result.fail("participant " + std::to_string(id) + " can trade (credentials) but "
+                        "has no position limit: add it to participants and set participant." +
+                        std::to_string(id) + ".position_limit, or pass --no-risk-limits "
+                        "(OB_NO_RISK_LIMITS=1)");
+        }
+    }
 }
 
 // worker_cores = 2,3,4,5 (OB_WORKER_CORES): the CPU each async worker pins

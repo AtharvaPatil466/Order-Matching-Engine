@@ -1,5 +1,8 @@
 // SnapshotContentionBenchmark — can an admin snapshot stall matching?
 //
+// LISTENER: none. The books are bare OrderBooks; the matching side pays no
+// listener work (HonestBenchmark Path A's configuration).
+//
 // WHY THIS EXISTS
 //
 // OrderBook::getSnapshot takes bookLock_ — the SAME std::mutex the whole

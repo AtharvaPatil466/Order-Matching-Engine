@@ -54,10 +54,7 @@ $CXX $FLAGS -c src/FaultInjector.cpp -o bin/FaultInjector.o
 LIB_OBJS="bin/OrderBook.o bin/MatchingEngine.o bin/FaultInjector.o"
 
 echo "Compiling main executable..."
-$CXX $FLAGS src/main.cpp $LIB_OBJS bin/AdminServer.o -o bin/OrderEngine
-
-echo "Compiling gateway server..."
-$CXX $FLAGS src/gateway_main.cpp $LIB_OBJS bin/TcpGateway.o -o bin/GatewayServer
+$CXX $FLAGS src/main.cpp $LIB_OBJS bin/AdminServer.o bin/TcpGateway.o -o bin/OrderEngine
 
 echo "Compiling market data subscriber..."
 $CXX $FLAGS src/md_subscriber.cpp $LIB_OBJS -o bin/MdSubscriber
@@ -83,9 +80,6 @@ $CXX $FLAGS benchmarks/E2EBenchmark.cpp $LIB_OBJS bin/TcpGateway.o bin/AdminServ
 echo "Compiling binary-codec benchmark..."
 $CXX $FLAGS benchmarks/BinaryCodecBenchmark.cpp $LIB_OBJS -o bin/BinaryCodecBenchmark
 
-echo "Compiling gateway protocol tests..."
-$CXX $FLAGS tests/GatewayProtocolTest.cpp $LIB_OBJS -o bin/GatewayProtocolTest
-
 echo "Compiling GTD replay tests..."
 $CXX $FLAGS tests/GTDReplayTest.cpp $LIB_OBJS -o bin/GTDReplayTest
 
@@ -98,11 +92,6 @@ $CXX $FLAGS tests/ConfigTest.cpp $LIB_OBJS -o bin/ConfigTest
 echo "Compiling alert dispatcher tests..."
 $CXX $FLAGS tests/AlertDispatcherTest.cpp $LIB_OBJS -o bin/AlertDispatcherTest
 
-echo "Compiling replication protocol tests..."
-$CXX $FLAGS tests/ReplicationProtocolTest.cpp $LIB_OBJS -o bin/ReplicationProtocolTest
-
-echo "Compiling OUCH session tests..."
-$CXX $FLAGS tests/OuchSessionTest.cpp $LIB_OBJS -o bin/OuchSessionTest
 
 echo "Compiling ITCH publisher tests..."
 $CXX $FLAGS tests/ItchPublisherTest.cpp $LIB_OBJS -o bin/ItchPublisherTest
@@ -113,9 +102,6 @@ $CXX $FLAGS tests/SoupBinTcpTest.cpp $LIB_OBJS -o bin/SoupBinTcpTest
 echo "Compiling MoldUDP64 multicast tests..."
 $CXX $FLAGS tests/MoldUDP64Test.cpp $LIB_OBJS -o bin/MoldUDP64Test
 
-echo "Compiling OUCH TCP gateway tests..."
-$CXX $FLAGS tests/OuchTcpGatewayTest.cpp $LIB_OBJS -o bin/OuchTcpGatewayTest
-
 echo "Compiling ITCH UDP transport tests..."
 $CXX $FLAGS tests/ItchUdpTransportTest.cpp $LIB_OBJS -o bin/ItchUdpTransportTest
 
@@ -125,35 +111,22 @@ $CXX $FLAGS tests/ItchRetransmissionTest.cpp $LIB_OBJS -o bin/ItchRetransmission
 echo "Compiling ITCH market-data feed integration tests..."
 $CXX $FLAGS tests/ItchMarketDataFeedTest.cpp $LIB_OBJS -o bin/ItchMarketDataFeedTest
 
-echo "Compiling SBE protocol tests..."
-$CXX $FLAGS tests/SbeProtocolTest.cpp $LIB_OBJS -o bin/SbeProtocolTest
-
-echo "Compiling SBE session tests..."
-$CXX $FLAGS tests/SbeSessionTest.cpp $LIB_OBJS -o bin/SbeSessionTest
-
 echo "Build successful!"
 echo "To run Engine:           ./bin/OrderEngine"
-echo "To run Gateway:          ./bin/GatewayServer [port]"
 echo "To run MD Subscriber:    ./bin/MdSubscriber [shm_name]"
 echo "To run Tests:            ./bin/ManualTest"
 echo "To run Stress Tests:     ./bin/StressTest"
 echo "To run Property Tests:   ./bin/PropertyTest"
 echo "To run Crash Tests:      ./bin/JournalCrashTest"
 echo "To run E2E Bench:        ./bin/E2EBenchmark"
-echo "To run Protocol Tests:   ./bin/GatewayProtocolTest"
 echo "To run GTD Tests:        ./bin/GTDReplayTest"
 echo "To run MD Compat:        ./bin/MdFeedSchemaCompatTest"
 echo "To run Config Tests:     ./bin/ConfigTest"
 echo "To run Alert Tests:      ./bin/AlertDispatcherTest"
-echo "To run Replication Tests: ./bin/ReplicationProtocolTest"
-echo "To run OUCH Tests:       ./bin/OuchSessionTest"
 echo "To run ITCH Tests:       ./bin/ItchPublisherTest"
 echo "To run SoupBin Tests:    ./bin/SoupBinTcpTest"
 echo "To run Mold Tests:       ./bin/MoldUDP64Test"
-echo "To run OUCH GW Tests:    ./bin/OuchTcpGatewayTest"
 echo "To run ITCH UDP Tests:   ./bin/ItchUdpTransportTest"
 echo "To run Retransmit Tests: ./bin/ItchRetransmissionTest"
 echo "To run MD Feed Tests:    ./bin/ItchMarketDataFeedTest"
-echo "To run SBE Tests:        ./bin/SbeProtocolTest"
-echo "To run SBE Sess Tests:   ./bin/SbeSessionTest"
 echo "To run Codec Bench:      ./bin/BinaryCodecBenchmark"

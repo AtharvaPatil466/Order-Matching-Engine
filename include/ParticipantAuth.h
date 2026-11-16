@@ -4,12 +4,8 @@
 //
 // THE PROBLEM (audit H7)
 //
-// Every gateway takes the participant identity straight off the wire and
-// trusts it:
-//
-//   FIX     FIXParser.h — result.participantId = msg.getInt(SenderCompID)
-//   OUCH    OuchSession — firmOf_[engineId] = o.firm
-//   binary  TcpGateway  — req.participantId, a field in the client's struct
+// The gateway takes the participant identity straight off the wire and
+// trusts it: TcpGateway reads req.participantId, a field in the client's struct.
 //
 // Nothing checks that the sender is entitled to that identity. Anyone who can
 // reach the port can:
@@ -28,9 +24,8 @@
 // WHAT THIS IS
 //
 // A credential store and an authorisation check, deliberately separate from
-// any protocol. Each gateway authenticates at its own session start (FIX
-// Logon, OUCH Login, a binary handshake) and then asks this class one question
-// per order: may this session act as this participant?
+// the protocol. The gateway authenticates at session start (its login frame)
+// and then asks this class one question per order: may this session act as this participant?
 //
 // One credential may cover several participant ids — a firm running multiple
 // desks or strategies legitimately submits under more than one — so
@@ -223,6 +218,17 @@ public:
     // that case, which is the pre-H7 behaviour.
     bool   enabled()          const { return !credentials_.empty(); }
     size_t credentialCount()  const { return credentials_.size(); }
+
+    // Every participant id some credential may act as, ascending, once each.
+    std::vector<ParticipantId> participantIds() const {
+        std::vector<ParticipantId> ids;
+        for (const auto& [user, c] : credentials_) {
+            ids.insert(ids.end(), c.allowed.begin(), c.allowed.end());
+        }
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        return ids;
+    }
 
     // Authenticate a session. Returns an invalid identity on any failure —
     // unknown user and wrong secret are deliberately indistinguishable, so a

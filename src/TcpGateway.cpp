@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cerrno>
+#include <type_traits>
 
 // MSG_NOSIGNAL is Linux-only; on macOS/BSD SO_NOSIGPIPE is set per-socket.
 #ifndef MSG_NOSIGNAL
@@ -20,6 +21,9 @@ static_assert(sizeof(GatewayRequestHeader) == GATEWAY_REQUEST_HEADER_SIZE,
               "GatewayRequestHeader wire size changed");
 static_assert(sizeof(GatewayResponseHeader) == GATEWAY_RESPONSE_HEADER_SIZE,
               "GatewayResponseHeader wire size changed");
+
+
+} // namespace
 
 const char* rejectReasonToString(RejectReason reason) {
     switch (reason) {
@@ -57,8 +61,6 @@ const char* rejectReasonToString(RejectReason reason) {
     return "unknown reject";
 }
 
-} // namespace
-
 void TcpGateway::setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -83,8 +85,12 @@ bool TcpGateway::start(uint16_t port, int backlog) {
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, bindAddress_.c_str(), &addr.sin_addr) != 1) {
+        std::cerr << "TcpGateway: '" << bindAddress_ << "' is not an IPv4 bind address\n";
+        close(listenFd_); listenFd_ = -1;
+        return false;
+    }
 
     if (bind(listenFd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "TcpGateway bind failed: " << std::strerror(errno) << "\n";
@@ -308,6 +314,8 @@ void TcpGateway::eventLoop() {
                 handleClientData(fd);
             }
         }
+        pumpReports();
+        reapOverflowed();
         checkIdleTimeouts();
         if (tick_) tick_();
         // D3: a sync engine journals on this thread; commit before blocking.
@@ -336,6 +344,8 @@ void TcpGateway::eventLoop() {
                 }
             }
         }
+        pumpReports();
+        reapOverflowed();
         checkIdleTimeouts();
         if (tick_) tick_();
         // D3: a sync engine journals on this thread; commit before blocking.
@@ -636,7 +646,30 @@ bool TcpGateway::handleLogin(int fd, ClientState& state,
     return true;
 }
 
-void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& req) {
+void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& wireReq) {
+    // MIDS-7: with auth off a participant id is only a claim, and the top of
+    // its range holds the engine's sentinels (kKillAllParticipants is one).
+    // No real participant is at or above kMaxParticipants, so nothing there
+    // is forwarded, whatever the request type.
+    const char* outOfRange = nullptr;
+    if (wireReq.participantId >= kMaxParticipants) {
+        outOfRange = "participant id out of range";
+    } else if (wireReq.orderId > kMaxClientOrderId) {
+        outOfRange = "order id out of range";
+    }
+    if (outOfRange) {
+        GatewayResponse refused{};
+        refused.type = GatewayResponse::Type::Error;
+        refused.orderId = wireReq.orderId;
+        refused.rejectReason = RejectReason::InvalidFieldValue;
+        std::snprintf(refused.errorMessage, sizeof(refused.errorMessage), "%s", outOfRange);
+        sendResponse(fd, refused);
+        return;
+    }
+    // MIDS-3: from here on the order id is the participant's, not the venue's.
+    OrderRequest req = wireReq;
+    req.orderId = gatewayOrderId(wireReq.participantId, wireReq.orderId);
+
     // H7: req.participantId is a claim the client makes about itself. With a
     // credential store configured, the session has to have logged in and the
     // credential has to cover the participant being claimed — otherwise any
@@ -670,12 +703,23 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
                              .kv("request_type", (long long)static_cast<int>(req.type)));
             GatewayResponse denied{};
             denied.type = GatewayResponse::Type::Error;
-            denied.orderId = req.orderId;
+            denied.orderId = wireReq.orderId;
             denied.rejectReason = RejectReason::None;
             std::snprintf(denied.errorMessage, sizeof(denied.errorMessage), "%s", denial);
             sendResponse(fd, denied);
             return;
         }
+    }
+
+    // With auth off the claim is all there is: this session hears that
+    // participant's execution reports.
+    // By value: OrderRequest is packed, so a reference to one of its fields
+    // (std::find's argument, a ?: of two lvalues) is a misaligned reference.
+    const ParticipantId participant = req.participantId;
+    if (!(auth_ && auth_->enabled()) &&
+        std::find(state.claimed.begin(), state.claimed.end(), participant) ==
+            state.claimed.end()) {
+        state.claimed.push_back(participant);
     }
 
     SubmitResult result = SubmitResult::rejected(RejectReason::EngineStopped);
@@ -685,7 +729,7 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
     // against it buys nothing and would reject clients that never filled the
     // field in — the check above has already established which case this is.
     const ParticipantId requester =
-        (auth_ && auth_->enabled()) ? req.participantId : kAnyParticipant;
+        (auth_ && auth_->enabled()) ? participant : kAnyParticipant;
 
     switch (req.type) {
         case OrderRequest::Type::NewOrder:
@@ -714,8 +758,27 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
             break;
     }
 
+    // An async engine has only queued the request. Answer once a worker has run
+    // it, and turn a write the journal refused into a reject: with an Immediate
+    // journal (OrderEngine) an Ack then means the entry is on disk, so kill -9
+    // cannot lose it. It does NOT mean the book took the order: a reject the
+    // worker decides (post-only, FOK, a cancel of an unknown id) still answers
+    // Ack until sessions hear about their orders (roadmap 1.9-I7).
+    //
+    // ponytail: this thread waits out one fsync per request, and every worker's
+    // queue with it. Roadmap D7 (a per-worker gate releasing acks at the durable
+    // ordinal) is the upgrade path once 0.4 has measured what it buys.
+    // The halt check runs on a sync engine too: its kill switch has no result
+    // of its own, and on a halted journal it cancels nothing (DA-1).
+    if (result.isAccepted()) {
+        if (engine_.isAsync()) engine_.waitForDrain();
+        if (const Journal* j = engine_.getJournal(); j && j->halted()) {
+            result = SubmitResult::rejected(RejectReason::JournalHalted);
+        }
+    }
+
     GatewayResponse resp{};
-    resp.orderId = req.orderId;
+    resp.orderId = wireReq.orderId;
     // Collapse NotOrderOwner into OrderNotFound before the raw enum byte goes
     // out: this field IS the wire value, so leaking the distinction here would
     // undo the point of keeping them separate internally.
@@ -730,6 +793,195 @@ void TcpGateway::processMessage(int fd, ClientState& state, const OrderRequest& 
                       rejectReasonToString(clientVisibleReason(result.rejectReason)));
     }
     sendResponse(fd, resp);
+    // The request has run (waitForDrain above): its reports follow its answer.
+    pumpReports();
+}
+
+// ─── Execution reports ──────────────────────────────────────────────────────
+
+void TcpGateway::enableExecutionReports() {
+    if (reports_) return;
+    reports_ = std::make_unique<MpscQueue<Report>>(kReportQueueSlots);
+    for (SymbolId sym : engine_.symbolIds()) {
+        OrderBook* book = engine_.getOrderBook(sym);
+        if (!book) continue;
+        auto tap = std::make_unique<BookTap>();
+        tap->gw = this;
+        tap->symbol = sym;
+        tap->downstream = book->eventListener();
+        // Orders already resting (replayed) report their fills from where
+        // they stand. The workers have not started, so the walk is safe.
+        book->forEachOrder([&](const Order& o) {
+            legs_[o.id] = Leg{o.cumQty, o.remainingQty};
+        });
+        book->setEventListener(tap.get());
+        taps_.push_back(std::move(tap));
+    }
+    engine_.setStepEndHook([this](size_t worker) { onStepEnd(worker); });
+}
+
+// Worker thread. A sync engine runs on the caller's thread with no step end,
+// so it keeps its listener as it was and gets no reports.
+template <typename E>
+void TcpGateway::capture(const BookTap& tap, Report::Kind kind, const E& e) {
+    if (!engine_.isAsync()) {
+        if (!tap.downstream) return;
+        if constexpr (std::is_same_v<E, Trade>) tap.downstream->onTrade(e);
+        else if constexpr (std::is_same_v<E, OrderUpdate>) tap.downstream->onOrderUpdate(e);
+        else if constexpr (std::is_same_v<E, MarketDataUpdate>) tap.downstream->onMarketData(e);
+        else if constexpr (std::is_same_v<E, BookVisibleUpdate>) tap.downstream->onBookVisible(e);
+        else tap.downstream->onUncross(e);
+        return;
+    }
+    Report r;
+    r.kind = kind;
+    r.worker = static_cast<uint32_t>(engine_.workerOf(tap.symbol));
+    r.downstream = tap.downstream;
+    r.event = e;
+    if (!reports_->push(r)) reportsDropped_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Worker thread, after each request: its events are releasable once the
+// journal has what produced them. A lost StepEnd (full queue) only merges
+// this request's events into the next one's, which is later, never earlier.
+void TcpGateway::onStepEnd(size_t worker) {
+    Report r;
+    r.kind = Report::Kind::StepEnd;
+    r.worker = static_cast<uint32_t>(worker);
+    r.durable = engine_.syncJournalForReports();
+    if (!reports_->push(r)) reportsDropped_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TcpGateway::pumpReports() {
+    if (!reports_) return;
+    Report r;
+    while (reports_->pop(r)) {
+        if (r.worker >= held_.size()) held_.resize(r.worker + 1);
+        std::vector<Report>& held = held_[r.worker];
+        if (r.kind != Report::Kind::StepEnd) {
+            held.push_back(std::move(r));
+            continue;
+        }
+        if (r.durable) {
+            for (const Report& e : held) deliver(e);
+        } else {
+            // The journal refused this request: nobody may hear about it.
+            reportsWithheld_.fetch_add(held.size(), std::memory_order_relaxed);
+        }
+        held.clear();
+    }
+    // No reaping here: processMessage() calls this while feedBytes() still
+    // holds its session. The event loop reaps between passes.
+}
+
+void TcpGateway::deliver(const Report& r) {
+    EventListener* down = r.downstream;
+    switch (r.kind) {
+    case Report::Kind::Trade: {
+        const Trade& t = std::get<Trade>(r.event);
+        if (down) down->onTrade(t);
+        deliverTrade(t, t.buyOrderId, Side::Buy);
+        deliverTrade(t, t.sellOrderId, Side::Sell);
+        break;
+    }
+    case Report::Kind::Update: {
+        const OrderUpdate& u = std::get<OrderUpdate>(r.event);
+        if (down) down->onOrderUpdate(u);
+        deliverUpdate(u);
+        break;
+    }
+    case Report::Kind::MarketData:
+        if (down) down->onMarketData(std::get<MarketDataUpdate>(r.event));
+        break;
+    case Report::Kind::BookVisible:
+        if (down) down->onBookVisible(std::get<BookVisibleUpdate>(r.event));
+        break;
+    case Report::Kind::Uncross:
+        if (down) down->onUncross(std::get<UncrossReport>(r.event));
+        break;
+    case Report::Kind::StepEnd:
+        break;
+    }
+}
+
+void TcpGateway::deliverTrade(const Trade& t, OrderId own, Side side) {
+    Leg& leg = legs_[own];
+    leg.cum += t.quantity;
+    leg.leaves = leg.leaves > t.quantity ? leg.leaves - t.quantity : 0;
+
+    GatewayResponse resp{};
+    resp.type = GatewayResponse::Type::TradeNotification;
+    resp.orderId = clientOrderId(own);
+    resp.sequenceId = t.sequenceNumber;
+    resp.trade = t;
+    // The contra side stays anonymous.
+    if (side == Side::Buy) {
+        resp.trade.buyOrderId = resp.orderId;
+        resp.trade.sellOrderId = 0;
+        resp.trade.sellerId = 0;
+    } else {
+        resp.trade.sellOrderId = resp.orderId;
+        resp.trade.buyOrderId = 0;
+        resp.trade.buyerId = 0;
+    }
+    resp.orderUpdate.orderId = resp.orderId;
+    resp.orderUpdate.status = leg.leaves == 0 ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+    resp.orderUpdate.filledQty = leg.cum;
+    resp.orderUpdate.remainingQty = leg.leaves;
+    resp.orderUpdate.lastFillPrice = t.price;
+    resp.orderUpdate.timestamp = t.timestamp;
+    resp.orderUpdate.sequenceNumber = t.sequenceNumber;
+    sendToParticipant(gatewayOrderOwner(own), resp);
+}
+
+void TcpGateway::deliverUpdate(const OrderUpdate& u) {
+    if (isTerminalStatus(u.status)) {
+        legs_.erase(u.orderId);
+    } else {
+        legs_[u.orderId] = Leg{u.filledQty, u.remainingQty};
+    }
+    GatewayResponse resp{};
+    resp.type = GatewayResponse::Type::OrderUpdateNotification;
+    resp.orderId = clientOrderId(u.orderId);
+    resp.rejectReason = clientVisibleReason(u.rejectReason);
+    resp.sequenceId = u.sequenceNumber;
+    resp.orderUpdate = u;
+    resp.orderUpdate.orderId = resp.orderId;
+    resp.orderUpdate.rejectReason = resp.rejectReason;
+    sendToParticipant(gatewayOrderOwner(u.orderId), resp);
+}
+
+bool TcpGateway::serves(const ClientState& state, ParticipantId p) const {
+    if (auth_ && auth_->enabled()) return state.identity.valid() && state.identity.permits(p);
+    return std::find(state.claimed.begin(), state.claimed.end(), p) != state.claimed.end();
+}
+
+// ponytail: a scan of every session per report; index sessions by
+// participant if a deployment runs enough sessions for it to show.
+void TcpGateway::sendToParticipant(ParticipantId p, const GatewayResponse& resp) {
+    bool sent = false;
+    for (auto& [fd, state] : clients_) {
+        if (state.writeBufOverflowed || !serves(state, p)) continue;
+        sendResponse(fd, resp, /*unsolicited=*/true);
+        sent = true;
+    }
+    if (!sent) {
+        // Decision: no live session, no report. Nothing replays it on
+        // reconnect yet (a drop copy or a replay is the follow-up).
+        reportsUndelivered_.fetch_add(1, std::memory_order_relaxed);
+        static auto& kUndelivered = MetricsRegistry::instance().counter(
+            "gateway_reports_undelivered_total",
+            "Execution reports for a participant with no live session");
+        kUndelivered.increment();
+    }
+}
+
+// A session that stopped reading is disconnected rather than buffered for.
+void TcpGateway::reapOverflowed() {
+    std::vector<int> slow;
+    for (const auto& [fd, state] : clients_)
+        if (state.writeBufOverflowed) slow.push_back(fd);
+    for (int fd : slow) removeClient(fd);
 }
 
 void TcpGateway::removeClient(int fd) {
@@ -746,7 +998,7 @@ void TcpGateway::removeClient(int fd) {
     kDiscTotal.increment();
 }
 
-bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp) {
+bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp, bool unsolicited) {
     auto it = clients_.find(fd);
     if (it == clients_.end()) return false;
     ClientState& state = it->second;
@@ -756,7 +1008,7 @@ bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp) {
     uint32_t payloadLen = sizeof(GatewayResponse);
     if (state.protocolVersion == GATEWAY_PROTOCOL_V2) {
         v2.header.version = GATEWAY_PROTOCOL_V2;
-        v2.header.clientRequestId = state.lastClientRequestId;
+        v2.header.clientRequestId = unsolicited ? 0 : state.lastClientRequestId;
         v2.response = resp;
         payload = reinterpret_cast<const char*>(&v2);
         payloadLen = sizeof(v2);
@@ -786,8 +1038,11 @@ bool TcpGateway::sendResponse(int fd, const GatewayResponse& resp) {
         return true;
     }
 
-    // Try direct send first
-    ssize_t n = send(fd, buf.data(), buf.size(), MSG_DONTWAIT);
+    // Try direct send first. MSG_NOSIGNAL: a peer that has reset the
+    // connection turns this send into SIGPIPE on Linux, which kills the
+    // process — an execution report to a session that just vanished, or the
+    // second answer to a client that pipelined two requests and closed.
+    ssize_t n = send(fd, buf.data(), buf.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
     if (n == static_cast<ssize_t>(buf.size())) {
         return true; // full write succeeded
     }

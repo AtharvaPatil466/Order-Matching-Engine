@@ -1,6 +1,6 @@
 // WideDifferentialFuzz — the widened differential fuzzer (roadmap 1.3-C1,
-// 1.5 "Done"; user decision 2 of 2026-10-05: a NON-BLOCKING CI lane until
-// 1.6-F5 and an event-order spec land, then blocking).
+// 1.5 "Done"; user decision 2 of 2026-10-05: a blocking CI lane once 1.6-F5
+// and the event-order spec, MatchingRules Rule 2.5, landed).
 //
 // Recovered from the audit's W/gtdiff/wide.cpp, which found GTDIFF-1/2. Against
 // a price-time reference it drives three symbols with: STP (participants not
@@ -8,15 +8,13 @@
 // CancelIncoming), PostOnly, modify, cancelReplace (newQty is the new TOTAL,
 // 1.5-E1), icebergs (--ice; display >= ceil(qty / kMaxIcebergSlices), 1.5-E2),
 // kill switch (--kill), a 19-tick grid, occasional huge quantities, and an
-// execution-report check (OrderUpdate.filledQty == that order's trades). Each
-// step also compares ladders, FIFO queues, per-order leaves and cumQty, and
-// validateIntegrity.
+// execution-report check (each OrderUpdate.filledQty == that order's trades
+// delivered before it, Rule 2.5). Each step also compares ladders, FIFO
+// queues, per-order leaves and cumQty, and validateIntegrity.
 //
-// Exits 1 on any divergence. Known classes at the time of writing: the maker's
-// Filled update dispatched before its trade (GTDIFF-7). FOK + STP partial
-// fills (GTDIFF-2) are fixed by 1.6-F5; --fok-engine now models the engine
-// BEFORE that fix (an STP-blind FOK check), so it diverges by design.
-// Not built into ctest: CI runs it in its own continue-on-error job.
+// Exits 1 on any divergence; there are no known classes. --fok-engine models
+// the engine BEFORE 1.6-F5 (an STP-blind FOK check, GTDIFF-2), so it diverges
+// by design. Not built into ctest: CI runs it in its own blocking job.
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 #include <algorithm>
@@ -140,13 +138,15 @@ struct Ref {
 // ---------------- engine tap ----------------
 struct Tap : EventListener {
   std::vector<Tr> trades; std::map<std::pair<int, Price>, std::vector<OrderId>> queues;
-  std::map<OrderId, Quantity> cum; std::string execErr; struct Rep { OrderId id; Quantity f; int st; }; std::vector<Rep> reports;
-  void checkReports() { for (auto& r : reports) if (execErr.empty() && r.f != cum[r.id]) { char b[160]; std::snprintf(b, sizeof b, "exec report id=%llu status=%d filledQty=%llu but trades sum=%llu", (unsigned long long)r.id, r.st, (unsigned long long)r.f, (unsigned long long)cum[r.id]); execErr = b; } reports.clear(); }
+  // seen: the order's trades delivered BEFORE the report (Rule 2.5), captured
+  // on arrival; comparing at op end could not see a report ahead of its trade.
+  std::map<OrderId, Quantity> cum; std::string execErr; struct Rep { OrderId id; Quantity f; int st; Quantity seen; }; std::vector<Rep> reports;
+  void checkReports() { for (auto& r : reports) if (execErr.empty() && r.f != r.seen) { char b[160]; std::snprintf(b, sizeof b, "exec report id=%llu status=%d filledQty=%llu but trades delivered before it=%llu", (unsigned long long)r.id, r.st, (unsigned long long)r.f, (unsigned long long)r.seen); execErr = b; } reports.clear(); }
   void onTrade(const Trade& t) override { trades.push_back({t.buyOrderId, t.sellOrderId, t.price, t.quantity}); cum[t.buyOrderId] += t.quantity; cum[t.sellOrderId] += t.quantity; }
   void onOrderUpdate(const OrderUpdate& u) override {
     if (u.status == OrderStatus::Rejected) return;
     if (u.status == OrderStatus::Filled || u.status == OrderStatus::PartiallyFilled || u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP) {
-      reports.push_back({u.orderId, u.filledQty, (int)u.status});
+      reports.push_back({u.orderId, u.filledQty, (int)u.status, cum[u.orderId]});
     }
     if (isTerminalStatus(u.status)) erase(u.orderId);
   }

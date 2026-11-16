@@ -8,19 +8,22 @@ services:
     command: ["--threads", "4", "--port", "8080", "--symbols", "4"]
     ports:
       - "8080:8080"    # Admin HTTP
-      - "9001:9001"    # FIX Gateway
+      - "9001:9001"    # Order entry (TcpGateway)
+    # The market-data ring is shared memory; md-subscriber joins this namespace.
+    ipc: shareable
     volumes:
       - journal-primary:/app/journal
-      - ./config/engine.conf.example:/app/config/engine.conf:ro
+      # Loaded through the image's OB_CONFIG_PATH. Every participant id in the
+      # credentials file needs a position limit here, or the engine refuses to
+      # start; the example covers 100 and 101.
+      - ${OB_ENGINE_CONFIG:-./config/engine.conf.example}:/app/config/engine.conf:ro
+      # Fail-closed, like the admin token: no credentials file, no engine.
+      - ${OB_PARTICIPANT_CREDENTIALS_FILE:?set OB_PARTICIPANT_CREDENTIALS_FILE — a file of user:secret:id[,id...] lines}:/app/config/participants.cred:ro
     environment:
-      - OB_THREADS=4
+      - OB_PARTICIPANT_CREDENTIALS=/app/config/participants.cred
       - OB_JOURNAL_PATH=/app/journal/primary.wal
-      # No OB_NODE_ROLE: replication is disabled unless explicitly acknowledged
-      # (--allow-unsafe-replication) because of known defects REPL-1..6 — a
-      # deposed primary is never fenced and a promoted backup can execute
-      # orders twice. This deployment is a single node; the backup service
-      # that used to follow this one is gone. deploy/chaos still runs the
-      # 1+1 topology, opted in, because it exists to exercise that path.
+      # A single node that recovers from its journal. There is no replication
+      # (removed, roadmap 1.1 R1), and OB_NODE_ROLE refuses to boot.
       # Fail-closed: compose refuses to start without a token so the
       # admin API is never exposed unauthenticated. Set in .env or:
       #   OB_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up
@@ -37,7 +40,12 @@ services:
     build: .
     container_name: orderengine-mdsub
     entrypoint: ["/app/MdSubscriber"]
-    command: ["orderengine_md"]
+    command: ["orderbook_md"]
+    # Reads the orderbook_md segment the engine creates, in the engine's IPC
+    # namespace. Not its network one: the image's /health check would fail here.
+    ipc: "service:engine-primary"
+    healthcheck:
+      disable: true
     depends_on:
       engine-primary:
         condition: service_healthy

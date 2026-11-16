@@ -8,7 +8,6 @@
 //   - Queue depth > 90% of capacity
 //   - Memory usage > 95% of limit
 //   - Journal disk usage > 90%
-//   - Replication lag > 100ms
 //
 // Every breach is emitted as a `capacity_alert` event on the structured log
 // sink (StructuredLog.h), which needs no configuration and is where the rest
@@ -37,7 +36,6 @@ struct CapacityThresholds {
     double queueDepthPct{0.90};       // Alert when queue > 90% full
     double memoryUsagePct{0.95};      // Alert when memory > 95% used
     double journalDiskPct{0.90};      // Alert when disk > 90% used
-    uint64_t replicationLagMs{100};   // Alert when repl lag > 100ms
     uint64_t checkIntervalMs{1000};   // Check every second
 };
 
@@ -47,7 +45,6 @@ public:
     using QueueDepthFn = std::function<double()>;       // Returns 0.0–1.0
     using MemoryUsageFn = std::function<double()>;      // Returns 0.0–1.0
     using DiskUsageFn = std::function<double()>;        // Returns 0.0–1.0
-    using ReplicationLagFn = std::function<uint64_t()>; // Returns ms
 
     CapacityMonitor() = default;
 
@@ -64,7 +61,6 @@ public:
     void setQueueDepthCallback(QueueDepthFn fn) { queryQueueDepth_ = std::move(fn); }
     void setMemoryUsageCallback(MemoryUsageFn fn) { queryMemoryUsage_ = std::move(fn); }
     void setDiskUsageCallback(DiskUsageFn fn) { queryDiskUsage_ = std::move(fn); }
-    void setReplicationLagCallback(ReplicationLagFn fn) { queryReplLag_ = std::move(fn); }
 
     void start() {
         if (running_.exchange(true)) return;
@@ -143,17 +139,6 @@ private:
                     AlertLevel::Critical, disk);
             }
         }
-
-        // Replication lag
-        if (queryReplLag_) {
-            uint64_t lag = queryReplLag_();
-            if (lag > thresholds_.replicationLagMs) {
-                raiseAlert("replication_lag",
-                    "Replication lag at " + std::to_string(lag) +
-                    "ms (threshold: " + std::to_string(thresholds_.replicationLagMs) + "ms)",
-                    AlertLevel::Critical, static_cast<double>(lag) / 1000.0);
-            }
-        }
     }
 
     void raiseAlert(const std::string& resource, const std::string& message,
@@ -203,7 +188,6 @@ private:
     QueueDepthFn queryQueueDepth_;
     MemoryUsageFn queryMemoryUsage_;
     DiskUsageFn queryDiskUsage_;
-    ReplicationLagFn queryReplLag_;
 
     std::atomic<bool> running_{false};
     std::thread worker_;

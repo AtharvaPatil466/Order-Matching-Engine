@@ -9,10 +9,7 @@
 // released exposure that was never reserved, moving the position the wrong way.
 //
 // Each probe runs on the engine as it is, on one restarted from the plain
-// journal, on one restarted from a checkpoint, and on a backup that applied
-// the journal record by record and was promoted; all four must agree. A
-// JournalFollower hosts bare books with no engine, so it has no engine-wide
-// limit to keep.
+// journal and on one restarted from a checkpoint; all three must agree.
 
 #include "MatchingEngine.h"
 #include "TempPath.h"
@@ -32,13 +29,12 @@ constexpr ParticipantId kBuyer = 7;
 constexpr ParticipantId kSeller = 8;
 constexpr int64_t kLimit = 12;
 
-enum class Life { Uninterrupted, Replayed, Checkpointed, Applied };
+enum class Life { Uninterrupted, Replayed, Checkpointed };
 const char* name(Life l) {
     switch (l) {
     case Life::Uninterrupted: return "uninterrupted";
     case Life::Replayed:      return "replayed";
     case Life::Checkpointed:  return "checkpointed";
-    case Life::Applied:       return "applied";   // applyReplicatedEntry, then promoted
     }
     return "";
 }
@@ -86,17 +82,6 @@ long long after(Life life, const Probe& probe) {
         result = probe(restarted);
         restarted.stop();
     }
-    if (life == Life::Applied) {
-        MatchingEngine backup;
-        configure(backup);
-        backup.setReplayModeAllBooks(true);
-        Journal journal(path);
-        for (const JournalEntry& e : journal.readAll(true, true)) backup.applyReplicatedEntry(e);
-        backup.setReplayModeAllBooks(false);   // promoted
-        backup.start();
-        result = probe(backup);
-        backup.stop();
-    }
     std::remove(path.c_str());
     return result;
 }
@@ -118,7 +103,7 @@ long long cancelProbe(MatchingEngine& e) {
 
 int check(const char* what, const Probe& probe, long long want) {
     int failures = 0;
-    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed, Life::Applied}) {
+    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed}) {
         const long long got = after(life, probe);
         std::printf("  %-13s %-36s %lld%s\n", name(life), what, got, got == want ? "" : "  <- differs");
         failures += got != want;

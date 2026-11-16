@@ -145,14 +145,14 @@ void test_invalid_lines() {
     {
         std::ofstream out(path);
         out << "valid_key = valid_value\n";
-        out << "no_equals_sign\n";  // should warn but not crash
+        out << "no_equals_sign\n";  // the whole file is refused, not loaded around it
         out << "another = good\n";
     }
 
     Config cfg;
-    assert(cfg.loadFile(path));
-    assert(cfg.getString("valid_key") == "valid_value");
-    assert(cfg.getString("another") == "good");
+    assert(!cfg.loadFile(path));
+    assert(!cfg.has("valid_key"));
+    assert(!cfg.has("another"));
 
     std::remove(path.c_str());
     PASS();

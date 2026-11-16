@@ -18,7 +18,7 @@ target_link_libraries(HonestBenchmark PRIVATE OrderMatcher)
 add_executable(MemoryProbe MemoryProbe.cpp)
 target_link_libraries(MemoryProbe PRIVATE OrderMatcher)
 
-# Binary-codec microbenchmark — comparing OUCH / ITCH / SBE encode rates
+# Binary-codec microbenchmark — ITCH encode rate
 add_executable(BinaryCodecBenchmark BinaryCodecBenchmark.cpp)
 target_link_libraries(BinaryCodecBenchmark PRIVATE OrderMatcher)
 
@@ -34,6 +34,13 @@ target_link_libraries(RealisticFlowBenchmark PRIVATE OrderMatcher)
 # P2-19: coordinated-omission correction (latency vs INTENDED start at fixed rate)
 add_executable(CoordinatedOmissionBenchmark CoordinatedOmissionBenchmark.cpp)
 target_link_libraries(CoordinatedOmissionBenchmark PRIVATE OrderMatcher)
+# The benchmark exits 1 if any timed op did not do its job. 80k orders is the
+# smallest of 20k/30k/40k/50k/60k/80k on which the default-sized pool failed
+# (6,259 new orders shed; scripts/bench_x86.sh runs 200k), and it stays inside
+# the timeout under ASan.
+add_test(NAME CoordinatedOmissionWorkloadTest
+         COMMAND CoordinatedOmissionBenchmark --orders 80000 --seed 7 --rate 6000000)
+set_tests_properties(CoordinatedOmissionWorkloadTest PROPERTIES TIMEOUT 120 LABELS "project")
 
 # P2-20: cold-cache variant (evict working set before each timed op)
 add_executable(ColdCacheBenchmark ColdCacheBenchmark.cpp)

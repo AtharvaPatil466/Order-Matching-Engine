@@ -223,6 +223,9 @@ public:
     OrderList* bestLevel() {
         return hasBest_ ? &slabEntry(slots_[bestIdx_]) : nullptr;
     }
+    const OrderList* bestLevel() const {
+        return hasBest_ ? &slabEntry(slots_[bestIdx_]) : nullptr;
+    }
 
     void eraseBest() {
         if (!hasBest_) {

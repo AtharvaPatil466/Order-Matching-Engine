@@ -14,7 +14,7 @@ Release enables `-O3` plus an architecture target chosen by `OB_ARCH`
 | `OB_ARCH` | Effect | Used by |
 |---|---|---|
 | `native` (default) | `-march=native -mtune=native` | local builds and every benchmark figure in `BENCHMARKS.md` |
-| a baseline, e.g. `x86-64-v3` | `-march=<value>`, no `-mtune` | `Dockerfile` and the chaos image |
+| a baseline, e.g. `x86-64-v3` | `-march=<value>`, no `-mtune` | `Dockerfile` |
 | empty | no architecture flags | portability checks |
 
 **The default is `native` on purpose, and the deployment images do not use it.**

@@ -5,6 +5,7 @@
 #include "Metrics.h"         // for the per-symbol pool-utilization gauge (P3-8)
 #include "StructuredLog.h"
 #include <algorithm>
+#include <chrono>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -101,6 +102,7 @@ OrderBook::OrderBook(SymbolId symbolId, MatchAlgorithm algo, size_t orderPoolCap
       volatilityDwellNs_(resolveVolatilityDwellNs()),
       participantRisk_(1024),
       tradeHistory_(resolveTradeHistoryCapacity()) {
+    proRataScratch_.reserve(kProRataReserve);  // 16 KiB: a pro-rata level of 1024 allocates nothing
     // orderLookup_ is sized FROM THE POOL ITSELF — orderPool_ is declared
     // before it in OrderBook.h precisely so this read is well-defined — so it
     // holds every order the pool can hand out with room to spare (50% load
@@ -166,6 +168,11 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
                                    Quantity remainingQty, Price lastFillPrice, RejectReason reason) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
+    // No real listener wired (the flag is set by setEventListener /
+    // setEngineListener): no update, no clock read, no dispatch (PERF-9). The
+    // sequence number is still drawn, so numbering does not depend on whether
+    // anyone listens.
+    if (!hasTradeListener_) { ++nextSequenceNumber_; return; }
     OrderUpdate u{};
     u.orderId = orderId;
     u.status = status;
@@ -175,12 +182,8 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
     u.rejectReason = reason;
     u.timestamp = nowNs();
     u.sequenceNumber = nextSequenceNumber_++;
-    // Skip the vtable dispatch when no real listener is wired (the flag is set
-    // by setEventListener/setEngineListener). Same guard as the onTrade path.
-    if (hasTradeListener_) {
-        listener_->onOrderUpdate(u);
-        engineListener_->onOrderUpdate(u);
-    }
+    listener_->onOrderUpdate(u);
+    engineListener_->onOrderUpdate(u);
 #else
     (void)orderId; (void)status; (void)filledQty; (void)remainingQty; (void)lastFillPrice; (void)reason;
 #endif
@@ -189,33 +192,27 @@ void OrderBook::notifyOrderUpdate(OrderId orderId, OrderStatus status, Quantity 
 void OrderBook::notifyMarketData(MarketDataUpdate::Action action, Side side, Price price) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
-    // Early-out before the O(level) walk below. The walk used to run even with
-    // no listener attached, only to discard the result at the dispatch check —
-    // pure waste on the benchmark configuration, which runs listener-free.
-    if (!hasTradeListener_) return;
+    // As notifyOrderUpdate: the sequence number is drawn with or without a
+    // listener (PERF-9). It used to be drawn only with one, so a book's trade
+    // sequence numbers depended on whether a feed was attached.
+    if (!hasTradeListener_) { ++nextSequenceNumber_; return; }
 
     MarketDataUpdate update{};
     update.action = action;
     update.side = side;
     update.timestamp = nowNs();
     update.sequenceNumber = nextSequenceNumber_++;
-
-    PriceLevel lvl{};
-    lvl.price = price;
-
-    auto& book = (side == Side::Buy) ? bids_ : asks_;
-    const OrderList* list = book.at(price);
-    if (list) {
-        for (Order* o = list->front(); o; o = o->next) {
-            if (!o->isHidden) {
-                lvl.totalQuantity += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
-                lvl.orderCount++;
-            }
-        }
+    update.level.price = price;
+    // The level's totals are maintained by OrderList on every change, so this
+    // is O(1). It used to walk every order at the price, which made each add,
+    // fill and cancel O(level depth) whenever a listener was attached — and
+    // the shipped binary always attaches one (PERF-1).
+    const auto& book = (side == Side::Buy) ? bids_ : asks_;
+    if (const OrderList* list = book.at(price)) {
+        update.level.totalQuantity = list->visibleQty();
+        update.level.orderCount = list->visibleCount();
     }
-
-    update.level = lvl;
-    if (hasTradeListener_) listener_->onMarketData(update);
+    listener_->onMarketData(update);
 #else
     (void)action; (void)side; (void)price;
 #endif
@@ -225,6 +222,9 @@ void OrderBook::notifyBookVisible(BookVisibleUpdate::Action action, OrderId orde
                                   Side side, Price price, Quantity quantity) {
 #ifndef OB_LEAN_MODE
     if (replayMode_) return;
+    // As notifyOrderUpdate: nothing built and no clock read without a
+    // listener, but the sequence number is drawn either way (PERF-9).
+    if (!hasTradeListener_) { ++nextSequenceNumber_; return; }
 
     BookVisibleUpdate update{};
     update.action = action;
@@ -238,7 +238,7 @@ void OrderBook::notifyBookVisible(BookVisibleUpdate::Action action, OrderId orde
     // Public market-data channel: same dispatch shape as notifyMarketData
     // (user listener only). engineListener_ is the internal contingent-order
     // observer and has no interest in the displayed-book projection.
-    if (hasTradeListener_) listener_->onBookVisible(update);
+    listener_->onBookVisible(update);
 #else
     (void)action; (void)orderId; (void)side; (void)price; (void)quantity;
 #endif
@@ -339,30 +339,24 @@ void OrderBook::removeFromBook(Order* order) {
     book.remove(order->price, order);
 }
 
+// A resting order's displayed size changed in place: carry it into its level's
+// maintained totals (OrderList::restate). A parked order is on no level.
+void OrderBook::restateLevel(const Order& order, Quantity displayBefore) {
+    if (!order.inBook) return;
+    auto& book = (order.side == Side::Buy) ? bids_ : asks_;
+    if (OrderList* level = book.at(order.price)) level->restate(order, displayBefore);
+}
+
 // ─── Risk & Validation ──────────────────────────────────────────────────────
 
-bool OrderBook::checkRiskLimits(ParticipantId participantId, Price price, Quantity qty) {
+// Side-aware (STP-9): the projected position is the filled one moved by this
+// order, up for a buy and down for a sell. It used to add qty whichever the
+// side, so a sell that took a long position back towards flat was refused as
+// if it made it longer.
+bool OrderBook::checkRiskLimits(ParticipantId participantId, Side side, Price price,
+                                Quantity qty) {
     const auto* state = participantRisk_.find(OTRKey(participantId, symbolId_));
-    if (!state) return true;
-
-    if (state->maxOrderSize > 0 && qty > state->maxOrderSize) return false;
-
-    if (state->maxOrderNotional > 0) {
-        if (orderNotional(price, qty) > static_cast<__int128>(state->maxOrderNotional))
-            return false;
-    }
-
-    if (state->maxPositionSize > 0) {
-        int64_t projected = state->currentExposure + static_cast<int64_t>(qty);
-        // std::abs(INT64_MIN) is UB. Convert to a saturating
-        // unsigned magnitude that handles the full int64 range.
-        uint64_t magnitude = projected < 0
-            ? static_cast<uint64_t>(-(projected + 1)) + 1u
-            : static_cast<uint64_t>(projected);
-        if (magnitude > state->maxPositionSize) return false;
-    }
-
-    return true;
+    return !state || state->checkOrder(price, qty, side);
 }
 
 void OrderBook::setRiskLimits(ParticipantId participantId, const RiskLimits& limits) {
@@ -372,10 +366,78 @@ void OrderBook::setRiskLimits(ParticipantId participantId, const RiskLimits& lim
     state.maxPositionSize = limits.maxPositionSize;
 }
 
-bool OrderBook::checkCircuitBreaker(Price price) {
-    if (referencePrice_ == 0) return true;
-    double deviation = std::abs(static_cast<double>(price - referencePrice_)) / referencePrice_;
-    return deviation <= cbThreshold_;
+// A buy is valued at the collar, the top of what it can reach; a sell at the
+// touch, since the collar only takes it lower. A stop or MIT elects a Market
+// order about where the print meets its trigger, so its trigger stands in for the
+// touch. A trailing stop elects a limit at its trigger, which starts here and
+// ratchets: a sell's can rise later, and this does not see that (ponytail:
+// valued as parked; re-check at election if a venue needs it bounded).
+// Called before validation on the engine's path, so garbage fields value at 0.
+Price OrderBook::notionalPriceLocked(Side side, OrderType type, Price price, Price stopPrice,
+                                     Price stopLimitPrice, Price trailAmount) const {
+    const bool isBuy = side == Side::Buy;
+    const bool collarOn = marketProtectionPct_ > 0.0;
+    switch (type) {
+    case OrderType::StopLimit:
+        return std::max<Price>(stopLimitPrice, 0);
+    case OrderType::Stop:
+    case OrderType::MIT:
+        if (stopPrice <= 0) return 0;
+        return isBuy && collarOn ? collarAbove(stopPrice) : stopPrice;
+    case OrderType::TrailingStop: {
+        const Price reference = lastTradePrice_ > 0 ? lastTradePrice_ : price;  // as parked
+        if (trailAmount <= 0 || trailAmount >= reference) return 0;
+        if (!isBuy) return reference - trailAmount;
+        return trailAmount > std::numeric_limits<Price>::max() - reference
+                   ? std::numeric_limits<Price>::max() : reference + trailAmount;
+    }
+    case OrderType::Market:
+    case OrderType::MOC: {
+        const FlatPriceMap& opposite = isBuy ? asks_ : bids_;
+        if (!collarOn || opposite.empty()) {
+            if (referencePrice_ > 0) return referencePrice_;
+            // No print yet, so no reference (MR-1): the nearest quote stands in.
+            const FlatPriceMap& same = isBuy ? bids_ : asks_;
+            return !opposite.empty() ? opposite.bestPrice() : same.empty() ? 0 : same.bestPrice();
+        }
+        return isBuy ? marketCollar(opposite, true) : opposite.bestPrice();
+    }
+    default:
+        return price;
+    }
+}
+
+// |px - reference| <= reference * cbThreshold_, in integers: the deviation is
+// a whole number of ticks, so it fits under the floor of the product.
+OrderBook::PrintBand OrderBook::printBand([[maybe_unused]] Price reference) const {
+    constexpr PrintBand kOpen{std::numeric_limits<Price>::min(), std::numeric_limits<Price>::max()};
+#ifdef OB_LEAN_MODE
+    return kOpen;
+#else
+    const double half = static_cast<double>(reference) * cbThreshold_;
+    if (reference <= 0 || !(half < 1e18)) return kOpen;  // 1e18: a breaker set out of reach
+    const Price h = static_cast<Price>(half);
+    return {reference - h, reference + h};
+#endif
+}
+
+// Only from Continuous: the sweeps that ask run only there, and an auction
+// state never trips. Evaluated in replay as live: the reference comes only
+// from prints, crosses, setReferencePrice and a checkpoint, so replay with
+// the same threshold stops the same sweep at the same fill. Logs
+// `breaker_trip` (symbol/price/ref/threshold_pct), the compliance and
+// monitoring contract, alongside the structured `risk.circuit_breaker`.
+void OrderBook::tripBreaker(Price px) {
+    if (tradingState_ != TradingState::Continuous) return;
+    if (!replayMode_) {
+        obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
+            .kv("symbol", (long long)symbolId_)
+            .kv("price", (long long)px)
+            .kv("ref", (long long)referencePrice_)
+            .kv("threshold_pct", cbThreshold_));
+        obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, px));
+    }
+    setTradingStateLocked(TradingState::VolatilityAuction);
 }
 
 // qty and riskChecksBypassed are [[maybe_unused]] because OB_LEAN_MODE compiles
@@ -400,7 +462,7 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     // Risk limits (maxOrderSize / maxOrderNotional / maxPositionSize). A
     // replace passes its new total, so growing an order and repricing it both
     // face the same caps as a new order of that size.
-    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty))
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, side, price, qty))
         return RejectReason::RiskLimitBreached;
 #else
     (void)participantId; (void)riskChecksBypassed;
@@ -424,14 +486,11 @@ RejectReason OrderBook::checkAdmission(ParticipantId participantId, Side side,
     if ((priced || type == OrderType::LOC) && priceRangeConfigured_ && !bids_.inRange(price))
         return RejectReason::OutOfPriceRange;
 
-#ifndef OB_LEAN_MODE
-    // Circuit breaker, on the replace's LIMIT price: the 0.14 rule. A new
-    // order trips on its first fill's price instead (tripBreakerOnFirstFill);
-    // a replace is refused, never auctioned, so a crossing replace cannot
-    // print out of band either.
-    if (priced && !checkCircuitBreaker(price))
-        return RejectReason::VolatilityCircuitBreaker;
-#endif
+    // No breaker test on the limit: the breaker tests prints, in the sweep
+    // (printBand). A replace's limit used to be refused here while its print
+    // was never tested, so a replace to an in-band limit printed 50% away at
+    // the resting price (FORMAL-1), and a far passive replace that could not
+    // print was refused.
 
     // PostOnly must never cross. Without this a repriced PostOnly matched as
     // an aggressor, which is the exact inversion of what PostOnly means.
@@ -464,16 +523,19 @@ bool OrderBook::checkSMP(const Order& incoming, const Order& resting) const {
 // pro-rata's STP pre-pass settles a level's own orders before it allocates,
 // so one that ends the sweep ends it before that level fills anything.
 // A Market order (Market+minQty) stops at market protection's collar, as in
-// match(); matchProRata applies no collar, so neither does its dry run.
+// match() and matchProRata(), and every order at the breaker's band, which a
+// first print seeds when there is no reference yet.
 Quantity OrderBook::sweepFillQty(const Order& in) const {
     const bool isBuy = (in.side == Side::Buy);
     const bool proRata = (matchAlgorithm_ == MatchAlgorithm::ProRata);
     const FlatPriceMap& opposite = isBuy ? asks_ : bids_;
-    const bool collared = !proRata && in.type == OrderType::Market &&
+    const bool collared = in.type == OrderType::Market &&
                           marketProtectionPct_ > 0.0 && !opposite.empty();
     const Price collar = collared ? marketCollar(opposite, isBuy) : 0;
     const STPMode stpMode = getSTPMode(in.participantId);
     Quantity need = in.remainingQty, fills = 0;
+    PrintBand band = printBand(referencePrice_);
+    bool seeded = referencePrice_ != 0;
 
     // False: the sweep ends at this own order.
     auto passOwn = [&](const Order& own) -> bool {
@@ -495,14 +557,16 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
         if (in.type != OrderType::Market && (isBuy ? levelPrice > in.price : levelPrice < in.price))
             return false;
         if (collared && (isBuy ? levelPrice > collar : levelPrice < collar)) return false;
+        if (!band.admits(levelPrice)) return false;
         Quantity reserve = 0;  // what the level fills after this pass
         if (proRata) {
             for (const Order* o = level.front(); o; o = o->next)
-                if (checkSMP(in, *o) && !passOwn(*o)) return false;
+                if (!makerExpired(*o) && checkSMP(in, *o) && !passOwn(*o)) return false;
             for (const Order* o = level.front(); o; o = o->next)
-                if (!checkSMP(in, *o)) reserve += o->remainingQty;
+                if (!makerExpired(*o) && !checkSMP(in, *o)) reserve += o->remainingQty;
         } else {
             for (const Order* o = level.front(); o && need > 0; o = o->next) {
+                if (makerExpired(*o)) continue;   // the sweep cancels it (THR-10)
                 if (checkSMP(in, *o)) {
                     if (!passOwn(*o)) return false;
                     continue;
@@ -517,6 +581,10 @@ Quantity OrderBook::sweepFillQty(const Order& in) const {
         const Quantity take = std::min(need, reserve);
         fills += take;
         need -= take;
+        if (!seeded && fills > 0) {
+            band = printBand(levelPrice);
+            seeded = true;
+        }
         return need > 0;
     });
     return fills;
@@ -706,12 +774,8 @@ std::optional<RejectReason> OrderBook::admitPoolPressure(OrderId orderId,
     return std::nullopt;
 }
 
-// --- Reference price + price band (LULD) admission filter ---
-// Seeds referencePrice_ from the first order carrying a meaningful limit price;
-// that seeding is what makes both the band below and the circuit breaker live,
-// so it stays attached to it.
-//
-// Then rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
+// --- Price band (LULD) admission filter ---
+// Rejects orders priced outside [ref*(1-pct), ref*(1+pct)] when a band
 // is configured and a reference price has been established. It rejects the
 // individual order and lets subsequent in-band orders continue trading.
 // Skipped on order types without a meaningful limit
@@ -721,12 +785,9 @@ std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
                                                       ParticipantId participantId,
                                                       Price price, Quantity qty,
                                                       OrderType type) {
-    if (referencePrice_ == 0 && type != OrderType::Market
-                 && type != OrderType::Stop && type != OrderType::StopLimit
-                 && type != OrderType::TrailingStop && type != OrderType::MIT) [[unlikely]] {
-        referencePrice_ = price;
-    }
-
+    // No reference until the first print, cross or setReferencePrice: an
+    // order is not a price. Seeded from the first priced order, a rejected
+    // 1-lot FOK at 0.0001 set it and the first honest trade tripped (MR-1).
     if (priceBandPct_ > 0.0 && referencePrice_ > 0 &&
         (type == OrderType::Limit  || type == OrderType::IOC ||
          type == OrderType::FOK    || type == OrderType::PostOnly ||
@@ -742,63 +803,6 @@ std::optional<RejectReason> OrderBook::admitPriceBand(OrderId orderId,
             return rejectOrder(orderId, participantId, qty, RejectReason::OutsidePriceBand);
     }
     return std::nullopt;
-}
-
-// --- H3: the volatility breaker trips on a print, not a quote ---
-// The breaker used to test each order's LIMIT price: a passive bid far below
-// the market, which can never execute, switched the whole symbol into
-// VolatilityAuction and nothing reopened it (PRIOR-5, AUCT-8); the 0.14
-// stop-gap then refused such orders one by one. What a breaker guards is the
-// print, so it now tests the price the order's first fill would execute at.
-//
-// ponytail: STP is approximated — an own resting order ends the walk under the
-// cancel-incoming modes and is stepped over under the others; DecreaseAndCancel
-// may leave nothing to fill and still count the next level.
-std::optional<Price> OrderBook::firstFillPrice(const Order& in) const {
-    const FlatPriceMap& opposite = (in.side == Side::Buy) ? asks_ : bids_;
-    if (opposite.empty()) return std::nullopt;
-    const bool market = in.type == OrderType::Market;
-    auto crosses = [&](Price px) {
-        return market || (in.side == Side::Buy ? px <= in.price : px >= in.price);
-    };
-    if (!crosses(opposite.bestPrice())) return std::nullopt;
-    if (stpNoneResting(in.participantId)) return opposite.bestPrice();
-
-    const STPMode mode = getSTPMode(in.participantId);
-    const bool ownOrderStopsIncoming = mode == STPMode::DefaultCancelIncoming ||
-                                       mode == STPMode::CancelIncoming ||
-                                       mode == STPMode::CancelBoth;
-    std::optional<Price> fill;
-    opposite.forEachLevelWhile([&](Price px, const OrderList& level) -> bool {
-        if (!crosses(px)) return false;
-        for (const Order* r = level.front(); r; r = r->next) {
-            if (r->participantId != in.participantId) { fill = px; return false; }
-            if (ownOrderStopsIncoming) return false;
-        }
-        return true;
-    });
-    return fill;
-}
-
-// Only in Continuous: an auction state never matches on arrival, and an order
-// arriving in one never trips (H3). Not in replay either — the trip is
-// journaled as a TradingStateChange ahead of the order that caused it, so a
-// replay with a different threshold or reference still reproduces it.
-// Logs `breaker_trip` (symbol/price/ref/threshold_pct), the compliance and
-// monitoring contract, alongside the structured `risk.circuit_breaker`.
-bool OrderBook::tripBreakerOnFirstFill(const Order& in) {
-    if (replayMode_ || tradingState_ != TradingState::Continuous || referencePrice_ == 0)
-        return false;
-    const std::optional<Price> fill = firstFillPrice(in);
-    if (!fill || checkCircuitBreaker(*fill)) return false;
-    obSink().log(obEvent("breaker_trip", LogSeverity::Warn)
-        .kv("symbol", (long long)symbolId_)
-        .kv("price", (long long)*fill)
-        .kv("ref", (long long)referencePrice_)
-        .kv("threshold_pct", cbThreshold_));
-    obSink().log(logCircuitBreaker(symbolId_, cbThreshold_, referencePrice_, *fill));
-    setTradingStateLocked(TradingState::VolatilityAuction);
-    return true;
 }
 
 // --- Post-Only: reject if would cross the spread ---  Precondition: bookLock_ held.
@@ -907,7 +911,7 @@ Order* OrderBook::allocateAndRegisterOrder(OrderId orderId, ParticipantId partic
     order->isHidden = hidden || (type == OrderType::Hidden);
     order->isStopTriggered = false;
     order->symbolId = symbolId_;
-    order->timestamp = nowNs();
+    order->arrivalSeq = nextArrival_++;
     order->next = nullptr;
     order->prev = nullptr;
 
@@ -1028,7 +1032,7 @@ void OrderBook::restPeggedOrder(Order* order, OrderId orderId, Side side, Price 
     (void)peggedOrders_.push_back(order);  // slot checked by admitParkCapacity
     if (!addToBook(order)) {
         notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-        peggedOrders_.erase_value(order);
+        untrackOrder(order);
         orderLookup_.erase(orderId);
         orderPool_.deallocate(order);
         return;
@@ -1108,9 +1112,8 @@ std::optional<RejectReason> OrderBook::screenFOK(Order* order, OrderId orderId,
 // --- Min quantity check ---  Precondition: bookLock_ held.
 // nullopt => the order goes on to match. A value => the order was finalized
 // here (cancelled, or rested without matching) and addOrder returns it.
-std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Side side,
-                                               Price price, Quantity qty, OrderType type,
-                                               Quantity minQty) {
+std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Quantity qty,
+                                               OrderType type, Quantity minQty) {
     // Not in an auction state: nothing executes until the uncross, where a
     // crossing order is how the auction accumulates, so a crossing minQty
     // order joins it rather than being cancelled for "locking" a book that is
@@ -1119,44 +1122,17 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
     // every level, and it never rests.
     if (minQty > 0 && type != OrderType::FOK && !inAuctionState()) [[unlikely]] {
         if (sweepFillQty(*order) < minQty) {
-            if (type == OrderType::IOC || type == OrderType::Market) {
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-                return orderId;
-            }
-            // H3: a limit order may rest here ONLY if it does not cross.
-            //
-            // sweepFillQty counts liquidity at crossing prices only, so a false
-            // return still permits some crossable size — just less than
-            // minQty. Resting unconditionally therefore parked the order at a
-            // price that crosses the opposite side, leaving bid >= ask: an
-            // invalid book. (Ask 30 @ 100, buy 100 @ 100 minQty 50 => both
-            // rest at 100, locked.)
-            //
-            // The semantic is a minimum on the FIRST execution: minQty is
-            // checked once at admission and the stored field is never read
-            // again, so matching has no per-fill minimum to enforce. A
-            // non-crossing order can therefore rest and wait for liquidity —
-            // that is the useful case and it stays. A crossing one cannot
-            // wait, because waiting is what produces the locked book, so it is
-            // cancelled, exactly as the IOC branch above does.
-            const bool wouldCross = (side == Side::Buy)
-                ? (!asks_.empty() && price >= asks_.bestPrice())
-                : (!bids_.empty() && price <= bids_.bestPrice());
-            if (wouldCross) [[unlikely]] {
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
-                return orderId;
-            }
-            if (!addToBook(order)) {
-                notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, 0);
-                orderLookup_.erase(orderId);
-                orderPool_.deallocate(order);
-            } else if (!order->isHidden) {
-                notifyMarketData(MarketDataUpdate::Action::Add, side, price);
-            }
+            // Rule 9.5: the minimum is on the order's first execution, so an
+            // order whose arrival cannot meet it does not trade and does not
+            // rest, whatever its type. A non-crossing limit used to rest and
+            // wait; matching never reads minQty, so its first execution, as a
+            // maker, was whatever the next aggressor brought: 1 lot of a
+            // minimum of 50 (MR-5). A crossing one could not wait either: it
+            // would have locked the book (H3).
+            untrackOrder(order);
+            orderLookup_.erase(orderId);
+            orderPool_.deallocate(order);
+            notifyOrderUpdate(orderId, OrderStatus::Cancelled, 0, qty);
             return orderId;
         }
     }
@@ -1169,12 +1145,24 @@ std::optional<OrderId> OrderBook::screenMinQty(Order* order, OrderId orderId, Si
 void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
                                      OrderType type, Quantity cumBefore) {
     if (order->remainingQty > 0) [[likely]] {
+        // The breaker stopped a market order's sweep: what is left waits for
+        // the reopening cross, as a market order arriving in the auction does.
+        // A limit rests below as an arrival would; an IOC or FOK is cancelled.
+        if (type == OrderType::Market && tradingState_ == TradingState::VolatilityAuction &&
+            auctionMarketOrders_.push_back(order)) [[unlikely]] {
+            order->status = order->cumQty > 0 ? OrderStatus::PartiallyFilled : OrderStatus::Accepted;
+            if (order->cumQty > cumBefore)
+                notifyOrderUpdate(orderId, OrderStatus::PartiallyFilled, order->cumQty,
+                                  order->remainingQty, lastTradePrice_);
+            return;
+        }
         if (type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market) [[unlikely]] {
             // Cancelled even after fills: the remainder is gone, so the status
             // is terminal and filledQty carries what executed. PartiallyFilled
             // with nothing left said "still working" and closed nothing
             // downstream (GTDIFF-4).
             notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
+            untrackOrder(order);
             orderLookup_.erase(orderId);
             orderPool_.deallocate(order);
         } else {
@@ -1182,6 +1170,7 @@ void OrderBook::finalizeRemainingQty(Order* order, OrderId orderId, Side side, P
             if (!addToBook(order)) {
                 // Depth limit or price range exceeded — cancel the order
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
             } else {
@@ -1211,9 +1200,34 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                           Quantity qty, OrderType type, Price stopPrice, Quantity displayQty,
                           TimeInForce tif, uint64_t expiryTime, Price stopLimitPrice,
                           PegType pegType, Price pegOffset, Price trailAmount,
-                          Quantity minQty, bool hidden,
-                          [[maybe_unused]] bool riskChecksBypassed) {
+                          Quantity minQty, bool hidden, bool riskChecksBypassed) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    const uint64_t arrivalBefore = nextArrival_;
+    const Price referenceBefore = referencePrice_;
+    AddOrderResult result = addOrderLocked(orderId, participantId, side, price, qty, type,
+                                           stopPrice, displayQty, tif, expiryTime,
+                                           stopLimitPrice, pegType, pegOffset, trailAmount,
+                                           minQty, hidden, riskChecksBypassed);
+    // A refused order is not journaled, so it must leave nothing a later
+    // decision reads: replay never sees it. Not an age (a FOK screen refuses
+    // after allocating), or every later order is numbered differently; not
+    // the reference price it seeded before a later screen refused it (a
+    // crossing post-only), which the breaker and the uncross's tie-break read.
+    // A refusal trades nothing and moves no peg, so both are its own doing.
+    if (!std::holds_alternative<OrderId>(result)) [[unlikely]] {
+        nextArrival_ = arrivalBefore;
+        referencePrice_ = referenceBefore;
+    }
+    return result;
+}
+
+AddOrderResult OrderBook::addOrderLocked(OrderId orderId, ParticipantId participantId, Side side,
+                          Price price, Quantity qty, OrderType type, Price stopPrice,
+                          Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                          Price stopLimitPrice, PegType pegType, Price pegOffset,
+                          Price trailAmount, Quantity minQty, bool hidden,
+                          [[maybe_unused]] bool riskChecksBypassed) {
+    sweepNow_ = 0;
 
     if (auto r = admitForTradingState(orderId, participantId, qty, type)) return *r;
     if (auto r = validateOrderRequest(orderId, participantId, price, qty, type, displayQty,
@@ -1224,7 +1238,10 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
 
     // --- Pre-trade risk checks ---
 #ifndef OB_LEAN_MODE
-    if (!riskChecksBypassed && !checkRiskLimits(participantId, price, qty)) [[unlikely]] {
+    const Price riskPrice = valuedOffTheBook(type) ? notionalPriceLocked(side, type, price, stopPrice,
+                                                                         stopLimitPrice, trailAmount)
+                                                   : price;
+    if (!riskChecksBypassed && !checkRiskLimits(participantId, side, riskPrice, qty)) [[unlikely]] {
         const RejectReason reason =
             rejectOrder(orderId, participantId, qty, RejectReason::RiskLimitBreached);
         obSink().log(logOrderRejected(orderId, participantId, "risk_limit_breached"));
@@ -1255,16 +1272,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
                                        pegType, pegOffset, trailAmount)) return *id;
 
     if (auto r = screenFOK(order, orderId, qty, type)) return *r;
-    if (auto id = screenMinQty(order, orderId, side, price, qty, type, minQty)) return *id;
-
-#ifndef OB_LEAN_MODE
-    // H3: a trip makes this order the volatility auction's first arrival: a
-    // market order parks for the reopening cross; any other type carries on
-    // below as an auction arrival (no match; a limit rests, IOC/FOK cancel).
-    if (tripBreakerOnFirstFill(*order))
-        if (auto id = parkNonMatchingOrder(order, orderId, side, price, qty, type,
-                                           pegType, pegOffset, trailAmount)) return *id;
-#endif
+    if (auto id = screenMinQty(order, orderId, qty, type, minQty)) return *id;
 
     // --- Match (skipped during auction / pre-open) ---
     // PreOpen / AuctionOpen / AuctionClose all accumulate without
@@ -1273,10 +1281,7 @@ AddOrderResult OrderBook::addOrder(OrderId orderId, ParticipantId participantId,
     const bool inAuction = inAuctionState();
     Price firstPrint = 0;
     if (!inAuction) {
-        if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-            firstPrint = matchProRata(order);
-        else
-            firstPrint = match(order);
+        firstPrint = sweep(order);
     }
 
     // C1: an order STP stopped must report CancelledBySTP (or the fills it
@@ -1370,14 +1375,27 @@ void OrderBook::stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMa
 // Returns true when the resting order reached zero and must be cancelled.
 bool OrderBook::stpDecreaseBoth(Order* incoming, Order* resting) {
     const Quantity dec = std::min(incoming->remainingQty, resting->remainingQty);
+    releaseWorking(*incoming, dec);
     incoming->remainingQty -= dec;
     incoming->initialQty   -= dec;
-    if (dec == resting->remainingQty) return true;
+    if (dec == resting->remainingQty) return true;  // its cancel releases the rest
+    releaseWorking(*resting, dec);
+    const Quantity displayBefore = displayQuantity(*resting);
     resting->remainingQty -= dec;
     resting->initialQty   -= dec;
     // Keep visibleQty <= remainingQty or a later fill underflows
     // remainingQty to UINT64_MAX (no-op for a non-iceberg).
     resting->visibleQty = std::min(resting->visibleQty, resting->remainingQty);
+    restateLevel(*resting, displayBefore);
+    // Its owner hears of it, in its own status with the new leaves, as a
+    // restatement; the order-level feed hears of the displayed shrink. The
+    // owner used to keep seeing 100 while the engine held 70 (MR-7). The L2
+    // level is republished by the sweep that touched it.
+    notifyOrderUpdate(resting->id, resting->status, resting->cumQty, resting->remainingQty);
+    const Quantity displayAfter = displayQuantity(*resting);
+    if (!resting->isHidden && displayAfter < displayBefore)
+        notifyBookVisible(BookVisibleUpdate::Action::Reduce, resting->id, resting->side,
+                          resting->price, displayBefore - displayAfter);
     return false;
 }
 
@@ -1390,6 +1408,7 @@ bool OrderBook::finalizeIfStpCancelled(Order* order) {
     // genuinely traded still wins its group. This used to report
     // PartiallyFilled with nothing left, a status that never closes.
     notifyOrderUpdate(order->id, OrderStatus::CancelledBySTP, order->cumQty, 0);
+    untrackOrder(order);
     orderLookup_.erase(order->id);
     orderPool_.deallocate(order);
     return true;
@@ -1442,6 +1461,9 @@ Price OrderBook::match(Order* incoming) {
     const STPMode stpMode = getSTPMode(incoming->participantId);
     const bool stpClear = stpNoneResting(incoming->participantId);
 
+    // The breaker's band, asked before every fill below.
+    PrintBand band = printBand(referencePrice_);
+
     // P1-3/P1-4/P1-5: buffer per-fill side effects on the stack and flush them
     // AFTER the loop rather than firing virtual onTrade dispatches, audit logs
     // and O(1)-lookup erases interleaved with book mutation on every fill.
@@ -1464,8 +1486,8 @@ Price OrderBook::match(Order* incoming) {
     // republish them: fills change displayed depth, and nothing in the match
     // path used to say so, leaving every incremental subscriber holding
     // pre-trade quantities forever. Published once per level after the sweep
-    // rather than once per fill — notifyMarketData recomputes the whole level,
-    // so per-fill would be O(depth) work repeated for each order consumed.
+    // rather than once per fill, so a subscriber sees each level once, at its
+    // final state (the totals themselves are maintained, so each is O(1)).
     // Bounded by kMaxFillsPerOrder: a level needs at least one fill to appear.
     std::array<Price, kMaxFillsPerOrder> touchedPrices;
     int touchedCount = 0;
@@ -1480,8 +1502,9 @@ Price OrderBook::match(Order* incoming) {
     // Flush the batched work: dispatch onTrade, emit trade-fill audit logs, then
     // apply the deferred lookup erases. Order among fills is preserved exactly
     // (== original per-fill order: logTradeFill then onTrade). Called when the
-    // buffer fills mid-sweep (flush-and-continue — never truncates a fill) and
-    // once after the loop.
+    // buffer fills mid-sweep (flush-and-continue — never truncates a fill),
+    // before a maker's Filled or a refreshed slice goes out, and once after
+    // the loop.
     auto flushFills = [&]() {
         const bool dispatchTrades = (!replayMode_ && hasTradeListener_);
         const bool auditLog = obSinkActive();
@@ -1551,6 +1574,14 @@ Price OrderBook::match(Order* incoming) {
         OrderList* level = opposite.bestLevel();
         Order* bookOrder = level->front();
 
+        // THR-10: an expired GTD/DAY maker never trades, swept yet or not. The
+        // fills before it go out first; its cancel is an event of its own.
+        if (makerExpired(*bookOrder)) [[unlikely]] {
+            flushFills();
+            expireMaker(bookOrder);
+            continue;
+        }
+
         // Past every break: this level is about to change, by a fill or an STP
         // removal. Recorded after the cross-check so a non-crossing order —
         // the common case — publishes nothing. The sweep walks levels in price
@@ -1616,6 +1647,13 @@ Price OrderBook::match(Order* incoming) {
             break;  // STP acted: stop matching this order
         }
 
+        // Past STP, so this fill will print: test its price. Outside the band
+        // nothing prints; the caller handles what is left as an auction arrival.
+        if (!band.admits(bestPrice)) [[unlikely]] {
+            tripBreaker(bestPrice);
+            break;
+        }
+
         Quantity available = (bookOrder->type == OrderType::Iceberg)
                              ? bookOrder->visibleQty : bookOrder->remainingQty;
         Quantity fillQty = std::min(incoming->remainingQty, available);
@@ -1630,8 +1668,12 @@ Price OrderBook::match(Order* incoming) {
         bookOrder->remainingQty -= fillQty;
         bookOrder->cumQty += fillQty;
         if (bookOrder->type == OrderType::Iceberg) [[unlikely]] bookOrder->visibleQty -= fillQty;
+        level->restate(*bookOrder, available);  // the level's displayed total drops by the fill
 
-        if (firstPrint == 0) [[unlikely]] firstPrint = bestPrice;
+        if (firstPrint == 0) [[unlikely]] {
+            firstPrint = bestPrice;
+            if (referencePrice_ == 0) band = printBand(referencePrice_ = bestPrice);
+        }
         lastTradePrice_ = bestPrice;
         lastTradeQty_ = fillQty;
         updateAnalytics(bestPrice, fillQty, bookOrder->participantId, incoming->participantId);
@@ -1669,6 +1711,10 @@ Price OrderBook::match(Order* incoming) {
 
         if (bookOrder->remainingQty == 0) [[unlikely]] {
             bookOrder->status = OrderStatus::Filled;
+            // Rule 2.5 (GTDIFF-7): the trade goes out before the maker's
+            // Filled. Notified inline with the trade still buffered, the
+            // maker's owner heard "Filled" before the execution behind it.
+            flushFills();
             notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->cumQty, 0, bestPrice);
             stpNoteRemoved(bookOrder);
             untrackOrder(bookOrder);
@@ -1689,9 +1735,11 @@ Price OrderBook::match(Order* incoming) {
             // any orders that arrived after the original iceberg
             // placement (but before the slice was refilled) fill ahead of
             // it. Tested in IcebergPriority_PriceTime_LosesPriorityOnRefresh.
+            // Unlinked with the empty slice it displays now, relinked with the
+            // new one, so the level's displayed total gains exactly the slice.
+            level->remove(bookOrder);
             bookOrder->visibleQty = std::min(bookOrder->remainingQty, bookOrder->displayQty);
             bookOrder->status = OrderStatus::PartiallyFilled;
-            level->remove(bookOrder);
             level->push_back(bookOrder);
             if (!bookOrder->isHidden) {
                 // Drain the buffered fills BEFORE publishing the replenished
@@ -1726,22 +1774,26 @@ Price OrderBook::match(Order* incoming) {
 // Zero-allocation: uses stack-allocated arrays instead of std::vector.
 
 Price OrderBook::matchProRata(Order* incoming) {
-    struct Alloc { Order* order; Quantity qty; };
-    static constexpr size_t MAX_LEVEL_ORDERS = 1024;
     Price firstPrint = 0;  // as match(): the sweep's first print
+    const bool isBuy = (incoming->side == Side::Buy);
+
+    // Branchless opposite-book select: incoming side is ~50/50 and so
+    // unpredictable by any HW branch predictor. Index a pointer array
+    // instead of branching. books[isBuy] is the same-side book
+    // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
+    FlatPriceMap* books[2] = {&asks_, &bids_};
+    FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
+
+    // The collar, from the arrival touch, as in match() (MATCH-16).
+    const bool useMktProt = incoming->type == OrderType::Market && marketProtectionPct_ > 0.0;
+    const Price mktProtBound = useMktProt && !opposite.empty() ? marketCollar(opposite, isBuy) : 0;
+    PrintBand band = printBand(referencePrice_);  // as match()
 
     while (incoming->remainingQty > 0) {
-        bool isBuy = (incoming->side == Side::Buy);
-
-        // Branchless opposite-book select: incoming side is ~50/50 and so
-        // unpredictable by any HW branch predictor. Index a pointer array
-        // instead of branching. books[isBuy] is the same-side book
-        // (isBuy=true -> bids_); the resting/opposite book is books[!isBuy].
-        FlatPriceMap* books[2] = {&asks_, &bids_};
-        FlatPriceMap& opposite = *books[static_cast<int>(!isBuy)];
         if (opposite.empty()) break;
 
         Price bestPrice = opposite.bestPrice();
+        if (useMktProt && (isBuy ? bestPrice > mktProtBound : bestPrice < mktProtBound)) break;
         if (isBuy) {
             if (incoming->type != OrderType::Market && incoming->price < bestPrice) break;
         } else {
@@ -1749,6 +1801,19 @@ Price OrderBook::matchProRata(Order* incoming) {
         }
 
         OrderList& level = *opposite.bestLevel();
+
+        // THR-10, as in match(): an expired maker leaves before the level is
+        // allocated, so it takes no share.
+        bool expiredAny = false;
+        for (Order* o = level.front(); o; ) {
+            Order* next = o->next;   // read before the cancel frees `o`
+            if (makerExpired(*o)) [[unlikely]] {
+                expireMaker(o);
+                expiredAny = true;
+            }
+            o = next;
+        }
+        if (expiredAny) continue;
 
         // ── C1: STP pre-pass ────────────────────────────────────────────────
         // Resolve self-trade prevention BEFORE computing allocations. The
@@ -1795,6 +1860,12 @@ Price OrderBook::matchProRata(Order* incoming) {
                     // Both shrink; see match() (MATCH-10).
                     if (stpDecreaseBoth(incoming, o))
                         stpCancelRestingOrder(o, &level, opposite);
+                    else if (!o->isHidden)
+                        // It shrank in place. Pro-rata publishes a level only
+                        // after fills from it, and an incoming order the
+                        // decrease used up never fills: the feed kept the old
+                        // size (price-time marks the level touched first).
+                        notifyMarketData(MarketDataUpdate::Action::Modify, o->side, o->price);
                     if (incoming->remainingQty == 0) {
                         incoming->status = OrderStatus::CancelledBySTP;
                         return firstPrint;
@@ -1809,6 +1880,12 @@ Price OrderBook::matchProRata(Order* incoming) {
             // The level may also be gone entirely, in which case this picks up
             // the next best price.
             if (levelChanged) continue;
+        }
+
+        // Past the STP pre-pass, so this level will print: test its price.
+        if (!band.admits(bestPrice)) [[unlikely]] {
+            tripBreaker(bestPrice);
+            break;
         }
 
         // Calculate total quantity at this level
@@ -1854,20 +1931,26 @@ Price OrderBook::matchProRata(Order* incoming) {
 
         Quantity toFill = std::min(incoming->remainingQty, totalLevelQty);
 
-        // Compute proportional allocations (stack-allocated)
-        Alloc allocs[MAX_LEVEL_ORDERS];
-        size_t allocCount = 0;
+        // Proportional allocations over the WHOLE level (MR-4: a fixed
+        // 1024-slot array once left order 1025 on with nothing, gave the
+        // front orders their shortfall FIFO, and lost a DMM floor past it).
+        // The scratch vector is a member, reserved at construction, so a
+        // level of up to kProRataReserve orders allocates nothing; a larger
+        // one grows it once.
+        std::vector<ProRataAlloc>& allocs = proRataScratch_;
+        allocs.clear();
         Quantity allocated = 0;
 
-        for (Order* o = level.front(); o && allocCount < MAX_LEVEL_ORDERS; o = o->next) {
+        for (Order* o = level.front(); o; o = o->next) {
             // Self-crossing orders are already resolved by the pre-pass above.
             Quantity avail = (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
             Quantity share = (totalLevelQty > 0)
                 ? static_cast<Quantity>(static_cast<double>(avail) / totalLevelQty * toFill)
                 : 0;
-            allocs[allocCount++] = {o, share};
+            allocs.push_back({o, share});
             allocated += share;
         }
+        const size_t allocCount = allocs.size();
 
         // ── LMM/DMM floor guarantee (pro-rata only) ──────────────────────────
         // DMM/LMM orders are guaranteed at least DMM_FLOOR_PCT of their available
@@ -1921,14 +2004,12 @@ Price OrderBook::matchProRata(Order* incoming) {
             remainder -= extra;
         }
 
-        // Execute fills (collect removals on stack)
-        Order* toRemove[MAX_LEVEL_ORDERS];
-        size_t removeCount = 0;
-
+        // Execute fills; filled orders are removed after the loop.
         for (size_t i = 0; i < allocCount; ++i) {
             if (allocs[i].qty == 0) continue;
             Order* bookOrder = allocs[i].order;
             Quantity fillQty = allocs[i].qty;
+            const Quantity shownBefore = displayQuantity(*bookOrder);
 
             incoming->remainingQty -= fillQty;
             incoming->cumQty += fillQty;
@@ -1936,7 +2017,10 @@ Price OrderBook::matchProRata(Order* incoming) {
             bookOrder->cumQty += fillQty;
             if (bookOrder->type == OrderType::Iceberg) bookOrder->visibleQty -= fillQty;
 
-            if (firstPrint == 0) firstPrint = bestPrice;
+            if (firstPrint == 0) {
+                firstPrint = bestPrice;
+                if (referencePrice_ == 0) band = printBand(referencePrice_ = bestPrice);
+            }
             lastTradePrice_ = bestPrice;
             lastTradeQty_ = fillQty;
 
@@ -1969,7 +2053,6 @@ Price OrderBook::matchProRata(Order* incoming) {
             if (bookOrder->remainingQty == 0) {
                 bookOrder->status = OrderStatus::Filled;
                 notifyOrderUpdate(bookOrder->id, OrderStatus::Filled, bookOrder->cumQty, 0, bestPrice);
-                toRemove[removeCount++] = bookOrder;
             } else if (bookOrder->type == OrderType::Iceberg && bookOrder->visibleQty == 0) {
                 // Pro-rata iceberg refresh: the slice is replenished in
                 // place. Pro-rata allocation is weight-by-volume (not
@@ -1991,14 +2074,17 @@ Price OrderBook::matchProRata(Order* incoming) {
             } else {
                 bookOrder->status = OrderStatus::PartiallyFilled;
             }
+            level.restate(*bookOrder, shownBefore);  // the fill, and a refreshed slice
         }
 
-        for (size_t i = 0; i < removeCount; ++i) {
-            stpNoteRemoved(toRemove[i]);
-            untrackOrder(toRemove[i]);  // as match() does (MATCH-15)
-            level.remove(toRemove[i]);
-            orderLookup_.erase(toRemove[i]->id);
-            orderPool_.deallocate(toRemove[i]);
+        for (const ProRataAlloc& a : allocs) {
+            Order* done = a.order;
+            if (a.qty == 0 || done->remainingQty != 0) continue;
+            stpNoteRemoved(done);
+            untrackOrder(done);  // as match() does (MATCH-15)
+            level.remove(done);
+            orderLookup_.erase(done->id);
+            orderPool_.deallocate(done);
         }
 
         if (level.empty()) {
@@ -2033,7 +2119,8 @@ void OrderBook::cancelOrder(OrderId orderId, ParticipantId requester) {
 }
 
 OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId,
-                                                         ParticipantId requester) {
+                                                         ParticipantId requester,
+                                                         RecordFn record) {
     std::unique_lock<std::mutex> lock(bookLock_);
     OrderExposure e;
     if (!ownedBy(orderId, requester)) {
@@ -2046,6 +2133,10 @@ OrderBook::OrderExposure OrderBook::cancelOrderReleasing(OrderId orderId,
         e.side          = o->side;
         e.remainingQty  = o->remainingQty;
         e.found         = true;
+        if (record && !record()) [[unlikely]] {
+            e.refused = true;
+            return e;
+        }
     }
     cancelOrderImpl(orderId);
     return e;
@@ -2066,14 +2157,14 @@ const char* tradingStateName(TradingState s) {
 }
 }  // namespace
 
-void OrderBook::setTradingState(TradingState s) {
+bool OrderBook::setTradingState(TradingState s) {
     std::unique_lock<std::mutex> lock(bookLock_);
-    setTradingStateLocked(s);
+    return setTradingStateLocked(s);
 }
 
-void OrderBook::beginSession(uint32_t tradingDate) {
+bool OrderBook::beginSession(uint32_t tradingDate) {
     std::unique_lock<std::mutex> lock(bookLock_);
-    setTradingStateLocked(TradingState::PreOpen, tradingDate);
+    return setTradingStateLocked(TradingState::PreOpen, tradingDate);
 }
 
 // Decision 7: the session transition table, docs/MatchingRules.md Rule 7.7.
@@ -2105,16 +2196,18 @@ bool OrderBook::transitionAllowed(TradingState to, uint32_t tradingDate) const {
     return false;
 }
 
-// Precondition: bookLock_ held.
-void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
-    if (tradingState_ == s) return;  // no-op transitions don't emit events
+// Precondition: bookLock_ held. False only when the table refuses the edge;
+// a reopen whose elections trip the breaker was applied, and returns true
+// though the book is then in VolatilityAuction.
+bool OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
+    if (tradingState_ == s) return true;  // no-op transitions don't emit events
     if (!replayMode_ && !transitionAllowed(s, tradingDate)) {
         obSink().log(obEvent("trading_state_refused", LogSeverity::Warn)
                          .kv("symbol", (long long)symbolId_)
                          .kv("from", tradingStateName(tradingState_))
                          .kv("to",   tradingStateName(s))
                          .kv("trading_date", (long long)tradingDate));
-        return;
+        return false;
     }
     if (s == TradingState::PreOpen) {
         sessionBegun_ = true;
@@ -2154,9 +2247,12 @@ void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
     // still parked at session end — the close never ran: halted over it, or a
     // volatility auction ran into it — used to wait for the next transition
     // into AuctionClose and execute at tomorrow's close, an overnight
-    // position nobody asked for. Released ones are gone by now: the closing
-    // cross fills or cancels them.
+    // position nobody asked for. Released ones are gone if the closing cross
+    // ran; a close reached through a halt runs none, so its released MOCs and
+    // LOCs and any parked market order are cancelled as an empty cross would.
     if (s == TradingState::PostClose) {
+        cancelAuctionMarketOrders();
+        cancelLocOrders();
         while (!onCloseOrders_.empty()) {
             const size_t last = onCloseOrders_.size() - 1;
             Order* o = onCloseOrders_[last];
@@ -2165,6 +2261,17 @@ void OrderBook::setTradingStateLocked(TradingState s, uint32_t tradingDate) {
                 onCloseOrders_.erase_swap(last);  // not in the lookup: just drop it
         }
     }
+    // Continuous trading resumes with the elections the book owes: those
+    // latched while it could not execute them (a breaker trip mid-sweep) and
+    // those the reopening cross printed through. They used to wait for the
+    // next incoming order, which may never come. Replay runs this too, so a
+    // restart elects the same orders at the same transition. Any state may
+    // reach Continuous here; a halt resumed into it owes the same.
+    if (s == TradingState::Continuous) {
+        sweepNow_ = 0;   // this operation's expiry clock, not the last one's
+        runTriggerSweeps(0);
+    }
+    return true;
 }
 
 // Drop `order` from every tracking list that holds a raw pointer to it.
@@ -2192,6 +2299,24 @@ bool OrderBook::validateIntegrity(std::string* err) const {
 
     auto checkSide = [&](const FlatPriceMap& book, Side side, const char* label) {
         book.forEachLevel([&](Price levelPrice, const OrderList& level) {
+            // The level's maintained displayed totals must equal a walk of it
+            // (PERF-1): every path that changes a resting order's display
+            // has to tell its level, and this is where one that forgot shows.
+            Quantity shownQty = 0;
+            uint32_t shownCount = 0;
+            for (const Order* o = level.front(); o; o = o->next) {
+                if (o->isHidden) continue;
+                shownQty += displayQuantity(*o);
+                ++shownCount;
+            }
+            if (problem.empty() &&
+                (shownQty != level.visibleQty() || shownCount != level.visibleCount())) {
+                problem = std::string(label) + " level " + std::to_string(levelPrice)
+                        + " carries displayed totals " + std::to_string(level.visibleQty())
+                        + " in " + std::to_string(level.visibleCount())
+                        + " orders, but its orders display " + std::to_string(shownQty)
+                        + " in " + std::to_string(shownCount);
+            }
             for (Order* o = level.front(); o; o = o->next) {
                 if (!problem.empty()) return;
                 auto fail = [&](const std::string& why) {
@@ -2268,6 +2393,17 @@ bool OrderBook::validateIntegrity(std::string* err) const {
         });
     }
 
+    // Parked stops and trailing stops are elected in list order, which is
+    // arrival order (Rule 5.7): a removal must not reorder them.
+    auto checkArrivalOrder = [&](const auto& list, const char* label) {
+        for (size_t i = 1; problem.empty() && i < list.size(); ++i)
+            if (list[i - 1]->arrivalSeq >= list[i]->arrivalSeq)
+                problem = std::string(label) + " list out of arrival order at #" +
+                          std::to_string(list[i]->id);
+    };
+    if (problem.empty()) checkArrivalOrder(stopOrders_, "stop");
+    if (problem.empty()) checkArrivalOrder(trailingStopOrders_, "trailing-stop");
+
     if (!problem.empty()) {
         if (err) *err = problem;
         return false;
@@ -2277,27 +2413,31 @@ bool OrderBook::validateIntegrity(std::string* err) const {
 
 void OrderBook::untrackOrder(Order* order) {
     if (!order) return;
+    // Whatever it still had working leaves with it (STP-10): cancel, kill,
+    // expiry, DAY and on-close sweeps, STP cuts, IOC/FOK/market remainders.
+    // A full fill reaches here at zero.
+    releaseWorking(*order, order->remainingQty);
     switch (order->type) {
         case OrderType::Stop:
         case OrderType::StopLimit:
         case OrderType::MIT:
-            stopOrders_.erase_value(order);
+            stopOrders_.erase_value_ordered(order);
             break;
         case OrderType::TrailingStop:
-            trailingStopOrders_.erase_value(order);
+            trailingStopOrders_.erase_value_ordered(order);
             break;
         case OrderType::Pegged:
-            peggedOrders_.erase_value(order);
+            peggedOrders_.erase_value_ordered(order);
             break;
         case OrderType::MOC:
             // An MOC moves from onCloseOrders_ into auctionMarketOrders_ when
             // the closing cross releases it, so it can be sitting in either.
-            onCloseOrders_.erase_value(order);
+            onCloseOrders_.erase_value_ordered(order);
             locActiveIds_.erase_value(order->id);
-            auctionMarketOrders_.erase_value(order);
+            auctionMarketOrders_.erase_value_ordered(order);
             break;
         case OrderType::LOC:
-            onCloseOrders_.erase_value(order);
+            onCloseOrders_.erase_value_ordered(order);
             locActiveIds_.erase_value(order->id);
             break;
         case OrderType::Market:
@@ -2307,7 +2447,7 @@ void OrderBook::untrackOrder(Order* order) {
             // pointing at the slot, the pool re-handed that slot to an
             // unrelated new order, and the next uncross() repriced THAT order
             // and addToBook'd it a second time — one node in two price levels.
-            auctionMarketOrders_.erase_value(order);
+            auctionMarketOrders_.erase_value_ordered(order);
             break;
         default:
             break;
@@ -2352,7 +2492,7 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty,
 }
 
 bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
-                            ParticipantId requester) {
+                            ParticipantId requester, RecordFn record) {
     std::unique_lock<std::mutex> lock(bookLock_);
     reason = RejectReason::None;
 
@@ -2382,6 +2522,17 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
     if (newQty == 0) [[unlikely]] { reason = RejectReason::InvalidQuantity; return false; }
 
     if (newQty < order->remainingQty) {
+        const Quantity cut = order->remainingQty - newQty;
+        if (const RejectReason r = admitAmend(*order, order->price, order->initialQty - cut, newQty);
+            r != RejectReason::None) [[unlikely]] {
+            reason = r;
+            return false;
+        }
+        if (record && !record()) [[unlikely]] {   // a reduce reserved nothing
+            reason = RejectReason::JournalHalted;
+            return false;
+        }
+        releaseWorking(*order, cut);
         const Quantity displayBefore = displayQuantity(*order);
         // newQty is the new LEAVES; the total drops by the same cut. Leaving
         // initialQty alone used to report the cut as a fill (GTDIFF-1).
@@ -2392,6 +2543,7 @@ bool OrderBook::modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reas
         // current slice leaves the order displaying more than it can deliver.
         if (order->type == OrderType::Iceberg)
             order->visibleQty = std::min(order->visibleQty, order->remainingQty);
+        restateLevel(*order, displayBefore);
         const Quantity displayAfter = displayQuantity(*order);
 
         if (!order->isHidden) {
@@ -2423,8 +2575,21 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 }
 
 bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
-                              RejectReason& reason, ParticipantId requester) {
+                              RejectReason& reason, ParticipantId requester,
+                              RecordFn record) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    const uint64_t arrivalBefore = nextArrival_;
+    const bool applied =
+        cancelReplaceLocked(orderId, newPrice, newQty, reason, requester, record);
+    // Not journaled when refused, so no age used, as addOrder.
+    if (!applied) [[unlikely]] nextArrival_ = arrivalBefore;
+    return applied;
+}
+
+bool OrderBook::cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity newQty,
+                                    RejectReason& reason, ParticipantId requester,
+                                    RecordFn record) {
+    sweepNow_ = 0;
     reason = RejectReason::OrderNotFound;
 
     auto* orderPtr = orderLookup_.find(orderId);
@@ -2511,9 +2676,38 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         reason = admit;
         return false;
     }
+    const Quantity newLeaves = newQty - order->cumQty;
+    // Rule 9.5 on a replace (MR-5). An order that has not executed and carries
+    // a minimum (one that rested through an auction, which does not apply it)
+    // trades at least that much on the replace's sweep, or nothing: a sweep
+    // that would fill less is refused with the liquidity screen's reason.
+    // Screened before admitAmend, which reserves any growth: refused after it,
+    // the growth stayed reserved with nothing working behind it.
+    if (order->minQty > 0 && order->cumQty == 0 && newPrice != order->price &&
+        !inAuctionState()) [[unlikely]] {
+        Order probe = *order;
+        probe.price = newPrice;
+        probe.remainingQty = newLeaves;
+        const Quantity fills = sweepFillQty(probe);
+        if (fills > 0 && fills < order->minQty) {
+            reason = RejectReason::FOKInsufficientLiquidity;
+            return false;
+        }
+    }
+    if (const RejectReason r = admitAmend(*order, newPrice, newQty, newLeaves);
+        r != RejectReason::None) [[unlikely]] {
+        reason = r;
+        return false;
+    }
+    if (record && !record()) [[unlikely]] {
+        // Refused after admitAmend reserved any growth: give it back.
+        if (newLeaves > order->remainingQty) releaseWorking(*order, newLeaves - order->remainingQty);
+        reason = RejectReason::JournalHalted;
+        return false;
+    }
+    if (newLeaves < order->remainingQty) releaseWorking(*order, order->remainingQty - newLeaves);
 
     reason = RejectReason::None;
-    const Quantity newLeaves = newQty - order->cumQty;
     order->initialQty = newQty;
     Price oldPrice = order->price;
     bool priceChanged = (newPrice != oldPrice);
@@ -2533,8 +2727,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 
         order->price = newPrice;
         order->remainingQty = newLeaves;
-        order->timestamp = nowNs();
+        order->arrivalSeq = nextArrival_++;
         const Quantity cumBefore = order->cumQty;
+        // The new leaves are told before the sweep below, so the fills it
+        // makes count down from them. Told after (by the engine), those fills
+        // carried the pre-replace leaves.
+        notifyOrderUpdate(orderId, order->status, order->cumQty, order->remainingQty);
 
         // Check if new price crosses — if so, match first
         bool wouldCross = false;
@@ -2544,14 +2742,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             wouldCross = !bids_.empty() && newPrice <= bids_.bestPrice();
 
         // In an auction state the repriced order rests, crossed or not, and
-        // waits for the uncross like every other order (H4, MATCH-6).
+        // waits for the uncross like every other order (H4, MATCH-6). Decided
+        // before the match: one the breaker stops still runs the sweeps
+        // below, which latch what its in-band prints elected.
+        const bool inAuction = inAuctionState();
         Price firstPrint = 0;
-        if (wouldCross && !inAuctionState()) {
-            if (matchAlgorithm_ == MatchAlgorithm::ProRata)
-                firstPrint = matchProRata(order);
-            else
-                firstPrint = match(order);
-        }
+        if (wouldCross && !inAuction) firstPrint = sweep(order);
 
         // A repriced order acts as an aggressor, so it can self-cross too.
         // Otherwise the same tail as addOrder; addToBook re-slices an iceberg
@@ -2561,7 +2757,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
 
         // As addOrder, and for the same reason after the tail: a replace that
         // printed through a stop's trigger never elected it (MATCH-5).
-        if (!inAuctionState()) runTriggerSweeps(firstPrint);
+        if (!inAuction) runTriggerSweeps(firstPrint);
     } else {
         // Same price
         const Quantity displayBefore = displayQuantity(*order);
@@ -2573,6 +2769,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             order->remainingQty = newLeaves;
             if (order->type == OrderType::Iceberg)
                 order->visibleQty = std::min(order->visibleQty, order->remainingQty);
+            restateLevel(*order, displayBefore);
             const Quantity displayAfter = displayQuantity(*order);
             if (!order->isHidden && displayAfter < displayBefore)
                 notifyBookVisible(BookVisibleUpdate::Action::Reduce, order->id,
@@ -2583,11 +2780,12 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
             // priority — a growth must not jump the queue it joined smaller.
             removeFromBook(order);
             order->remainingQty = newLeaves;
-            order->timestamp = nowNs();
+            order->arrivalSeq = nextArrival_++;
             if (!addToBook(order)) {  // re-announces: back of the queue, new size
                 notifyOrderUpdate(orderId, OrderStatus::Cancelled, order->cumQty, 0);
                 if (!order->isHidden)
                     notifyMarketData(MarketDataUpdate::Action::Delete, order->side, order->price);
+                untrackOrder(order);
                 orderLookup_.erase(orderId);
                 orderPool_.deallocate(order);
                 return true;
@@ -2595,6 +2793,7 @@ bool OrderBook::cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
         }
         if (!order->isHidden)
             notifyMarketData(MarketDataUpdate::Action::Modify, order->side, order->price);
+        notifyOrderUpdate(orderId, order->status, order->cumQty, order->remainingQty);
     }
 
     return true;
@@ -2649,16 +2848,24 @@ uint64_t OrderBook::cancelAllForParticipant(ParticipantId participantId) {
 
 // ─── Time-based expiry ───────────────────────────────────────────────────────
 
+static constexpr size_t kMaxExpiryBatch = 4096;
+
 void OrderBook::expireOrders(uint64_t currentTime,
                              const std::function<void(OrderId)>& onExpire) {
     std::unique_lock<std::mutex> lock(bookLock_);
+    (void)expireDueLocked(currentTime, onExpire);
+}
 
+// Precondition: bookLock_ held. Returns how many it cancelled, at most
+// kMaxExpiryBatch.
+size_t OrderBook::expireDueLocked(uint64_t currentTime,
+                                  const std::function<void(OrderId)>& onExpire) {
     // Collect expired order IDs into stack buffer (avoids heap allocation)
-    OrderId toExpire[4096];
+    OrderId toExpire[kMaxExpiryBatch];
     size_t expireCount = 0;
 
     orderLookup_.forEach([&](OrderId id, Order* order) {
-        if (!order || expireCount >= 4096) return;
+        if (!order || expireCount >= kMaxExpiryBatch) return;
         if ((order->timeInForce == TimeInForce::GTD || order->timeInForce == TimeInForce::DAY)
             && order->expiryTime != 0 && currentTime >= order->expiryTime) {
             toExpire[expireCount++] = id;
@@ -2669,9 +2876,42 @@ void OrderBook::expireOrders(uint64_t currentTime,
         if (onExpire) onExpire(toExpire[i]);  // notify (e.g. journal) BEFORE cancel
         cancelOrderImpl(toExpire[i]);          // already holding the lock
     }
+    return expireCount;
+}
+
+// The clock is read once per operation (sweepNow_). Expired at expiryTime
+// itself, as the sweep counts it.
+bool OrderBook::expiredNow(const Order& o) const {
+    if (replayMode_ || (o.timeInForce != TimeInForce::GTD && o.timeInForce != TimeInForce::DAY))
+        return false;
+    if (sweepNow_ == 0) sweepNow_ = expiryClockNow();
+    return sweepNow_ >= o.expiryTime;
+}
+
+uint64_t OrderBook::expiryClockNow() const {
+    if (expiryClock_) return expiryClock_();
+    // Wall-clock ns since the Unix epoch, expiryTime's unit (MatchingEngine::expiryNow).
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+void OrderBook::expireMaker(Order* o) {
+    const OrderId id = o->id;
+    if (onLazyExpire_) onLazyExpire_(id);   // journal BEFORE the cancel, as the sweep does
+    cancelOrderImpl(id);
 }
 
 // ─── Stop Order Triggers ─────────────────────────────────────────────────────
+
+// The election is the owner's news, told once: when the latch goes from clear
+// to set, before any fill the elected order makes. A latched election that
+// waits for budget or for Continuous was already told. A restored latch
+// (restoreStopElection) sets the flag directly and tells nobody again.
+void OrderBook::latchElection(Order& order) {
+    if (order.isStopTriggered) return;
+    order.isStopTriggered = true;
+    notifyOrderUpdate(order.id, OrderStatus::Triggered, order.cumQty, order.remainingQty);
+}
 
 void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
     if (stopOrders_.empty()) [[unlikely]] return;
@@ -2689,7 +2929,8 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
     // Elections beyond the cap are latched, not dropped — see the constant.
     size_t executed = 0;
 
-    // Index-based iteration with erase_swap (FixedVector compatible)
+    // Index-based iteration; an executed stop leaves with erase_ordered, so the
+    // rest keep arrival order and the next one slides into slot i.
     size_t i = 0;
     while (i < stopOrders_.size()) {
         Order* order = stopOrders_[i];
@@ -2712,12 +2953,15 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
         if (triggered) {
             // Latch the election before deciding whether there is budget to act
             // on it, so the deferred ones are the SAME set this print elected.
-            order->isStopTriggered = true;
+            latchElection(*order);
 
-            if (executed >= kMaxStopExecutionsPerSweep) [[unlikely]] {
-                // Out of budget: leave it parked and latched. The next sweep
-                // (every addOrder runs one once the book has traded) executes
-                // it. It stays cancellable by its owner until then.
+            if (executed >= kMaxStopExecutionsPerSweep ||
+                tradingState_ != TradingState::Continuous) [[unlikely]] {
+                // Out of budget, or an earlier election in this sweep tripped
+                // the breaker: leave it parked and latched. The next sweep in
+                // Continuous (every addOrder runs one once the book has traded)
+                // executes it, and its prints face the band then (MR-2). It
+                // stays cancellable by its owner until then.
                 ++i;
                 continue;
             }
@@ -2730,11 +2974,11 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
                 order->type = OrderType::Market;   // Stop and MIT fire a market order
             }
 
-            stopOrders_.erase_swap(i);
-            match(order);
+            stopOrders_.erase_ordered(i);
+            sweep(order);
 
             // A triggered stop becomes an aggressor and can self-cross.
-            // erase_swap already moved the last element here, so `continue`
+            // erase_ordered already moved the next element here, so `continue`
             // without incrementing i, exactly as the tail of this block does.
             if (finalizeIfStpCancelled(order)) continue;
 
@@ -2743,7 +2987,7 @@ void OrderBook::checkStopOrders(Price lowPrint, Price highPrint) {
             // L2 Add. A triggered Stop or MIT is now a Market order, so its
             // remainder is cancelled there rather than rested.
             finalizeRemainingQty(order, order->id, order->side, order->price, order->type);
-            // Don't increment i — erase_swap moved the last element here
+            // Don't increment i — erase_ordered moved the next element here
         } else {
             ++i;
         }
@@ -2793,9 +3037,10 @@ void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
         }
 
         if (triggered) {
-            order->isStopTriggered = true;
+            latchElection(*order);
 
-            if (executed >= kMaxStopExecutionsPerSweep) [[unlikely]] {
+            if (executed >= kMaxStopExecutionsPerSweep ||
+                tradingState_ != TradingState::Continuous) [[unlikely]] {  // as checkStopOrders
                 ++i;
                 continue;
             }
@@ -2803,8 +3048,8 @@ void OrderBook::updateTrailingStops(Price firstPrint, Price lastPrint) {
 
             order->type = OrderType::Limit;
             order->price = order->stopPrice;
-            trailingStopOrders_.erase_swap(i);
-            match(order);
+            trailingStopOrders_.erase_ordered(i);
+            sweep(order);
 
             if (finalizeIfStpCancelled(order)) continue;
 
@@ -2825,7 +3070,7 @@ void OrderBook::updatePeggedOrders() {
         // Check if order was removed
         auto* lookupPtr = orderLookup_.find(order->id);
         if (!lookupPtr || *lookupPtr != order) {
-            peggedOrders_.erase_swap(i);
+            peggedOrders_.erase_ordered(i);
             continue;
         }
 
@@ -2842,7 +3087,7 @@ void OrderBook::updatePeggedOrders() {
             const Price oldPrice = order->price;
             removeFromBook(order);
             order->price = newPrice;
-            order->timestamp = nowNs();
+            order->arrivalSeq = nextArrival_++;
             const bool rested = addToBook(order);
             if (!order->isHidden) {
                 notifyMarketData(MarketDataUpdate::Action::Delete, order->side, oldPrice);
@@ -2853,7 +3098,7 @@ void OrderBook::updatePeggedOrders() {
                 // Off the book at its old price and not on it at the new one:
                 // finish it rather than leave it live in no level (MATCH-11).
                 notifyOrderUpdate(order->id, OrderStatus::Cancelled, order->cumQty, 0);
-                peggedOrders_.erase_swap(i);
+                untrackOrder(order);  // erases slot i, as erase_ordered(i) does
                 orderLookup_.erase(order->id);
                 orderPool_.deallocate(order);
                 continue;
@@ -2885,6 +3130,14 @@ void OrderBook::updateAnalytics(Price price, Quantity qty, ParticipantId p1, Par
 }
 
 // ─── Uncross (Auction) ──────────────────────────────────────────────────────
+
+// Whether `a` arrived no earlier than `b`: the auction's "incoming" order of a
+// self-crossing pair. The one place the uncross asks which of two orders is
+// older. Age is the per-book arrival sequence a checkpoint carries (MIDS-1);
+// two orders on one book never share one, so there are no ties.
+static bool arrivedNoEarlierThan(const Order& a, const Order& b) {
+    return a.arrivalSeq >= b.arrivalSeq;
+}
 // Uses stack-allocated FixedVector to avoid heap allocation during auction.
 
 void OrderBook::uncross() {
@@ -2892,8 +3145,47 @@ void OrderBook::uncross() {
     uncrossLocked();
 }
 
+// The first order the cross at res would fill below an unmet minimum, or
+// null. Mirrors the cross's allocation on each side: parked market orders in
+// list order, then the levels at or through the price, best first, in queue
+// order, each taking min(its leaves, what is left of the paired volume).
+// Precondition: bookLock_ held.
+Order* OrderBook::minQtyShortInCross(const AuctionResult& res) const {
+    const Price px = res.indicativePrice;
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        Quantity left = res.pairedVolume;
+        Order* found = nullptr;
+        auto take = [&](Order* o) {
+            const Quantity alloc = std::min(o->remainingQty, left);
+            left -= alloc;
+            if (o->minQty > 0 && o->cumQty == 0 && alloc > 0 && alloc < o->minQty) found = o;
+            return left > 0 && !found;
+        };
+        bool more = true;
+        for (Order* m : auctionMarketOrders_)
+            if (more && m && m->side == side) more = take(m);
+        const FlatPriceMap& book = side == Side::Buy ? bids_ : asks_;
+        if (more)
+            book.forEachLevelWhile([&](Price p, const OrderList& level) {
+                if (side == Side::Buy ? p < px : p > px) return false;
+                for (Order* o : level)
+                    if (!take(o)) return false;
+                return true;
+            });
+        if (found) return found;
+    }
+    return nullptr;
+}
+
 // Precondition: bookLock_ held.
 void OrderBook::uncrossLocked() {
+    // THR-10: an order past its expiry takes no part in the cross. Replay applies
+    // the cancels this journaled instead.
+    if (!replayMode_) {
+        const uint64_t now = expiryClockNow();
+        while (expireDueLocked(now, onLazyExpire_) == kMaxExpiryBatch) {}
+    }
+
     // H5: resolve self-crossing pairs first, exactly as discovery assumed.
     std::vector<Order*> selfCrossed;
     planAuctionSelfCrosses(selfCrossed);
@@ -2902,7 +3194,16 @@ void OrderBook::uncrossLocked() {
     // Discover the clearing price via the shared, non-destructive core —
     // the same logic computeAuctionState() publishes pre-cross, so the
     // indicative feed and the executed price can never disagree.
+    // Rule 9.5 in the cross: an unexecuted minQty order the cross would fill
+    // below its minimum is cancelled untraded, as on arrival, and the price is
+    // found again without it. Each pass removes one order, so it ends.
     AuctionResult res = discoverUncrossPrice();
+    while (res.hasCross) {
+        Order* shortOfMin = minQtyShortInCross(res);
+        if (!shortOfMin) break;
+        cancelOrderImpl(shortOfMin->id);
+        res = discoverUncrossPrice();
+    }
     if (!res.hasCross) {
         // Nothing crosses: empty / one-sided / non-overlapping book, or
         // parked market orders with no limit prices to anchor on. Parked
@@ -2954,7 +3255,7 @@ void OrderBook::uncrossLocked() {
         return nullptr;
     };
     // Takes an order out of the cross: a parked one by nulling its slot, a
-    // resting one through `inBook` (stpCancelRestingOrder / retireFilled).
+    // resting one through its level (retireFilled).
     auto releaseParked = [&](size_t cursor) { auctionMarketOrders_[cursor] = nullptr; };
 
     // Execute trades at the uncross price
@@ -2978,89 +3279,30 @@ void OrderBook::uncrossLocked() {
 
         if (!buyer || !seller) break;
 
-        // ── C1: mode-aware STP in the auction cross ─────────────────────────
-        // The pre-fix code ignored stpModes_ entirely and always cancelled the
-        // BUYER — an arbitrary side bias — reporting it as a client-initiated
-        // Cancelled.
-        //
-        // An auction has no aggressor: both orders were resting before the
-        // uncross, so CancelIncoming / CancelResting / DecreaseResting have no
-        // literal referent. "Incoming" maps to the LATER-ARRIVING order by
-        // timestamp: price-time is the auction's own ordering, and the newer
-        // order is the one that created the self-cross. Ties (equal timestamps)
-        // fall to the buyer, preserving the historical side for that case.
-        //
-        // Whose mode applies is unambiguous — checkSMP has already established
-        // both orders belong to the same participant, so the two lookups are
-        // the same lookup.
-        //
-        // H5: planAuctionSelfCrosses already removed every pair that could
-        // meet here (an eligible bid and an eligible ask always cross), before
-        // the price was discovered. This branch is therefore unreachable; it
-        // stays so a self-trade can never print if that invariant breaks.
-        if (checkSMP(*buyer, *seller)) {
-            const STPMode stpMode = getSTPMode(buyer->participantId);
-            const STPResult stp = SelfTradeProtection::check(
-                buyer->participantId, seller->participantId, stpMode,
-                std::min(buyer->remainingQty, seller->remainingQty));
-
-            const bool buyerIsNewer = (buyer->timestamp >= seller->timestamp);
-            Order*     newer     = buyerIsNewer ? buyer    : seller;
-            OrderList* newerLvl  = buyerIsNewer ? bidLevel : askLevel;
-            FlatPriceMap& newerBk = buyerIsNewer ? bids_   : asks_;
-            size_t     newerCur  = buyerIsNewer ? buyCursor : sellCursor;
-            Order*     older     = buyerIsNewer ? seller   : buyer;
-            OrderList* olderLvl  = buyerIsNewer ? askLevel : bidLevel;
-            FlatPriceMap& olderBk = buyerIsNewer ? asks_   : bids_;
-            size_t     olderCur  = buyerIsNewer ? sellCursor : buyCursor;
-
-            // A null level means a parked market order: it was never in the
-            // book, so it leaves the cross through its slot instead.
-            auto stpCancel = [&](Order* o, OrderList* lvl, FlatPriceMap& bk, size_t cur) {
-                if (lvl) { stpCancelRestingOrder(o, lvl, bk); return; }
-                notifyOrderUpdate(o->id, OrderStatus::CancelledBySTP,
-                                  o->initialQty - o->remainingQty, 0);
-                releaseParked(cur);
-                orderLookup_.erase(o->id);
-                orderPool_.deallocate(o);
-            };
-
-            switch (stp.action) {
-            case STPResult::Action::NoSelfTrade:
-            case STPResult::Action::CancelIncoming:
-                stpCancel(newer, newerLvl, newerBk, newerCur);
-                break;
-            case STPResult::Action::CancelResting:
-                stpCancel(older, olderLvl, olderBk, olderCur);
-                break;
-            case STPResult::Action::CancelBoth:
-                stpCancel(newer, newerLvl, newerBk, newerCur);
-                stpCancel(older, olderLvl, olderBk, olderCur);
-                break;
-            case STPResult::Action::DecreaseResting:
-                if (stp.decreaseAmount >= older->remainingQty) {
-                    stpCancel(older, olderLvl, olderBk, olderCur);
-                } else {
-                    older->remainingQty -= stp.decreaseAmount;
-                    older->initialQty   -= stp.decreaseAmount;  // not a fill
-                    // Keep visibleQty <= remainingQty or a later fill
-                    // underflows remainingQty to UINT64_MAX.
-                    older->visibleQty = std::min(older->visibleQty, older->remainingQty);
-                }
-                break;
-            }
-            continue;
-        }
+        // No self-match here (MIDS-5): planAuctionSelfCrosses resolved every
+        // same-owner pair executable at this price, and a buyer and seller
+        // that meet here are both executable at it (a parked order, or a
+        // limit at or through the price). The in-loop STP branch that once
+        // stood here was never executed by any test or fuzz run.
+        assert(!checkSMP(*buyer, *seller) && "self-cross plan missed a pair");
 
         Quantity fillQty = std::min({buyer->remainingQty, seller->remainingQty, remainingVolume});
+        const Quantity buyerShown = displayQuantity(*buyer);
+        const Quantity sellerShown = displayQuantity(*seller);
 
         buyer->remainingQty -= fillQty;
         buyer->cumQty += fillQty;
         seller->remainingQty -= fillQty;
         seller->cumQty += fillQty;
         remainingVolume -= fillQty;
+        // As a continuous fill does; retireFilled makes an exhausted one Filled.
+        // Left Accepted, a part-filled survivor said Accepted live and
+        // PartiallyFilled after a restore (restoreExecutedQty).
+        buyer->status = OrderStatus::PartiallyFilled;
+        seller->status = OrderStatus::PartiallyFilled;
 
         lastTradePrice_ = bestUncrossPrice;
+        if (referencePrice_ == 0) referencePrice_ = bestUncrossPrice;  // an auction result (MR-1)
         lastTradeQty_ = fillQty;
         updateAnalytics(bestUncrossPrice, fillQty, buyer->participantId, seller->participantId);
         participantRisk_[OTRKey(buyer->participantId, symbolId_)].currentExposure += static_cast<int64_t>(fillQty);
@@ -3088,6 +3330,9 @@ void OrderBook::uncrossLocked() {
         // by the lambda's own guard.
         resliceIceberg(buyer);
         resliceIceberg(seller);
+        // Into the levels' displayed totals; a parked order is on no level.
+        if (bidLevel) bidLevel->restate(*buyer, buyerShown);
+        if (askLevel) askLevel->restate(*seller, sellerShown);
 
         // Both sides' levels changed. Published per fill rather than batched:
         // an auction runs once per session, so the repeated level walk costs
@@ -3150,6 +3395,7 @@ void OrderBook::uncrossLocked() {
         if (!m) continue;
         Quantity filled = m->initialQty - m->remainingQty;
         notifyOrderUpdate(m->id, OrderStatus::Cancelled, filled, 0);
+        releaseWorking(*m, m->remainingQty);  // the list is cleared below
         orderLookup_.erase(m->id);
         orderPool_.deallocate(m);
     }
@@ -3170,9 +3416,12 @@ void OrderBook::cancelAuctionMarketOrders() {
         // "normally" is what the double free above relied on: if anything
         // ever rests one, freeing it here would leave its level pointing at
         // freed memory. Free nothing that is still linked.
+        // Not untrackOrder: it erases from the list this loop walks, and the
+        // list is cleared below.
         removeFromBook(m);
-        untrackOrder(m);
-        notifyOrderUpdate(m->id, OrderStatus::Cancelled, 0, 0);
+        releaseWorking(*m, m->remainingQty);
+        // A market order the breaker parked mid-sweep has fills (cumQty).
+        notifyOrderUpdate(m->id, OrderStatus::Cancelled, m->cumQty, 0);
         orderLookup_.erase(m->id);
         orderPool_.deallocate(m);
     }
@@ -3193,6 +3442,7 @@ void OrderBook::releaseOnCloseOrders() {
         }
         Quantity filled = o->initialQty - o->remainingQty;
         notifyOrderUpdate(o->id, OrderStatus::Cancelled, filled, 0);
+        releaseWorking(*o, o->remainingQty);  // the list is cleared below
         orderLookup_.erase(o->id);
         orderPool_.deallocate(o);
     }
@@ -3249,60 +3499,80 @@ void OrderBook::cancelLocOrders() {
 // of 1000 at 99 moved an honest 105 cross to 99, published 1100 paired instead
 // of 100, and were then cancelled unfilled, so they cost their owner nothing.
 //
-// Per participant, its buys and sells are walked most aggressive first —
-// parked market orders in arrival order, then limits in price-time order — and
-// each pair that crosses (either side priceless, or bid >= ask) is resolved by
-// the owner's mode, with the same newer/older mapping the cross has always
-// used: "incoming" is the later arrival, ties go to the buyer. DecreaseResting
-// cuts the older order: in the cross it was decremented by the newer order's
-// size, pair after pair, until it was gone. A pair that does not cross ends
-// the walk, since every later pair is less aggressive.
+// MIDS-5: only a pair that can meet is resolved — both orders executable at
+// the clearing price (priceless, or a limit at or through it), as continuous
+// STP fires only on orders that would trade. Crossing each other is not
+// enough: P's buy@101 and sell@99 under Q's buy@105 clear at 105, where P's
+// buy cannot trade, and cutting P's sell voided Q's 100-lot cross.
 //
-// Pure read. Discovery excludes the result; uncross() cancels it first, after
-// which the plan is empty — so the published indicative equals the print.
-// ponytail: allocates a map and per-owner vectors per call; the auction runs
-// once per session and the admin indicative is on demand.
-void OrderBook::planAuctionSelfCrosses(std::vector<Order*>& victims) const {
-    struct Sides { std::vector<Order*> buys, sells; };
-    std::map<ParticipantId, Sides> byOwner;  // ordered: deterministic cancel order
-    auto note = [&](Order* o) {
-        Sides& s = byOwner[o->participantId];
-        (o->side == Side::Buy ? s.buys : s.sells).push_back(o);
-    };
-    for (Order* m : auctionMarketOrders_) note(m);
-    bids_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
-    asks_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
-
+// The price depends on what is cut, so this is a fixed point: discover the
+// price without the orders cut so far, resolve the same-owner pairs
+// executable at it, and repeat until a pass cuts nothing (each pass cuts at
+// least one order, so at most one pass per order). Per participant, its
+// executable buys and sells are walked most aggressive first — parked market
+// orders in arrival order, then limits in price-time order — and each pair is
+// resolved by the owner's mode: "incoming" is the later arrival, ties go to
+// the buyer. DecreaseResting cuts the older order: in the cross it was
+// decremented by the newer order's size, pair after pair, until it was gone.
+//
+// Pure read; returns the discovery without the victims. uncross() cancels
+// them first, after which the plan is empty — so the published indicative
+// equals the print.
+// ponytail: allocates per pass and re-runs discovery per pass; the auction
+// runs once per session and the admin indicative is on demand.
+AuctionResult OrderBook::planAuctionSelfCrosses(std::vector<Order*>& victims) const {
     auto priceless = [](const Order* o) {
         return o->type == OrderType::Market || o->type == OrderType::MOC;
     };
-    for (const auto& [owner, s] : byOwner) {
-        size_t bi = 0, si = 0;
-        while (bi < s.buys.size() && si < s.sells.size()) {
-            Order* buy = s.buys[bi];
-            Order* sell = s.sells[si];
-            if (!priceless(buy) && !priceless(sell) && buy->price < sell->price) break;
+    std::vector<Order*> cut;  // sorted copy of victims, for lookup
+    for (;;) {
+        cut.assign(victims.begin(), victims.end());
+        std::sort(cut.begin(), cut.end());
+        const AuctionResult res = discoverExcluding(cut);
+        if (!res.hasCross) return res;
+        const Price px = res.indicativePrice;
 
-            const bool buyIsNewer = buy->timestamp >= sell->timestamp;
-            const STPResult stp = SelfTradeProtection::check(
-                owner, owner, getSTPMode(owner), std::min(buy->remainingQty, sell->remainingQty));
-            bool cutBuy = false, cutSell = false;
-            switch (stp.action) {
-            case STPResult::Action::NoSelfTrade:
-            case STPResult::Action::CancelIncoming:
-                (buyIsNewer ? cutBuy : cutSell) = true;
-                break;
-            case STPResult::Action::CancelResting:
-            case STPResult::Action::DecreaseResting:
-                (buyIsNewer ? cutSell : cutBuy) = true;
-                break;
-            case STPResult::Action::CancelBoth:
-                cutBuy = cutSell = true;
-                break;
+        struct Sides { std::vector<Order*> buys, sells; };
+        std::map<ParticipantId, Sides> byOwner;  // ordered: deterministic cancel order
+        auto note = [&](Order* o) {
+            if (std::binary_search(cut.begin(), cut.end(), o)) return;
+            const bool buy = o->side == Side::Buy;
+            if (!priceless(o) && (buy ? o->price < px : o->price > px)) return;
+            Sides& s = byOwner[o->participantId];
+            (buy ? s.buys : s.sells).push_back(o);
+        };
+        for (Order* m : auctionMarketOrders_) note(m);
+        bids_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
+        asks_.forEachLevel([&](Price, const OrderList& l) { for (Order* o : l) note(o); });
+
+        const size_t before = victims.size();
+        for (const auto& [owner, s] : byOwner) {
+            size_t bi = 0, si = 0;
+            while (bi < s.buys.size() && si < s.sells.size()) {
+                Order* buy = s.buys[bi];
+                Order* sell = s.sells[si];
+                const bool buyIsNewer = arrivedNoEarlierThan(*buy, *sell);
+                const STPResult stp = SelfTradeProtection::check(
+                    owner, owner, getSTPMode(owner), std::min(buy->remainingQty, sell->remainingQty));
+                bool cutBuy = false, cutSell = false;
+                switch (stp.action) {
+                case STPResult::Action::NoSelfTrade:
+                case STPResult::Action::CancelIncoming:
+                    (buyIsNewer ? cutBuy : cutSell) = true;
+                    break;
+                case STPResult::Action::CancelResting:
+                case STPResult::Action::DecreaseResting:
+                    (buyIsNewer ? cutSell : cutBuy) = true;
+                    break;
+                case STPResult::Action::CancelBoth:
+                    cutBuy = cutSell = true;
+                    break;
+                }
+                if (cutBuy)  { victims.push_back(buy);  ++bi; }
+                if (cutSell) { victims.push_back(sell); ++si; }
             }
-            if (cutBuy)  { victims.push_back(buy);  ++bi; }
-            if (cutSell) { victims.push_back(sell); ++si; }
         }
+        if (victims.size() == before) return res;
     }
 }
 
@@ -3331,8 +3601,11 @@ void OrderBook::stpCancelAuctionOrder(Order* o) {
 AuctionResult OrderBook::discoverUncrossPrice() const {
     // Orders STP takes out before the cross count for nothing (H5).
     std::vector<Order*> selfCrossed;
-    planAuctionSelfCrosses(selfCrossed);
-    std::sort(selfCrossed.begin(), selfCrossed.end());
+    return planAuctionSelfCrosses(selfCrossed);
+}
+
+// Discovery over the book without `selfCrossed` (sorted).
+AuctionResult OrderBook::discoverExcluding(const std::vector<Order*>& selfCrossed) const {
     auto qtyOf = [&](const Order* o) -> Quantity {
         return std::binary_search(selfCrossed.begin(), selfCrossed.end(), o) ? 0 : o->remainingQty;
     };
@@ -3562,14 +3835,7 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
 
     bids_.forEachLevelWhile([&](Price price, const OrderList& level) -> bool {
         if (snap.bidCount >= maxDepth) return false;
-        PriceLevel pl{};
-        pl.price = price;
-        for (Order* o = level.front(); o; o = o->next) {
-            if (!o->isHidden) {
-                pl.totalQuantity += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
-                pl.orderCount++;
-            }
-        }
+        const PriceLevel pl{price, level.visibleQty(), level.visibleCount()};
         if (pl.orderCount > 0) {
             snap.bids[snap.bidCount++] = pl;
         }
@@ -3578,14 +3844,7 @@ MarketDataSnapshot OrderBook::getSnapshot(size_t depth) const {
 
     asks_.forEachLevelWhile([&](Price price, const OrderList& level) -> bool {
         if (snap.askCount >= maxDepth) return false;
-        PriceLevel pl{};
-        pl.price = price;
-        for (Order* o = level.front(); o; o = o->next) {
-            if (!o->isHidden) {
-                pl.totalQuantity += (o->type == OrderType::Iceberg) ? o->visibleQty : o->remainingQty;
-                pl.orderCount++;
-            }
-        }
+        const PriceLevel pl{price, level.visibleQty(), level.visibleCount()};
         if (pl.orderCount > 0) {
             snap.asks[snap.askCount++] = pl;
         }
@@ -3614,6 +3873,70 @@ const Order* OrderBook::getOrder(OrderId orderId) const {
     return ptr ? *ptr : nullptr;
 }
 
+RejectReason OrderBook::restoreOrder(OrderId orderId, ParticipantId participantId, Side side,
+                                     Price price, Quantity qty, OrderType type, Price stopPrice,
+                                     Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                                     Price stopLimitPrice, PegType pegType, Price pegOffset,
+                                     Price trailAmount, Quantity minQty, bool hidden,
+                                     uint64_t arrivalSeq) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    if (qty == 0) return RejectReason::InvalidQuantity;
+    if (orderLookup_.find(orderId)) return RejectReason::DuplicateOrderId;
+
+    const TradingState state =
+        tradingState_ == TradingState::Halted ? preHaltState_ : tradingState_;
+    const bool released = state == TradingState::AuctionClose || state == TradingState::PostClose;
+    FixedVector<Order*, 16384>* list = nullptr;
+    bool rests = false, releasedLoc = false;
+    switch (type) {
+    case OrderType::Stop:
+    case OrderType::StopLimit:
+    case OrderType::MIT:          list = &stopOrders_; break;
+    case OrderType::TrailingStop: list = &trailingStopOrders_; break;
+    case OrderType::Market:       list = &auctionMarketOrders_; break;
+    case OrderType::MOC:          list = released ? &auctionMarketOrders_ : &onCloseOrders_; break;
+    case OrderType::LOC:
+        if (released) rests = releasedLoc = true;
+        else list = &onCloseOrders_;
+        break;
+    case OrderType::Pegged:       list = &peggedOrders_; rests = true; break;
+    case OrderType::Limit:
+    case OrderType::PostOnly:
+    case OrderType::Iceberg:
+    case OrderType::Hidden:       rests = true; break;
+    case OrderType::IOC:
+    case OrderType::FOK:          break;
+    }
+    if (!list && !rests) return RejectReason::OrderTypeNotAllowedInState;  // never rests
+    if ((list && list->full()) || (releasedLoc && locActiveIds_.full()))
+        return RejectReason::CapacityExhausted;
+
+    const uint64_t counterBefore = nextArrival_;
+    Order* order = allocateAndRegisterOrder(orderId, participantId, side, price, qty, type,
+                                           stopPrice, displayQty, tif, expiryTime, stopLimitPrice,
+                                           pegType, pegOffset, trailAmount, minQty, hidden);
+    if (!order) return RejectReason::CapacityExhausted;
+    if (arrivalSeq != 0) {  // the checkpoint's age, not a fresh one
+        order->arrivalSeq = arrivalSeq;
+        nextArrival_ = std::max(counterBefore, arrivalSeq + 1);
+    }
+    if (rests && !addToBook(order)) {
+        orderLookup_.erase(orderId);
+        orderPool_.deallocate(order);
+        return RejectReason::OutOfPriceRange;
+    }
+    if (list) (void)list->push_back(order);  // slots checked above
+    if (releasedLoc) (void)locActiveIds_.push_back(orderId);
+    return RejectReason::None;
+}
+
+// A trailing stop's reference from its trigger: the ratchet, inverted. A sell
+// trigger floored at 0 says only that the high was at most the trail; taking
+// the trail ratchets the same from here.
+static Price trailRefFor(const Order& o, Price stopPrice) {
+    return o.side == Side::Buy ? stopPrice - o.trailAmount : stopPrice + o.trailAmount;
+}
+
 void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
     std::unique_lock<std::mutex> lock(bookLock_);
     Order** found = orderLookup_.find(orderId);
@@ -3623,8 +3946,12 @@ void OrderBook::restoreStopElection(OrderId orderId, Price stopPrice) {
         return;
     o->isStopTriggered = true;
     // A trailing stop's trigger moved with the price until it was elected;
-    // replay re-derived it from scratch, so put back the one it was elected at.
+    // replay re-derived it from scratch, so put back the one it was elected at,
+    // and the reference it was ratcheted from. Nothing reads the reference
+    // once the stop is elected, but a restored book that differs from the live
+    // one in a field nothing reads today is the next divergence.
     o->stopPrice = stopPrice;
+    if (o->type == OrderType::TrailingStop) o->trailRefPrice = trailRefFor(*o, stopPrice);
 }
 
 void OrderBook::restoreTrailingStop(OrderId orderId, Price stopPrice) {
@@ -3633,10 +3960,7 @@ void OrderBook::restoreTrailingStop(OrderId orderId, Price stopPrice) {
     Order* o = found ? *found : nullptr;
     if (!o || o->type != OrderType::TrailingStop || o->isStopTriggered) return;
     o->stopPrice = stopPrice;
-    // The ratchet, inverted. A sell trigger floored at 0 says only that the
-    // high was at most the trail; taking the trail ratchets the same from here.
-    o->trailRefPrice = o->side == Side::Buy ? stopPrice - o->trailAmount
-                                            : stopPrice + o->trailAmount;
+    o->trailRefPrice = trailRefFor(*o, stopPrice);
 }
 
 void OrderBook::restoreExecutedQty(OrderId orderId, Quantity cumQty) {
@@ -3654,7 +3978,26 @@ void OrderBook::restoreIcebergSlice(OrderId orderId, Quantity visibleQty) {
     Order** found = orderLookup_.find(orderId);
     Order* o = found ? *found : nullptr;
     if (!o || o->type != OrderType::Iceberg || !o->inBook || visibleQty == 0) return;
+    const Quantity shownBefore = displayQuantity(*o);
     o->visibleQty = std::min(visibleQty, o->remainingQty);
+    restateLevel(*o, shownBefore);
+}
+
+// ponytail: a linear find per record, O(pegs^2) per restore; carry each
+// peg's index in the record if a book ever rests thousands of pegs.
+void OrderBook::restorePegQueue(OrderId orderId) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    Order** found = orderLookup_.find(orderId);
+    Order** const end = peggedOrders_.end();
+    Order** const at = found ? std::find(peggedOrders_.begin(), end, *found) : end;
+    if (at != end) std::rotate(at, at + 1, end);
+}
+
+void OrderBook::restoreLocQueue(OrderId orderId) {
+    std::unique_lock<std::mutex> lock(bookLock_);
+    OrderId* const end = locActiveIds_.end();
+    OrderId* const at = std::find(locActiveIds_.begin(), end, orderId);
+    if (at != end) std::rotate(at, at + 1, end);
 }
 
 size_t OrderBook::getBidLevelsCount() const { return bids_.size(); }

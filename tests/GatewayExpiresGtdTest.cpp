@@ -1,25 +1,17 @@
 // GatewayExpiresGtdTest — a GTD order the order-entry port accepted must be gone
 // once its expiry time has passed.
 //
-// WHAT WAS WRONG. MatchingEngine has an expiry sweep and a timer to run it, and
-// neither binary started either. GatewayServer — the binary that takes client
-// orders — acknowledged a GTD order and let it rest, display and trade forever:
-// the expiry field on the wire was stored and never read.
+// WHAT WAS WRONG. The expiry field on the wire was stored and never read: a GTD
+// order rested, displayed and traded forever.
 //
-// WHY NOT THE ENGINE'S TIMER. This engine is synchronous; orders are processed on
-// the gateway's event thread. The timer sweeps from a thread of its own, and a
-// sweep emits events through the durability gate and into the market-data
-// publisher, neither of which takes a lock — it would race the order path. The
-// sweep runs on the event thread instead.
+// HOW IT IS OBSERVED. Black-box, through the order port and /book. Three resting
+// orders — a GTD due in a second, a GTD due in an hour, a GTC — then a wait past
+// the first expiry and a sweep interval, then a cancel for each. Cancelling the
+// first must take nothing off the book, because it expired. Cancelling the other
+// two must, which shows the sweep compared times rather than clearing every GTD,
+// and that the probe can say yes at all.
 //
-// HOW IT IS OBSERVED. Black-box, through the order port; GatewayServer has no
-// endpoint to read the book with. Three resting orders — a GTD due in a second,
-// a GTD due in an hour, a GTC — then a wait past the first expiry and a sweep
-// interval, then a cancel for each. OrderNotFound for the first means it
-// expired. An Ack for the other two means the sweep compared times rather than
-// clearing every GTD, and that the probe can say yes at all.
-//
-// Usage: GatewayExpiresGtdTest <path-to-GatewayServer>
+// Usage: GatewayExpiresGtdTest <path-to-OrderEngine>
 
 #include "GatewayProcess.h"
 
@@ -63,27 +55,22 @@ OrderRequest request(OrderRequest::Type type, const Resting& o) {
 }
 
 // Cancel the order; true if it was there to cancel.
-bool stillResting(Client& c, const Resting& o) {
-    assert(c.send(request(OrderRequest::Type::Cancel, o)));
-    GatewayResponse r{};
-    assert(c.answerFor(o.id, r) && "no answer to the cancel");
-    if (r.type == GatewayResponse::Type::Ack) return true;
-    assert(r.rejectReason == RejectReason::OrderNotFound &&
-           "the cancel was refused for a reason other than the order being gone");
-    return false;
+bool stillResting(Client& c, uint16_t adminPort, const Resting& o) {
+    return cancelRemoved(c, adminPort, request(OrderRequest::Type::Cancel, o));
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    assert(argc == 2 && "usage: GatewayExpiresGtdTest <path-to-GatewayServer>");
+    assert(argc == 2 && "usage: GatewayExpiresGtdTest <path-to-OrderEngine>");
     const char* bin = argv[1];
-    uint16_t port = 28230;
+    uint16_t port = 31560;
     const std::string journal = tempJournalPath("ob_gateway_gtd");
     std::remove(journal.c_str());
 
     const pid_t pid = startOnFreePort(bin, port, journal);
-    assert(pid > 0 && "GatewayServer never started listening");
+    assert(pid > 0 && "OrderEngine never started listening");
+    const uint16_t admin = static_cast<uint16_t>(port + kAdminPortOffset);
 
     const Resting soon {7001, 9900, TimeInForce::GTD, wallNsIn(std::chrono::seconds(1))};
     const Resting later{7002, 9800, TimeInForce::GTD, wallNsIn(std::chrono::hours(1))};
@@ -101,9 +88,9 @@ int main(int argc, char** argv) {
     // Past the first expiry (1 s) and a full sweep interval (1 s), with margin.
     std::this_thread::sleep_for(std::chrono::seconds(4));
 
-    const bool soonResting  = stillResting(c, soon);
-    const bool laterResting = stillResting(c, later);
-    const bool gtcResting   = stillResting(c, gtc);
+    const bool soonResting  = stillResting(c, admin, soon);
+    const bool laterResting = stillResting(c, admin, later);
+    const bool gtcResting   = stillResting(c, admin, gtc);
 
     // Stop the process before asserting, so a failure does not leak it.
     const bool stopped = stopCleanly(pid);
@@ -116,7 +103,7 @@ int main(int argc, char** argv) {
     assert(!soonResting && "a GTD order is still resting 3 s after its expiry time");
     assert(laterResting && "a GTD order expired an hour early — the sweep ignored its time");
     assert(gtcResting && "a GTC order was swept");
-    assert(stopped && "GatewayServer did not exit cleanly on SIGTERM");
+    assert(stopped && "OrderEngine did not exit cleanly on SIGTERM");
 
     std::puts("GatewayExpiresGtdTest passed");
     return 0;

@@ -1,5 +1,8 @@
 // ScalingBenchmark — the thread-scaling curve for the THREAD-PER-SYMBOL path.
 //
+// LISTENER: attached (bench::BookOutcomes) while the flow runs, plus the
+// engine's internal OCO observer every MatchingEngine book carries.
+//
 // WHY THIS EXISTS
 //
 // Project_Overview.md claimed "horizontal scalability" and nothing in

@@ -60,6 +60,18 @@ cap rather than failing it.
 
 > `include/Types.h:213-215` — `constexpr __int128 orderNotional(Price, Quantity)`
 
+An order with no limit is valued at the highest price it can trade at (STP-12): a `Market` or
+`MOC` buy at the collar (Rule 9.5), a sell at the opposite touch; a `Stop` or `MIT` from its
+trigger the same way; a `StopLimit` at its limit; a `TrailingStop` at its trigger as parked. With
+the collar off, or nothing on the opposite side, a market order is valued at the reference price,
+and the engine's fat-finger cap falls back to its own reference (`setReferencePrice` or the last
+trade). An order with no price at all is refused by a notional cap rather than valued at 0, which
+is what every cap used to read for it. The engine's fat-finger cap for these orders runs on the
+book's thread, so on the async path the order is acknowledged and then rejected by the worker.
+
+> `OrderBook::notionalPrice`, `MatchingEngine::checkBookValuedNotional`; pinned by
+> `tests/MarketNotionalTest.cpp`
+
 **Status: Deliberate — commented and pinned.** The `__int128` widening carries its own
 rationale comment and the tick-grid choice is load-bearing across the wire protocols.
 
@@ -72,7 +84,7 @@ them is ever stored as one:
 |---|---|---|
 | `cbThreshold_` | `include/OrderBook.h:957` | Circuit-breaker threshold, default 0.05 (5%) |
 | `priceBandPct_` | `include/OrderBook.h:958` | Price-band half-width, 0 = disabled |
-| `marketProtectionPct_` | `include/OrderBook.h:959` | Market-order sweep collar, 0 = disabled |
+| `marketProtectionPct_` | `include/OrderBook.h:959` | Market-order sweep collar, default 0.05 (5%), 0 = disabled |
 | `vwap_` | `include/OrderBook.h:948` | Session VWAP — an analytics output, never an input to matching |
 
 Each is used in exactly one shape: multiply an `int64_t` reference price by the percentage,
@@ -118,12 +130,18 @@ prices in one fixed range of at most that width. The range is set once:
 
 - **Configured.** `OrderBook::setPriceRange(min, max)` sets it before the first order rests
   (`std::logic_error` over resting orders, `std::invalid_argument` for a range the map cannot
-  hold). `OrderEngine` started with `--config` sets every symbol's range from
-  `instrument.<id>.min_price` / `max_price` before it replays the journal, and refuses to boot
-  when a symbol has no range.
+  hold). `OrderEngine` sets every symbol's range from `instrument.<id>.min_price` / `max_price`
+  before it replays the journal, and refuses to boot when a symbol has no range unless started
+  with `--no-price-band`, or when a range is wider than the map holds (200,000 ticks of 0.0001,
+  i.e. 20.0000; the tick is fixed, there is no per-instrument tick size).
 - **Anchored.** A book with no configured range centres one on the first price that rests, and
-  never moves it. This is what a book gets in `OrderEngine` without `--config`, in
-  `GatewayServer`, and in the library unless the owner calls `setPriceRange`.
+  never moves it. This is what a book gets in `OrderEngine` only under `--no-price-band`
+  (`OB_NO_PRICE_BAND=1`) for a symbol the config gives no range, and in the library unless the
+  owner calls `setPriceRange`. The anchor outlives the orders that set it,
+  and a checkpoint carries it (in the book's `Counters` record, written before the orders), so a
+  restart restores it before putting any order back. It used to re-anchor on the first order
+  restored — the best bid — and an order the live range held no longer fitted (JOURNAL-2). A
+  range configured at the restart wins over a carried anchor.
 
 With a configured range, an order priced outside it is rejected with `OutOfPriceRange` at
 admission, before the ack: `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg`, `Hidden` and `LOC` on
@@ -184,9 +202,8 @@ Pro-rata at one level runs in this exact order:
 2. Sum the **available** quantity of every order at the level. Available means the displayed
    slice for an iceberg and the full leaves for everything else (`src/OrderBook.cpp:1521-1524`).
 3. `toFill = min(incoming leaves, level total)` (`src/OrderBook.cpp:1531`).
-4. For each of the **first 1024** orders at the level in list order, `share = floor(available
-   / total × toFill)` (`src/OrderBook.cpp:1538-1546`). Orders past index 1023 receive no
-   allocation on this pass — see [defect B1](#b1--pro-rata-silently-allocates-only-the-first-1024-orders-at-a-level).
+4. For **every** order at the level in list order, `share = floor(available / total × toFill)`.
+   This used to stop at the first 1024 orders — see [defect B1](#b1--pro-rata-silently-allocates-only-the-first-1024-orders-at-a-level-fixed).
 5. **DMM/LMM floor.** Any order whose owner is a Designated or Lead Market Maker is topped up
    to at least 40% of its available quantity (capped at `toFill`). The top-up is *taken from*
    Regular participants' allocations, first-come in list order, and does not create new
@@ -209,6 +226,90 @@ which pins the behaviour without justifying the value.
 distribution is standard — CME's matching algorithms include an LMM/"Top Order" allocation
 step, and several venues publish DMM guarantees. I do not know of a venue that publishes
 exactly 40%, and I am not going to assert one. Treat 40% as this engine's own parameter.
+
+### Rule 2.5 — A fill's trade is delivered before either side's order update
+
+For each fill, the listener receives the `Trade` before the buyer's or the seller's
+`OrderUpdate`. So an `OrderUpdate`'s `filledQty` never exceeds the sum of the trades already
+delivered for that order. This holds on every path that fills: both algorithms, iceberg
+slices, elected stops and MITs, a replace that trades, the auction uncross, and a sweep cut
+short by STP or the market-protection collar. Price-time batches its trades, so it flushes
+them before a maker's `Filled`. Until GTDIFF-7 it did not, and a maker's owner heard `Filled`
+before the trade.
+
+**Status: Deliberate — commented and pinned.** Pinned by `tests/EventOrderTest.cpp` (every
+path above) and by `tests/WideDifferentialFuzz.cpp`, which checks each report against the
+trades delivered before it.
+
+### Rule 2.6 — On the order port, the owner hears every fill and every status change, once durable
+
+`OrderEngine`'s order port forwards what the book emits to the order's owner: a
+`TradeNotification` per fill to the aggressor and to each maker (the execution, the order's
+cumulative and leaves, the trade id; the contra side's order and participant are zeroed), and an
+`OrderUpdateNotification` per status change (`Accepted`; `Cancelled` for an IOC, FOK or Market
+remainder, an expiry, a kill switch or a session end; `CancelledBySTP`; `Rejected` for a new
+order the book refused after its Ack). Rule 2.5's order holds on the wire. The owner is the
+participant in the order's scoped id; every session whose credential covers it, or that has
+claimed it with authentication off, receives the report. A participant with no live session
+is not told later: the report is dropped and counted (`gateway_reports_undelivered_total`).
+
+A request's reports, and the market data it produced, leave only after its journal entries
+are durable; if the journal refused them, nothing about that request is ever shown. A session
+whose unread output reaches 1 MiB is disconnected; matching never waits for it.
+
+A cancel, modify or replace is answered Ack once the worker has run it, whatever it decided;
+the outcome follows as an `OrderUpdateNotification`. A modify or replace that took effect
+restates the order: its status, cumulative and new leaves, with no reject reason. A cancel that
+took effect is its `Cancelled`. A refusal carries the order's unchanged status, cumulative and
+leaves and the reason (`InvalidQuantity`, a risk or band reason, ...); a request naming no live
+order of the requester's is `Rejected` with `OrderNotFound`. A resting order shrunk by
+`DecreaseAndCancel` is restated the same way, in its own status with its new leaves. A
+replace that took effect is restated by the book itself, before the sweep its new price may
+cause, so a crossing replace's own fills count down from the new leaves. Refusals and "no such
+order" are told by the engine and carry sequence id 0.
+
+A stop, stop-limit, MIT or trailing stop that is elected is reported once, as `Triggered` with
+its cumulative and leaves, when the election is latched and before any fill it makes; an
+election deferred by the execution budget or by a non-Continuous state is reported then too
+(Rule 5.6). `Triggered` is not terminal and is not an execution.
+
+**Status: Deliberate — pinned** by `tests/GatewayExecutionReportTest.cpp` and the crossing
+rounds of `tests/CrashRecoveryE2ETest.cpp`. Sync-mode `TcpGateway` sends no reports.
+
+### Rule 2.7 — Once the journal halts, no book changes
+
+A journal halts on a real write or sync error (a full disk, `EFBIG`, `EIO`) and writes nothing
+more. From then on nothing changes any book, because nothing could be recorded and a restart
+would undo it:
+
+- new orders, cancels, modifies and replaces are refused with `JournalHalted`, at admission and
+  again on the worker for anything queued before the halt;
+- the kill switch is refused as well: it cancels nothing, and the order port answers it
+  `JournalHalted` rather than Ack. Since nothing can trade while halted, it is not needed;
+- expiry sweeps, the DAY sweep at session end, session transitions, uncrosses and the
+  volatility-auction reopening cross are suspended;
+- an engine-initiated cancel (kill, DAY, OCO sibling) is journaled before it is applied, so a
+  sweep the halt interrupts stops with the book still matching the disk.
+
+One request is the exception: the one whose own record failed. A cancel, a modify and a
+cancel-replace, on both engines, are recorded before they are applied: the book runs every
+refusal check, then calls the engine's write-ahead hook (`OrderBook::RecordFn`) under its lock,
+and only a record that stands lets it change anything. A refused record leaves the order
+exactly as it was, as a restart finds it, and gives back any growth a replace had reserved.
+A new order and a session transition are still applied before their record is written (not
+write-ahead; Rule 2.6), so that request's effect is in memory. It is answered `JournalHalted`,
+nothing it produced is shown, nothing can trade against it, and a restart drops it. An expiry sweep that halts partway also finishes cancelling its expired orders
+in memory; their cancels are never shown and a restart's next sweep expires them again.
+
+Reads while halted: the admin port's views of a book (`/book`, `/audit`, `/auction`) answer
+503 `{"status":"journal_halted"}`, because the book in memory may hold that one request and a
+restart will not. `/health`, `/metrics` and `/journal/head` still answer. The library's
+`MatchingEngine::getSnapshot` serves the book as it stands in memory; an in-process caller
+asks `getJournal()->halted()` to know it may be ahead of the disk.
+
+**Status: Deliberate — pinned** by `tests/JournalHaltTest.cpp`,
+`tests/JournalHaltFreezeTest.cpp` and `tests/JournalRecordBeforeEventTest.cpp`. Recovery is a
+restart.
 
 ---
 
@@ -346,7 +447,7 @@ that permits a self-cross, and the unconfigured default prevents.
 | `CancelResting` (1) | Remove the resting order, incoming continues |
 | `CancelIncoming` (2) | Cancel the incoming order, resting survives |
 | `CancelBoth` (3) | Remove both |
-| `DecreaseAndCancel` (4) | Reduce both orders by the smaller remaining quantity; cancel whichever reaches zero (continuous trading; in an auction the older order is cancelled — see [B2](#b2--decreaseandcancel-never-decrements-the-incoming-order-fixed-in-continuous-trading)) |
+| `DecreaseAndCancel` (4) | Reduce both orders by the smaller remaining quantity; cancel whichever reaches zero, and send a surviving resting order's owner an update with its new leaves in its own status (MR-7) (continuous trading; in an auction the older order is cancelled — see [B2](#b2--decreaseandcancel-never-decrements-the-incoming-order-fixed-in-continuous-trading)) |
 
 ### Rule 4.1 — An STP-cancelled order reports `CancelledBySTP`, never `Cancelled` and never `Filled`
 
@@ -358,12 +459,13 @@ from its size (see [rule 9.2](#rule-92--cancelreplace-loses-priority-on-a-price-
 
 > `include/Types.h:50-60` — why the status exists
 > `include/Types.h:64-71` — `isExecution()`, the single predicate for "did this order trade?"
-> `src/OrderBook.cpp:1047-1087` — `stpCancelRestingOrder`, shared by all three matching paths
-> `src/OrderBook.cpp:1088-1104` — `finalizeIfStpCancelled`
+> `src/OrderBook.cpp` `stpCancelRestingOrder` — shared by all three matching paths
+> `src/OrderBook.cpp` `finalizeIfStpCancelled`
 
-An order that traded against *other* participants before hitting the self-cross reports
-`PartiallyFilled` with its genuine executed quantity. Only a zero-fill STP termination reports
-`CancelledBySTP` (`src/OrderBook.cpp:1092-1099`).
+An order that traded against *other* participants before hitting the self-cross also reports
+`CancelledBySTP`, a terminal status, with `cumQty` carrying its genuine executed quantity: it
+used to report `PartiallyFilled` with nothing left, a status that never closes (GTDIFF-4,
+`finalizeIfStpCancelled`).
 
 **Status: Deliberate — commented and pinned.** `tests/StpSemanticsTest.cpp` covers all five
 modes on all three paths.
@@ -423,27 +525,46 @@ cannot slip past it.
 > `src/OrderBook.cpp:1133-1157`; parity between the counter and a brute-force rescan is
 > asserted in `tests/StpOccupancyTest.cpp`.
 
-### Rule 4.4 — In an auction cross, "incoming" means the later-arriving order by timestamp
+### Rule 4.4 — In an auction cross, "incoming" means the later-arriving order
 
 An auction has no aggressor — both orders were resting before the uncross — so
 `CancelIncoming` / `CancelResting` have no literal referent. The engine maps "incoming" to
-the **later-arriving** order by `timestamp`, on the grounds that price-time is the auction's
-own ordering and the newer order is the one that created the self-cross. Equal timestamps
-fall to the buyer.
+the **later-arriving** order, on the grounds that price-time is the auction's own ordering
+and the newer order is the one that created the self-cross. Arrival is `Order::arrivalSeq`, a
+per-book counter drawn when an order is admitted and again whenever it goes to the back of its
+queue (a reprice, a growth, a peg move), so two orders never tie. It is a sequence, not a
+clock: a journal replay regenerates it, and a checkpoint carries each order's value and the
+counter, so a restarted engine resolves the same pair the same way. An order the book refuses
+(a FOK screen refuses after allocating) and a replace it refuses give their sequence back,
+since neither is journaled and a replay would otherwise number every later order differently. It was a wall-clock
+`timestamp` that a checkpoint restore re-stamped in bids-then-asks order, which made every
+restored bid older than every ask and cancelled the other leg (MIDS-1).
 
-The pairs are resolved **before** price discovery, not as they meet in the cross. Per
-participant, buys and sells are walked most aggressive first (parked market orders in arrival
-order, then limits in price-time order); every pair that crosses — either side priceless, or
-bid ≥ ask — is resolved by the owner's mode with this mapping. `DecreaseAndCancel` cuts the
+The pairs are resolved **before** price discovery, not as they meet in the cross, and only
+pairs that can meet: **both orders executable at the clearing price** (priceless, or a limit
+at or through it), as continuous STP fires only on orders that would trade. Since the price
+depends on what is cut, the plan is a fixed point: discover the price without the orders cut
+so far; per participant, walk its executable buys and sells most aggressive first (parked
+market orders in arrival order, then limits in price-time order) and resolve each pair by the
+owner's mode with this mapping; repeat until a pass cuts nothing. `DecreaseAndCancel` cuts the
 older order, which is where the cross's repeated decrements always ended. The published
 indicative already excludes these orders, and `uncross()` cancels them (`CancelledBySTP`)
 before it discovers the price, so a participant's own buy and sell can no longer move the
 print or inflate the paired volume (roadmap 1.8-H5, AUCT-3; this closed defect B3).
 
-> `planAuctionSelfCrosses()` and `stpCancelAuctionOrder()` in `src/OrderBook.cpp`
+A pair that merely crosses itself is left alone (MIDS-5). The plan used to cut every pair
+with bid ≥ ask: P's buy 10@101 and sell 100@99 under Q's buy 100@105 lost P's sell, and the
+100-lot cross at 105 — where P's buy@101 cannot trade — became no cross. Now it prints. Any
+two orders that meet in the cross are both executable at its price, so after the plan the
+cross never meets a same-owner pair; the in-loop STP branch that guarded it was never
+executed and is gone (an `assert` stands in its place).
+
+> `planAuctionSelfCrosses()`, `arrivedNoEarlierThan()` and `stpCancelAuctionOrder()` in
+> `src/OrderBook.cpp`
 
 **Status: Deliberate — commented and pinned** (`tests/StpSemanticsTest.cpp`, auction section;
-`tests/AuctionSelfCrossTest.cpp`).
+`tests/AuctionSelfCrossTest.cpp`; `tests/AuctionUncrossRulesTest.cpp`; the reference in
+`tests/UncrossOracleTest.cpp`).
 
 ---
 
@@ -582,65 +703,48 @@ none lost. `tests/StopCascadeBoundTest.cpp:187` pins the identical bound on trai
 
 This is the part a participant needs to know and the part the engine does not tell them.
 
-- **No message is sent at election time.** The deferral branch emits no order update, no
-  execution report, nothing. The first thing the owner hears is the fill when the stop
-  eventually runs (`src/OrderBook.cpp:2257-2263`).
-- **The order still looks armed.** `getOrder()` returns it with `status == Accepted` (set once
-  at `src/OrderBook.cpp:700` and not touched by election) and `type` still `Stop`/`StopLimit`/
-  `MIT` — the type is only rewritten at execution. The `isStopTriggered` latch is a private
-  field carried on no wire protocol (`include/Order.h:71`; grep confirms it is read only
-  inside `OrderBook`).
+- **The election is reported, once.** `OrderBook::latchElection` emits an order update with
+  status `Triggered` when the latch goes from clear to set, whether the stop executes in this
+  sweep or is deferred; the gateway passes it to the owner as an `OrderUpdateNotification`.
+  A latch restored from a checkpoint is not reported again.
+- **The order object still looks armed.** `getOrder()` returns it with `status == Accepted`
+  (not touched by election) and `type` still `Stop`/`StopLimit`/`MIT` — the type is only
+  rewritten at execution. The `Triggered` report is what tells the owner.
 - **It remains cancellable, and a cancel wins.** A cancel arriving before the deferred
   execution removes the order and discards the election, silently
   (`src/OrderBook.cpp:1879` → `src/OrderBook.cpp:1843-1846`). The owner is never told their
   stop had already been elected.
-- **Deferral is measured in arriving orders, not in time.** The sweep runs only from
-  `addOrder`, for an order that reaches matching, and from a `cancelReplace` that changes
-  price, both in `Continuous` (Rule 5.8). A newly parked stop or peg, a FOK rejected for
-  liquidity, an order the `minQty` screen finalized, cancels, modifies, same-price replaces,
-  expiry sweeps and uncrosses do **not** drain the backlog. If order flow stops, a latched
-  stop sits latched indefinitely.
+- **Deferral is measured in sweeps, not in time.** The sweep runs from `addOrder`, for an
+  order that reaches matching, from a `cancelReplace` that changes price, both in
+  `Continuous`, and at every transition into `Continuous` (Rule 5.8). A newly parked stop or
+  peg, a FOK rejected for liquidity, an order the `minQty` screen finalized, cancels,
+  modifies, same-price replaces and expiry sweeps do **not** drain a backlog left by the
+  execution budget; the next order or the next reopen does.
 
-So from the outside, a deferred stop is indistinguishable from an un-elected one. A
-participant cannot tell whether their stop is armed or already committed.
+**Status: Deliberate — pinned** by `GatewayExecutionReportTest` (`elections`: the
+`Triggered` report arrives before the elected stop's first fill).
 
-**Status: Undocumented consequence of a deliberate design.** The bound itself is documented
-and pinned; the client-observable consequence of it is not stated anywhere, and no test
-asserts what a deferred stop's owner sees. This is worth a wire-protocol field — a "triggered,
-pending execution" state — and there is not one.
+### Rule 5.7 — Elections execute in arrival order
 
-### Rule 5.7 — Deferral order is scan order, and scan order is arbitrary
+Stops elected by one print execute, and are deferred past the execution budget, in the order
+they arrived. `stopOrders_` and `trailingStopOrders_` are flat arrays scanned from index 0, and
+every removal — an execution, a cancel, an expiry — leaves with `FixedVector::erase_ordered`,
+which shifts the rest down rather than moving the last element into the gap. So the array is
+always in arrival order, and the first 64 elected are the 64 oldest. The pegged list is kept
+the same way, so pegs that move together reprice, and queue at the new price, in arrival order.
 
-**Which 64 of the elected stops fire first is not time priority and is not specified by
-anything.**
+They used to be swap-erased: after a single removal the newest stop sat in the oldest's slot and
+sold first, at the best price, and the order was a permutation fixed by the history of removals,
+not derivable from the book's public state. Journal replay and a checkpoint reproduced the
+permutation, so restarts agreed with it; it was still not time priority.
 
-`stopOrders_` is a flat array scanned from index 0. When a stop executes, `erase_swap(i)`
-removes it by **moving the last element of the array into slot `i`**
-(`include/OrderBook.h:202-207`). Cancellation and expiry do the same thing via `erase_value`
-(`include/OrderBook.h:210-218`, reached from `src/OrderBook.cpp:1843-1846`).
+The cost is an O(n) shift per removal (n at most 16384 pointers), paid on the election and
+cancel paths only.
 
-Consequences:
-
-- On a pristine book that has never removed a stop, array order equals arrival order, so the
-  first 64 elected do fire in arrival order.
-- **After a single removal of any kind — one execution, one cancel, one expiry — that stops
-  being true.** The tail element has jumped into the middle. Array order is now a permutation
-  of arrival order determined by the entire history of removals.
-- Within one sweep the permutation is still evolving: each execution swaps a new element into
-  the slot the scan is currently reading.
-
-This is not a race and it is fully deterministic given an identical input sequence — journal
-replay reproduces it, and a checkpoint re-adds the parked orders in array order, so a restart
-from one does too (`tests/CheckpointParkedOrderTest.cpp`) — but it is **not derivable from the
-order book's public state**. Two
-participants whose stops sit at the same trigger level have no way to reason about which of
-them is executed and which is deferred, and it is not the one who armed first.
-
-**Status: Undocumented — no test pins this, may be incidental.** `erase_swap` was chosen for
-O(1) removal from a flat array; there is no evidence anyone decided the resulting fairness
-properties were acceptable. A venue publishing this rulebook would have to either specify
-time-ordered deferral or state plainly that deferral order is unspecified. Right now the code
-does the latter without saying so.
+**Status: Deliberate — pinned.** `tests/StopSweepOrderTest.cpp`
+(`electionsKeepArrivalOrderAfterARemoval`: stops, trailing stops and pegs after a cancel),
+and `OrderBook::validateIntegrity` checks both stop lists are in arrival order, which
+`tests/CheckpointEquivalenceTest.cpp` now runs on the live book after every operation.
 
 ### Rule 5.8 — Elections run after the triggering order is final
 
@@ -649,6 +753,14 @@ printed is finished: rested, filled, cancelled, or ended by self-trade preventio
 runs them after its finalize step, and so does a `cancelReplace` that changes price — the
 repriced order is an aggressor and its prints elect stops like any other. Neither runs them in
 `PreOpen` or an auction state (Rule 7.1).
+
+Every transition into `Continuous` runs them too, after the reopening cross if there is one
+(`setTradingStateLocked`): the open, the end of a volatility auction, a halt resumed into
+`Continuous`. So a stop latched while the book could not execute it, and a stop the reopening
+cross printed through, are elected at the reopen rather than at the next incoming order, and
+pegs reprice against the book the cross left. Their prints face the band like any; if they trip
+the breaker again the engine journals that trip after the transition, as it does for an
+order's. Replay runs the same sweep at the same record.
 
 So the aggressor's own report comes first: its rest or `Filled` update precedes the executions
 of any stop it elected. The sweeps used to run between `match()` and the finalize step. A stop
@@ -662,11 +774,14 @@ MATCH-5).
 `Continuous`; the accumulation states, where crossing orders legitimately wait for the
 uncross, pass.
 
-> `runTriggerSweeps()`, its two call sites in `addOrder` and `cancelReplace`, and
+> `runTriggerSweeps()`, its call sites in `addOrder`, `cancelReplace` and
+> `setTradingStateLocked`, and
 > `validateIntegrity()` in `src/OrderBook.cpp`
 
 **Status: Deliberate — commented and pinned.** `tests/StopSweepOrderTest.cpp` (incoming-print
-and replace elections), `tests/IntegrityOracleTest.cpp` (crossed and locked books).
+and replace elections), `tests/IntegrityOracleTest.cpp` (crossed and locked books),
+`tests/PrintBandTest.cpp` (`LatchedElectionsAreCheckedWhenTheyFire`,
+`TheOpeningCrossElectsAtTheOpen`: elections at the reopen).
 
 ---
 
@@ -789,11 +904,11 @@ walk past any pegs resting at the touch to find the first non-pegged order (the 
 ponytail note names a per-side best-non-peg tracker as the upgrade path).
 
 When a peg's target differs from its current price, the order is **removed from the book,
-repriced, given a fresh timestamp, and re-inserted** — and insertion appends to the tail of
+repriced, given a fresh arrival sequence, and re-inserted** — and insertion appends to the tail of
 the destination level.
 
 > `updatePeggedOrders()` — `removeFromBook` → `order->price = newPrice` →
-> `order->timestamp = nowNs()` → `addToBook`
+> `order->arrivalSeq = nextArrival_++` → `addToBook`
 > `include/FlatPriceMap.h:146,151` — insertion is `push_back`
 
 **So yes: a repegged order loses time priority, every time it repegs.** A peg that follows a
@@ -801,6 +916,14 @@ moving touch is perpetually at the back of its queue.
 
 The depth change is published as a `Delete` at the old price and an `Add` at the new one, so
 incremental subscribers can follow it.
+
+The sweep moves the pegs in `peggedOrders_` order, so pegs that land on one price queue in
+that order, and a clamp sees the pegs moved before it at their new price. Removal keeps the
+rest in order, as for stops (Rule 5.7), so that order is the pegs' arrival order, not the
+level order. A checkpoint keeps it: each peg comes back at the price
+it rested at, not re-pegged against a book still being restored, and a Snapshot record flagged
+`SNAPSHOT_PEG_QUEUE` per peg, in sweep order, rebuilds the list
+(`tests/CheckpointPeggedOrderTest.cpp`).
 
 **Status: the pricing is deliberate — commented and pinned** (`tests/PegOrderTest.cpp`:
 through-the-touch reject, no ratchet, no mid drift, the clamp, the rounding;
@@ -962,7 +1085,11 @@ limit's price: each side's next order is its oldest unfilled parked market order
 when none is left the front of the best limit level. They never enter the book. They used to
 be inserted at the discovered price, at the back of that level, so a later limit there — or
 any limit priced through the cross — filled first and the market order was cancelled
-unfilled (roadmap 1.8-H2, AUCT-2; pinned by `tests/AuctionMarketPriorityTest.cpp`). Any
+unfilled (roadmap 1.8-H2, AUCT-2; pinned by `tests/AuctionMarketPriorityTest.cpp`). "Oldest"
+is arrival order: an order that leaves the parked list (cancel, STP) no longer lets the
+latest arrival take its slot, which put it ahead of everything parked after the leaver
+(MIDS-4); the on-close list keeps arrival order the same way, so released `MOC` and `LOC`
+queue as they arrived. Any
 market-order remainder is cancelled after the cross rather than left resting — a market order
 is auction-only and does not get to become a limit at the clearing price. Unfilled `LOC`
 orders are cancelled likewise (`cancelLocOrders()`).
@@ -971,47 +1098,84 @@ An `MOC` / `LOC` sent before the close waits in `onCloseOrders_` until the book 
 `AuctionClose`. Any still waiting when the book enters `PostClose` — the close never ran: a
 halt over it, or a volatility auction run into it — is cancelled. It used to wait for the next
 day's close and execute there (roadmap 1.8-H3, AUCT-8 / OTM-9; pinned by
-`tests/OnCloseSessionEndTest.cpp`).
+`tests/OnCloseSessionEndTest.cpp`). A close reached through a halt (`AuctionClose` or
+`VolatilityAuction` → `Halted` → `PostClose`) runs no cross, so it cancels what an empty cross
+would: released `MOC`, `LOC` in the book and parked market orders. They used to survive into
+the next session (pinned by `StaleOnClose.*` in `tests/AuctionUncrossRulesTest.cpp`).
 
 > `uncross()` in `src/OrderBook.cpp` — `nextParked` and the step-3 cancel pass
+
+Price, volume, per-order fills and the self-cross set are checked against an independent
+reference written from Rules 4.4, 7.2 and 7.3 on 40,000 random books (limits and parked market
+orders over 7 prices, random STP modes, cancels before the cross, a reference price in half the
+runs): `tests/UncrossOracleTest.cpp`.
 
 **Status: Undocumented — no test pins this, may be incidental.** That the cross ignores
 `matchAlgorithm_` and is always FIFO is a real semantic choice — a pro-rata product would
 plausibly want pro-rata allocation at the cross — and nothing states it or tests it.
 
-### Rule 7.4 — The breaker trips on the first fill's price and starts a timed volatility auction
+### Rule 7.4 — The breaker tests every continuous print and starts a timed volatility auction
 
-In `Continuous`, before an arriving order matches, the book takes the price its **first fill**
-would print at — the best opposite level it crosses, stepping over its owner's own orders
-where self-trade prevention would — and compares it with `referencePrice_`. If it deviates by
-more than `cbThreshold_`, the book enters `VolatilityAuction` before anything prints and a
-`breaker_trip` event is logged. The order becomes the auction's first arrival: a limit rests,
-a market order is parked for the reopening cross, an IOC or FOK is cancelled. Only the first
-fill is tested; a sweep that starts in band runs on. A passive order trips nothing however far
-it is from the market, and nothing trips in an auction state.
+In `Continuous`, every print is tested before it happens, whatever caused it: an arriving
+order, a cancel/replace, an elected stop, stop-limit, MIT or trailing stop, and an election
+latched earlier that fires now. The price of each fill — after self-trade prevention has
+decided the fill will happen — is compared with `referencePrice_`; a print more than
+`cbThreshold_` away does not happen. The book enters `VolatilityAuction`, a `breaker_trip` event
+is logged, and the order that would have printed keeps the fills it made inside the band and is
+treated as an auction arrival with the rest: a limit (an elected stop-limit or trailing stop
+included) rests, a market order (an elected stop or MIT included) is parked for the reopening
+cross, an IOC or FOK is cancelled. A FOK or `minQty` screen counts only the liquidity inside the
+band, so a FOK never fills in part; one whose size the band cannot hold is refused with
+`FOKInsufficientLiquidity` and trips nothing, since it never prints. A passive order trips
+nothing however far it is from the market, and nothing trips in an auction state.
 
-The breaker used to test each order's **limit** price and switch the book on a breach: one
-passive order far from the market stopped continuous trading for the whole symbol, and nothing
-reopened it (PRIOR-5, AUCT-8). The 0.14 stop-gap then rejected such orders one by one. A
-**replace** is still refused on its new limit price (`VolatilityCircuitBreaker`): it is never
-auctioned, so a crossing replace cannot print out of band either (roadmap 1.8-H3; pinned by
-`tests/VolatilityBreakerTest.cpp`).
+**Elections in a tripped sweep are latched, not executed.** Once the book has left
+`Continuous`, the stop and trailing-stop sweeps still latch what the in-band prints elected,
+but execute nothing; the latched elections fire at the reopen itself (Rule 5.8), and their
+prints face the band measured from the reopening print. A stop cascade therefore stops at the
+band (MR-2: one in-band 1-lot trigger used to elect 66 stops and print 33% below the reference
+with the book still `Continuous`; the default 5% market collar, measured from each elected
+order's own touch, did not bound it).
 
-> `firstFillPrice` and `tripBreakerOnFirstFill` in `src/OrderBook.cpp`
+**The reference is a price that traded.** `referencePrice_` comes only from the first print
+(which also bounds the rest of its own sweep), an auction cross, `setReferencePrice`, the
+reopening print of a volatility auction, or a checkpoint. It used to be seeded by the first
+priced order *seen*, ahead of the FOK and PostOnly refusals, so a rejected 1-lot FOK at 0.0001
+fixed it and the first honest trade put the symbol into a five-minute auction (MR-1). Until there
+is a reference neither the breaker nor the price band applies.
+
+The breaker used to test each order's **limit** price, then (H3) only an arriving order's first
+fill: a sweep that started in band ran on through it, a replace was refused on its limit while
+its print was never tested (so replacing a 4.00 bid to 9.60 traded at 5.00 against a 10.00
+reference, FORMAL-1), and elected stops were not tested at all. A replace is now admitted on
+the same terms as a new order at its price — `VolatilityCircuitBreaker` is no longer emitted —
+and its print is tested. Pinned by `tests/PrintBandTest.cpp` and
+`tests/VolatilityBreakerTest.cpp`.
+
+> `printBand` / `tripBreaker`, asked in `match()`, `matchProRata()` and `sweepFillQty()`, in
+> `src/OrderBook.cpp`
 
 **The auction reopens on a timer.** A book in `VolatilityAuction` — tripped or entered with
 `setTradingState` — reopens after the dwell, 5 minutes by default (`volatility_auction_dwell_ms`).
 The dwell runs on the engine's expiry clock and starts at the first expiry tick after the book
 entered the state, so it can run up to one tick (1 s) long. The engine's periodic expiry hook
 drives it on the book's owning thread: the `ExpireCheck` sweep in async mode, `expireOrders()`
-— `GatewayServer`'s tick — in sync mode. The reopen is an ordinary journaled
+in sync mode. The reopen is an ordinary journaled
 `TradingStateChange` to `Continuous`, which runs the uncross and re-anchors `referencePrice_`
 to the reopening print. `resumeVolatilityAuction()` reopens at once.
 
-**A trip is journaled.** The engine writes a `TradingStateChange(VolatilityAuction)` record
-ahead of the order that tripped the breaker, and replay never evaluates the breaker itself, so
-recovery reproduces the trip even with another threshold. The dwell clock is not journaled:
-after a restart into a volatility auction the dwell starts again.
+**A trip is journaled, and replay evaluates the breaker.** Replay stops a sweep at the same fill
+as live did, because the reference is reproduced (prints, crosses and checkpoints) and the
+threshold is configuration; a replaying engine must run with the live threshold, as it must with
+the live market collar. The engine writes a `TradingStateChange(VolatilityAuction)` record
+**after** the add or replace that tripped, where replay finds the book already in the auction.
+It used to go ahead of the order, so replay made the order an auction arrival; with a trip
+mid-sweep that would drop its in-band fills. Journals written that way still replay as before.
+A checkpoint carries when the dwell started (in the book's `Counters` record), so a restart
+from one keeps the dwell's clock and reopens when the live book would have (JOURNAL-7). The
+plain journal does not carry it, because the start is the first expiry tick, which is not
+journaled: after a restart from a journal with no checkpoint since the trip, the dwell starts
+again.
 
 **A checkpoint carries the reference and the last trade price** (the per-book `Counters`
 record: `price` is the last trade, `newPrice` the reference, `newQty` the last trade's
@@ -1019,21 +1183,20 @@ quantity, 0 for none). A book restarted
 from one used to have neither, so the breaker re-seeded its reference from the next order (a
 20% print traded instead of tripping) and an auction holding only market orders cancelled them
 instead of crossing at the last trade price (Rule 7.2). Pinned by
-`tests/CheckpointPriceStateTest.cpp`, which also restarts a `JournalFollower` from the
-checkpoint.
+`tests/CheckpointPriceStateTest.cpp`.
 
 ### Rule 7.5 — What this engine calls LULD is a single fixed percentage band, not US-equities LULD
 
-The name appears throughout (`OutsidePriceBand`, `priceBandPct_`, `LULDManager`), so the
+The name appears throughout (`OutsidePriceBand`, `priceBandPct_`), so the
 distance from the real thing needs stating:
 
 | US-equities LULD (Reg NMS Plan) | This engine |
 |---|---|
-| Reference price is a rolling 5-minute average | `referencePrice_` is seeded from the first limit price seen and re-anchored only on a volatility-auction reopen (`src/OrderBook.cpp:591-595`, `src/OrderBook.cpp:2881`) |
+| Reference price is a rolling 5-minute average | `referencePrice_` is set by the first print (or an auction cross, or `setReferencePrice`) and re-anchored only on a volatility-auction reopen (Rule 7.4) |
 | Band percentage is tiered by price and by time of day, and doubles near the open/close | One flat `priceBandPct_` for the whole session |
 | A quote at the band creates a *Limit State*; 15 seconds in Limit State becomes a 5-minute pause | No Limit State; a would-be print outside the breaker threshold starts a volatility auction at once |
 | A pause reopens via an auction on a published schedule | The volatility auction reopens with a cross after a fixed dwell (5 minutes by default) |
-| Trades outside the band are prohibited | The band is an **admission** filter on limit-style orders only — see [defect B5](#b5--triggered-stops-and-pegs-bypass-the-price-band-and-the-circuit-breaker) |
+| Trades outside the band are prohibited | The band is an **admission** filter on limit-style orders only; what bounds every print is the breaker (Rule 7.4) — see [B5](#b5--triggered-stops-and-pegs-bypassed-the-circuit-breaker-fixed-for-the-breaker) |
 
 The band is checked only for `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden`.
 `Market`, `Stop`, `StopLimit`, `TrailingStop`, `MIT` and `Pegged` are all excluded.
@@ -1045,20 +1208,14 @@ the exclusions are necessary (a `Market` order has no price to band-check; a `St
 trigger, not a tradeable limit). Whether the *triggered* form should be re-checked is a
 separate question the code never asks.
 
-### Rule 7.6 — `LULDManager` is not wired to anything
+### Rule 7.6 — There is no LULD pause state machine
 
-`OrderBook` holds a `LULDManager luld_` member and exposes it through a getter. **Nothing in
-the engine ever calls a method on it.** Its band computation, pause state machine, dwell timer
-and resume logic are all unreachable.
+Rules 7.4 and 7.5 are the engine's whole volatility control, done by `referencePrice_` /
+`cbThreshold_` / `priceBandPct_` on `OrderBook` directly. There is no Limit State, no pause
+and no separate resume logic.
 
-> `include/OrderBook.h:359-360`, `include/OrderBook.h:972` — the member and its accessors
-> A repository-wide grep finds no other use: no `luld_.` call site exists.
-
-Everything described in Rules 7.4 and 7.5 is done by `referencePrice_` / `cbThreshold_` /
-`priceBandPct_` on `OrderBook` directly. `LULDManager` is a parallel, dormant implementation.
-
-**Status: [Defect B8](#b8--luldmanager-is-dead-code).** Listed here so nobody reads
-`LULDManager.h` and believes it describes engine behaviour. It does not.
+**Status: Known defect, fixed ([B8](#b8--luldmanager-was-dead-code-fixed)).** `OrderBook` used
+to hold an `LULDManager`, a pause state machine nothing called; it was deleted.
 
 ### Rule 7.7 — The session transition table is enforced
 
@@ -1125,9 +1282,8 @@ The mechanism end to end:
 
 1. `startExpiryTimer(intervalMs)` spawns a thread that sleeps, wakes, and calls
    `expireOrdersFromClock()`. **Default interval: 1000 ms.** `OrderEngine` starts it after
-   `startAsync()`. `GatewayServer` does not — its engine is synchronous, so it calls
-   `expireOrdersFromClock()` once a second from the gateway's event thread instead, between
-   orders. `expiryTime` is **Unix-epoch nanoseconds, wall clock** (`system_clock`).
+   `startAsync()`. A synchronous engine must not use it (the sweep would race the thread that
+   runs orders); its owner calls `expireOrdersFromClock()` from that thread instead. `expiryTime` is **Unix-epoch nanoseconds, wall clock** (`system_clock`).
    > `include/MatchingEngine.h:194`, `src/MatchingEngine.cpp:461-484`
 2. In async mode the sweep is posted as an `ExpireCheck` control message to every worker; in
    sync mode it runs inline.
@@ -1143,9 +1299,12 @@ The mechanism end to end:
 
 ### Rule 8.2 — What it costs, and who pays
 
-**It does not cost the hot path per order.** No matching path reads `expiryTime` — `match()`,
-`matchProRata()` and `uncross()` contain no expiry test at all. Submitting an order pays
-nothing for expiry.
+**It costs the hot path one branch per maker met.** `match()` tests each maker's `expiryTime`
+against 0 before it trades it (Rule 8.3); the field shares the cache line the fill reads the
+maker's participant from, and the clock is read only for a maker that has an expiry, once per
+operation. `matchProRata()` makes the same test over each level it allocates. Measured A/B on
+`DeterministicBenchmark` and `HonestBenchmark --only a`, the difference was inside the noise
+(commit message of the change that added it).
 
 **It costs the hot path per sweep.** The sweep takes the same exclusive `bookLock_` that
 `addOrder` takes, so once per interval, matching stalls for the duration of a full hash-table
@@ -1156,18 +1315,27 @@ absolute terms, but it is a **lock-held stall on the matching thread**, not back
 and its duration scales with pool capacity rather than with how many orders are actually
 expiring.
 
-### Rule 8.3 — An expired order remains fully tradeable until the next sweep
+### Rule 8.3 — An expired maker never trades; it is cancelled when the match meets it
 
-Because nothing on the matching path checks `expiryTime`, an order whose expiry has passed
-continues to rest, display, and fill normally until a sweep reaches it. **The window is up to
-one full interval — one second at the default.**
+A `GTD` or `DAY` order whose `expiryTime` has passed (at or after it, as the sweep counts it)
+does not trade as a maker, whether or not the sweep has reached it. The match that meets it —
+`match()`, `matchProRata()`'s pass over a level before it allocates, or the auction uncross,
+which first expires every order due — cancels it with the same `Cancelled` update the sweep
+sends, after the fills it has already made go out, and the engine journals that cancel ahead
+of the order that met it. Replay never reads the clock: it applies the journaled cancel. The
+screens that count liquidity before a sweep, the FOK and `minQty` dry run and the breaker's
+band, look past an expired maker the same way, so a FOK cannot be filled in part
+by liquidity that leaves under it. One operation reads the clock once, so its screens and its
+sweep agree on what has expired (THR-10).
 
-This is a genuine semantic, not a detail: a client whose GTD order expires at T can receive a
-fill stamped as late as T + 1s.
+Until then an expired order still rests and displays: the public feed shows it until a match
+meets it or the sweep, up to one interval later, removes it. A `PostOnly` priced through an
+expired maker is still refused as crossing. An expired order that is not a maker can still
+trade in that window: an expired parked stop that is elected, or a `GTD` sent with an
+`expiryTime` already past, trades as the aggressor.
 
-**Status: Undocumented — no test pins this, may be incidental.** `tests/GTDReplayTest.cpp`
-and `tests/TestOrderBook.cpp:389` drive expiry with an injected clock and assert that expiry
-*happens*; nothing asserts anything about the window during which it has not happened yet.
+**Status: Deliberate — pinned.** `tests/LazyExpiryTest.cpp` (both algorithms, sync and async,
+FOK, breaker, uncross, replay with a clock that disagrees).
 
 ### Rule 8.4 — At most 4096 orders expire per sweep
 
@@ -1193,11 +1361,18 @@ PRIOR-7): `MatchingEngine::submitOrder` rejects, with `MissingRequiredField`, a 
 with `expiryTime == 0`, and a `DAY` order with `expiryTime == 0` while no session end is
 scheduled. Both used to be accepted and rest as `GTC` while the client believed them
 time-bounded. `MatchingEngine::setSessionEndScheduled` says whether a session end is
-scheduled: `OrderEngine` and `GatewayServer` set it false at startup, a `SessionScheduler`
+scheduled: `OrderEngine` sets it false at startup, a `SessionScheduler`
 sets it true, and the library default is true, for an in-process owner that ends its sessions
-itself. The check is in `submitOrder`, so it covers every ingress; journal replay and
-`JournalFollower` call the book directly and do not apply it. Pinned by
+itself. The check is in `submitOrder`, so it covers every ingress; journal replay
+calls the book directly and does not apply it. Pinned by
 `tests/ExpiryAdmissionTest.cpp`.
+
+An order that never rests — `IOC`, `FOK`, or `Market` (a market order parked in an auction
+leaves at the cross) — needs no session end, so its `DAY` with `expiryTime == 0` is admitted;
+it used to be refused `MissingRequiredField` on an engine with no scheduled session end, which
+is both binaries (MR-8). An order whose `expiryTime` has already passed on the engine's expiry
+clock (`expiryNow()`) is refused with `InvalidFieldValue`; it used to be acked and live until
+the next sweep (MR-6). Pinned by `tests/AdmissionTifTest.cpp`.
 
 There is a separate session-end sweep, `cancelDayOrders()`, which cancels every `DAY` order
 regardless of `expiryTime`. It runs only from `gracefulShutdown(/*cancelDayOrders=*/true)` —
@@ -1219,24 +1394,25 @@ every `DAY` order on them, and only them. `SessionScheduler`'s close calls it (r
 started with `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` (HH:MM UTC, or
 `OB_SESSION_SCHEDULE`, or `session_schedule` in the `--config` file), and runs it Monday to
 Friday by UTC date; without it, which is the default, nothing ends a session, so a `DAY`
-order must carry an `expiryTime` or it is refused (above). `GatewayServer` never runs one, so
-the same holds there. Both binaries run the expiry sweep (Rule 8.1), so a `DAY` order that
-carries an `expiryTime` expires like `GTD` either way.
+order must carry an `expiryTime` or it is refused (above). `OrderEngine` runs the expiry sweep
+(Rule 8.1), so a `DAY` order that carries an `expiryTime` expires like `GTD` either way.
 
 **How venues specify it.** Every venue publishes DAY as "cancelled at the end of the trading
 session", and deriving the session-end timestamp from the session calendar is how I would
 expect it to be implemented. Venues do **not** publish their expiry *mechanism* — timer wheel
 versus scan is an implementation detail, not a rule — so there is nothing to compare Rules
-8.1–8.4 against. The part that *is* rulebook material is Rule 8.3, the tradeable-after-expiry
-window, and I do not know of a venue that publishes one.
+8.1–8.4 against. The part that *is* rulebook material is Rule 8.3: an expired order does not
+trade as a maker, and the sweep's interval only bounds how long it stays displayed.
 
 ### Rule 8.6 — Absolute expiry timestamps are in an unspecified epoch
 
-`expiryTime` is compared against `high_resolution_clock::now().time_since_epoch().count()`.
+`expiryTime` is nanoseconds since the Unix epoch: `expiryNow()` reads `system_clock` on every
+platform, unless a test injects a clock with `setExpiryClock()`.
 
-> `src/MatchingEngine.cpp:491-497` (`expiryNow`), `include/LatencyTracker.h:12-15` (`nowNs`)
+> `src/MatchingEngine.cpp` `expiryNow`; pinned against the real binary by `GatewayExpiresGtdTest`
 
-See [defect B6](#b6--gtd-expiry-timestamps-are-compared-against-a-platform-dependent-epoch).
+See [defect B6](#b6--gtd-expiry-timestamps-are-compared-against-a-platform-dependent-epoch) for
+what it used to be.
 
 ---
 
@@ -1263,13 +1439,13 @@ can see (`src/OrderBook.cpp:1936-1952`).
 
 ### Rule 9.2 — `cancelReplace` loses priority on a price change or a same-size re-add, keeps it on a shrink
 
-First, what `newQty` means. It is the order's new **total** (FIX `OrderQty`), shares already
+First, what `newQty` means. It is the order's new **total** (as FIX `OrderQty` is), shares already
 executed included, not its new leaves (roadmap 1.5-E1, MATCH-4). Every order records what it
 executed in `cumQty`, and `cumQty + remainingQty == initialQty` holds on every live order.
 
 | `newQty` against `cumQty` | Result |
 |---|---|
-| `newQty <= cumQty` | Refused with `InvalidQuantity` (FIX OrdRejReason 13, OUCH invalid-quantity reject). Nothing is left to work; the order is untouched |
+| `newQty <= cumQty` | Refused with `InvalidQuantity`. Nothing is left to work; the order is untouched |
 | `newQty > cumQty` | Accepted. `initialQty = newQty`, `remainingQty = newQty - cumQty`. Growth and shrink both work on a partially filled order |
 
 So an order for 100 with 60 filled, replaced "to 100", has 40 left and executes 100 in all.
@@ -1279,8 +1455,7 @@ its cancel. Roadmap 0.11 had stopped that by refusing any quantity change on a p
 filled order and any growth; that restriction is gone. Risk limits judge the new total, as
 they would a new order of that size (rule 9.3).
 
-Every ingress passes the client's quantity through unchanged: FIX `OrderQty` (38) on a `G`,
-OUCH `Shares` on a Replace, and the native gateway's `newQty`. Journal replay passes the
+The order port passes the client's `newQty` through unchanged. Journal replay passes the
 recorded `newQty` back through the same contract. A `CancelReplace` record says which meaning
 it carries: those written since journal format v3 are flagged as totals, and an older unflagged
 one meant the new leaves, so replay restates it as `cumQty + newQty` at that point
@@ -1292,9 +1467,9 @@ Pinned by `tests/ReplaceQuantityTest.cpp`.
 
 | Change | Priority |
 |---|---|
-| Price changed | Lost. Removed, repriced, timestamped, matched if it now crosses, then re-rested at the tail. |
+| Price changed | Lost. Removed, repriced, given a fresh arrival sequence, matched if it now crosses, then re-rested at the tail. |
 | Same price, leaves down | **Kept.** In-place reduction. |
-| Same price, leaves the same or up | Lost. Removed and re-added at the tail with a fresh timestamp. |
+| Same price, leaves the same or up | Lost. Removed and re-added at the tail with a fresh arrival sequence. |
 
 A repriced order is **off the book while it matches** and acts as an aggressor. Its display
 entry is removed before the match so its fills surface through the resting maker's execution
@@ -1332,8 +1507,24 @@ back "not yours", and you have mapped a competitor's resting book.
 
 ### Rule 9.5 — `minQty` is a minimum on the FIRST execution only
 
-`minQty` is checked once at admission and the stored field is never read again. Matching
-enforces no per-fill minimum.
+`minQty` is a minimum on the order's first execution, and it is met on arrival or not at all:
+in `Continuous`, an order whose arrival sweep cannot fill its minimum is cancelled untraded,
+whatever its type, and never rests with the minimum unmet. Matching therefore needs no per-fill
+minimum and never reads the field. An order that meets it trades, and its remainder rests with no
+minimum left. **A non-crossing limit used to rest and wait**, and since matching never reads
+`minQty` its first execution, as a maker, was whatever the next aggressor brought: 1 lot of a
+minimum of 50 (MR-5). The one way an order still reaches `Continuous` with its minimum unmet is
+through an auction. **The uncross applies the rule too:** before it executes, an unexecuted
+`minQty` order that the cross would fill above zero but below its minimum (its allocation in
+the cross's own order: parked market orders, then levels at or through the price, best first,
+queue order) is cancelled untraded, and the price is discovered again without it, until no such
+order remains (`OrderBook::minQtyShortInCross`). It used to fill whatever the cross allocated.
+An order the cross does not reach at all rests into `Continuous` with its minimum unmet; a
+cancel/replace of such an order that would cross for less than its minimum is refused with
+`FOKInsufficientLiquidity`, the liquidity screen's reason, and leaves the order as it was. As a
+maker it is not protected (decision for the author: cancel such orders at the reopen, or accept
+the gap). Pinned by `tests/RestingOrderRulesTest.cpp` (`TheCrossDoesNotFillBelowAnUnmetMinimum`,
+`TheCrossFillsAMinimumItCanMeet`).
 
 It is checked against what the sweep would actually **fill**, not against everything at a
 crossing price. `sweepFillQty()` dry-runs the sweep over the opposite book, at crossing prices
@@ -1350,16 +1541,25 @@ liquidity and its own order filled 5 (roadmap 1.6-F5, GTDIFF-2); and it counted 
 iceberg's displayed slice, so an IOC 50 `minQty` 10 against an iceberg of 100 showing 5 was
 cancelled unfilled (OTM-11).
 
-If the dry run fills less than `minQty`: an `IOC` or `Market` order is cancelled untraded; a
-**crossing** limit order is cancelled (resting it would leave bid ≥ ask, a locked book); a
-**non-crossing** limit order rests and waits.
+If the dry run fills less than `minQty`, the order is cancelled untraded: an `IOC` or `Market`
+order, a **crossing** limit (resting it would leave bid ≥ ask, a locked book), and a
+**non-crossing** limit (see above). Pinned by `tests/RestingOrderRulesTest.cpp`.
 
 **A `Market` order with `minQty` is an IOC with `minQty`.** It is counted at every level it can
-reach — every level, or under price-time with market protection on, the levels inside the collar
-(`OrderBook::marketCollar`) where `match()` stops; one that misses its minimum is cancelled
-untraded, and one that meets it trades and has its remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
+reach — the levels inside the collar, below, where the sweep stops; one that misses its minimum
+is cancelled untraded, and one that meets it trades and has its remainder cancelled. The screen used to read its price (0) as a limit, so a buy saw no
 liquidity and was **rested in the book as a bid at 0**, where it later printed at 0; roadmap
 0.12 rejected `Market` + `minQty` outright until 1.6-F2 (OTM-2).
+
+**The market-order collar.** A `Market` order, and a `Stop` or `MIT` once elected, trades at most
+5% from the opposite touch it arrives at, under both algorithms, inclusive of the bound
+(`OrderBook::marketCollar`). The remainder is cancelled, so one order cannot walk the book. The
+value is fixed like the circuit breaker's, and for a reason: it is on by default and replay re-runs
+matching, so a value that changed across a restart would replay different fills than clients were
+told. `setMarketProtectionPct` changes it for a library owner, 0 turning it off. At very low prices
+the band truncates to nothing (5% of a touch under 20 ticks is 0), so such an order trades only at
+the touch. A journal written before the default changed replays under the collar: a market order
+that walked further than 5% then fills less on replay than it did live (MATCH-16).
 
 **Not in an auction state.** In `PreOpen` and the auction states the screen does not run: the
 order rests and takes part in the uncross, **which does not apply `minQty`**. A crossing
@@ -1375,7 +1575,8 @@ part of its size (GTDIFF-2).
 > locked-book reasoning in `screenMinQty()`
 
 **Status: Deliberate — commented and pinned.** `tests/FokStpLiquidityTest.cpp` (each STP mode,
-the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`.
+the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`,
+`tests/MarketCollarTest.cpp`.
 
 ---
 
@@ -1384,27 +1585,16 @@ the iceberg cases, pro-rata, the auction case), `tests/MarketMinQtyTest.cpp`.
 Behaviour that looks like a defect rather than a choice. **Nothing in this section is a rule.**
 Flagged, not fixed.
 
-### B1 — Pro-rata silently allocates only the first 1024 orders at a level
+### B1 — Pro-rata silently allocates only the first 1024 orders at a level (fixed)
 
-`matchProRata` caps its allocation array at `MAX_LEVEL_ORDERS = 1024` and stops building
-allocations at that index — but the level **total** was summed over *all* orders at the level,
-with no cap.
-
-> `src/OrderBook.cpp:1436` — `static constexpr size_t MAX_LEVEL_ORDERS = 1024;`
-> `src/OrderBook.cpp:1521-1524` — the total loop, uncapped
-> `src/OrderBook.cpp:1538` — `for (... o && allocCount < MAX_LEVEL_ORDERS; ...)`
-
-At a level holding more than 1024 orders, orders past index 1023 receive **zero** allocation on
-each pass. The algorithm still terminates and still cannot over-fill — the remainder passes cap
-each top-up at `avail − allocs[i].qty` — but the behaviour silently degenerates from "pro-rata
-across the level" to "pro-rata across the front 1024, FIFO-gated". Deep-queue participants are
-excluded from allocation entirely until the front of the queue is consumed, which is precisely
-the outcome pro-rata exists to avoid.
-
-**Severity: high for a pro-rata product.** No comment acknowledges the truncation and no test
-exercises a level deeper than 1024. Two plausible fixes — allocate in chunks, or compute the
-total over the same capped window so the ratios are at least self-consistent — but this is a
-behaviour change and out of scope here.
+Fixed in round 8 (MR-4). `matchProRata` built its allocations in a 1024-slot array while the
+level total was summed over every order, so at a deeper level the front 1024 orders took their
+shares *and* the shortfall FIFO (about twice their share), order 1025 on got nothing, and a
+DMM/LMM order past index 1023 lost its 40% floor. Allocation now runs over the whole level, in a
+scratch vector reserved at 1024 entries per book (a deeper level grows it once). Elected stops
+and trailing stops used to match price-time in a pro-rata book; every aggressor (arrival,
+replace, elected stop) now goes through the book's algorithm. Pinned by
+`tests/ProRataLevelTest.cpp`.
 
 ### B2 — `DecreaseAndCancel` never decrements the incoming order (fixed in continuous trading)
 
@@ -1417,12 +1607,12 @@ at full size. Pinned by `DecreaseAndCancelDecrementsBothOrders` in `tests/StpSem
 on both paths.
 
 The auction still cancels the older order outright: its self-cross plan treats
-`DecreaseResting` like `CancelResting` ([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order-by-timestamp)).
+`DecreaseResting` like `CancelResting` ([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order)).
 
 ### B3 — Auction price discovery runs before auction STP (fixed)
 
 Fixed by roadmap 1.8-H5: self-crossing pairs are resolved before discovery
-([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order-by-timestamp)).
+([Rule 4.4](#rule-44--in-an-auction-cross-incoming-means-the-later-arriving-order)).
 Discovery used to count them and STP removed them only in the execution loop, so a
 participant's buy and sell of 1000 at 99 moved an honest 105 cross to 99 and published 1100
 paired instead of 100.
@@ -1444,36 +1634,28 @@ the opposite touch is clamped one tick behind it. `Pegged` is admitted again. Pi
 `tests/PegOrderTest.cpp`; `validateIntegrity()` now refuses a crossed book in `Continuous`
 (Rule 5.8).
 
-### B5 — Triggered stops and pegs bypass the price band and the circuit breaker
+### B5 — Triggered stops and pegs bypassed the circuit breaker (fixed for the breaker)
 
-The price band is checked only for `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden`;
-the circuit breaker tests the first fill of an order arriving through `addOrder` (Rule 7.4).
+The circuit breaker tested only the first fill of an order arriving through `addOrder`, and
+`checkStopOrders` / `updateTrailingStops` call `match()` directly, so a triggered stop executed
+with no breaker check: a stop cascade printed straight through it (MR-2). **Fixed:** the breaker
+is asked at every fill inside `match()` and `matchProRata()`, so every print faces it, whatever
+caused it (Rule 7.4). A peg never prints as an aggressor (it is clamped behind the opposite
+touch, Rule 6.4); as a maker its prints are tested like any other.
 
-> `admitPriceBand` (band) and `tripBreakerOnFirstFill` (breaker) in `src/OrderBook.cpp`
+**Still open: the admission band is not re-applied at election.** The band of Rule 7.5 is
+checked only on `Limit`, `IOC`, `FOK`, `PostOnly`, `Iceberg` and `Hidden` at admission. An
+elected stop-limit or trailing stop whose limit lies outside the band is not refused when it
+elects; its prints are bounded by the breaker, and if its sweep empties the book inside the band
+its remainder can rest as a quote outside the band. Decision for the author: refuse it at
+election (`OutsidePriceBand`), or leave it as a quote.
 
-A `Stop` is admitted without either check, because at admission it carries a trigger rather
-than a tradeable price — reasonable. But when it elects, `checkStopOrders` rewrites its type
-to `Limit`/`Market` and calls `match()` **directly**, never re-entering `addOrder`.
+### B6 — GTD expiry timestamps are compared against a platform-dependent epoch (fixed)
 
-> `checkStopOrders()` in `src/OrderBook.cpp`
-
-So a triggered stop executes with **no band check and no breaker check, ever**. A stop
-cascade can therefore print straight through a LULD band that would have rejected the same
-order submitted directly — which is the exact scenario price bands exist to contain. The same
-holds for `TrailingStop` (`updateTrailingStops()`) and for `Pegged`, which is excluded from the
-band list; a peg's only price check is the opposite touch (Rule 6.4).
-
-**Severity: high for anything claiming LULD-style controls.** No comment considers the
-re-check, and no test covers a stop firing outside the band. It is genuinely ambiguous whether
-this is a deliberate "a stop is already committed" stance or simply an unconsidered gap —
-**from the code you cannot tell.**
-
-### B6 — GTD expiry timestamps are compared against a platform-dependent epoch
-
-`expiryNow()` and `nowNs()` both return
+**Fixed** (`7a651ed`): `expiryNow()` reads `system_clock`, so `expiryTime` is Unix-epoch
+nanoseconds on every platform (Rule 8.6). The rest of this entry describes the defect as it
+was. `expiryNow()` and `nowNs()` both returned
 `std::chrono::high_resolution_clock::now().time_since_epoch().count()`.
-
-> `src/MatchingEngine.cpp:491-497`, `include/LatencyTracker.h:12-15`
 
 `high_resolution_clock` is an alias whose target is implementation-defined:
 
@@ -1486,8 +1668,8 @@ A client-supplied absolute `expiryTime` therefore means two entirely different i
 depending on which standard library the engine was built against. The same GTD order that
 expires correctly on Linux expires immediately, or never, on macOS.
 
-Internal consistency is preserved — `Order::timestamp` uses the same clock, so time priority
-and the auction's newer/older STP mapping are unaffected — so this only bites the one field
+Time priority and the auction's newer/older STP mapping do not read a clock (queue position
+and `Order::arrivalSeq`), so this only bites the one field
 that crosses the API boundary as an absolute value. `setExpiryClock()`
 (`include/MatchingEngine.h:196`) lets a test inject a clock, which is why every expiry test
 passes on both platforms and none of them would catch this.
@@ -1519,20 +1701,13 @@ The same read decides the zero-imbalance case: a candidate that pairs its whole 
 a buy surplus, so with no reference price a zero-imbalance tie clears at the highest tied price.
 That consequence is kept as the rule (Rule 7.2).
 
-### B8 — `LULDManager` is dead code
+### B8 — `LULDManager` was dead code (fixed)
 
-Constructed as an `OrderBook` member, exposed through `getLULDManager()`, and **never
-driven**. No call site anywhere in the repository invokes any of its methods.
-
-> `include/OrderBook.h:359-360`, `include/OrderBook.h:972`
-
-Its entire state machine — `Normal`/`Paused`/`Resuming`, the dwell timer, `shouldPause`,
-`enterPause`, `shouldResume`, `completeResume` — is unreachable. A reader who opens
-`LULDManager.h` to learn how this engine handles volatility pauses will learn something false:
-the real behaviour is Rules 7.4 and 7.5, implemented on `OrderBook` directly with a different
-(and simpler) model.
-
-**Severity: documentation-grade, but genuinely misleading.** Either wire it or delete it.
+Fixed by roadmap 2.5 (STP-18): deleted, together with `WashTradeDetector`, the other
+`OrderBook` member nothing called. `LULDManager` was constructed as an `OrderBook` member,
+exposed through `getLULDManager()`, and never driven, so its `Normal`/`Paused`/`Resuming`
+state machine and dwell timer described a volatility pause the engine did not have. The real
+behaviour is Rules 7.4 and 7.5.
 
 ### B9 — The expiry sweep's 4096 cap does not trigger an immediate second pass
 
@@ -1555,9 +1730,9 @@ Deliberately out of scope, so their absence is not mistaken for "the engine has 
 - **Fees, rebates and clearing.** See `include/FeeEngine.h`.
 - **Risk limits, position limits, kill switch and rate limiting.** Admission-side controls;
   see `docs/Compliance.md` and `include/HierarchicalRiskManager.h`.
-- **Market-data encoding.** ITCH/MoldUDP64/SBE wire formats and sequencing; see
+- **Market-data encoding.** ITCH/MoldUDP64 wire formats and sequencing; see
   `Architecture.md`.
-- **Journalling, replay and replication determinism.** See `docs/Verification.md`.
+- **Journalling and replay determinism.** See `docs/Verification.md`.
 - **Session scheduling.** `SessionScheduler` drives the trading-state transitions that §7
   assumes; it does not participate in matching. Its default clock reads the wall clock once
   and then advances on `steady_clock`, and within a trading date it never runs backwards: a

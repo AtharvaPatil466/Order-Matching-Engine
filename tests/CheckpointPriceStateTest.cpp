@@ -2,14 +2,14 @@
 // survive a checkpoint.
 //
 // Both lived only in what the journal replays: the reference is seeded by the
-// first priced order and re-anchored by a volatility auction's reopening
-// print, the last trade price by every trade. A checkpoint keeps resting
+// first print (once by the first priced order, MR-1) and re-anchored by a
+// volatility auction's reopening print, the last trade price by every trade. A checkpoint keeps resting
 // orders, the session state and the id counters, and drops the trades, so a
 // book restarted from one had neither. The circuit breaker (5% from the
 // reference) then re-seeded from whatever order came next, and an auction
 // with only market orders on both sides, which crosses at the last trade
-// price (decision 6), cancelled them instead. A book that only quoted has a
-// reference too, and no trade id for the checkpoint to record it beside.
+// price (decision 6), cancelled them instead. A book that only quoted has no
+// reference, in any of the three lives: a quote is not a price (MR-1).
 //
 // The last trade's quantity, which a market-data snapshot and the admin /book
 // and /depth endpoints show beside its price, came back as 0.
@@ -20,10 +20,8 @@
 // below the high it had trailed.
 //
 // Each probe runs on the book as it is, on one restarted from the plain
-// journal, on one restarted from a checkpoint, and on a JournalFollower's
-// standby promoted over that checkpoint; all four must agree.
+// journal and on one restarted from a checkpoint; all three must agree.
 
-#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -40,13 +38,12 @@ constexpr SymbolId kSym = 0;
 constexpr Price kPx = 10000;              // 100.00: the reference and the last trade
 constexpr Price kJump = kPx * 12 / 10;    // 120.00: 20% away, past the 5% breaker
 
-enum class Life { Uninterrupted, Replayed, Checkpointed, Followed };
+enum class Life { Uninterrupted, Replayed, Checkpointed };
 const char* name(Life l) {
     switch (l) {
     case Life::Uninterrupted: return "uninterrupted";
     case Life::Replayed:      return "replayed";
     case Life::Checkpointed:  return "checkpointed";
-    case Life::Followed:      return "followed";   // a promoted JournalFollower
     }
     return "";
 }
@@ -75,7 +72,7 @@ void traded(MatchingEngine& e) {
     assert(!e.getOrderBook(kSym)->getOrder(1) && !e.getOrderBook(kSym)->getOrder(2));
 }
 
-// No trade: an order at 100.00 seeded the reference, then was cancelled.
+// No trade: an order at 100.00, then cancelled. It sets no reference.
 void quoted(MatchingEngine& e) {
     assert(e.submitOrder(kSym, 1, 1, Side::Sell, kPx, 10, OrderType::Limit).isAccepted());
     e.cancelOrder(kSym, 1);
@@ -98,8 +95,7 @@ void trailed(MatchingEngine& e) {
     assert(e.getOrderBook(kSym)->getOrder(3)->stopPrice == kPx + 300);
 }
 
-// `setup`, then `probe` on that book, or on one rebuilt from its journal (the
-// followed one after a checkpoint too).
+// `setup`, then `probe` on that book, or on one rebuilt from its journal.
 int after(Life life, const Setup& setup, const Probe& probe) {
     const std::string path = uniqueTempPath("checkpoint_prices.wal");
     std::remove(path.c_str());
@@ -109,7 +105,7 @@ int after(Life life, const Setup& setup, const Probe& probe) {
         boot(engine, path);
         setup(engine);
         if (life == Life::Uninterrupted) result = probe(*engine.getOrderBook(kSym));
-        if (life == Life::Checkpointed || life == Life::Followed) engine.checkpoint();
+        if (life == Life::Checkpointed) engine.checkpoint();
         engine.stop();
     }
     if (life == Life::Replayed || life == Life::Checkpointed) {
@@ -118,12 +114,6 @@ int after(Life life, const Setup& setup, const Probe& probe) {
         restarted.replayJournal();
         result = probe(*restarted.getOrderBook(kSym));
         restarted.stop();
-    }
-    if (life == Life::Followed) {
-        OrderBook standby(kSym);
-        JournalFollower follower(path, kSym, standby);
-        follower.promote();
-        result = probe(standby);
     }
     std::remove(path.c_str());
     return result;
@@ -163,7 +153,7 @@ int lastQtyProbe(OrderBook& b) {
 
 int check(const char* what, const Setup& setup, const Probe& probe, int want) {
     int failures = 0;
-    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed, Life::Followed}) {
+    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed}) {
         const int got = after(life, setup, probe);
         std::printf("  %-13s %-38s %d%s\n", name(life), what, got, got == want ? "" : "  <- differs");
         failures += got != want;
@@ -178,7 +168,7 @@ int main() {
     failures += check("traded: breaker tripped at 120.00", traded, breakerProbe, 1);
     failures += check("traded: trades from market vs market", traded, marketCrossProbe, 1);
     failures += check("traded: last trade quantity shown", traded, lastQtyProbe, 10);
-    failures += check("quoted: breaker tripped at 120.00", quoted, breakerProbe, 1);
+    failures += check("quoted: no reference, 120.00 trades", quoted, breakerProbe, 0);
     failures += check("trailed: stop fired at 102.80", trailed, trailProbe, 1);
     if (failures != 0) {
         std::printf("CheckpointPriceStateTest FAILED: %d restarted book(s) lost price state\n", failures);

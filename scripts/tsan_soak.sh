@@ -15,7 +15,7 @@
 #   * QueueChaosTest       MpscQueue producer/consumer under chaos
 #   * GatewayChaosTest     concurrent gateway recv path
 #   * FaultInjectorTest    explicitly tests scaffold thread safety
-#   * FixTcpGatewayTest    real TCP sockets, kqueue/epoll loop
+#   * GatewayIntegrationTest  real TCP sockets, kqueue/epoll loop
 #
 # Each iteration runs all tests; the OS scheduler varies thread
 # interleavings between iterations, so repeated runs are effective at
@@ -37,7 +37,7 @@ TESTS=(
     JournalChaosTest
     JournalCorruptionTest
     GatewayChaosTest
-    FixTcpGatewayTest
+    GatewayIntegrationTest
     SnapshotConsistencyTest
     CombinedChaosTest
 )

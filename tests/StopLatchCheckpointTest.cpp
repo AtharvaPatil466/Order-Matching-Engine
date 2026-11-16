@@ -12,7 +12,6 @@
 // Plain journal replay is not the problem: it re-runs the print and latches
 // them again. Only the snapshot loses it, so the test checkpoints first.
 
-#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -69,15 +68,6 @@ int main() {
         const auto [parked, latched] = parkedStops(*engine.getOrderBook(kSym));
         assert(parked == 6 && latched == 6);
 
-        // A joining backup is built from the same Snapshot records, streamed.
-        MatchingEngine backup;
-        backup.addSymbol(kSym);
-        backup.start();
-        backup.setReplayModeAllBooks(true);
-        engine.streamSnapshot([&](const JournalEntry& e) { backup.applyReplicatedEntry(e); });
-        assert(parkedStops(*backup.getOrderBook(kSym)).second == 6 && "a backup must receive the latch too");
-        backup.stop();
-
         engine.checkpoint();
         engine.stop();
     }
@@ -95,15 +85,6 @@ int main() {
                   << "replay (" << latched << " latched)" << std::endl;
     assert(parked == 0 && "an elected stop must stay elected across checkpoint + replay");
     restarted.stop();
-
-    // A JournalFollower over the same journal — checkpoint, then that print —
-    // must end where the restarted engine did.
-    OrderBook standby(kSym);
-    standby.setCircuitBreakerThreshold(0.99);
-    JournalFollower follower(path, kSym, standby);
-    follower.poll();
-    assert(parkedStops(standby).first == 0 &&
-           "a follower must restore the latch from the checkpoint too");
 
     std::remove(path.c_str());
     std::cout << "StopLatchCheckpointTest PASSED" << std::endl;

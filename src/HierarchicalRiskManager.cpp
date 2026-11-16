@@ -40,7 +40,7 @@ void HierarchicalRiskManager::setLimits(RiskTier tier, uint64_t entityId,
 
 bool HierarchicalRiskManager::tierBreached(const EntityState& state, Side side,
                                            Price price, Quantity qty,
-                                           Price referencePrice) {
+                                           Price referencePrice, Quantity reserve) {
     const TierLimits& lim = state.limits;
 
     // --- Max single order size ---------------------------------------------
@@ -65,13 +65,15 @@ bool HierarchicalRiskManager::tierBreached(const EntityState& state, Side side,
         }
     }
 
-    // --- Projected aggregate net position ----------------------------------
+    // --- Projected position on this side, working orders included --------
+    // What the entity would hold if everything working on this side filled,
+    // this order too. Net of working, a firm with nothing filled admitted any
+    // number of orders that each fitted alone (TLA-5).
     if (lim.maxNetPosition > 0) {
-        const int64_t projected = state.netPosition + signedDelta(side, qty);
-        const uint64_t magnitude =
-            (projected >= 0) ? static_cast<uint64_t>(projected)
-                             : static_cast<uint64_t>(-projected);
-        if (magnitude > lim.maxNetPosition) {
+        const __int128 net = state.netPosition;
+        const __int128 reach = static_cast<__int128>(state.working[sideIndex(side)]) +
+                               reserve + (side == Side::Buy ? net : -net);
+        if (reach > static_cast<__int128>(lim.maxNetPosition)) {
             return true;
         }
     }
@@ -82,6 +84,35 @@ bool HierarchicalRiskManager::tierBreached(const EntityState& state, Side side,
 RiskDecision HierarchicalRiskManager::check(ParticipantId trader, Side side,
                                             Price price, Quantity qty,
                                             Price referencePrice) const {
+    return evaluate(trader, side, price, qty, referencePrice, qty);
+}
+
+RiskDecision HierarchicalRiskManager::checkAndReserve(ParticipantId trader, Side side,
+                                                      Price price, Quantity qty,
+                                                      Price referencePrice, Quantity reserve) {
+    const RiskDecision decision = evaluate(trader, side, price, qty, referencePrice, reserve);
+    if (decision.allowed && reserve != 0) addWorking(trader, side, static_cast<int64_t>(reserve));
+    return decision;
+}
+
+void HierarchicalRiskManager::release(ParticipantId trader, Side side, Quantity qty) {
+    addWorking(trader, side, -static_cast<int64_t>(qty));
+}
+
+void HierarchicalRiskManager::reserve(ParticipantId trader, Side side, Quantity qty) {
+    addWorking(trader, side, static_cast<int64_t>(qty));
+}
+
+void HierarchicalRiskManager::addWorking(ParticipantId trader, Side side, int64_t delta) {
+    auto pit = participants_.find(trader);
+    if (pit == participants_.end()) return;  // unmapped: nothing reserved
+    for (std::size_t t = 0; t < kNumTiers; ++t)
+        tiers_[t][pit->second[t]].working[sideIndex(side)] += delta;
+}
+
+RiskDecision HierarchicalRiskManager::evaluate(ParticipantId trader, Side side, Price price,
+                                               Quantity qty, Price referencePrice,
+                                               Quantity reserve) const {
     RiskDecision decision;  // allowed = true by default
 
     auto pit = participants_.find(trader);
@@ -100,7 +131,7 @@ RiskDecision HierarchicalRiskManager::check(ParticipantId trader, Side side,
         if (eit == table.end()) {
             continue;  // no limits configured for this entity at this tier
         }
-        if (tierBreached(eit->second, side, price, qty, referencePrice)) {
+        if (tierBreached(eit->second, side, price, qty, referencePrice, reserve)) {
             decision.allowed      = false;
             decision.reason       = RejectReason::RiskLimitBreached;
             decision.breachedTier = static_cast<RiskTier>(t);
@@ -135,6 +166,21 @@ int64_t HierarchicalRiskManager::netPosition(RiskTier tier,
     const auto& table = tiers_[static_cast<std::size_t>(tier)];
     auto eit = table.find(entityId);
     return (eit == table.end()) ? 0 : eit->second.netPosition;
+}
+
+int64_t HierarchicalRiskManager::workingQty(RiskTier tier, uint64_t entityId,
+                                            Side side) const {
+    const auto& table = tiers_[static_cast<std::size_t>(tier)];
+    auto eit = table.find(entityId);
+    return (eit == table.end()) ? 0 : eit->second.working[sideIndex(side)];
+}
+
+void HierarchicalRiskManager::clearPositions() {
+    for (auto& table : tiers_)
+        for (auto& [id, state] : table) {
+            state.netPosition = 0;
+            state.working[0] = state.working[1] = 0;
+        }
 }
 
 }  // namespace OrderMatcher

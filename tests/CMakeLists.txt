@@ -93,7 +93,7 @@ gtest_discover_tests(BenchmarkRegression
 # threshold is only ENFORCED in a Release build without fault injection. NDEBUG
 # can't carry this signal: ENABLE_ASSERTIONS=ON compiles -UNDEBUG, leaving NDEBUG
 # undefined even in Release. Elsewhere the workload still runs and prints, but the
-# assertion is replaced by GTEST_SKIP.
+# assertion is replaced by a skip, tagged skip-ok in tests/BenchmarkRegression.cpp.
 if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT ENABLE_FAULT_INJECTION)
     target_compile_definitions(BenchmarkRegression PRIVATE OB_ENFORCE_LATENCY_THRESHOLD=1)
 endif()
@@ -104,13 +104,6 @@ target_link_libraries(EngineLifecycleTest PRIVATE OrderMatcher)
 enable_assertions(EngineLifecycleTest)
 add_test(NAME EngineLifecycleTest COMMAND EngineLifecycleTest)
 set_tests_properties(EngineLifecycleTest PROPERTIES TIMEOUT 60 LABELS "project;lifecycle")
-
-# Replication apply + snapshot (H11). No GTest dependency.
-add_executable(ReplicationApplyTest ReplicationApplyTest.cpp)
-target_link_libraries(ReplicationApplyTest PRIVATE OrderMatcher)
-enable_assertions(ReplicationApplyTest)
-add_test(NAME ReplicationApplyTest COMMAND ReplicationApplyTest)
-set_tests_properties(ReplicationApplyTest PROPERTIES TIMEOUT 60 LABELS "project;replication")
 
 # Participant authentication (H7). No GTest dependency.
 add_executable(ParticipantAuthTest ParticipantAuthTest.cpp)
@@ -158,20 +151,14 @@ set_tests_properties(ShutdownWatchdogTest PROPERTIES TIMEOUT 60 LABELS "project;
 
 # The order-entry port must refuse to serve unauthenticated (H7, GW-6), and must
 # still start when it is configured or when the opt-out is explicit. Driven
-# against the real binary because the decision lives in src/gateway_main.cpp.
-#
-# This REPLACES a pure-CMake `add_test(... COMMAND GatewayServer 0)` with
-# WILL_FAIL TRUE. That test rotted: once gateway_main learned to validate its
-# port argument, "0" was rejected with "PORT must be 1-65535" and the process
-# exited 1 before reaching the credentials check at all. WILL_FAIL cannot tell a
-# refusal from an argument error, so it stayed green while testing nothing.
+# against the real binary because the decision lives in src/main.cpp.
 #
 # The script pins WHY each case exits, and runs the refusing cases with a
-# deadline — a gateway that decides to serve never exits, so an exit-code
+# deadline — an engine that decides to serve never exits, so an exit-code
 # assertion cannot observe that failure and a command substitution would hang.
 add_test(NAME GatewayRequiresCredentialsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/gateway_requires_credentials.sh
-                 $<TARGET_FILE:GatewayServer>)
+                 $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayRequiresCredentialsTest PROPERTIES
     TIMEOUT 180
     LABELS "project;security")
@@ -209,11 +196,9 @@ set_tests_properties(EngineReplaysJournalTest PROPERTIES
 # records frame perfectly, so this is content trust, not layout compatibility.
 # Covers the refusal, the operator's override, and that a journal this build
 # wrote still replays.
-# A role must not switch replication on. It has known CRITICAL defects
-# (REPL-1..6), and docker-compose.yml set a role on both engines, so the default
-# deployment ran it. Now a role refuses to boot unless --allow-unsafe-replication
-# acknowledges it; deploy/chaos opts in. Deadline-driven: at HEAD the engine
-# served, and a serving engine never exits.
+# Replication was removed (roadmap 1.1 R1), so a --role / OB_NODE_ROLE refuses
+# to boot instead of running as a single node nobody asked for. Deadline-driven:
+# a serving engine never exits.
 add_test(NAME EngineRefusesReplicationRoleTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_replication_role.sh
                  $<TARGET_FILE:OrderEngine>)
@@ -257,6 +242,12 @@ add_test(NAME NoFixedTmpPathsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_fixed_tmp_paths.sh ${CMAKE_SOURCE_DIR})
 set_tests_properties(NoFixedTmpPathsTest PROPERTIES TIMEOUT 30 LABELS "project")
 
+# Roadmap 2.1: no skip, disabled test or known-divergence marker in tests or
+# benchmarks unless its line carries `skip-ok: <reason>`.
+add_test(NAME NoTestSuppressionsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_test_suppressions.sh ${CMAKE_SOURCE_DIR})
+set_tests_properties(NoTestSuppressionsTest PROPERTIES TIMEOUT 30 LABELS "project")
+
 add_test(NAME AdminBindsLoopbackTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/admin_binds_loopback.sh
                  $<TARGET_FILE:OrderEngine>)
@@ -294,6 +285,25 @@ set_tests_properties(EngineRequiresPriceBandTest PROPERTIES
     TIMEOUT 120
     LABELS "project;lifecycle")
 
+# Review v2 row 2 / SURF-1 / SURF-4: no order port with a price band, journal
+# or per-participant limit missing unless waived by name; an unreadable config
+# is fatal; configured position limits are applied. Admin port 29541.
+add_test(NAME EngineRequiresControlsTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_requires_controls.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRequiresControlsTest PROPERTIES
+    TIMEOUT 180
+    LABELS "project;lifecycle;security")
+
+# SURF-10: rate_limit.default_rate / default_burst apply at startup, not only
+# on SIGHUP. Admin port 29551.
+add_test(NAME EngineRateLimitConfigTest
+         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_rate_limit_config.sh
+                 $<TARGET_FILE:OrderEngine>)
+set_tests_properties(EngineRateLimitConfigTest PROPERTIES
+    TIMEOUT 120
+    LABELS "project;lifecycle")
+
 add_test(NAME EngineRefusesLegacyJournalTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/engine_refuses_legacy_journal.sh
                  $<TARGET_FILE:OrderEngine>)
@@ -312,12 +322,12 @@ set_tests_properties(EngineRefusesUnreadableJournalTest PROPERTIES
     TIMEOUT 60
     LABELS "project;recovery")
 
-# An argument neither binary understands is fatal (DOC-3). Both skipped unknown
-# flags, so the Runbook's `--lean` and `--replay-only` were dropped silently and
+# An argument the binary does not understand is fatal (DOC-3). It used to skip
+# unknown flags, so the Runbook's `--lean` and `--replay-only` were dropped silently and
 # the process started without them. Deadline-driven: the defect is "it started".
 add_test(NAME CliRejectsUnknownFlagsTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cli_rejects_unknown_flags.sh
-                 $<TARGET_FILE:OrderEngine> $<TARGET_FILE:GatewayServer>)
+                 $<TARGET_FILE:OrderEngine>)
 set_tests_properties(CliRejectsUnknownFlagsTest PROPERTIES
     TIMEOUT 120
     LABELS "project;lifecycle")
@@ -367,7 +377,7 @@ add_test(NAME CheckpointPositionTest COMMAND CheckpointPositionTest)
 set_tests_properties(CheckpointPositionTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
 # The engine-wide position limit sees the same position after a restart —
-# replay, checkpoint or a promoted backup — as the engine that traded.
+# plain replay or checkpoint — as the engine that traded.
 add_executable(RestartPositionLimitTest RestartPositionLimitTest.cpp)
 target_link_libraries(RestartPositionLimitTest PRIVATE OrderMatcher)
 enable_assertions(RestartPositionLimitTest)
@@ -396,6 +406,55 @@ target_link_libraries(CheckpointTimePriorityTest PRIVATE OrderMatcher)
 enable_assertions(CheckpointTimePriorityTest)
 add_test(NAME CheckpointTimePriorityTest COMMAND CheckpointTimePriorityTest)
 set_tests_properties(CheckpointTimePriorityTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
+# Pegged orders keep their price, queue order and reprice order across a checkpoint.
+add_executable(CheckpointPeggedOrderTest CheckpointPeggedOrderTest.cpp)
+target_link_libraries(CheckpointPeggedOrderTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointPeggedOrderTest)
+add_test(NAME CheckpointPeggedOrderTest COMMAND CheckpointPeggedOrderTest)
+set_tests_properties(CheckpointPeggedOrderTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
+# Every order comes back from a checkpoint in every trading state, and the book
+# takes its next transition as it would have; a halted or closed book restored
+# empty.
+add_executable(CheckpointTradingStateTest CheckpointTradingStateTest.cpp)
+target_link_libraries(CheckpointTradingStateTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointTradingStateTest)
+add_test(NAME CheckpointTradingStateTest COMMAND CheckpointTradingStateTest)
+set_tests_properties(CheckpointTradingStateTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
+
+# A checkpoint order the restart cannot put back stops the boot: replay used to
+# discard the refusal and boot without it.
+add_executable(CheckpointRestoreRefusedTest CheckpointRestoreRefusedTest.cpp)
+target_link_libraries(CheckpointRestoreRefusedTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointRestoreRefusedTest)
+add_test(NAME CheckpointRestoreRefusedTest COMMAND CheckpointRestoreRefusedTest)
+set_tests_properties(CheckpointRestoreRefusedTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
+# Property: after a checkpoint restart (B) and a plain-journal restart (C), the
+# rest of a randomized flow gives the same trades, updates and books as the
+# engine that never stopped (A).
+add_executable(CheckpointEquivalenceTest CheckpointEquivalenceTest.cpp)
+target_link_libraries(CheckpointEquivalenceTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointEquivalenceTest)
+add_test(NAME CheckpointEquivalenceTest COMMAND CheckpointEquivalenceTest)
+# 300: it runs every seed twice (breaker off, then a tight band).
+set_tests_properties(CheckpointEquivalenceTest PROPERTIES TIMEOUT 300 LABELS "project;recovery")
+
+# A journal entry applied live and refused on replay stops the boot.
+add_executable(ReplayRefusedEntryTest ReplayRefusedEntryTest.cpp)
+target_link_libraries(ReplayRefusedEntryTest PRIVATE OrderMatcher)
+enable_assertions(ReplayRefusedEntryTest)
+add_test(NAME ReplayRefusedEntryTest COMMAND ReplayRefusedEntryTest)
+set_tests_properties(ReplayRefusedEntryTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
+# A restart from a checkpoint decides as the engine that wrote it would have:
+# order age, the anchored band, the volatility dwell (round 8).
+add_executable(CheckpointCompleteStateTest CheckpointCompleteStateTest.cpp)
+target_link_libraries(CheckpointCompleteStateTest PRIVATE OrderMatcher)
+enable_assertions(CheckpointCompleteStateTest)
+add_test(NAME CheckpointCompleteStateTest COMMAND CheckpointCompleteStateTest)
+set_tests_properties(CheckpointCompleteStateTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
 # A replace after a checkpoint applies against the order's executed quantity:
 # Snapshot records carry cumQty (1.5-E1).
@@ -427,13 +486,6 @@ enable_assertions(GatewayIntegrationTest)
 add_test(NAME GatewayIntegrationTest COMMAND GatewayIntegrationTest)
 set_tests_properties(GatewayIntegrationTest PROPERTIES TIMEOUT 120 LABELS "project;integration")
 
-# FIX TCP gateway integration test
-add_executable(FixTcpGatewayTest FixTcpGatewayTest.cpp)
-target_link_libraries(FixTcpGatewayTest PRIVATE OrderMatcher)
-enable_assertions(FixTcpGatewayTest)
-add_test(NAME FixTcpGatewayTest COMMAND FixTcpGatewayTest)
-set_tests_properties(FixTcpGatewayTest PROPERTIES TIMEOUT 60 LABELS "project;integration")
-
 # Submit-result contract tests
 add_executable(SubmitResultTest SubmitResultTest.cpp)
 target_link_libraries(SubmitResultTest PRIVATE OrderMatcher)
@@ -447,6 +499,16 @@ add_executable(RiskControlsTest RiskControlsTest.cpp)
 target_link_libraries(RiskControlsTest PRIVATE OrderMatcher gtest_main)
 enable_assertions(RiskControlsTest)
 gtest_discover_tests(RiskControlsTest
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;risk")
+
+# Roadmap 1.9 I2/I3/I6: reservation ledger, hierarchical gate and graduated kill
+# switch on the admission path, on both engine paths.
+add_executable(RiskLedgerTest RiskLedgerTest.cpp)
+target_link_libraries(RiskLedgerTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(RiskLedgerTest)
+gtest_discover_tests(RiskLedgerTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;risk")
@@ -476,14 +538,6 @@ enable_assertions(StructuredLogTest)
 add_test(NAME StructuredLogTest COMMAND StructuredLogTest)
 set_tests_properties(StructuredLogTest PROPERTIES TIMEOUT 30
                      LABELS "project;ops")
-
-# Journal follower convergence test (HA replication primitive)
-add_executable(JournalFollowerTest JournalFollowerTest.cpp)
-target_link_libraries(JournalFollowerTest PRIVATE OrderMatcher)
-enable_assertions(JournalFollowerTest)
-add_test(NAME JournalFollowerTest COMMAND JournalFollowerTest)
-set_tests_properties(JournalFollowerTest PROPERTIES TIMEOUT 60
-                     LABELS "project;property")
 
 # Snapshot consistency under concurrent writes
 add_executable(SnapshotConsistencyTest SnapshotConsistencyTest.cpp)
@@ -542,9 +596,8 @@ set_tests_properties(DifferentialFuzzTest PROPERTIES
 
 # The widened differential fuzzer (1.3-C1; user decision 2): modify, replace,
 # icebergs, STP modes, kill switch, execution reports. Built here but NOT an
-# add_test: it is red on known classes (GTDIFF-2 until 1.6-F5, GTDIFF-7 until
-# an event-order spec), so CI runs it in its own continue-on-error job
-# (.github/workflows/ci.yml, wide-diff-fuzz) until then. Exits 1 on divergence.
+# add_test: CI runs it under ASan/UBSan in its own blocking job
+# (.github/workflows/ci.yml, wide-diff-fuzz). Exits 1 on divergence.
 add_executable(WideDifferentialFuzz WideDifferentialFuzz.cpp)
 target_link_libraries(WideDifferentialFuzz PRIVATE OrderMatcher)
 enable_assertions(WideDifferentialFuzz)
@@ -701,6 +754,35 @@ enable_assertions(PriceRangeTest)
 add_test(NAME PriceRangeTest COMMAND PriceRangeTest)
 set_tests_properties(PriceRangeTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
+# The market-order collar: on by default, both algorithms (1.9 I4, MATCH-16).
+add_executable(MarketCollarTest MarketCollarTest.cpp)
+target_link_libraries(MarketCollarTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(MarketCollarTest)
+gtest_discover_tests(MarketCollarTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
+# Notional caps value Market and stop orders off the collar (1.9 I4, STP-12).
+add_executable(MarketNotionalTest MarketNotionalTest.cpp)
+target_link_libraries(MarketNotionalTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(MarketNotionalTest)
+gtest_discover_tests(MarketNotionalTest
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;risk")
+
+# An expired GTD/DAY maker never trades, before the sweep reaches it (1.9 I9, THR-10).
+add_executable(LazyExpiryTest LazyExpiryTest.cpp)
+target_link_libraries(LazyExpiryTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(LazyExpiryTest)
+gtest_discover_tests(LazyExpiryTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;session")
+
 # GTD, and DAY with no session end, must carry an expiry (1.6-F6, PRIOR-7).
 add_executable(ExpiryAdmissionTest ExpiryAdmissionTest.cpp)
 target_link_libraries(ExpiryAdmissionTest PRIVATE OrderMatcher)
@@ -739,6 +821,14 @@ target_link_libraries(StopSweepOrderTest PRIVATE OrderMatcher)
 enable_assertions(StopSweepOrderTest)
 add_test(NAME StopSweepOrderTest COMMAND StopSweepOrderTest)
 set_tests_properties(StopSweepOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
+
+# GTDIFF-7: a fill's Trade reaches listeners before either side's OrderUpdate
+# (MatchingRules Rule 2.5), on every path that fills.
+add_executable(EventOrderTest EventOrderTest.cpp)
+target_link_libraries(EventOrderTest PRIVATE OrderMatcher)
+enable_assertions(EventOrderTest)
+add_test(NAME EventOrderTest COMMAND EventOrderTest)
+set_tests_properties(EventOrderTest PROPERTIES TIMEOUT 60 LABELS "project;unit")
 
 # Roadmap 1.6-F4 (STP-13): a peg never rests at or through the opposite touch
 # and does not count pegs, itself included, in its reference.
@@ -800,6 +890,22 @@ enable_assertions(JournalHaltTest)
 add_test(NAME JournalHaltTest COMMAND JournalHaltTest)
 set_tests_properties(JournalHaltTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
+# JOURNAL-6, DA-1, DA-2: once the journal halts no path moves a book — the kill
+# switch (engine and TcpGateway), expiry, DAY and session sweeps, sync and async.
+add_executable(JournalHaltFreezeTest JournalHaltFreezeTest.cpp)
+target_link_libraries(JournalHaltFreezeTest PRIVATE OrderMatcher)
+enable_assertions(JournalHaltFreezeTest)
+add_test(NAME JournalHaltFreezeTest COMMAND JournalHaltFreezeTest)
+set_tests_properties(JournalHaltFreezeTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
+# JOURNAL-4: in OrderEngine's wiring every event the market-data feed receives
+# finds its journal record already on disk.
+add_executable(JournalRecordBeforeEventTest JournalRecordBeforeEventTest.cpp)
+target_link_libraries(JournalRecordBeforeEventTest PRIVATE OrderMatcher)
+enable_assertions(JournalRecordBeforeEventTest)
+add_test(NAME JournalRecordBeforeEventTest COMMAND JournalRecordBeforeEventTest)
+set_tests_properties(JournalRecordBeforeEventTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
+
 # JRN-11: a refused io_uring_submit halts the journal instead of leaving the
 # writer waiting forever on a chain the kernel never saw, and the refused SQEs
 # never reach the disk. Fault-injection build on Linux with liburing; skips
@@ -828,47 +934,57 @@ enable_assertions(JournalIdCountersTest)
 add_test(NAME JournalIdCountersTest COMMAND JournalIdCountersTest)
 set_tests_properties(JournalIdCountersTest PROPERTIES TIMEOUT 60 LABELS "project;recovery")
 
-# The order-entry port must journal what it acknowledges: GatewayServer had no
-# journal at all, so a restart lost every order it had accepted. Driven against
-# the real binary through the order port — acknowledge, restart, then cancel the
-# order (Ack = it survived) and cancel it again (must be refused, so the probe
-# can tell the two apart).
+# The order-entry port must journal what it acknowledges. Driven against the real
+# binary through the order port — acknowledge, restart, then cancel the order and
+# read /book (a level changes = it survived), and cancel it again (nothing changes,
+# so the probe can tell the two apart). Ports 31520-31539.
 add_executable(GatewayJournalRestartTest GatewayJournalRestartTest.cpp)
 target_link_libraries(GatewayJournalRestartTest PRIVATE OrderMatcher)
 enable_assertions(GatewayJournalRestartTest)
 add_test(NAME GatewayJournalRestartTest
-         COMMAND GatewayJournalRestartTest $<TARGET_FILE:GatewayServer>)
+         COMMAND GatewayJournalRestartTest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayJournalRestartTest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
-# Roadmap 1.3-C4 (2.8): kill -9 GatewayServer at a random point in a stream of
+# Roadmap 1.2-B2: OrderEngine is the binary clients trade through. A client logs
+# in on its order port, trades on symbol 1, kill -9, and the orders come back from
+# the journal; a client without valid credentials is refused. Ports 31500-31509
+# (order entry) and 31590-31599 (admin).
+add_executable(OrderEngineGatewayTest OrderEngineGatewayTest.cpp)
+target_link_libraries(OrderEngineGatewayTest PRIVATE OrderMatcher)
+enable_assertions(OrderEngineGatewayTest)
+add_test(NAME OrderEngineGatewayTest
+         COMMAND OrderEngineGatewayTest $<TARGET_FILE:OrderEngine>)
+set_tests_properties(OrderEngineGatewayTest PROPERTIES TIMEOUT 120
+                     LABELS "project;recovery;security;integration")
+
+# Roadmap 1.3-C4 (2.8): kill -9 OrderEngine at a random point in a stream of
 # adds and cancels, restart on the same journal, and require every acknowledged
-# order present and every acknowledged cancel still applied.
+# order present and every acknowledged cancel still applied. Ports 31540-31559.
 add_executable(CrashRecoveryE2ETest CrashRecoveryE2ETest.cpp)
 target_link_libraries(CrashRecoveryE2ETest PRIVATE OrderMatcher)
 enable_assertions(CrashRecoveryE2ETest)
 add_test(NAME CrashRecoveryE2ETest
-         COMMAND CrashRecoveryE2ETest $<TARGET_FILE:GatewayServer>)
+         COMMAND CrashRecoveryE2ETest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(CrashRecoveryE2ETest PROPERTIES TIMEOUT 120 LABELS "project;recovery")
 
-# A GTD order must be gone once its time passes. Neither binary ran the expiry
-# sweep, so GatewayServer let GTD orders rest and trade forever. Black-box: a GTD
-# due in 1 s, a GTD due in 1 h and a GTC; after the wait, a cancel for each —
-# OrderNotFound for the first, Ack for the other two.
+# A GTD order entered on the order port must be gone once its time passes.
+# Black-box: a GTD due in 1 s, a GTD due in 1 h and a GTC; after the wait, /book
+# holds the last two only. Ports 31560-31564 and 31570-31574.
 add_executable(GatewayExpiresGtdTest GatewayExpiresGtdTest.cpp)
 target_link_libraries(GatewayExpiresGtdTest PRIVATE OrderMatcher)
 enable_assertions(GatewayExpiresGtdTest)
 add_test(NAME GatewayExpiresGtdTest
-         COMMAND GatewayExpiresGtdTest $<TARGET_FILE:GatewayServer>)
+         COMMAND GatewayExpiresGtdTest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayExpiresGtdTest PROPERTIES TIMEOUT 120 LABELS "project;lifecycle")
 
-# GatewayServer's market-data ring must have one writer (LF-2): snapshots were
-# published, and the book read, from main() while the event thread published
-# updates. Black-box; the race shows as a non-zero exit under ThreadSanitizer.
+# OrderEngine's market-data ring takes one writer at a time (LF-2) though every
+# worker publishes. Black-box; a race shows as a non-zero exit under
+# ThreadSanitizer. Ports 31565-31569 and 31575-31579.
 add_executable(GatewayMarketDataThreadTest GatewayMarketDataThreadTest.cpp)
 target_link_libraries(GatewayMarketDataThreadTest PRIVATE OrderMatcher)
 enable_assertions(GatewayMarketDataThreadTest)
 add_test(NAME GatewayMarketDataThreadTest
-         COMMAND GatewayMarketDataThreadTest $<TARGET_FILE:GatewayServer>)
+         COMMAND GatewayMarketDataThreadTest $<TARGET_FILE:OrderEngine>)
 set_tests_properties(GatewayMarketDataThreadTest PROPERTIES TIMEOUT 120
                      LABELS "project;concurrency")
 
@@ -934,8 +1050,8 @@ enable_assertions(JournalCorruptionTest)
 add_test(NAME JournalCorruptionTest COMMAND JournalCorruptionTest)
 set_tests_properties(JournalCorruptionTest PROPERTIES TIMEOUT 60 LABELS "project;chaos")
 
-# Journal ack-durability test — onCommit (replication ack) must fire strictly
-# after a successful durable sync, never before / when fsync is skipped.
+# Journal ack-durability test — onDurable must fire strictly after a successful
+# durable sync, never before / when fsync is skipped.
 add_executable(JournalAckDurabilityTest JournalAckDurabilityTest.cpp)
 target_link_libraries(JournalAckDurabilityTest PRIVATE OrderMatcher)
 enable_assertions(JournalAckDurabilityTest)
@@ -1027,22 +1143,6 @@ enable_assertions(CombinedChaosTest)
 add_test(NAME CombinedChaosTest COMMAND CombinedChaosTest)
 set_tests_properties(CombinedChaosTest PROPERTIES TIMEOUT 120 LABELS "project;chaos")
 
-# Gateway binary protocol schema evolution tests
-add_executable(GatewayProtocolTest GatewayProtocolTest.cpp)
-target_link_libraries(GatewayProtocolTest PRIVATE OrderMatcher)
-enable_assertions(GatewayProtocolTest)
-add_test(NAME GatewayProtocolTest COMMAND GatewayProtocolTest)
-set_tests_properties(GatewayProtocolTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol")
-
-# OUCH 4.2 binary order-entry codec + session-layer tests
-add_executable(OuchSessionTest OuchSessionTest.cpp)
-target_link_libraries(OuchSessionTest PRIVATE OrderMatcher)
-enable_assertions(OuchSessionTest)
-add_test(NAME OuchSessionTest COMMAND OuchSessionTest)
-set_tests_properties(OuchSessionTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol")
-
 # ITCH 5.0 market-data publisher + codec tests
 add_executable(ItchPublisherTest ItchPublisherTest.cpp)
 target_link_libraries(ItchPublisherTest PRIVATE OrderMatcher)
@@ -1114,14 +1214,6 @@ add_test(NAME MoldUDP64Test COMMAND MoldUDP64Test)
 set_tests_properties(MoldUDP64Test PROPERTIES TIMEOUT 30
                      LABELS "project;protocol")
 
-# OUCH-over-SoupBinTCP end-to-end gateway over real loopback TCP
-add_executable(OuchTcpGatewayTest OuchTcpGatewayTest.cpp)
-target_link_libraries(OuchTcpGatewayTest PRIVATE OrderMatcher)
-enable_assertions(OuchTcpGatewayTest)
-add_test(NAME OuchTcpGatewayTest COMMAND OuchTcpGatewayTest)
-set_tests_properties(OuchTcpGatewayTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;integration")
-
 # ITCH-over-MoldUDP64 transport over real loopback UDP
 add_executable(ItchUdpTransportTest ItchUdpTransportTest.cpp)
 target_link_libraries(ItchUdpTransportTest PRIVATE OrderMatcher)
@@ -1182,9 +1274,8 @@ add_test(NAME MoldSeqPersistenceTest COMMAND MoldSeqPersistenceTest)
 set_tests_properties(MoldSeqPersistenceTest PROPERTIES TIMEOUT 30
                      LABELS "project;protocol;durability;recovery")
 
-# Option A UDP gap recovery: reorder buffer (hold-and-drain out-of-order
-# datagrams, NAK only the new gap) + sender retransmit window. DPDK-free logic,
-# runs headless on CI; the rte_eth_tx_burst NAK path is validated on hardware.
+# UDP gap recovery: reorder buffer (hold-and-drain out-of-order datagrams, NAK
+# only the new gap) + sender retransmit window.
 add_executable(UdpGapRecoveryTest UdpGapRecoveryTest.cpp)
 target_link_libraries(UdpGapRecoveryTest PRIVATE OrderMatcher)
 enable_assertions(UdpGapRecoveryTest)
@@ -1201,22 +1292,6 @@ enable_assertions(StpOccupancyTest)
 add_test(NAME StpOccupancyTest COMMAND StpOccupancyTest)
 set_tests_properties(StpOccupancyTest PROPERTIES TIMEOUT 30
                      LABELS "project;matching;stp")
-
-# SBE — schema-driven binary protocol with forward-compat versioning
-add_executable(SbeProtocolTest SbeProtocolTest.cpp)
-target_link_libraries(SbeProtocolTest PRIVATE OrderMatcher)
-enable_assertions(SbeProtocolTest)
-add_test(NAME SbeProtocolTest COMMAND SbeProtocolTest)
-set_tests_properties(SbeProtocolTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol")
-
-# SBE session: schema-driven NewOrder → engine + OrderAck reply
-add_executable(SbeSessionTest SbeSessionTest.cpp)
-target_link_libraries(SbeSessionTest PRIVATE OrderMatcher)
-enable_assertions(SbeSessionTest)
-add_test(NAME SbeSessionTest COMMAND SbeSessionTest)
-set_tests_properties(SbeSessionTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;integration")
 
 # GTD virtual clock deterministic replay tests
 # Graceful shutdown with state persistence (P3-6): GTD/GTC persist + restore,
@@ -1342,14 +1417,6 @@ add_test(NAME CapacityMonitorIntegrationTest COMMAND CapacityMonitorIntegrationT
 set_tests_properties(CapacityMonitorIntegrationTest PROPERTIES TIMEOUT 60
                      LABELS "project;ops")
 
-# Replication protocol HA tests
-add_executable(ReplicationProtocolTest ReplicationProtocolTest.cpp)
-target_link_libraries(ReplicationProtocolTest PRIVATE OrderMatcher)
-enable_assertions(ReplicationProtocolTest)
-add_test(NAME ReplicationProtocolTest COMMAND ReplicationProtocolTest)
-set_tests_properties(ReplicationProtocolTest PROPERTIES TIMEOUT 60
-                     LABELS "project;ha;replication")
-
 # Session scheduler: deterministic daily-lifecycle sequencing via virtual clock
 add_executable(SessionSchedulerTest TestSessionScheduler.cpp)
 target_link_libraries(SessionSchedulerTest PRIVATE OrderMatcher)
@@ -1424,38 +1491,6 @@ add_test(NAME ComplianceTest COMMAND ComplianceTest)
 set_tests_properties(ComplianceTest PROPERTIES TIMEOUT 30
                      LABELS "project;compliance;integration")
 
-# Durable lease-epoch persistence
-add_executable(EpochStoreTest TestEpochStore.cpp)
-target_link_libraries(EpochStoreTest PRIVATE OrderMatcher)
-enable_assertions(EpochStoreTest)
-add_test(NAME EpochStoreTest COMMAND EpochStoreTest)
-set_tests_properties(EpochStoreTest PROPERTIES TIMEOUT 30
-                     LABELS "project;ha;durability")
-
-# FIX session-layer sequence / recovery / heartbeat state machine
-add_executable(FixSessionStateTest TestFixSessionState.cpp)
-target_link_libraries(FixSessionStateTest PRIVATE OrderMatcher)
-enable_assertions(FixSessionStateTest)
-add_test(NAME FixSessionStateTest COMMAND FixSessionStateTest)
-set_tests_properties(FixSessionStateTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;fix")
-
-# Durable lease epoch survives restart (split-brain hardening)
-add_executable(LeaseEpochTest TestLeaseEpoch.cpp)
-target_link_libraries(LeaseEpochTest PRIVATE OrderMatcher)
-enable_assertions(LeaseEpochTest)
-add_test(NAME LeaseEpochTest COMMAND LeaseEpochTest)
-set_tests_properties(LeaseEpochTest PROPERTIES TIMEOUT 30
-                     LABELS "project;ha;replication")
-
-# Wire-protocol versioning contract (FIX/SBE/ITCH/OUCH)
-add_executable(ProtocolVersioningTest ProtocolVersioningTest.cpp)
-target_link_libraries(ProtocolVersioningTest PRIVATE OrderMatcher)
-enable_assertions(ProtocolVersioningTest)
-add_test(NAME ProtocolVersioningTest COMMAND ProtocolVersioningTest)
-set_tests_properties(ProtocolVersioningTest PROPERTIES TIMEOUT 30
-                     LABELS "project;protocol;versioning")
-
 # Shadow mode divergence detection test
 add_executable(ShadowModeTest ShadowModeTest.cpp)
 target_link_libraries(ShadowModeTest PRIVATE OrderMatcher gtest_main)
@@ -1463,15 +1498,6 @@ gtest_discover_tests(ShadowModeTest
     DISCOVERY_TIMEOUT 60
     XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
     PROPERTIES LABELS "project\;shadow\;integration")
-
-# FIX inbound boundary-validation tests (seqnum, logon gate, required
-# fields, BodyLength cross-check, TargetCompID, unknown enums)
-add_executable(FixValidationTest FixValidationTest.cpp)
-target_link_libraries(FixValidationTest PRIVATE OrderMatcher gtest_main)
-gtest_discover_tests(FixValidationTest
-    DISCOVERY_TIMEOUT 60
-    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
-    PROPERTIES LABELS "project\;fix\;validation")
 
 # ContingencyManager OCO linkage tests (assert-based, engine-agnostic)
 add_executable(ContingencyManagerTest TestContingencyManager.cpp)
@@ -1501,8 +1527,7 @@ gtest_discover_tests(SimulationTest
 # shipped binary. Labelled project so every lane checks its own build.
 add_test(NAME NoResearchInEngineTest
          COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/no_research_in_engine.sh
-                 $<TARGET_FILE:OrderMatcher> $<TARGET_FILE:OrderEngine>
-                 $<TARGET_FILE:GatewayServer>)
+                 $<TARGET_FILE:OrderMatcher> $<TARGET_FILE:OrderEngine>)
 set_tests_properties(NoResearchInEngineTest PROPERTIES TIMEOUT 60 LABELS "project")
 
 # Roadmap 2.4: every guarantee marked in README, Compliance, Verification and
@@ -1642,10 +1667,119 @@ add_test(NAME RateLimiterReconfigureTest COMMAND RateLimiterReconfigureTest)
 set_tests_properties(RateLimiterReconfigureTest PROPERTIES TIMEOUT 15
                      LABELS "project;ops;rate-limit")
 
-# Reconnect backoff smoke test
-add_executable(ReconnectBackoffTest ReconnectBackoffTest.cpp)
-target_link_libraries(ReconnectBackoffTest PRIVATE OrderMatcher)
-enable_assertions(ReconnectBackoffTest)
-add_test(NAME ReconnectBackoffTest COMMAND ReconnectBackoffTest)
-set_tests_properties(ReconnectBackoffTest PROPERTIES TIMEOUT 30
-                     LABELS "project;ha;replication")
+# One volatility check for every continuous print: fresh orders, replaces,
+# elected and latched stops; the reference comes from a print (MR-1, MR-2, FORMAL-1).
+# A price level's displayed totals are maintained, not recomputed by a walk,
+# and every published L2 level equals a recomputation (PERF-1).
+add_executable(LevelTotalsTest LevelTotalsTest.cpp)
+target_link_libraries(LevelTotalsTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(LevelTotalsTest)
+gtest_discover_tests(LevelTotalsTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project")
+
+add_executable(PrintBandTest PrintBandTest.cpp)
+target_link_libraries(PrintBandTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(PrintBandTest)
+gtest_discover_tests(PrintBandTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;auction")
+
+# A resting order's minQty (Rule 9.5), DecreaseAndCancel's report to the
+# resting owner and CancelBoth in continuous matching (MR-5, MR-7).
+add_executable(RestingOrderRulesTest RestingOrderRulesTest.cpp)
+target_link_libraries(RestingOrderRulesTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(RestingOrderRulesTest)
+gtest_discover_tests(RestingOrderRulesTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+# MIDS-3, MIDS-7: order ids are scoped by participant at the gateway, and an
+# out-of-range participant id (the kill-all sentinel among them) is refused.
+add_executable(GatewayParticipantIsolationTest GatewayParticipantIsolationTest.cpp)
+target_link_libraries(GatewayParticipantIsolationTest PRIVATE OrderMatcher)
+enable_assertions(GatewayParticipantIsolationTest)
+add_test(NAME GatewayParticipantIsolationTest COMMAND GatewayParticipantIsolationTest)
+set_tests_properties(GatewayParticipantIsolationTest PROPERTIES TIMEOUT 60 LABELS "project;security;integration")
+
+# N6 / DA-3, DA-4: fills, engine cancels and post-ack rejects reach the owning
+# sessions, only once durable, without a slow reader stalling matching; the
+# market-data feed is held to the same rule.
+add_executable(GatewayExecutionReportTest GatewayExecutionReportTest.cpp)
+target_link_libraries(GatewayExecutionReportTest PRIVATE OrderMatcher)
+enable_assertions(GatewayExecutionReportTest)
+add_test(NAME GatewayExecutionReportTest COMMAND GatewayExecutionReportTest)
+set_tests_properties(GatewayExecutionReportTest PROPERTIES TIMEOUT 120 LABELS "project;integration;recovery")
+
+# The uncross keeps arrival order among parked orders, resolves only self-crossing
+# pairs that can meet at the clearing price, and a halted close cancels
+# on-close and parked orders (MIDS-4, MIDS-5).
+add_executable(AuctionUncrossRulesTest AuctionUncrossRulesTest.cpp)
+target_link_libraries(AuctionUncrossRulesTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(AuctionUncrossRulesTest)
+gtest_discover_tests(AuctionUncrossRulesTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
+# The uncross against an independent reference written from Rules 4.4, 7.2 and
+# 7.3: price, volume, per-order fills and the STP set on random books.
+add_executable(UncrossOracleTest UncrossOracleTest.cpp)
+target_link_libraries(UncrossOracleTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(UncrossOracleTest)
+gtest_discover_tests(UncrossOracleTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
+# An OCO link names one live order on one symbol; the sibling cancel releases
+# its reserved position (MIDS-2, MIDS-9).
+add_executable(OcoScopeTest OcoScopeTest.cpp)
+target_link_libraries(OcoScopeTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(OcoScopeTest)
+gtest_discover_tests(OcoScopeTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
+# Pro-rata allocates over the whole level and elected stops match pro-rata (MR-4).
+add_executable(ProRataLevelTest ProRataLevelTest.cpp)
+target_link_libraries(ProRataLevelTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(ProRataLevelTest)
+gtest_discover_tests(ProRataLevelTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
+# Admission: an order past its expiry is refused; IOC/FOK with DAY need no
+# session end (MR-6, MR-8).
+add_executable(AdmissionTifTest AdmissionTifTest.cpp)
+target_link_libraries(AdmissionTifTest PRIVATE OrderMatcher gtest_main)
+enable_assertions(AdmissionTifTest)
+gtest_discover_tests(AdmissionTifTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit")
+
+# The C++ book's Limit/Cancel/Modify/Replace traces checked by TLC to be
+# behaviours of spec/MatchingEngine.tla (spec/TraceMatchingEngine.tla). SKIPs
+# without java and spec/tla2tools.jar; the TLA+ workflow runs it with both.
+add_executable(TraceValidationTest TraceValidationTest.cpp)
+target_link_libraries(TraceValidationTest PRIVATE OrderMatcher gtest_main)
+target_compile_definitions(TraceValidationTest PRIVATE SPEC_DIR="${CMAKE_SOURCE_DIR}/spec")
+enable_assertions(TraceValidationTest)
+gtest_discover_tests(TraceValidationTest
+    NO_PRETTY_VALUES
+    DISCOVERY_TIMEOUT 60
+    XML_OUTPUT_DIR ${CMAKE_BINARY_DIR}/test-results
+    PROPERTIES LABELS "project\;unit" TIMEOUT 300)

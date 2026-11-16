@@ -2,24 +2,36 @@ name: TLA+ Model Checking
 
 # Model-checks the project's TLA+ specifications with TLC on every push / PR.
 #
-# Only the FAST specs that exhaust their (bounded) state space in a few
-# seconds are gated here:
-#   - Auction         : exchange auction / session state machine
-#   - Oco              : One-Cancels-Other contingent-order safety
-#   - Risk             : multi-tier risk-limit aggregation safety
-#   - EpochDurability  : lease epoch stays monotonic across a restart
-#   - FixSession       : FIX inbound sequence recovery (no out-of-order delivery)
-#   - MpscQueue        : lock-free ring-buffer linearizability
-#   - EngineConsumer   : worker-loop wake-up protocol
-#   - Snapshot         : lockless snapshot (properties that hold)
-#   - SnapshotLocked   : locked snapshot (strong-consistency properties)
+# What each spec models, and whether the shipped binary (OrderEngine)
+# runs that code by default, is in docs/Verification.md ("Scope"). In short:
+#   - MatchingEngine   : OrderBook::match / modifyOrder / cancelReplace  (runs)
+#   - Auction          : session table, volatility auction, uncross      (runs:
+#                        the breaker by default, sessions with --session-schedule)
+#   - MpscQueue        : the per-worker request queue (include/MpscQueue.h)  (runs)
+#   - EngineConsumer   : MatchingEngine::workerLoop wake-up protocol      (runs)
+#   - SnapshotLocked   : OrderBook::getSnapshot under bookLock_   (runs: admin /book)
+#   - Oco, Risk        : ContingencyManager, HierarchicalRiskManager + the
+#                        position ledger: LIBRARY ONLY. OrderEngine never calls
+#                        registerOco, mapParticipant, setRiskTierLimits or
+#                        setPositionLimit, so it never executes this code.
 #
-# MatchingEngine.tla is checked at MatchingEngine.cfg (a few minutes), and
-# each of its seven MatchingEngineBroken*.cfg variants must fail with the
-# counterexample its injected bug produces. Auction.tla's AuctionBrokenEdge.cfg
+# MatchingEngine.tla is checked at MatchingEngine.cfg (about a minute) and at
+# MatchingEngineDeep.cfg (one price, four orders: a fill reaches a level
+# three deep; about two minutes), and each of its eight broken variants must
+# fail with the counterexample its injected bug produces;
+# MatchingEngineDeepBrokenSwap.cfg's bug passes at MatchingEngine.cfg.
+#
+# Trace validation: TraceValidationTest (C++) records what OrderBook does on
+# Limit/Cancel/Modify/Replace flows, and TLC checks every trace is a
+# behaviour of MatchingEngine.tla (spec/TraceMatchingEngine.tla). Auction.tla's AuctionBrokenEdge.cfg
 # and AuctionBrokenDate.cfg (an illegal session transition) and
 # AuctionBrokenHalt.cfg (a halt that resumes to Continuous from a closing
-# auction) must fail the same way. Replication.tla is not checked.
+# auction) must fail the same way.
+#
+# EngineConsumerBroken.cfg (the worker samples its wake counter after the
+# empty check) must stop with "Deadlock reached": TLC's deadlock check is on
+# for every spec (spec/check.sh), and each spec that legitimately ends says
+# so with an explicit terminal step.
 #
 # A dedicated step also runs the Auction NON-VACUITY variant
 # (AuctionBroken.cfg, BUG = "no_reopen") and asserts that TLC reports a
@@ -47,13 +59,23 @@ jobs:
         uses: actions/cache@v4
         with:
           path: spec/tla2tools.jar
-          key: tla2tools-jar-v1.8.0
+          key: tla2tools-jar-v1.7.4
 
       - name: Check fast specs
         working-directory: spec
         run: |
           set -e
-          for module in Auction Oco Risk EpochDurability FixSession MpscQueue EngineConsumer Snapshot SnapshotLocked; do
+          for module in Auction MpscQueue EngineConsumer SnapshotLocked; do
+            echo "::group::TLC $module"
+            ./check.sh "$module"
+            echo "::endgroup::"
+          done
+
+      - name: Check library-only specs (code OrderEngine does not run)
+        working-directory: spec
+        run: |
+          set -e
+          for module in Oco Risk; do
             echo "::group::TLC $module"
             ./check.sh "$module"
             echo "::endgroup::"
@@ -62,6 +84,26 @@ jobs:
       - name: Check MatchingEngine
         working-directory: spec
         run: ./check.sh MatchingEngine
+
+      - name: Check MatchingEngine at queue depth three (MatchingEngineDeep.cfg, ~2 min)
+        working-directory: spec
+        run: ./check.sh MatchingEngine MatchingEngineDeep.cfg
+
+      - name: Trace validation (the C++ book's traces are behaviours of MatchingEngine.tla)
+        # tests/TraceValidationTest.cpp runs 300 seeded Limit/Cancel/Modify/
+        # Replace flows on OrderBook and has TLC check each is a behaviour of
+        # spec/MatchingEngine.tla (spec/TraceMatchingEngine.tla), then that a
+        # sweep reported out of order is rejected. It SKIPs without java and
+        # spec/tla2tools.jar, so here a skip is a failure.
+        run: |
+          set -o pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=OFF
+          cmake --build build --parallel 4 --target TraceValidationTest
+          ./build/tests/TraceValidationTest | tee trace_validation.log
+          if grep -q "SKIPPED" trace_validation.log; then
+            echo "::error::TraceValidationTest skipped: java or spec/tla2tools.jar missing"
+            exit 1
+          fi
 
       - name: Non-vacuity checks (each injected MatchingEngine / Auction bug must be caught)
         working-directory: spec
@@ -90,9 +132,12 @@ jobs:
           MatchingEngine MatchingEngineBrokenStp.cfg Invariant NoSelfTrade is violated
           MatchingEngine MatchingEngineBrokenModify.cfg Invariant NoEmptyRestingOrder is violated
           MatchingEngine MatchingEngineBrokenReplace.cfg Invariant FIFO_Preservation is violated
+          MatchingEngine MatchingEngineDeepBrokenSwap.cfg Invariant FIFO_Preservation is violated
           Auction AuctionBrokenEdge.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenDate.cfg Action property ValidTransitions is violated
           Auction AuctionBrokenHalt.cfg Invariant NoReopenAfterClose is violated
+          EngineConsumer EngineConsumerBroken.cfg Error: Deadlock reached.
+          SnapshotLocked SnapshotLockedBroken.cfg Invariant SnapshotIsPointInTime is violated
           EOF
           exit "$fail"
 
@@ -108,7 +153,16 @@ jobs:
             echo "::error::AuctionBroken.cfg unexpectedly PASSED — VolatilityEventuallyReopens is vacuous"
             exit 1
           fi
-          if ! grep -q "Temporal property VolatilityEventuallyReopens was violated" broken.log; then
+          # TLC 2.19 (the pinned v1.7.4 jar) says "Temporal properties were
+          # violated" without naming one; newer builds name it. AuctionBroken.cfg
+          # checks exactly one property and no invariant, so either wording can
+          # only mean VolatilityEventuallyReopens. The first grep keeps that true.
+          if [ "$(grep -c "^    [A-Za-z]" <(sed -n '/^PROPERTIES/,$p' AuctionBroken.cfg))" -ne 1 ] ||
+             grep -q "^INVARIANTS\?" AuctionBroken.cfg; then
+            echo "::error::AuctionBroken.cfg must check VolatilityEventuallyReopens and nothing else"
+            exit 1
+          fi
+          if ! grep -Eq "Temporal property VolatilityEventuallyReopens was violated|Temporal properties were violated" broken.log; then
             echo "::error::AuctionBroken.cfg failed for the wrong reason (expected a VolatilityEventuallyReopens counterexample)"
             exit 1
           fi
@@ -149,39 +203,3 @@ jobs:
             exit 1
           fi
           echo "Non-vacuity confirmed: TLC produced the expected risk counterexample."
-
-      - name: Non-vacuity check (epoch durability must be violable)
-        working-directory: spec
-        run: |
-          set +e
-          ./check.sh EpochDurability EpochDurabilityBroken.cfg > epoch_broken.log 2>&1
-          status=$?
-          set -e
-          cat epoch_broken.log
-          if [ "$status" -eq 0 ]; then
-            echo "::error::EpochDurabilityBroken.cfg unexpectedly PASSED — NoRegression is vacuous"
-            exit 1
-          fi
-          if ! grep -q "Invariant NoRegression is violated" epoch_broken.log; then
-            echo "::error::EpochDurabilityBroken.cfg failed for the wrong reason (expected a NoRegression counterexample)"
-            exit 1
-          fi
-          echo "Non-vacuity confirmed: TLC produced the expected epoch counterexample."
-
-      - name: Non-vacuity check (FIX sequence recovery must be violable)
-        working-directory: spec
-        run: |
-          set +e
-          ./check.sh FixSession FixSessionBroken.cfg > fix_broken.log 2>&1
-          status=$?
-          set -e
-          cat fix_broken.log
-          if [ "$status" -eq 0 ]; then
-            echo "::error::FixSessionBroken.cfg unexpectedly PASSED — DeliveredInOrder is vacuous"
-            exit 1
-          fi
-          if ! grep -q "Invariant DeliveredInOrder is violated" fix_broken.log; then
-            echo "::error::FixSessionBroken.cfg failed for the wrong reason (expected a DeliveredInOrder counterexample)"
-            exit 1
-          fi
-          echo "Non-vacuity confirmed: TLC produced the expected FIX counterexample."

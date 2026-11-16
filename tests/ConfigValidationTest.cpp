@@ -1,8 +1,8 @@
 // ConfigValidationTest — P3-7 fail-fast startup config validation.
 //
-// Verifies validateStartupConfig() catches every declared-config invariant
-// violation (instruments, participants, journal path) and accepts a valid
-// config. Uses Config::loadMap so no files are needed except for the
+// Verifies validateStartupConfig() refuses every control OrderEngine would
+// otherwise start without (a symbol's band, participants' position limits)
+// unless waived, refuses keys nothing applies, and accepts a valid config. Uses Config::loadMap so no files are needed except for the
 // journal-path writability check.
 
 #include "Config.h"
@@ -28,164 +28,153 @@ static bool hasError(const ConfigValidationResult& r, const std::string& needle)
 }
 
 // Config is non-copyable (holds a mutex), so fill a caller-owned instance.
+// One symbol, banded; one participant, limited.
 static void fillValidConfig(Config& cfg) {
     cfg.loadMap({
-        {"instruments", "1"},
-        {"instrument.1.min_price", "990000"},
-        {"instrument.1.max_price", "1010000"},   // span 20000 < 200001
-        {"instrument.1.tick_size", "100"},
-        {"instrument.1.lot_size", "1"},
+        {"instrument.0.min_price", "990000"},
+        {"instrument.0.max_price", "1010000"},   // 20001 levels < 200001
         {"participants", "10"},
         {"participant.10.position_limit", "5000000"},
-        {"participant.10.otr_limit", "100"},
-        {"journal_path", uniqueTempPath("cfgval_ok.wal")},
     });
+}
+
+static ConfigValidationResult check(const Config& cfg, ControlWaivers w = {},
+                                    size_t capacity = FlatPriceMap::DEFAULT_CAPACITY) {
+    return validateStartupConfig(cfg, /*numSymbols=*/1, w, capacity);
+}
+
+static void expectError(const ConfigValidationResult& r, const std::string& needle) {
+    if (r.ok || !hasError(r, needle)) {
+        std::cout << "\n    wanted an error with: " << needle;
+        for (auto& e : r.errors) std::cout << "\n    got: " << e;
+        assert(false);
+    }
 }
 
 void test_valid_config_passes() {
     SECTION("Valid config passes");
     Config cfg; fillValidConfig(cfg);
-    auto r = validateStartupConfig(cfg);
+    auto r = check(cfg);
     if (!r.ok) for (auto& e : r.errors) std::cout << "\n    unexpected: " << e;
     assert(r.ok);
     assert(r.errors.empty());
     PASS();
 }
 
-void test_empty_config_passes() {
-    SECTION("Empty config (nothing declared) passes");
-    Config cfg;  // no instruments/participants/journal
-    auto r = validateStartupConfig(cfg);
-    assert(r.ok);
+void test_empty_config_needs_waivers() {
+    SECTION("Empty config: refused without waivers, passes with both");
+    Config cfg;
+    auto r = check(cfg);
+    expectError(r, "--no-price-band");
+    expectError(r, "--no-risk-limits");
+    assert(check(cfg, {true, true}).ok);
+    PASS();
+}
+
+void test_waiver_does_not_excuse_a_bad_band() {
+    SECTION("A waiver allows an absent band, not a broken one");
+    Config cfg; fillValidConfig(cfg);
+    cfg.set("instrument.0.max_price", "1");
+    expectError(check(cfg, {true, true}), "min_price");
+    Config half; half.loadMap({{"instrument.0.min_price", "5"}});
+    expectError(check(half, {true, true}), "set both");
     PASS();
 }
 
 void test_min_ge_max() {
-    SECTION("min_price >= max_price rejected");
+    SECTION("min_price >= max_price, or min_price <= 0, rejected");
     Config cfg; fillValidConfig(cfg);
-    cfg.set("instrument.1.min_price", "1010000");
-    cfg.set("instrument.1.max_price", "1000000");
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "min_price"));
+    cfg.set("instrument.0.min_price", "1010000");
+    cfg.set("instrument.0.max_price", "1000000");
+    expectError(check(cfg), "min_price");
+    Config zero; fillValidConfig(zero);
+    zero.set("instrument.0.min_price", "0");
+    expectError(check(zero), "0 < min_price");
     PASS();
 }
 
-void test_tick_not_positive() {
-    SECTION("tick_size <= 0 rejected");
-    Config cfg; fillValidConfig(cfg);
-    cfg.set("instrument.1.tick_size", "0");
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "tick_size"));
-    PASS();
-}
-
-void test_lot_not_positive() {
-    SECTION("lot_size <= 0 rejected");
-    Config cfg; fillValidConfig(cfg);
-    cfg.set("instrument.1.lot_size", "-5");
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "lot_size"));
+void test_unapplied_keys_refused() {
+    SECTION("tick_size, lot_size and per-participant otr_limit are refused, not certified");
+    for (const char* key : {"instrument.0.tick_size", "instrument.0.lot_size",
+                            "participant.10.otr_limit"}) {
+        Config cfg; fillValidConfig(cfg);
+        cfg.set(key, "1");
+        expectError(check(cfg), "is not applied");
+    }
     PASS();
 }
 
 void test_price_range_exceeds_capacity() {
-    SECTION("price range exceeding FlatPriceMap capacity rejected");
+    SECTION("A band the price map cannot hold is refused, and the message says why");
     Config cfg; fillValidConfig(cfg);
-    // Override capacity to a tiny value so span 20000 overflows it.
-    auto r = validateStartupConfig(cfg, /*priceMapCapacity=*/100);
-    assert(!r.ok);
-    assert(hasError(r, "capacity"));
+    expectError(check(cfg, {}, /*capacity=*/100), "fixed tick of 0.0001");
 
-    // And with the real default capacity, a genuinely oversized band fails too.
-    Config big; fillValidConfig(big);
-    big.set("instrument.1.min_price", "0");
-    big.set("instrument.1.max_price", "500000");   // span 500000 >= 200001
-    auto r2 = validateStartupConfig(big);
-    assert(!r2.ok);
-    assert(hasError(r2, "capacity"));
+    // The real map: 200,000 ticks fits, 200,001 does not.
+    Config edge; fillValidConfig(edge);
+    edge.set("instrument.0.min_price", "1");
+    edge.set("instrument.0.max_price", "200001");
+    assert(check(edge).ok);
+    edge.set("instrument.0.max_price", "200002");
+    const auto r = check(edge);
+    expectError(r, "200002 price levels");
+    expectError(r, "widest band is 200000 ticks");
     PASS();
 }
 
-void test_instrument_missing_fields() {
-    SECTION("Instrument with missing fields rejected");
-    Config cfg;
-    cfg.loadMap({
-        {"instruments", "7"},
-        {"instrument.7.min_price", "1000"},
-        // max_price, tick_size, lot_size all missing
-    });
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "max_price"));
-    assert(hasError(r, "tick_size"));
-    assert(hasError(r, "lot_size"));
+void test_every_symbol_needs_a_band() {
+    SECTION("Every symbol 0..N-1 needs a band");
+    Config cfg; fillValidConfig(cfg);
+    const auto r = validateStartupConfig(cfg, /*numSymbols=*/2, {});
+    expectError(r, "symbol 1 has no price band");
     PASS();
 }
 
-void test_participant_missing_limits() {
-    SECTION("Participant missing position/OTR limits rejected");
-    Config cfg;
-    cfg.loadMap({
-        {"participants", "20"},
-        // neither position_limit nor otr_limit set
-    });
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "position_limit"));
-    assert(hasError(r, "otr_limit"));
+void test_participant_limits() {
+    SECTION("Participant ids and position limits");
+    Config missing; missing.loadMap({{"participants", "20"}});
+    expectError(check(missing, {true, false}), "position_limit not set");
+    Config zero; zero.loadMap({{"participants", "20"}, {"participant.20.position_limit", "0"}});
+    expectError(check(zero, {true, false}), "must be > 0");
+    Config bad; bad.loadMap({{"participants", "x,1024"}});
+    const auto r = check(bad, {true, false});
+    expectError(r, "'x' is not a participant id");
+    expectError(r, "'1024' is not a participant id");
     PASS();
 }
 
-void test_participant_nonpositive_limit() {
-    SECTION("Participant with non-positive limits rejected");
-    Config cfg;
-    cfg.loadMap({
-        {"participants", "20"},
-        {"participant.20.position_limit", "0"},
-        {"participant.20.otr_limit", "0"},
-    });
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "position_limit"));
-    assert(hasError(r, "otr_limit"));
+void test_risk_coverage() {
+    SECTION("A credentialed participant without a limit is refused unless waived");
+    Config cfg; fillValidConfig(cfg);
+    ConfigValidationResult r;
+    validateRiskCoverage(cfg, {10, 11}, /*waived=*/false, r);
+    expectError(r, "participant 11 can trade");
+    assert(!hasError(r, "participant 10 "));
+    ConfigValidationResult w;
+    validateRiskCoverage(cfg, {10, 11}, /*waived=*/true, w);
+    assert(w.ok);
     PASS();
 }
 
-void test_journal_path_unwritable() {
-    SECTION("Unwritable journal path rejected");
-    Config cfg;
-    cfg.loadMap({
-        {"journal_path", "/nonexistent_dir_p37_xyz/journal.wal"},
-    });
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(hasError(r, "journal_path"));
-
-    // A writable path (the temp directory exists and is writable) passes.
-    Config ok;
-    ok.loadMap({{"journal_path", uniqueTempPath("cfgval_journal.wal")}});
-    auto r2 = validateStartupConfig(ok);
-    assert(r2.ok);
+void test_rate_limit() {
+    SECTION("rate_limit: both > 0 or neither");
+    Config both; fillValidConfig(both);
+    both.loadMap({{"rate_limit.default_rate", "100"}, {"rate_limit.default_burst", "10"}});
+    assert(check(both).ok);
+    for (const char* bad : {"rate_limit.default_rate", "rate_limit.default_burst"}) {
+        Config one; fillValidConfig(one);
+        one.set(bad, "5");
+        expectError(check(one), "must both be set and > 0");
+    }
+    Config zero; fillValidConfig(zero);
+    zero.loadMap({{"rate_limit.default_rate", "0"}, {"rate_limit.default_burst", "10"}});
+    expectError(check(zero), "must both be set and > 0");
     PASS();
 }
 
-void test_multiple_errors_accumulate() {
-    SECTION("Multiple violations are all reported");
-    Config cfg;
-    cfg.loadMap({
-        {"instruments", "1"},
-        {"instrument.1.min_price", "2000"},
-        {"instrument.1.max_price", "1000"},   // min >= max
-        {"instrument.1.tick_size", "0"},      // bad tick
-        {"instrument.1.lot_size", "0"},       // bad lot
-        {"participants", "5"},                // participant with no limits
-    });
-    auto r = validateStartupConfig(cfg);
-    assert(!r.ok);
-    assert(r.errors.size() >= 5);
+void test_journal_path_writable() {
+    SECTION("Journal path writability");
+    assert(!isJournalPathWritable("/nonexistent_dir_p37_xyz/journal.wal"));
+    assert(isJournalPathWritable(uniqueTempPath("cfgval_journal.wal")));
     PASS();
 }
 
@@ -236,16 +225,16 @@ int main() {
     std::cout << "\n═══ Config Validation (P3-7) Tests ═══\n\n";
 
     test_valid_config_passes();
-    test_empty_config_passes();
+    test_empty_config_needs_waivers();
+    test_waiver_does_not_excuse_a_bad_band();
     test_min_ge_max();
-    test_tick_not_positive();
-    test_lot_not_positive();
+    test_unapplied_keys_refused();
     test_price_range_exceeds_capacity();
-    test_instrument_missing_fields();
-    test_participant_missing_limits();
-    test_participant_nonpositive_limit();
-    test_journal_path_unwritable();
-    test_multiple_errors_accumulate();
+    test_every_symbol_needs_a_band();
+    test_participant_limits();
+    test_risk_coverage();
+    test_rate_limit();
+    test_journal_path_writable();
     test_worker_cores();
 
     std::cout << "\n─── Results: " << passed << " passed ───\n";

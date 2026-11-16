@@ -2,18 +2,18 @@
 #include "AlertDispatcher.h"
 #include "AdminServer.h"
 #include "CliFlags.h"
-#include "ReplicationProtocol.h"
 #include "Config.h"
 #include "ConfigValidator.h"
 #include "Journal.h"
 #include "JournalBoot.h"
+#include "MarketDataPublisher.h"
 #include "Metrics.h"
+#include "ParticipantAuth.h"
 #include "SessionScheduler.h"
-#ifdef OB_HAVE_DPDK
-#include "DpdkGateway.h"
-#endif
+#include "TcpGateway.h"
 
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -21,6 +21,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -36,6 +37,81 @@ void signalHandler(int) {
 void sighupHandler(int) {
     g_reload_config.store(true, std::memory_order_release);
 }
+
+namespace {
+
+// H7: participant credentials. A separate file, not engine.conf — same reasoning
+// as the admin token: the main config travels into tickets and chat logs, and
+// secrets should not travel with it.
+//
+// Required, not optional. This is the order-entry port; an operator who forgets
+// the credentials file should find out at startup, not from an incident review.
+// Opting out stays available and has to be deliberate. False once it has said
+// why the engine cannot start.
+bool loadParticipantAuth(const std::string& credPath, bool authDisabled, ParticipantAuth& auth) {
+    if (!credPath.empty()) {
+        if (ParticipantAuth::fileIsOverlyPermissive(credPath)) {
+            std::cerr << "[Auth] WARNING: " << credPath
+                      << " is readable by group or other. Secrets in a "
+                         "world-readable file are not secrets; chmod 600 it.\n";
+        }
+        std::string err;
+        const int n = auth.loadFromFile(credPath, &err);
+        if (n < 0) {
+            std::cerr << "[Auth] FATAL: " << err << "\n";
+            return false;
+        }
+        // A file of nothing but comments parses cleanly and yields no
+        // credentials, so enabled() is false and the gateway would take each
+        // claimed identity on trust. A fail-open on a control that WAS
+        // configured is worse than one that was forgotten, because nothing in
+        // the log looks wrong.
+        if (n == 0) {
+            std::cerr << "[Auth] FATAL: " << credPath
+                      << " parsed cleanly but contains no credentials.\n"
+                      << "        Every line was blank or a comment. Starting would\n"
+                      << "        leave the order-entry port accepting any claimed\n"
+                      << "        participant id.\n"
+                      << "        Add a credential as user:secret:id[,id...], or pass\n"
+                      << "        --no-participant-auth (OB_NO_PARTICIPANT_AUTH=1) to\n"
+                      << "        accept every claimed identity on purpose.\n";
+            return false;
+        }
+        std::cout << "[Auth] Loaded " << n << " participant credential(s) from "
+                  << credPath << "\n";
+        return true;
+    }
+    if (authDisabled) {
+        std::cout << "[Auth] Participant auth explicitly disabled via "
+                     "--no-participant-auth. Every identity on the order port is "
+                     "taken on trust.\n";
+        return true;
+    }
+    std::cerr << "[Auth] FATAL: no participant credentials configured.\n"
+              << "        Set --participant-credentials /path/to/file\n"
+              << "        (OB_PARTICIPANT_CREDENTIALS), one credential per\n"
+              << "        line as user:secret:id[,id...], or pass\n"
+              << "        --no-participant-auth (OB_NO_PARTICIPANT_AUTH=1)\n"
+              << "        to accept every claimed identity on purpose.\n";
+    return false;
+}
+
+// Publishes each book's updates. They reach it from the order port's event
+// thread, once the journal entry behind them is durable (DA-4): the gateway's
+// execution reports carry it as each book's downstream listener. Nothing here
+// reads a book (LF-2, MD-11). The lock keeps the ring single-writer whatever
+// thread calls.
+struct MarketDataListener : EventListener {
+    explicit MarketDataListener(MarketDataPublisher& p) : pub(p) {}
+    void onMarketData(const MarketDataUpdate& u) override {
+        const std::lock_guard<std::mutex> lock(mu);
+        pub.publishUpdate(u);
+    }
+    MarketDataPublisher& pub;
+    std::mutex mu;
+};
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
     std::cout << "╔═══════════════════════════════════════════════════╗\n"
@@ -54,20 +130,26 @@ int main(int argc, char* argv[]) {
         {"--admin-bind", "ADDR", "admin listen address (default 127.0.0.1) [OB_ADMIN_BIND]"},
         {"--admin-token", "TOKEN", "admin bearer token [OB_ADMIN_TOKEN]"},
         {"--admin-no-auth", nullptr, "run the admin port without a token [OB_ADMIN_NO_AUTH=1]"},
+        {"--gateway-port", "P", "order-entry port, 0 picks a free one (default 9001) [OB_GATEWAY_PORT]"},
+        {"--gateway-bind", "ADDR", "order-entry listen address (default 0.0.0.0) [OB_GATEWAY_BIND]"},
+        {"--participant-credentials", "FILE",
+         "credentials, one per line as user:secret:id[,id...] [OB_PARTICIPANT_CREDENTIALS]"},
+        {"--no-participant-auth", nullptr,
+         "accept every claimed identity on the order port [OB_NO_PARTICIPANT_AUTH=1]"},
         {"--config", "PATH", "config file, re-read on SIGHUP [OB_CONFIG_PATH]"},
         {"--journal", "PATH", "journal file, replayed at boot [OB_JOURNAL_PATH]"},
         {"--journal-max-mb", "MB", "checkpoint past this size [OB_JOURNAL_MAX_SIZE_MB]"},
+        {"--no-journal", nullptr,
+         "run with no journal: every acked order is lost on restart [OB_NO_JOURNAL=1]"},
+        {"--no-price-band", nullptr,
+         "let a symbol with no configured band centre it on its first rest [OB_NO_PRICE_BAND=1]"},
+        {"--no-risk-limits", nullptr,
+         "serve participants that have no position limit [OB_NO_RISK_LIMITS=1]"},
         {"--replay-legacy-journal", nullptr,
          "replay a journal from a build that seeded orders [OB_REPLAY_LEGACY_JOURNAL=1]"},
         {"--session-schedule", "PRE,OPEN,CLOSE_AUCTION,CLOSE",
          "session timetable, HH:MM UTC; the close cancels DAY orders [OB_SESSION_SCHEDULE]"},
-        {"--role", "primary|backup", "replication role; refused without the next flag [OB_NODE_ROLE]"},
-        {"--allow-unsafe-replication", nullptr,
-         "run replication despite REPL-1..6 [OB_ALLOW_UNSAFE_REPLICATION=1]"},
-        {"--node-id", "N", "replication node id (default 1) [OB_NODE_ID]"},
-        {"--repl-port", "P", "primary's replication port (default 9002) [OB_REPLICATION_PORT]"},
-        {"--primary-host", "HOST", "backup only: primary's host [OB_PRIMARY_HOST]"},
-        {"--primary-port", "P", "backup only: primary's port (default 9002) [OB_PRIMARY_REPLICATION_PORT]"},
+        {"--role", "ROLE", "removed with replication; any value refuses to boot [OB_NODE_ROLE]"},
         {"--help", nullptr, "this message"},
     };
     if (const std::string err = cliArgsError(argc, argv, kFlags); !err.empty()) {
@@ -96,6 +178,10 @@ int main(int argc, char* argv[]) {
     }
 
     // Signal handlers for graceful shutdown
+    // A write to a peer that has gone must come back as EPIPE, never as a
+    // signal that ends the engine. The sockets pass MSG_NOSIGNAL already; this
+    // covers every other descriptor (the wake pipe, a closed stdout).
+    std::signal(SIGPIPE, SIG_IGN);
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
     std::signal(SIGHUP, sighupHandler);
@@ -103,13 +189,23 @@ int main(int argc, char* argv[]) {
     // ── Config ───────────────────────────────────────────────────────
     Config cfg;
     const std::string configPath = flagOrEnv(argc, argv, "--config", "OB_CONFIG_PATH");
+    // A config that cannot be read is fatal: starting on defaults would drop
+    // every band and limit it names without a word.
     if (!configPath.empty()) {
-        if (cfg.loadFile(configPath)) {
-            std::cout << "[Config] Loaded from " << configPath << "\n";
-        } else {
-            std::cerr << "[Config] WARNING: could not load " << configPath << "\n";
+        if (!cfg.loadFile(configPath)) {
+            std::cerr << "[Config] FATAL: could not load " << configPath
+                      << " — refusing to start.\n";
+            return 1;
         }
+        std::cout << "[Config] Loaded from " << configPath << "\n";
     }
+
+    // Controls the order port does not run without unless each is waived by
+    // name, like --no-participant-auth (review v2 row 2, SURF-1).
+    const ControlWaivers waivers{
+        flagOrEnvBool(argc, argv, "--no-price-band", "OB_NO_PRICE_BAND"),
+        flagOrEnvBool(argc, argv, "--no-risk-limits", "OB_NO_RISK_LIMITS")};
+    const bool journalWaived = flagOrEnvBool(argc, argv, "--no-journal", "OB_NO_JOURNAL");
 
     // ── Structured logging sink ──────────────────────────────────────
     // config/engine.conf.example has documented `log_sink = stderr | null`
@@ -144,37 +240,30 @@ int main(int argc, char* argv[]) {
     // exit(1) — the engine never starts in a silently-degraded state.
     std::vector<int> workerCores;   // worker_cores, applied at startAsync
     {
-        ConfigValidationResult vr = validateStartupConfig(cfg);
+        ConfigValidationResult vr = validateStartupConfig(cfg, numSymbols, waivers);
 
-        // Also validate the journal path we will actually open (from
-        // --journal / OB_JOURNAL_PATH, which is separate from the config key).
+        // The journal we will actually open (--journal / OB_JOURNAL_PATH).
         const std::string resolvedJournal =
             flagOrEnv(argc, argv, "--journal", "OB_JOURNAL_PATH");
+        if (resolvedJournal.empty() && !journalWaived) {
+            vr.fail("no journal: set --journal PATH (OB_JOURNAL_PATH), or pass --no-journal "
+                    "(OB_NO_JOURNAL=1) to run with every acknowledged order in memory only");
+        }
         if (!resolvedJournal.empty() && !isJournalPathWritable(resolvedJournal)) {
             vr.fail("journal path '" + resolvedJournal +
                     "': parent directory does not exist or is not writable");
         }
 
-        // Replication is disabled unless explicitly acknowledged. A role used
-        // to switch it on, and docker-compose.yml set one on both engines, so
-        // the default deployment ran a path with known CRITICAL defects
-        // (REPL-1..6): a deposed primary is never fenced; a promoted backup
-        // keeps applying the old primary's stream, so orders execute twice; a
-        // replication send blocks the journal commit path with no timeout,
-        // freezing acks; entries lost in a disconnect are never re-sent. The
-        // opt-in exists for the chaos suite, which is there to exercise exactly
-        // this path — the same shape as --no-participant-auth.
+        // Replication was removed (roadmap 1.1 R1): it had no fencing, a
+        // promoted backup kept applying the old primary's stream, its send
+        // blocked the commit path, and resync only ever added orders
+        // (REPL-1..9). A role still refuses to boot, so a deployment that sets
+        // one finds out here rather than running as an unannounced single node.
         const std::string requestedRole = flagOrEnv(argc, argv, "--role", "OB_NODE_ROLE");
-        if (!requestedRole.empty() &&
-            !flagOrEnvBool(argc, argv, "--allow-unsafe-replication",
-                           "OB_ALLOW_UNSAFE_REPLICATION")) {
-            vr.fail("replication is disabled (--role / OB_NODE_ROLE = '" + requestedRole +
-                    "'). It has known CRITICAL defects (REPL-1..6): a deposed primary "
-                    "is never fenced, a promoted backup can execute orders twice, a "
-                    "slow backup freezes acks, and entries lost in a disconnect are "
-                    "never re-sent. Run standalone (unset the role), or pass "
-                    "--allow-unsafe-replication (OB_ALLOW_UNSAFE_REPLICATION=1) to run "
-                    "it anyway");
+        if (!requestedRole.empty()) {
+            vr.fail("--role / OB_NODE_ROLE = '" + requestedRole + "': replication was "
+                    "removed. This engine runs as a single node and recovers from its "
+                    "journal; unset the role");
         }
 
         workerCores = validateWorkerCores(cfg, numThreads > 0 ? numThreads : 1,
@@ -189,7 +278,58 @@ int main(int argc, char* argv[]) {
         std::cout << "[Config] Startup validation passed\n";
     }
 
+    // ── Order entry settings ─────────────────────────────────────────
+    // Checked here so a refusal comes before a journal is replayed. Each is the
+    // flag, then the environment, then the config file (Config::getString reads
+    // the same OB_ name first).
+    const auto setting = [&](const char* flag, const char* key, const char* fallback) {
+        const std::string fromFlag = flagOrEnv(argc, argv, flag, "");
+        return fromFlag.empty() ? cfg.getString(key, fallback) : fromFlag;
+    };
+    const std::string gatewayBind = setting("--gateway-bind", "gateway_bind", "0.0.0.0");
+    const std::string gatewayPortText = setting("--gateway-port", "gateway_port", "9001");
+    uint16_t gatewayPort = 0;
+    const char* const gatewayPortEnd = gatewayPortText.data() + gatewayPortText.size();
+    if (const auto [end, ec] =
+            std::from_chars(gatewayPortText.data(), gatewayPortEnd, gatewayPort);
+        ec != std::errc{} || end != gatewayPortEnd || gatewayPortText.empty()) {
+        std::cerr << "[Config] FATAL: gateway port '" << gatewayPortText
+                  << "' is not a number from 0 to 65535\n";
+        return 1;
+    }
+    ParticipantAuth participantAuth;
+    if (!loadParticipantAuth(setting("--participant-credentials", "participant_credentials", ""),
+                             flagOrEnvBool(argc, argv, "--no-participant-auth",
+                                           "OB_NO_PARTICIPANT_AUTH"),
+                             participantAuth)) {
+        return 1;
+    }
+    {
+        ConfigValidationResult vr;
+        validateRiskCoverage(cfg, participantAuth.participantIds(), waivers.riskLimits, vr);
+        if (!vr.ok) {
+            std::cerr << "[Config] FATAL: refusing to start:\n";
+            for (const auto& e : vr.errors) std::cerr << "  - " << e << "\n";
+            return 1;
+        }
+    }
+
+    // The default per-participant rate limit, from the validated keys. At boot
+    // and on SIGHUP: it used to be read only on SIGHUP, so every restart came
+    // up unlimited whatever the file said (SURF-10).
+    const auto applyRateLimit = [&cfg](MatchingEngine& eng) {
+        const auto rate = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_rate", 0));
+        const auto burst = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_burst", 0));
+        if (rate == 0) return;
+        eng.getRateLimiter().reconfigure(rate, burst);
+        std::cout << "[Config] Rate limit: " << rate << " msg/s, burst " << burst
+                  << " per participant\n";
+    };
+
     // ── Engine ────────────────────────────────────────────────────────
+    // The publisher outlives the engine, whose workers call its listener.
+    MarketDataPublisher mdPub("orderbook_md");
+    MarketDataListener mdListener(mdPub);
     MatchingEngine engine;
     for (size_t s = 0; s < numSymbols; ++s) {
         engine.addSymbol(static_cast<SymbolId>(s));
@@ -199,39 +339,52 @@ int main(int argc, char* argv[]) {
     engine.setSessionEndScheduled(false);
     std::cout << "[Engine] Registered " << numSymbols << " symbols\n";
 
-    // STP-8: a symbol trades in the band its engine.conf entry names, set
-    // before replay so no first order can pick one (unset, a book centres its
-    // band on its first rest, and one participant's 1-tick bid made every real
-    // price unrestable). A config that leaves a symbol out refuses to boot.
-    // Without --config the books keep the anchor, for local runs and tests.
-    if (!configPath.empty()) {
-        for (size_t s = 0; s < numSymbols; ++s) {
-            const std::string key = "instrument." + std::to_string(s) + ".";
-            if (!cfg.has(key + "min_price") || !cfg.has(key + "max_price")) {
-                std::cerr << "[Config] FATAL: symbol " << s << " has no price band; set "
-                          << key << "min_price and " << key << "max_price\n";
-                return 1;
-            }
-            try {
-                engine.getOrderBook(static_cast<SymbolId>(s))
-                    ->setPriceRange(cfg.getInt64(key + "min_price"),
-                                    cfg.getInt64(key + "max_price"));
-            } catch (const std::exception& e) {
-                std::cerr << "[Config] FATAL: symbol " << s << " price band: " << e.what() << "\n";
-                return 1;
-            }
+    // STP-8: a symbol trades in the band its config names, set before replay
+    // so no first order can pick one (unset, a book centres its band on its
+    // first rest, and one participant's 1-tick bid made every real price
+    // unrestable). Validation refused a symbol without one unless
+    // --no-price-band, and a band the price map cannot hold.
+    size_t banded = 0;
+    for (size_t s = 0; s < numSymbols; ++s) {
+        const std::string key = "instrument." + std::to_string(s) + ".";
+        if (!cfg.has(key + "min_price")) continue;
+        engine.getOrderBook(static_cast<SymbolId>(s))
+            ->setPriceRange(cfg.getInt64(key + "min_price"), cfg.getInt64(key + "max_price"));
+        ++banded;
+    }
+    std::cout << "[Config] Price bands set for " << banded << " of " << numSymbols << " symbols"
+              << (banded < numSymbols ? " (--no-price-band: the rest centre on their first rest)"
+                                      : "")
+              << "\n";
+
+    // Position limits, before replay; the ledger is rebuilt from the books
+    // after it. Validation refused a participant the port serves without one
+    // unless --no-risk-limits.
+    {
+        ConfigValidationResult ignored;
+        const std::vector<ParticipantId> limited = configuredParticipants(cfg, ignored);
+        for (const ParticipantId id : limited) {
+            engine.setPositionLimit(
+                id, cfg.getInt64("participant." + std::to_string(id) + ".position_limit"));
         }
-        std::cout << "[Config] Price bands set for " << numSymbols << " symbols\n";
+        std::cout << "[Risk] Position limits set for " << limited.size() << " participant(s)"
+                  << (waivers.riskLimits ? " (--no-risk-limits: any other is unlimited)" : "")
+                  << "\n";
     }
 
-    // Optional journal — enables replication on the primary path because
-    // the coordinator hooks the journal's onCommit callback. Without a
-    // journal, the engine still runs but replication has no entries to
-    // ship (heartbeats only).
-    //
-    // Enable, refuse and replay the journal — the same sequence GatewayServer
-    // runs, shared through JournalBoot.h so the two cannot drift apart.
-    if (const int rc = bootJournal(engine, argc, argv); rc != 0) return rc;
+    applyRateLimit(engine);
+
+    // Enable, refuse and replay the journal (JournalBoot.h). Immediate, not the
+    // default group commit: the order port's ack waits for the worker, and under
+    // Immediate that worker's append has synced by then, so kill -9 cannot lose an
+    // acked order. Group commit would leave it in a 64-entry user-space batch.
+    if (const int rc = bootJournal(engine, argc, argv, Journal::SyncPolicy::Immediate);
+        rc != 0)
+        return rc;
+    if (!engine.getJournal()) {
+        std::cout << "[Engine] No journal (--no-journal). Every order the port\n"
+                     "         acknowledges lives only in memory and is lost on any restart.\n";
+    }
 
     const std::string maxSizeStr = flagOrEnv(argc, argv, "--journal-max-mb", "OB_JOURNAL_MAX_SIZE_MB");
     const size_t journalMaxMb = maxSizeStr.empty() ? 0 : std::stoul(maxSizeStr);
@@ -322,6 +475,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // After replay, so replayed orders are not republished, and before the workers
+    // start, because they read the listener slot unlocked.
+    if (mdPub.start()) {
+        for (size_t s = 0; s < numSymbols; ++s) {
+            engine.getOrderBook(static_cast<SymbolId>(s))->setEventListener(&mdListener);
+        }
+        std::cout << "[MarketData] Publishing to shared memory /orderbook_md\n";
+    } else {
+        std::cerr << "[MarketData] WARNING: could not open /orderbook_md; no feed\n";
+    }
+
+    // Execution reports, and the market-data feed behind them, go out only
+    // once the journal holds what produced them. Installed on the books and
+    // the workers, so before they start.
+    TcpGateway gateway(engine);
+    gateway.enableExecutionReports();
+
     std::cout << "[Engine] Starting async mode with " << numThreads << " worker threads...\n";
     engine.setWorkerCores(workerCores);
     engine.startAsync(numThreads, 8192);
@@ -341,173 +511,8 @@ int main(int argc, char* argv[]) {
                   << " UTC, Monday to Friday (pre-open, open, closing auction, close)\n";
     }
 
-    // ── Replication wiring (env-driven) ──────────────────────────────
-    // The OrderEngine binary used to read these env vars only via its
-    // docker-compose.yml manifest, but no code path consumed them.
-    // Wiring them here is what closes the gap between the
-    // "TLA+-verified replication protocol" claim and the running binary.
-    std::unique_ptr<ReplicationCoordinator> coord;
-
-    const std::string role = flagOrEnv(argc, argv, "--role", "OB_NODE_ROLE");
-    if (!role.empty()) {
-        const uint32_t nodeId = static_cast<uint32_t>(
-            std::stoul(flagOrEnv(argc, argv, "--node-id", "OB_NODE_ID").empty()
-                          ? "1"
-                          : flagOrEnv(argc, argv, "--node-id", "OB_NODE_ID")));
-        const int replPort = std::stoi(
-            flagOrEnv(argc, argv, "--repl-port", "OB_REPLICATION_PORT").empty()
-                ? "9002"
-                : flagOrEnv(argc, argv, "--repl-port", "OB_REPLICATION_PORT"));
-
-        coord = std::make_unique<ReplicationCoordinator>(nodeId);
-
-        if (role == "primary") {
-            // Both hooks below MUST be registered before startAsPrimary():
-            // its accept loop is live once it returns, and a backup that
-            // connects before setOnPeerJoined is armed receives no
-            // SnapshotStart/SnapshotEnd bracket — the backup engages
-            // snapshot buffering on connect and would buffer live entries
-            // forever, never applying them. Registering the commit hook
-            // first closes the sibling window where entries committed
-            // pre-registration are never shipped to that early joiner.
-            // replicateEntry() no-ops until the role flips to Primary, so
-            // early registration is safe.
-
-            // Hook the journal's onCommit so every fsync-durable batch
-            // is shipped to the backup. The callback runs synchronously
-            // on the engine's writer thread — the coordinator's send
-            // path locks internally and writes to a non-blocking TCP
-            // socket, so the overhead is bounded.
-            if (auto* j = engine.getJournal()) {
-                ReplicationCoordinator* c = coord.get();
-                j->setOnCommit([c](const JournalEntry* entries, size_t n) {
-                    for (size_t i = 0; i < n; ++i) {
-                        c->replicateEntry(reinterpret_cast<const uint8_t*>(&entries[i]),
-                                          sizeof(JournalEntry));
-                    }
-                });
-                std::cout << "[Replication] Journal commit hook installed\n";
-            } else {
-                std::cout << "[Replication] WARNING: no journal — only heartbeats will flow.\n"
-                          << "             Set OB_JOURNAL_PATH to enable entry replication.\n";
-            }
-
-            // Snapshot-on-join: stream every currently-resting order to
-            // a backup that just connected. Closes the rolling-restart
-            // gap where pre-reconnect entries would never reach a
-            // late-joining backup. The Snapshot handler on the receive
-            // side is idempotent, so running concurrently with live
-            // replication is safe (duplicates collapse).
-            {
-                ReplicationCoordinator* c = coord.get();
-                MatchingEngine* e = &engine;
-                coord->setOnPeerJoined([c, e]() {
-                    static auto& kStreams = MetricsRegistry::instance().counter(
-                        "replication_snapshot_streams_total",
-                        "Number of times a snapshot stream was initiated to a joining peer");
-                    static auto& kSnapEntries = MetricsRegistry::instance().counter(
-                        "replication_snapshot_entries_total",
-                        "Total resting orders shipped as Snapshot entries across all streams");
-                    size_t shipped = 0;
-                    e->streamSnapshot([&](const JournalEntry& entry) {
-                        c->replicateEntry(reinterpret_cast<const uint8_t*>(&entry),
-                                          sizeof(JournalEntry));
-                        ++shipped;
-                    });
-                    kStreams.increment(1);
-                    kSnapEntries.increment(shipped);
-                    std::cout << "[Replication] Snapshot streamed " << shipped
-                              << " resting orders to joining backup\n";
-                });
-            }
-
-            if (!coord->startAsPrimary(replPort)) {
-                std::cerr << "[Replication] FATAL: failed to start as primary on port "
-                          << replPort << "\n";
-                return 1;
-            }
-            std::cout << "[Replication] Started as PRIMARY (nodeId=" << nodeId
-                      << ", port=" << replPort << ")\n";
-        } else if (role == "backup") {
-            const std::string primaryHost = flagOrEnv(argc, argv, "--primary-host",
-                                                       "OB_PRIMARY_HOST");
-            const std::string primaryPortStr = flagOrEnv(argc, argv, "--primary-port",
-                                                          "OB_PRIMARY_REPLICATION_PORT");
-            if (primaryHost.empty()) {
-                std::cerr << "[Replication] FATAL: backup role requires OB_PRIMARY_HOST\n";
-                return 1;
-            }
-            const int primaryPort = primaryPortStr.empty() ? 9002 : std::stoi(primaryPortStr);
-
-            // Backup books stay in replay mode for the duration of the
-            // backup role so applying primary-shipped entries does not
-            // emit duplicate market data or order acks to local clients.
-            // On promotion (heartbeat timeout → lease acquisition), the
-            // promotion callback below flips them back to live mode.
-            engine.setReplayModeAllBooks(true);
-
-            coord->setJournalApplyCallback([&engine](const uint8_t* data, size_t len) {
-                if (len != sizeof(JournalEntry)) {
-                    std::cerr << "[Replication] DIVERGED: malformed entry ("
-                              << len << " bytes, expected " << sizeof(JournalEntry)
-                              << ")\n";
-                    obSink().log(obEvent("replication_apply_failed", LogSeverity::Error)
-                                     .kv("reason", "malformed_entry")
-                                     .kv("bytes", (long long)len));
-                    return;
-                }
-                JournalEntry entry{};
-                std::memcpy(&entry, data, sizeof(entry));
-
-                // applyReplicatedEntry returns false when it could NOT apply —
-                // most importantly when the entry names a symbol this backup was
-                // not configured with, because start() freezes books_ (worker
-                // threads iterate it, so inserting under them would race) and a
-                // running backup therefore cannot create a book on demand.
-                //
-                // This return value was discarded. A backup that ignores it keeps
-                // looking healthy while its book silently diverges from the
-                // primary's, and finds out at promotion — which is the
-                // split-brain the whole replication path exists to prevent. It is
-                // loud now: the operator can resync or fail over deliberately
-                // rather than discovering it during an incident.
-                if (!engine.applyReplicatedEntry(entry)) {
-                    std::cerr << "[Replication] DIVERGED: could not apply entry"
-                              << " type=" << static_cast<int>(entry.entryType)
-                              << " symbol=" << entry.symbolId
-                              << " order=" << entry.orderId
-                              << " — this backup is NO LONGER a faithful copy\n";
-                    obSink().log(obEvent("replication_apply_failed", LogSeverity::Error)
-                                     .kv("entry_type", (long long)static_cast<int>(entry.entryType))
-                                     .kv("symbol", (long long)entry.symbolId)
-                                     .kv("order", (long long)entry.orderId));
-                }
-            });
-
-            coord->setPromotionCallback([&engine]() {
-                std::cout << "[Replication] PROMOTED to primary — exiting replay mode\n";
-                engine.setReplayModeAllBooks(false);
-            });
-
-            if (!coord->startAsBackup(primaryHost, primaryPort)) {
-                std::cerr << "[Replication] FATAL: failed to connect to primary at "
-                          << primaryHost << ":" << primaryPort << "\n";
-                return 1;
-            }
-            std::cout << "[Replication] Started as BACKUP (nodeId=" << nodeId
-                      << ", primary=" << primaryHost << ":" << primaryPort << ")\n";
-        } else {
-            std::cerr << "[Replication] FATAL: OB_NODE_ROLE must be 'primary' or 'backup', got '"
-                      << role << "'\n";
-            return 1;
-        }
-    } else {
-        std::cout << "[Replication] Disabled (standalone mode)\n";
-    }
-
     // ── Admin HTTP server ────────────────────────────────────────────
     AdminServer admin(engine, adminPort);
-    admin.setReplicationCoordinator(coord.get());  // null is fine — standalone
     // Loopback unless widened. The Docker image sets OB_ADMIN_BIND=0.0.0.0: a
     // published port or a k8s probe arrives on the container's interface, not
     // its loopback. A bad address makes admin.start() below refuse.
@@ -548,6 +553,18 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // ── Order entry ──────────────────────────────────────────────────
+    // After replay, so no order races the book being rebuilt, and before Ready.
+    gateway.setBindAddress(gatewayBind);
+    gateway.setParticipantAuth(participantAuth.enabled() ? &participantAuth : nullptr);
+    if (!gateway.start(gatewayPort)) {
+        std::cerr << "[Gateway] FATAL: Failed to start gateway on " << gatewayBind << ":"
+                  << gatewayPort << "\n";
+        return 1;
+    }
+    std::cout << "[Gateway] Order Gateway listening on " << gatewayBind << ":" << gateway.port()
+              << std::endl;
+
     // ── Ready ────────────────────────────────────────────────────────
     // A "warmup" used to run here: 200 Limit orders per symbol — 800 at the
     // default --symbols 4 — attributed to participants 1 and 2 and submitted
@@ -562,44 +579,16 @@ int main(int argc, char* argv[]) {
     // Nothing replaces it. If pre-faulting the pools is ever worth doing,
     // MemoryPool::warmup (include/MemoryPool.h:89) touches the memory without
     // inventing orders — the book is the wrong place for a page-fault workaround.
-    //
-    // The primary/backup split went with it: both arms did the same two
-    // statements once the orders were gone, and the comment about breaking the
-    // byte-identical-state invariant described a hazard that only the injected
-    // orders created in the first place.
     admin.setReady(true);
     std::cout << "[Engine] Ready for traffic.\n";
 
-#ifdef OB_HAVE_DPDK
-    // Kernel-bypass OUCH ingestion on the secondary ENI (F-Stack/DPDK). Behind
-    // OB_HAVE_DPDK so the default kernel build is unchanged; further gated on
-    // OB_DPDK=1 so a DPDK-capable binary can still run the kernel path. F-Stack
-    // reads its NIC/lcore/IP config from the process args (--conf) via ff_init.
-    std::unique_ptr<DpdkGateway> dpdk;
-    if (const char* d = std::getenv("OB_DPDK"); d && std::string(d) == "1") {
-        DpdkConfig dcfg;
-        if (const char* p = std::getenv("OB_DPDK_PORT")) {
-            dcfg.port = static_cast<uint16_t>(std::stoul(p));
-        }
-        dpdk = std::make_unique<DpdkGateway>(engine, dcfg);
-        if (dpdk->start(argc, argv)) {
-            std::cout << "[DPDK] F-Stack kernel-bypass ingestion started on port "
-                      << dcfg.port << "\n";
-        } else {
-            std::cerr << "[DPDK] FATAL: F-Stack ingestion failed to start\n";
-            return 1;
-        }
-    }
-#endif
-
     std::cout << "═══════════════════════════════════════════════════\n";
+    std::cout << "  Order entry:   port " << gateway.port() << "\n";
     std::cout << "  Admin server:  http://localhost:" << adminPort << "\n";
     std::cout << "  Endpoints:\n";
     std::cout << "    GET /metrics              — throughput & queue depth\n";
     std::cout << "    GET /otr?participantId=X  — order-to-trade ratio\n";
     std::cout << "    GET /book?symbolId=Y      — L2 order book snapshot\n";
-    std::cout << "    GET /role                 — primary | backup | standalone\n";
-    std::cout << "    GET /replication          — peer liveness, epoch, bytes\n";
     std::cout << "═══════════════════════════════════════════════════\n";
     std::cout << "Press Ctrl-C to shut down.\n\n";
 
@@ -607,12 +596,16 @@ int main(int argc, char* argv[]) {
     while (g_running.load(std::memory_order_acquire)) {
         if (g_reload_config.exchange(false, std::memory_order_acq_rel) && !configPath.empty()) {
             std::cout << "[Config] SIGHUP received — reloading " << configPath << "\n";
-            cfg.loadFile(configPath);
-            const uint64_t newRate = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_rate", 0));
-            const uint64_t newBurst = static_cast<uint64_t>(cfg.getInt64("rate_limit.default_burst", 0));
-            if (newRate > 0) {
-                engine.getRateLimiter().reconfigure(newRate, newBurst);
-                std::cout << "[Config] Rate limiter reconfigured: " << newRate << " msg/s\n";
+            // A file that fails to load, or a bad rate, leaves the running limit.
+            ConfigValidationResult vr;
+            if (!cfg.loadFile(configPath)) {
+                std::cerr << "[Config] ERROR: could not reload " << configPath
+                          << "; nothing changed\n";
+            } else if (validateRateLimit(cfg, vr); !vr.ok) {
+                std::cerr << "[Config] ERROR: " << vr.errors.front() << "; rate limit unchanged\n";
+            } else {
+                applyRateLimit(engine);
+                std::cout << "[Config] Reload applied\n";
             }
         }
         if (journalMaxMb > 0) {
@@ -634,10 +627,8 @@ int main(int argc, char* argv[]) {
     // orders on each one. Nothing here knows when a session ends, so nothing
     // here cancels them.
     std::cout << "\n[Engine] Shutting down — draining queues...\n";
+    gateway.stop();
     admin.stop();
-#ifdef OB_HAVE_DPDK
-    if (dpdk) dpdk->stop();
-#endif
     if (scheduler) scheduler->stop();  // no session transition during the drain
     const auto shutdownReport = engine.gracefulShutdown();
     std::cout << "[Engine] Queues drained. DAY orders cancelled: "
@@ -647,8 +638,8 @@ int main(int argc, char* argv[]) {
               << ", other=" << shutdownReport.otherOrdersPersisted << ")"
               << (shutdownReport.journalEnabled ? "" : " [no journal — not durable]")
               << "\n";
-    if (coord) coord->stop();
     engine.stopAsync();
+    mdPub.stop();
     std::cout << "[Engine] Shutdown complete.\n";
 
     return 0;

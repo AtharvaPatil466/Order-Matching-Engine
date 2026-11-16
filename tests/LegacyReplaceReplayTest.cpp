@@ -16,7 +16,6 @@
 // meaning is per record rather than per file.
 
 #include "Journal.h"
-#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -95,24 +94,6 @@ int main() {
         assert(e.enableJournal(path) && "a version-2 journal was refused");
         e.replayJournal();
         expectOrder(*e.getOrderBook(kSym), kPx - 1, 40, "restart replay");
-
-        // A backup fed the same records.
-        MatchingEngine backup;
-        backup.addSymbol(kSym);
-        backup.start();
-        backup.setReplayModeAllBooks(true);
-        {
-            Journal reader(path, Journal::SyncPolicy::Immediate);
-            for (const JournalEntry& r : reader.readAll()) backup.applyReplicatedEntry(r);
-        }
-        expectOrder(*backup.getOrderBook(kSym), kPx - 1, 40, "backup");
-        backup.stop();
-
-        // And a follower.
-        OrderBook followed(kSym);
-        JournalFollower follower(path, kSym, followed);
-        follower.poll();
-        expectOrder(followed, kPx - 1, 40, "journal follower");
 
         // A new replace lands in the old file: total 100 keeps the 40 leaves.
         e.start();

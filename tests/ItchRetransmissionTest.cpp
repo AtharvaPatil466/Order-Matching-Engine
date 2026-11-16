@@ -28,7 +28,7 @@
 
 #include "ItchRetransmissionService.h"
 #include "MoldPacketJournal.h"
-#include "OuchProtocol.h"
+#include "WireBytes.h"
 #include "SoupBinTCP.h"
 
 #include <arpa/inet.h>

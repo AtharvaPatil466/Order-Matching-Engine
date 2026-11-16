@@ -13,7 +13,7 @@
 # zero-size best bid, an aggressor hitting it produced a TRADE OF QUANTITY
 # ZERO, and pro-rata matching spun forever on the level.
 #
-# This case shipped for a while as a ".known.flow" the build ignored. That
+# This case shipped for a while as a known-divergence case the build ignored. That
 # suppression class no longer exists: if this diverges again, the run fails.
 A 1 30 2 B L 999800 1
 M 1 30 * 0

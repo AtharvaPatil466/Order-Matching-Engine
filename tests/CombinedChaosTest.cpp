@@ -187,7 +187,8 @@ int main() {
                     // -Waddress-of-packed-member does not flag this shape, so
                     // nothing but the sanitizer was ever going to catch it.
                     const OrderId id = req.orderId;
-                    accepted[c].push_back(id);
+                    // The book holds it under the participant's scope (MIDS-3).
+                    accepted[c].push_back(gatewayOrderId(ParticipantId(c + 1), id));
                 } else {
                     // The only legitimate failure mode in this scenario.
                     if (resp.rejectReason != RejectReason::QueueBackpressure) {

@@ -8,12 +8,6 @@
 
 namespace OrderMatcher {
 
-// Forward declaration — full definition (with POSIX networking deps)
-// lives in ReplicationProtocol.h. AdminServer only needs an opaque
-// pointer plus the methods it calls; including the full header here
-// would pull <arpa/inet.h> and friends into every AdminServer client.
-class ReplicationCoordinator;
-
 class AdminServer {
 public:
     AdminServer(MatchingEngine& engine, uint16_t port);
@@ -31,13 +25,6 @@ public:
     // start(). Without this, callers that wanted an ephemeral port had to
     // guess one instead and hope nothing else held it.
     uint16_t port() const { return port_; }
-
-    // Optional: attach a replication coordinator so /role and
-    // /replication endpoints return live state. Pass nullptr (the
-    // default) on engines that run without replication.
-    void setReplicationCoordinator(ReplicationCoordinator* coord) {
-        coord_ = coord;
-    }
 
     // All endpoints except /health and /readyz require an
     // "Authorization: Bearer <token>" header. Call before start().
@@ -84,15 +71,12 @@ private:
     std::string generateOtrResponse(ParticipantId pid) const;
     std::string generateBookResponse(SymbolId sym) const;
     std::string generateAuctionResponse(SymbolId sym) const;
-    std::string generateFeesResponse(ParticipantId pid) const;
-    std::string generateRiskResponse(uint32_t tier, uint64_t entityId) const;
-    std::string generateCatResponse() const;
     std::string generateAuditResponse(SymbolId sym) const;
-    std::string generateRoleResponse() const;
-    std::string generateReplicationResponse() const;
     std::string generateJournalHeadResponse() const;
     std::string generateVersionResponse() const;
     std::string generateReadyzResponse() const;
+    // A whole 503 response carrying `body` (buildHttpResponse always says 200).
+    static std::string serviceUnavailable(const std::string& body);
     // Chaos-only order injection (guarded by OB_CHAOS_INJECT=1 env
     // AND, if OB_CHAOS_TOKEN is set, a matching X-Chaos-Token header).
     // Not exposed unless the env var is set at process start — the
@@ -107,7 +91,6 @@ private:
     std::atomic<int> serverSocket_{-1};
     std::atomic<bool> running_{false};
     std::thread listenThread_;
-    ReplicationCoordinator* coord_{nullptr};
 
     // Captured at construction from OB_CHAOS_INJECT — guards the
     // /chaos/order endpoint at parse time. Compiled in unconditionally

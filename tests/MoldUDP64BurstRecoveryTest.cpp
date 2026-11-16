@@ -17,7 +17,7 @@
 #include "ItchRetransmissionService.h"
 #include "ItchUdpTransport.h"
 #include "MoldPacketJournal.h"
-#include "OuchProtocol.h"
+#include "WireBytes.h"
 #include "SoupBinTCP.h"
 
 #include <algorithm>

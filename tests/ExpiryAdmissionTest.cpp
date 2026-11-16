@@ -10,7 +10,7 @@
 //
 // WHAT IS PINNED. submitOrder refuses, with MissingRequiredField, a GTD order
 // with expiryTime 0, and a DAY order with expiryTime 0 on an engine with no
-// session end scheduled — how OrderEngine and GatewayServer start; a
+// session end scheduled — how OrderEngine starts; a
 // SessionScheduler declares one. Orders that carry an expiry, and DAY orders
 // on an engine whose session ends, are admitted as before.
 
@@ -43,7 +43,8 @@ void expect(const SubmitResult& r, bool accepted, const char* what) {
 }
 
 void run(MatchingEngine& e, const char* mode) {
-    e.setSessionEndScheduled(false);  // as OrderEngine / GatewayServer start
+    e.setSessionEndScheduled(false);  // as OrderEngine starts
+    e.setExpiryClock([] { return uint64_t{0}; });  // virtual time: expiries are in its units (MR-6)
     expect(submit(e, 1, TimeInForce::GTD, 0), false, "GTD with expiryTime 0");
     expect(submit(e, 2, TimeInForce::DAY, 0), false, "DAY with expiryTime 0, no session end");
     expect(submit(e, 3, TimeInForce::GTD, 5'000), true, "GTD with an expiry");
@@ -83,6 +84,7 @@ int main() {
         MatchingEngine e;
         e.addSymbol(kSym);
         e.start();
+        e.setExpiryClock([] { return uint64_t{0}; });
         e.setSessionEndScheduled(false);
         SessionScheduler scheduler(e, {kSym});
         expect(submit(e, 10, TimeInForce::DAY, 0), true, "DAY with no expiry, session end scheduled");

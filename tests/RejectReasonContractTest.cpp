@@ -5,7 +5,7 @@
 //      where a rule change silently shifts which reason a path emits.
 //
 //   2. (Completeness) Iterate a hardcoded list of every enum value and
-//      verify FixSession's user-facing string mapping returns a non-empty,
+//      verify the gateway's user-facing string mapping returns a non-empty,
 //      non-generic label for each. The compiler's -Wswitch -Werror rule
 //      already enforces case coverage; this test additionally enforces
 //      that someone didn't paper over a new reason with a placeholder.
@@ -17,9 +17,9 @@
 // check); skipping them in the per-reason path keeps this test fast and
 // non-flaky.
 
-#include "FixSession.h"
 #include "MatchingEngine.h"
 #include "OrderBook.h"
+#include "TcpGateway.h"
 #include "Types.h"
 
 #include <gtest/gtest.h>
@@ -96,22 +96,26 @@ TEST(RejectReasonContract, OrderTypeNotAllowedInState) {
 TEST(RejectReasonContract, OutsidePriceBand) {
     OrderBook book(0);
     book.setCircuitBreakerThreshold(0.50);  // breaker out of the way
+    book.setReferencePrice(1000000);        // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     book.setPriceBandPct(0.05);
     auto r = book.addOrder(2, 2, Side::Buy, 1100000, 100, OrderType::Limit);
     EXPECT_EQ(expectReject(r), RejectReason::OutsidePriceBand);
 }
 
-// A new order never gets this reason: an out-of-band first fill moves the
-// book into a volatility auction instead (roadmap 1.8-H3). A replace to a
-// price outside the threshold is still refused with it.
+// No longer emitted, kept for the wire. The breaker tests prints, not limits
+// (roadmap 1.8-H3): an out-of-band print moves the book into a volatility
+// auction. A replace was the last path refused on its limit; it is now
+// admitted like a new order at that price, and its print is tested (FORMAL-1).
 TEST(RejectReasonContract, VolatilityCircuitBreaker) {
     OrderBook book(0);
     book.setCircuitBreakerThreshold(0.02);
+    book.setReferencePrice(1000000);
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     RejectReason reason = RejectReason::None;
-    EXPECT_FALSE(book.cancelReplace(1, 1030000, 100, reason));
-    EXPECT_EQ(reason, RejectReason::VolatilityCircuitBreaker);
+    EXPECT_TRUE(book.cancelReplace(1, 1030000, 100, reason));
+    EXPECT_EQ(reason, RejectReason::None);
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous);
 }
 
 TEST(RejectReasonContract, PostOnlyWouldCross) {
@@ -193,7 +197,7 @@ TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
     // its own omissions — and it had five: the four P2-8..P2-11 risk-control
     // reasons and NotOrderOwner were all missing, so this test has been
     // quietly checking a subset while claiming "EveryReason". The real
-    // enforcement is -Wswitch -Werror on FixSession::rejectReason, which
+    // enforcement is -Wswitch -Werror on rejectReasonToString, which
     // makes a new reason a compile error until it is wired; this list is the
     // redundancy that surfaces the addition in review, and the placeholder
     // check below is what it actually buys.
@@ -239,15 +243,15 @@ TEST(RejectReasonContract, EveryReasonHasUserFacingString) {
                   "last-value reference in this assert");
 
     for (RejectReason r : kAll) {
-        const char* s = FixSession::rejectReason(r);
+        const char* s = rejectReasonToString(r);
         ASSERT_NE(s, nullptr);
         EXPECT_NE(std::string(s), "")
             << "RejectReason value " << int(r) << " has empty string";
         // The fallthrough placeholder. If a real reason returns this,
         // someone wired a new enum value without giving it a meaningful
         // user-facing label.
-        EXPECT_NE(std::string(s), "rejected")
+        EXPECT_NE(std::string(s), "unknown reject")
             << "RejectReason value " << int(r)
-            << " maps to the generic placeholder \"rejected\"";
+            << " maps to the generic placeholder \"unknown reject\"";
     }
 }

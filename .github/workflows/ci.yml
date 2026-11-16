@@ -67,10 +67,6 @@ jobs:
         # ANCHORED, every name: ctest -E is a regex SEARCH, and the unanchored
         # "PropertyTest" also excluded JournalReplayPropertyTest — the test that
         # drives the async worker — from the one lane that checks it for races.
-        # ReplicationProtocolTest is INCLUDED now — was previously excluded
-        # for teardown races on peerFd_/listenFd_ (close-during-recv) and a
-        # non-atomic sendSeq_; both fixed (atomic fds + shutdown(2) wakeup +
-        # atomic sequence). Keep TSan green going forward.
         if: matrix.thread_sanitizer == 'ON'
         run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
 
@@ -253,16 +249,14 @@ jobs:
         run: ctest --test-dir build --output-on-failure -L project -E '^BenchmarkRegressionTest\.'
 
   wide-diff-fuzz:
-    name: Ubuntu Wide Differential Fuzz (non-blocking)
+    name: Ubuntu Wide Differential Fuzz
     # The widened differential fuzzer (roadmap 1.3-C1): modify, replace,
     # icebergs, STP modes, kill switch and execution reports against a
-    # price-time reference, 60 seeds x 2000 ops under ASan/UBSan. NON-BLOCKING
-    # by the user's decision 2 (2026-10-05) until an event-order spec lands
-    # (GTDIFF-7); 1.6-F5 fixed the FOK + STP class (GTDIFF-2), so the run is
-    # clean today and anything it finds is a new defect. Remove
-    # continue-on-error once the event-order spec lands.
+    # price-time reference, 60 seeds x 2000 ops under ASan/UBSan. Blocking
+    # since the event-order spec landed (MatchingRules Rule 2.5, GTDIFF-7), per
+    # the user's decision 2 (2026-10-05); 1.6-F5 fixed the FOK + STP class
+    # (GTDIFF-2). It has no known classes: anything it finds is a new defect.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -338,3 +332,40 @@ jobs:
 
       - name: Check every OB_* macro against ci.yml
         run: sh scripts/check_feature_macro_lanes.sh
+
+  docker-image:
+    name: Docker image
+    # Non-required. chaos.yml was the only job that built the image, and it went
+    # with replication (roadmap 1.1), so nothing else checks that the image
+    # builds, refuses a replication role and boots.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t ob-engine:ci .
+
+      - name: A replication role is refused
+        run: |
+          rc=0; docker run --rm ob-engine:ci --role primary || rc=$?
+          [ "$rc" -eq 1 ] || { echo "::error::--role primary exited $rc, want 1"; exit 1; }
+
+      - name: Boots and answers /health
+        run: |
+          docker run -d --name ob -p 8080:8080 \
+            -e OB_ADMIN_TOKEN=ci -e OB_NO_PARTICIPANT_AUTH=1 ob-engine:ci
+          for _ in $(seq 1 30); do curl -sf localhost:8080/health && exit 0; sleep 1; done
+          docker logs ob; exit 1
+
+  runbook-smoke:
+    name: Runbook smoke
+    # docs/Runbook.md says every bash block in it is executed; this is what
+    # executes them (SURF-8). It builds OrderEngine in ubuntu:24.04 and runs
+    # the blocks top to bottom, and fails on a table flag --help lacks.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run every Runbook bash block
+        run: scripts/runbook_smoke.sh

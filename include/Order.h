@@ -25,8 +25,8 @@ namespace OrderMatcher {
 // status, isHidden. The eight 8-byte hot fields plus the four 1-byte enums/bool fill
 // the line exactly (56 + 4 + 4 pad = 64). displayQty (iceberg slice refill
 // only) is the first cold field and therefore the first byte of line 2; the
-// common path never reads it. timestamp is write-once at creation and is read
-// only off the hot path, so it lives in the cold region too.
+// common path never reads it. arrivalSeq is written when the order takes its
+// place and is read only off the hot path, so it lives in the cold region too.
 //
 // This is a pure field reorder: identical field names, types and default
 // initializers, so every existing call site and the ObjectPool<Order> layout
@@ -71,7 +71,12 @@ struct alignas(64) Order {
 
     // Time-in-Force
     TimeInForce timeInForce = TimeInForce::GTC;
-    uint64_t timestamp;         // set once at creation; read only off hot path
+    // The order's age on its book: drawn from OrderBook's arrival counter when
+    // it is admitted and again whenever it goes to the back of its queue (a
+    // reprice, a growth, a peg move). Older = smaller. A sequence and not a
+    // clock, so it is deterministic, replays identically, and a checkpoint
+    // carries it exactly (MIDS-1). Read only off the hot path.
+    uint64_t arrivalSeq = 0;
     uint64_t expiryTime = 0;    // For GTD/DAY orders
 
     // Stop orders

@@ -88,14 +88,26 @@ public:
     //   * maxOrderSize / maxOrderNotional against THIS order;
     //   * fat-finger: if referencePrice != 0 and maxPctFromRef > 0, reject
     //     when |price - referencePrice| / referencePrice > maxPctFromRef;
-    //   * projected aggregate net position: (current tier net position
-    //     +/- qty, Buy adds, Sell subtracts) magnitude must not exceed
-    //     maxNetPosition.
+    //   * projected position on the order's side, working orders included
+    //     (TLA-5): a buy may take net + working buys + qty up to
+    //     maxNetPosition, a sell working sells + qty - net. Working orders on
+    //     opposite sides do not net: either can fill alone.
     // Returns the FIRST breach found, checking from most-specific (Trader)
     // to broadest (Firm), and reports which tier breached. An unmapped
     // participant is always allowed.
     RiskDecision check(ParticipantId trader, Side side, Price price,
                        Quantity qty, Price referencePrice) const;
+
+    // check(), projecting `reserve` rather than qty (a replace's growth), and on
+    // success add `reserve` to the working quantity at every tier the trader
+    // belongs to. One call, so nothing is admitted between check and reserve.
+    RiskDecision checkAndReserve(ParticipantId trader, Side side, Price price,
+                                 Quantity qty, Price referencePrice, Quantity reserve);
+
+    // Working quantity reserved by checkAndReserve that left without trading.
+    void release(ParticipantId trader, Side side, Quantity qty);
+    // Reserve without a check: re-booking what already rests.
+    void reserve(ParticipantId trader, Side side, Quantity qty);
 
     // Commit an executed fill: update the running net position at EVERY tier
     // the trader belongs to (Buy += qty, Sell -= qty). No-op for an unmapped
@@ -105,13 +117,19 @@ public:
     // Inspect the running net position of an entity at a tier (for tests /
     // monitoring). Returns 0 for an entity that has never been filled.
     int64_t netPosition(RiskTier tier, uint64_t entityId) const;
+    int64_t workingQty(RiskTier tier, uint64_t entityId, Side side) const;
+
+    // Zero every net position and working quantity, keeping mappings and
+    // limits: the engine then re-books both from its books after a replay.
+    void clearPositions();
 
 private:
-    // Per-tier state for a single entity: its configured limits and running
-    // net position. Both live in the same map so a tier lookup is one probe.
+    // Per-tier state for a single entity: its configured limits, running net
+    // position and working quantity per side (Buy, Sell). One map probe.
     struct EntityState {
         TierLimits limits{};
         int64_t    netPosition = 0;
+        int64_t    working[2] = {0, 0};
     };
 
     // The entity ids a trader belongs to, indexed by RiskTier value. Index 0
@@ -121,9 +139,15 @@ private:
     // Convert a signed quantity delta for a side: Buy is positive.
     static int64_t signedDelta(Side side, Quantity qty);
 
-    // Evaluate one tier's limits against an order. Returns true on breach.
+    // Evaluate one tier's limits against an order that would add `reserve` to
+    // the working quantity on its side. Returns true on breach.
     static bool tierBreached(const EntityState& state, Side side, Price price,
-                             Quantity qty, Price referencePrice);
+                             Quantity qty, Price referencePrice, Quantity reserve);
+    RiskDecision evaluate(ParticipantId trader, Side side, Price price, Quantity qty,
+                          Price referencePrice, Quantity reserve) const;
+    // Add delta to the working quantity on `side` at every tier of `trader`.
+    void addWorking(ParticipantId trader, Side side, int64_t delta);
+    static std::size_t sideIndex(Side side) { return side == Side::Buy ? 0 : 1; }
 
     // trader -> entity ids for each tier.
     std::unordered_map<ParticipantId, EntityIds> participants_;

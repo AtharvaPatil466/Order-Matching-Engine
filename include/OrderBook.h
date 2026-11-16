@@ -8,9 +8,8 @@
 #include "EventListener.h"
 #include "RingBuffer.h"
 #include "SelfTradeProtection.h"
-#include "LULDManager.h"
-#include "WashTradeDetector.h"
 #include "BatchRiskValidator.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -253,6 +252,27 @@ public:
         return false;
     }
 
+    // Erase, keeping the rest in order. For lists whose order is a priority:
+    // the parked market and on-close orders cross in arrival order (MIDS-4),
+    // stops and trailing stops elected by one print execute in it, and pegs
+    // reprice (so requeue) in it (Rule 5.7). A swap moved the last arrival
+    // into the leaver's slot. ponytail: O(n) shift per removal, n <= MaxSize.
+    void erase_ordered(size_t idx) {
+        if (idx < size_) {
+            std::move(data_ + idx + 1, data_ + size_, data_ + idx);
+            size_--;
+        }
+    }
+    bool erase_value_ordered(const T& val) {
+        for (size_t i = 0; i < size_; i++) {
+            if (data_[i] == val) {
+                erase_ordered(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
     T& operator[](size_t i) { return data_[i]; }
     const T& operator[](size_t i) const { return data_[i]; }
     size_t size() const { return size_; }
@@ -267,6 +287,20 @@ public:
 private:
     T data_[MaxSize];
     size_t size_;
+};
+
+// The write-ahead hook of OrderBook's amends and cancel (see modifyOrder).
+// A non-owning callable reference (no allocation, the cancel is hot): the
+// callable it names must outlive the call it is passed to.
+struct RecordFn {
+    bool (*fn)(void*) = nullptr;
+    void* ctx = nullptr;
+    template <typename F>
+    static RecordFn of(F& f) {
+        return {[](void* c) { return (*static_cast<F*>(c))(); }, &f};
+    }
+    explicit operator bool() const { return fn != nullptr; }
+    bool operator()() const { return fn(ctx); }
 };
 
 class OrderBook {
@@ -296,6 +330,11 @@ public:
     // caller. kAnyParticipant means "no check": internal sweeps act for the
     // venue, not for a participant.
     void cancelOrder(OrderId orderId, ParticipantId requester = kAnyParticipant);
+    // Write-ahead for an amend: called under bookLock_ once every refusal
+    // check has passed and before anything changes. It journals the request;
+    // false (the journal refused or is halted) refuses it with JournalHalted
+    // and leaves the order exactly as it was, as a restart will find it.
+    using RecordFn = OrderMatcher::RecordFn;
     bool modifyOrder(OrderId orderId, Quantity newQty,
                      ParticipantId requester = kAnyParticipant);
     // Same, but reports why it failed. A modify can fail because the order is
@@ -305,9 +344,38 @@ public:
     // Unlike cancelReplace, newQty here is the new LEAVES; the order's total
     // drops by the same amount, so nothing executed is misreported.
     bool modifyOrder(OrderId orderId, Quantity newQty, RejectReason& reason,
-                     ParticipantId requester = kAnyParticipant);
+                     ParticipantId requester = kAnyParticipant,
+                     RecordFn record = {});
 
 private:
+    // addOrder and cancelReplace with bookLock_ held; the public ones give a
+    // refusal's arrival sequence back.
+    AddOrderResult addOrderLocked(OrderId orderId, ParticipantId participantId, Side side,
+                                  Price price, Quantity qty, OrderType type, Price stopPrice,
+                                  Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                                  Price stopLimitPrice, PegType pegType, Price pegOffset,
+                                  Price trailAmount, Quantity minQty, bool hidden,
+                                  bool riskChecksBypassed);
+    bool cancelReplaceLocked(OrderId orderId, Price newPrice, Quantity newQty,
+                             RejectReason& reason, ParticipantId requester,
+                             RecordFn record);
+
+    // Roadmap 1.9 I2: tell the engine's reservation ledger that `qty` of this
+    // order's working quantity is gone without trading. A fill goes back through
+    // onTrade instead, so what is reserved stays the sum of the live orders'
+    // remaining quantity. Replay rebuilds the ledger afterwards.
+    void releaseWorking(const Order& order, Quantity qty) {
+        if (qty != 0 && !replayMode_)
+            engineListener_->onWorkingReleased(order.participantId, order.side, qty);
+    }
+    // GW-2: a replace or modify is an admission decision for the engine's
+    // controls too, not only the book's. See EventListener::onAmend.
+    RejectReason admitAmend(const Order& order, Price newPrice, Quantity newTotal,
+                            Quantity newLeaves) {
+        return replayMode_ ? RejectReason::None
+                           : engineListener_->onAmend(order, newPrice, newTotal, newLeaves);
+    }
+
     // Drop `order` from every special-order tracking list that can hold a raw
     // pointer to it. MUST run before the order is returned to the pool: those
     // lists outlive the order, and a stale entry is a dangling pointer that a
@@ -365,7 +433,8 @@ public:
     // wrong thing. Mirrors modifyOrder's reason-reporting overload above.
     bool cancelReplace(OrderId orderId, Price newPrice, Quantity newQty,
                        RejectReason& reason,
-                       ParticipantId requester = kAnyParticipant);
+                       ParticipantId requester = kAnyParticipant,
+                       RecordFn record = {});
 
     // Kill switch: cancel all orders for a participant
     uint64_t cancelAllForParticipant(ParticipantId participantId);
@@ -408,6 +477,18 @@ public:
     void expireOrders(uint64_t currentTime,
                       const std::function<void(OrderId)>& onExpire = {});
 
+    // Lazy expiry (THR-10). A GTD/DAY maker past its expiryTime never trades,
+    // whether or not the sweep above has reached it: the match that meets it
+    // cancels it, calling onExpire first so the engine journals the cancel ahead
+    // of the order that met it, as it does for the sweep. Replay never reads the
+    // clock; it applies that cancel. `clock` is in expiryTime's unit, the wall
+    // clock when unset. Set before traffic.
+    using ExpiryClock = std::function<uint64_t()>;
+    void setExpiryHooks(ExpiryClock clock, std::function<void(OrderId)> onExpire) {
+        expiryClock_ = std::move(clock);
+        onLazyExpire_ = std::move(onExpire);
+    }
+
     // Market Data
     MarketDataSnapshot getSnapshot(size_t depth = 10) const;
 
@@ -431,14 +512,6 @@ public:
         auto* m = stpModes_.find(participant);
         return m ? *m : STPMode::DefaultCancelIncoming;
     }
-
-    // ─── LULD Volatility Controls (Phase 4, Week 14) ─────────────────
-    LULDManager& getLULDManager() { return luld_; }
-    const LULDManager& getLULDManager() const { return luld_; }
-
-    // ─── Wash Trade Detection (Phase 4, Week 13) ─────────────────────
-    WashTradeDetector& getWashTradeDetector() { return washTradeDetector_; }
-    const WashTradeDetector& getWashTradeDetector() const { return washTradeDetector_; }
 
     // Analytics
     double getVWAP() const { return vwap_; }
@@ -486,16 +559,16 @@ public:
     // or ends the session (PostClose).
     // Replay applies what the journal holds without judging it: the engine
     // journals only transitions that were applied.
-    void setTradingState(TradingState s);
+    bool setTradingState(TradingState s);   // false: refused by the table
     // Enter PreOpen for trading date `tradingDate` (days since 1970-01-01;
     // 0 = undated, which PostClose refuses). Same rules as above.
-    void beginSession(uint32_t tradingDate);
+    bool beginSession(uint32_t tradingDate);
     uint32_t sessionDate() const { return sessionDate_; }  // 0 = none/undated
     bool sessionBegun() const { return sessionBegun_; }    // dated or not
     // Safe from any thread: reads publishedState_, the atomic copy the owner
-    // stores after every change. Admin /auction, checkpoint and the
-    // replication snapshot call it off the worker; tradingState_ itself is
-    // the worker's plain copy for the hot path.
+    // stores after every change. Admin /auction and checkpoint call it off
+    // the worker; tradingState_ itself is the worker's plain copy for the hot
+    // path.
     TradingState getTradingState() const { return publishedState_.load(std::memory_order_acquire); }
     // The state a halt resumes to (meaningful while Halted).
     TradingState preHaltState() const { return preHaltState_; }
@@ -517,9 +590,9 @@ public:
 
     // Price-band (LULD-style) admission filter. Distinct from the
     // volatility circuit breaker (a threshold on the same reference, tested
-    // against the price an order's FIRST fill would print at; a breach moves
-    // the book into VolatilityAuction and logs breaker_trip — see
-    // tripBreakerOnFirstFill). The band REJECTS
+    // against the price of every continuous print; a breach moves the book
+    // into VolatilityAuction and logs breaker_trip — see printBand). The band
+    // REJECTS
     // individual orders
     // priced outside [ref*(1-pct), ref*(1+pct)] without affecting market
     // state. Both can be active simultaneously.
@@ -534,11 +607,28 @@ public:
 
     // Market-order sweep protection: cap how far a market order may walk
     // from the arrival touch price (fractional half-width, e.g. 0.10 = 10%).
-    // 0 disables. The portion of a market order that would fill beyond the
-    // collar is left unfilled (and cancelled), so a single sweep cannot
-    // clear the book at runaway prices.
+    // 0 disables; default 5%. The portion of a market order that would fill
+    // beyond the collar is left unfilled (and cancelled), so a single sweep
+    // cannot clear the book at runaway prices. Replay re-runs matching, so set
+    // it before traffic and to the value the journal was written under.
     void setMarketProtectionPct(double pct) { marketProtectionPct_ = pct < 0 ? 0 : pct; }
     double getMarketProtectionPct() const   { return marketProtectionPct_; }
+    // The price a notional cap values an order at (STP-12). A limit-priced order
+    // is worth its limit; a Market or trigger order has none, so it is valued at
+    // the highest price it can trade at. 0 if there is no price to value it at,
+    // which a cap refuses. Takes bookLock_ only for those orders, as a sync
+    // engine's caller is not the only thread on the book.
+    static constexpr bool valuedOffTheBook(OrderType t) {
+        return t == OrderType::Market || t == OrderType::MOC || t == OrderType::Stop ||
+               t == OrderType::MIT || t == OrderType::StopLimit || t == OrderType::TrailingStop;
+    }
+    Price notionalPrice(Side side, OrderType type, Price price, Price stopPrice,
+                        Price stopLimitPrice, Price trailAmount) const {
+        if (!valuedOffTheBook(type)) [[likely]] return price;
+        std::lock_guard<std::mutex> lock(bookLock_);
+        return notionalPriceLocked(side, type, price, stopPrice, stopLimitPrice, trailAmount);
+    }
+
     // Takes bookLock_: the admin /otr endpoint calls this from its own thread
     // while the owning worker inserts into participantRisk_ under that lock.
     ParticipantStats getParticipantStats(ParticipantId id) const {
@@ -579,18 +669,18 @@ public:
     }
 
     // Same as forEachOrder, but acquires bookLock_ for the whole iteration so
-    // it is safe to call from a thread that does NOT own the book — snapshot
-    // streaming, checkpoint, replication. Writers take the lock exclusively, so
+    // it is safe to call from a thread that does NOT own the book — checkpoint,
+    // position rebuild. Writers take the lock exclusively, so
     // orderLookup_ cannot be mutated/rehashed mid-walk. The callback must not
     // re-enter a method that takes bookLock_ (no re-entrancy on the non-
     // recursive mutex).
     //
     // Resting orders come first, each level front to back (bids, then asks),
     // then the parked ones, each list front to back: stops, trailing stops,
-    // auction market orders, on-close orders. A checkpoint and a joining
-    // backup re-add the orders in this order, so it is the time priority and
-    // the queue order they restore; the id map's order queued a level, and
-    // then each list, by order id. The list order decides which elected stops
+    // auction market orders, on-close orders. A checkpoint re-adds the orders
+    // in this order, so it is the time priority and the queue order it
+    // restores; the id map's order queued a level, and then each list, by order
+    // id. The list order decides which elected stops
     // run first and which market orders an uncross fills first.
     template<typename Fn>
     void forEachOrderLocked(Fn&& fn) const {
@@ -610,6 +700,18 @@ public:
         orderLookup_.forEach([&](OrderId, Order* order) {
             if (order && !order->inBook && !parkedInAList(order->type)) fn(*order);
         });
+    }
+
+    // The pegs in the order a reprice pass moves them (updatePeggedOrders):
+    // the order they queue in at a new price, and which of them a clamp sees
+    // already moved. A cancel or fill reorders it, so a checkpoint writes it
+    // rather than rebuild it from the levels; restorePegQueue reads it back.
+    // Locks like forEachOrderLocked.
+    template<typename Fn>
+    void forEachPeggedOrderLocked(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        for (const Order* o : peggedOrders_)
+            if (o) fn(*o);
     }
 
     // MD-9: run fn() under bookLock_, a consistent cut of the book (the
@@ -640,6 +742,29 @@ public:
     // returned that slot to the pool. Prefer cancelOrderReleasing() below;
     // getOrder() remains for single-threaded tests and read-only inspection.
     const Order* getOrder(OrderId orderId) const;
+
+    // Recovery only: put a checkpoint's order back where it rested or was
+    // parked, as it was. Not an arrival — addOrder judged one, and refused a
+    // halted or closed book's every order, a trailing stop entered without a
+    // price (no last trade until the Counters record after the orders) and a
+    // post-only offer an auction's call period crossed. So no admission rule,
+    // no match, no sweep or reprice, no reference price seeded: the book it
+    // came from had done all of that. Placed by type and the restored state: a
+    // resting type behind its level, a stop, trailing stop or auction market
+    // order at the back of its list, an on-close order on onCloseOrders_, or
+    // where the close released it once the book reached AuctionClose (a halt
+    // there keeps it released; PostClose has cancelled every unreleased one).
+    // Returns None, or why it could not be placed: a duplicate id, a type
+    // that never rests, a full list or pool, a price the book cannot hold.
+    // arrivalSeq is the order's age when the checkpoint was taken (Order::
+    // arrivalSeq); 0, from a checkpoint written before ages were carried,
+    // draws a fresh one as a new arrival would.
+    RejectReason restoreOrder(OrderId orderId, ParticipantId participantId, Side side,
+                              Price price, Quantity qty, OrderType type, Price stopPrice,
+                              Quantity displayQty, TimeInForce tif, uint64_t expiryTime,
+                              Price stopLimitPrice, PegType pegType, Price pegOffset,
+                              Price trailAmount, Quantity minQty, bool hidden,
+                              uint64_t arrivalSeq = 0);
 
     // Recovery only: mark a parked stop as already elected, frozen at
     // `stopPrice`, the state a checkpoint found it in (see
@@ -673,6 +798,8 @@ public:
         // false — nothing was cancelled, so there is no exposure to release
         // and a caller that only checks `found` still does the right thing.
         bool          denied{false};
+        // Found and owned, but its record was refused: nothing was cancelled.
+        bool          refused{false};
     };
 
     // Cancel the order and report the exposure it was holding, both inside the
@@ -680,8 +807,12 @@ public:
     // getOrder()-then-cancelOrder() pattern: the read now provably happens
     // while the order is still alive, and it costs one lock acquisition rather
     // than the two a separate locked getter would add to the cancel hot path.
+    // `record` as for modifyOrder: called once the order is found and owned,
+    // before it is cancelled; false leaves it resting (found stays true,
+    // refused is set).
     OrderExposure cancelOrderReleasing(OrderId orderId,
-                                       ParticipantId requester = kAnyParticipant);
+                                       ParticipantId requester = kAnyParticipant,
+                                       RecordFn record = {});
     size_t getBidLevelsCount() const;
     size_t getAskLevelsCount() const;
     SymbolId getSymbolId() const { return symbolId_; }
@@ -691,8 +822,7 @@ public:
     //
     // KNOWN HAZARD, deliberately NOT guarded here — see the Phase 0 report.
     // There is exactly ONE public listener slot, and ItchPublisher,
-    // OuchSession::attachFillListener, MarketMaker and InformedTrader all
-    // claim it through this setter. A second claim silently replaces the
+    // MarketMaker and InformedTrader all claim it through this setter. A second claim silently replaces the
     // first, so two protocols (or two agents) on one book means one of them
     // goes deaf with no diagnostic. MarketMaker.h:89 and InformedTrader.h:88
     // collide exactly this way today.
@@ -721,7 +851,7 @@ public:
 
     // Secondary, engine-owned listener for internal observation (e.g. OCO
     // contingent-order tracking). Kept separate from the user listener slot
-    // above so installing one does not clobber a gateway/OUCH market-data
+    // above so installing one does not clobber a market-data
     // listener. Receives the same order-update events.
     void setEngineListener(EventListener* listener) {
         engineListener_ = listener ? listener : &nullListener();
@@ -746,6 +876,48 @@ public:
     void restoreNextTradeId(uint64_t next) {
         std::lock_guard<std::mutex> lock(bookLock_);
         if (next > nextTradeId_) nextTradeId_ = next;
+    }
+    // Order ages (Order::arrivalSeq) the same way: the checkpoint records the
+    // next one, and replay restores it and never lowers it.
+    uint64_t nextArrivalLocked() const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        return nextArrival_;
+    }
+    void restoreNextArrival(uint64_t next) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (next > nextArrival_) nextArrival_ = next;
+    }
+    // And the band a book with no configured range (setPriceRange) anchored
+    // on its first resting price (ensurePriceRange). Restored before any
+    // order, or the first one put back re-anchors it and orders the live band
+    // held no longer fit (JOURNAL-2). False: configured, or not anchored yet.
+    bool anchoredRangeLocked(Price& minPrice) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (priceRangeConfigured_ || !bids_.rangeSet()) return false;
+        minPrice = bids_.minPrice();
+        return true;
+    }
+    // And when the current volatility auction's dwell started (the caller's
+    // clock at its first due-check), so a restart does not start it again
+    // (JOURNAL-7). False: not started.
+    bool volatilityClockLocked(uint64_t& start) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        start = volatilityClockStart_;
+        return volatilityClockStarted_;
+    }
+    // Replay applies it after the book's TradingStateChange records, whose
+    // entry into VolatilityAuction resets the clock.
+    void restoreVolatilityClock(uint64_t start) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        volatilityClockStarted_ = true;
+        volatilityClockStart_ = start;
+    }
+    // A band already set (configured at boot, or anchored) is kept.
+    void restoreAnchoredRange(Price minPrice) {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        if (bids_.rangeSet()) return;
+        bids_.setRange(minPrice);
+        asks_.setRange(minPrice);
     }
     // So are the prices the dropped trades left: the last trade (a market-vs-
     // market auction crosses at it) and the breaker's reference, which a book
@@ -774,7 +946,7 @@ public:
         std::lock_guard<std::mutex> lock(bookLock_);
         participantRisk_.forEach([&](const OTRKey& key, const ParticipantRiskState& s) {
             if (s.currentExposure != 0 || s.ordersSubmitted != 0 || s.tradesExecuted != 0)
-                fn(ParticipantPosition{key.value >> 32, s.currentExposure,
+                fn(ParticipantPosition{key.participant, s.currentExposure,
                                        s.ordersSubmitted, s.tradesExecuted});
         });
     }
@@ -785,6 +957,17 @@ public:
         s.ordersSubmitted = p.ordersSubmitted;
         s.tradesExecuted = p.tradesExecuted;
     }
+
+    // A checkpoint's PEG_QUEUE record: the peg goes to the back of the
+    // reprice list. Applied in list order, after the orders, they rebuild it.
+    void restorePegQueue(OrderId orderId);
+    // The released LOC orders the same way (Journal.h SNAPSHOT_LOC_QUEUE).
+    template <typename Fn>
+    void forEachReleasedLocLocked(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(bookLock_);
+        for (OrderId id : locActiveIds_) fn(id);
+    }
+    void restoreLocQueue(OrderId orderId);
 
     // Replay mode: suppresses all callbacks during journal replay
     void setReplayMode(bool replay) { replayMode_ = replay; }
@@ -917,19 +1100,40 @@ private:
     // Both return the sweep's first print price, 0 if it printed nothing.
     Price match(Order* order);
     Price matchProRata(Order* order);
+    // The book's algorithm, for every aggressor: arrival, replace, elected stop.
+    Price sweep(Order* order) {
+        return matchAlgorithm_ == MatchAlgorithm::ProRata ? matchProRata(order) : match(order);
+    }
     bool checkSMP(const Order& incoming, const Order& resting) const;
     Quantity sweepFillQty(const Order& in) const;
-    // Market protection's collar: the farthest price match() lets a Market
-    // order reach from the opposite touch. Callers check it is on and the side
-    // is not empty.
+    // Market protection's collar: the farthest price a Market order may reach
+    // from the opposite touch. Callers check it is on and the side is not empty.
     Price marketCollar(const FlatPriceMap& opposite, bool isBuy) const {
         const Price touch = opposite.bestPrice();
-        const Price band = static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
-        return isBuy ? touch + band : touch - band;
+        return isBuy ? collarAbove(touch) : touch - collarBand(touch);
     }
+    Price collarBand(Price touch) const {
+        return static_cast<Price>(static_cast<double>(touch) * marketProtectionPct_);
+    }
+    Price collarAbove(Price touch) const {
+        const Price band = collarBand(touch);
+        return band > std::numeric_limits<Price>::max() - touch
+                   ? std::numeric_limits<Price>::max() : touch + band;
+    }
+    Price notionalPriceLocked(Side side, OrderType type, Price price, Price stopPrice,
+                              Price stopLimitPrice, Price trailAmount) const;
 
     void runTriggerSweeps(Price firstPrint);
+    // THR-10. One branch on the hot path: expiryTime shares the cache line the
+    // fill reads participantId from (Order.h), and is 0 for most orders.
+    bool makerExpired(const Order& o) const { return o.expiryTime != 0 && expiredNow(o); }
+    bool expiredNow(const Order& o) const;
+    uint64_t expiryClockNow() const;
+    void expireMaker(Order* o);
+    size_t expireDueLocked(uint64_t currentTime, const std::function<void(OrderId)>& onExpire);
     void checkStopOrders(Price lowPrint, Price highPrint);
+    void latchElection(Order& order);   // latch + report Triggered, once
+    Order* minQtyShortInCross(const AuctionResult& res) const;
     void updateTrailingStops(Price firstPrint, Price lastPrint);
     void updatePeggedOrders();
     // Cancel any market orders parked during an auction without
@@ -945,21 +1149,27 @@ private:
     // Lock-free bodies of uncross() / setTradingState(), so a transition can
     // run the cross under the same bookLock_ as the flip (H4).
     void uncrossLocked();
-    void setTradingStateLocked(TradingState s, uint32_t tradingDate = 0);
+    bool setTradingStateLocked(TradingState s, uint32_t tradingDate = 0);
     bool transitionAllowed(TradingState to, uint32_t tradingDate) const;
     // H5: the orders STP takes out before discovery (see the definition).
-    void planAuctionSelfCrosses(std::vector<Order*>& victims) const;
+    AuctionResult planAuctionSelfCrosses(std::vector<Order*>& victims) const;
+    AuctionResult discoverExcluding(const std::vector<Order*>& sortedExcluded) const;
     void stpCancelAuctionOrder(Order* o);
     void updateAnalytics(Price price, Quantity qty, ParticipantId p1 = 0, ParticipantId p2 = 0);
-    bool checkCircuitBreaker(Price price);
-    // H3: the price `in`'s first fill would print at, or nullopt if it would
-    // not fill on arrival. Precondition: bookLock_ held.
-    std::optional<Price> firstFillPrice(const Order& in) const;
-    // H3: in Continuous, an order whose first fill would print outside the
-    // breaker threshold moves the book into VolatilityAuction before it
-    // matches. True if it tripped. Never evaluated in replay: a trip is
-    // journaled and replayed as a state change. Precondition: bookLock_ held.
-    bool tripBreakerOnFirstFill(const Order& in);
+    // The volatility breaker's one question, asked of every continuous print
+    // (MR-2, FORMAL-1): may a print at this price happen now? The prices a
+    // print may happen at around `reference`, cbThreshold_ either side; all
+    // of them with no reference yet, or in a lean build. Integer bounds,
+    // built once per sweep, so the per-fill test is two compares.
+    struct PrintBand {
+        Price lo;
+        Price hi;
+        bool admits(Price px) const { return px >= lo && px <= hi; }
+    };
+    PrintBand printBand(Price reference) const;
+    // A print at `px` failed the band: in Continuous, the book enters
+    // VolatilityAuction and breaker_trip is logged. Precondition: bookLock_ held.
+    void tripBreaker(Price px);
 
     // H2: the PURE admission checks — no state mutation, no events, no
     // reject notifications. Returns RejectReason::None if the order may be
@@ -1038,14 +1248,14 @@ private:
                                                 Price trailAmount);
     OB_ALWAYS_INLINE std::optional<RejectReason> screenFOK(Order* order, OrderId orderId,
                                           Quantity qty, OrderType type);
-    OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Side side, Price price,
-                                        Quantity qty, OrderType type, Quantity minQty);
+    OB_ALWAYS_INLINE std::optional<OrderId> screenMinQty(Order* order, OrderId orderId, Quantity qty,
+                                        OrderType type, Quantity minQty);
     // Rest or finish an order after it matched. `cumBefore` is its cumQty
     // before this match: an order that traded and rests is reported
     // PartiallyFilled (GTS-4). New orders and elected stops pass 0.
     OB_ALWAYS_INLINE void finalizeRemainingQty(Order* order, OrderId orderId, Side side, Price price,
                               OrderType type, Quantity cumBefore = 0);
-    bool checkRiskLimits(ParticipantId participantId, Price price, Quantity qty);
+    bool checkRiskLimits(ParticipantId participantId, Side side, Price price, Quantity qty);
 
     // STP DecreaseAndCancel: shrink both by the smaller remaining quantity;
     // true => the resting order reached zero and must be cancelled.
@@ -1055,6 +1265,7 @@ private:
     // C1: remove a resting order under STP, reporting CancelledBySTP. Shared
     // by match(), matchProRata() and uncross(). `lvl` must be book's best level.
     void stpCancelRestingOrder(Order* victim, OrderList* lvl, FlatPriceMap& book);
+    void restateLevel(const Order& order, Quantity displayBefore);
 
     bool finalizeIfStpCancelled(Order* order);
 
@@ -1137,7 +1348,8 @@ private:
     // (getSnapshot, computeAuctionState) all take an exclusive lock. Without
     // this, a snapshot read could observe a side-flipping cancelReplace
     // mid-flight and return a torn view (an order on both sides) — exactly
-    // the scenario the Snapshot.tla spec produced as a counterexample.
+    // the scenario the deleted Snapshot.tla spec produced as a counterexample
+    // (SnapshotLockedBroken.cfg reproduces it).
     //
     // A plain std::mutex (not shared_mutex) because the engine's
     // single-writer-per-book worker-thread model has no writer-vs-writer
@@ -1171,6 +1383,10 @@ private:
     // price and execute against limit liquidity; any remainder is
     // cancelled at the end of the uncross.
     FixedVector<Order*, 16384> auctionMarketOrders_;
+    // matchProRata's per-level allocation scratch (MR-4); reserved up front.
+    struct ProRataAlloc { Order* order; Quantity qty; };
+    static constexpr size_t kProRataReserve = 1024;
+    std::vector<ProRataAlloc> proRataScratch_;
     // MOC/LOC orders parked before AuctionClose. Released when the book
     // transitions to AuctionClose: MOC→auctionMarketOrders_, LOC→limit book.
     FixedVector<Order*, 16384> onCloseOrders_;
@@ -1224,6 +1440,7 @@ private:
     MatchAlgorithm matchAlgorithm_;
 
     uint64_t nextTradeId_{1};
+    uint64_t nextArrival_{1};   // Order::arrivalSeq's source; a checkpoint carries it
     Price lastTradePrice_{0};
     Quantity lastTradeQty_{0};
     bool priceRangeConfigured_{false};  // setPriceRange, not the first-rest anchor
@@ -1252,7 +1469,13 @@ private:
     uint64_t volatilityClockStart_{0};    // caller's clock at the first due-check
     bool     volatilityClockStarted_{false};
     double priceBandPct_{0.0};   // LULD price-band half-width (0 = disabled)
-    double marketProtectionPct_{0.0};  // market-order sweep collar (0 = disabled)
+    double marketProtectionPct_{0.05};  // market-order sweep collar, as the breaker (0 = disabled)
+    ExpiryClock expiryClock_;                     // lazy expiry (THR-10); unset = wall clock
+    std::function<void(OrderId)> onLazyExpire_;
+    // The expiry clock as one operation read it, so its screens and its sweep
+    // agree on what has expired. 0 = not read yet; addOrder and cancelReplace,
+    // the only callers of match(), reset it.
+    mutable uint64_t sweepNow_{0};
 
     // Per-participant tracking — open-addressing hash maps
     FlatHashMap<OTRKey, ParticipantRiskState, OTRKeyHash> participantRisk_;
@@ -1265,8 +1488,6 @@ private:
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     FlatHashMap<ParticipantId, STPMode> stpModes_{1024};
     FlatHashMap<ParticipantId, ParticipantRole> participantRoles_{1024};
-    LULDManager luld_;
-    WashTradeDetector washTradeDetector_;
 };
 
 } // namespace OrderMatcher

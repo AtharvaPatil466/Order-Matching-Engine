@@ -17,6 +17,10 @@
 (* Continuous or PostClose is the uncross; any other change prints nothing. *)
 (* Books boot in Continuous, so Init does too.                             *)
 (*                                                                         *)
+(* Not modelled: the cross itself. No sides, prices, owners or priority,  *)
+(* so neither price discovery, allocation nor the self-cross plan (Rule    *)
+(* 4.4) is here; tests/UncrossOracleTest.cpp checks those.                 *)
+(*                                                                         *)
 (* The book is abstract: a sequence of resting quantities. In Continuous   *)
 (* an incoming order may trade at once; in an auction state it only        *)
 (* accumulates; in Halted and PostClose it is rejected. Cancels are        *)
@@ -196,6 +200,14 @@ ReopeningUncross ==
     /\ Step("Continuous", 0)
     /\ UNCHANGED eventCount
 
+\* The event budget is spent. Every state has a move on the table (any
+\* state can halt, a halt resumes or closes), so only the bound ends a
+\* behaviour; this stuttering step says so, and TLC's deadlock check still
+\* fails any state with budget left and nothing enabled.
+BudgetSpent ==
+    /\ eventCount = MaxEvents
+    /\ UNCHANGED vars
+
 Next ==
     \/ SubmitAccumulate
     \/ SubmitContinuousRest
@@ -204,6 +216,7 @@ Next ==
     \/ \E to \in States :
            \E d \in (IF to = "PreOpen" THEN 0..MaxDate ELSE {0}) : Transition(to, d)
     \/ ReopeningUncross
+    \/ BudgetSpent
 
 \* No fairness on anything else: a halt, or a closed book, may persist.
 Spec == Init /\ [][Next]_vars /\ WF_vars(ReopeningUncross)

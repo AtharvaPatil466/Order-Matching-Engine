@@ -1,8 +1,9 @@
 #pragma once
 
-// Drive a real GatewayServer process: fork/exec it on a port with a journal,
-// talk to it over the length-prefixed framing, stop it cleanly. Shared by the
-// tests that can only observe the binary from outside.
+// Drive a real OrderEngine process: fork/exec it with a journal, talk to its
+// order port over the length-prefixed framing, read its book from the admin
+// port, stop it cleanly. Shared by the tests that can only observe the binary
+// from outside.
 
 #include "MatchingEngine.h"
 #include "TempPath.h"
@@ -19,6 +20,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 namespace gwtest {
 
@@ -61,6 +63,20 @@ public:
         return false;
     }
 
+    // The next frame of any type: an answer or an execution report.
+    bool next(GatewayResponse& out) {
+        uint32_t len = 0;
+        if (!recvAll(&len, sizeof(len)) || ntohl(len) != sizeof(GatewayResponse)) return false;
+        return recvAll(&out, sizeof(out));
+    }
+
+    bool sendRaw(const void* b, size_t n) { return sendAll(b, n); }
+    ssize_t recvSome(void* b, size_t n) {
+        ssize_t r;
+        do { r = ::recv(fd_, b, n, 0); } while (r < 0 && errno == EINTR);
+        return r;
+    }
+
 private:
     bool sendAll(const void* b, size_t n) {
         auto* p = static_cast<const char*>(b);
@@ -88,28 +104,45 @@ private:
     int fd_{-1};
 };
 
-// Start GatewayServer on `port` with `journal`, or return -1 if it exited
-// before listening (a taken port, or a refusal to boot).
-inline pid_t startGateway(const char* bin, uint16_t port, const std::string& journal) {
+// Start OrderEngine with its order port on `gatewayPort` and `args` as the rest
+// of its command line, or return -1 if it exited before that port answered (a
+// taken port, or a refusal to boot). Nothing is inherited that would change
+// which boot this is.
+inline pid_t startEngine(const char* bin, uint16_t gatewayPort,
+                         const std::vector<std::string>& args) {
     const pid_t pid = fork();
     if (pid == 0) {
-        // Unset, not blank: a set-but-empty OB_ENGINE_HOST sends the gateway
-        // down the forwarding path, and inherited credentials would change
-        // which boot this is.
-        for (const char* v : {"OB_ENGINE_HOST", "OB_ENGINE_PORT", "OB_JOURNAL_PATH",
+        for (const char* v : {"OB_CONFIG_PATH", "OB_JOURNAL_PATH", "OB_NODE_ROLE",
+                              "OB_ADMIN_TOKEN", "OB_ADMIN_NO_AUTH", "OB_ADMIN_BIND",
+                              "OB_GATEWAY_PORT", "OB_GATEWAY_BIND",
                               "OB_PARTICIPANT_CREDENTIALS", "OB_NO_PARTICIPANT_AUTH",
                               "OB_REPLAY_LEGACY_JOURNAL"})
             unsetenv(v);
-        const std::string p = std::to_string(port);
-        execl(bin, bin, p.c_str(), "--journal", journal.c_str(), "--no-participant-auth",
-              static_cast<char*>(nullptr));
+        // Whatever `args` configures applies; what it leaves out is waived
+        // (engine_requires_controls.sh pins the refusals).
+        for (const char* v : {"OB_NO_PRICE_BAND", "OB_NO_JOURNAL", "OB_NO_RISK_LIMITS"})
+            setenv(v, "1", 1);
+        const std::string port = std::to_string(gatewayPort);
+        std::vector<const char*> argv{bin, "--gateway-port", port.c_str()};
+        for (const std::string& a : args) argv.push_back(a.c_str());
+        argv.push_back(nullptr);
+        execv(bin, const_cast<char* const*>(argv.data()));
         _exit(127);
     }
-    for (int i = 0; i < 200; ++i) {                 // up to 10 s
+    for (int i = 0; i < 600; ++i) {                 // up to 30 s: a sanitizer boot is slow
         int status = 0;
         if (waitpid(pid, &status, WNOHANG) == pid) return -1;
         Client probe;
-        if (probe.connect(port)) return pid;
+        if (probe.connect(gatewayPort)) {
+            // Something answered, but it may be another process on that port
+            // (another test, another worktree's suite) while ours is failing
+            // to bind it. Ours refuses a taken port within moments.
+            for (int j = 0; j < 6; ++j) {
+                usleep(50 * 1000);
+                if (waitpid(pid, &status, WNOHANG) == pid) return -1;
+            }
+            return pid;
+        }
         usleep(50 * 1000);
     }
     kill(pid, SIGKILL);
@@ -117,12 +150,60 @@ inline pid_t startGateway(const char* bin, uint16_t port, const std::string& jou
     return -1;
 }
 
+// GET `path` from an admin port on loopback; the body, or "" if none came.
+inline std::string httpGet(uint16_t port, const std::string& path) {
+    Client c;
+    if (!c.connect(port)) return {};
+    const std::string req = "GET " + path + " HTTP/1.0\r\nConnection: close\r\n\r\n";
+    if (!c.sendRaw(req.data(), req.size())) return {};
+    std::string reply;
+    char buf[4096];
+    for (ssize_t n; (n = c.recvSome(buf, sizeof(buf))) > 0;) reply.append(buf, static_cast<size_t>(n));
+    const size_t body = reply.find("\r\n\r\n");
+    return body == std::string::npos ? std::string{} : reply.substr(body + 4);
+}
+
+// A process in these tests has its admin port this far above its order port.
+inline constexpr uint16_t kAdminPortOffset = 10;
+
+// OrderEngine with `journal`, no order-port credentials and two workers, on the
+// first free port from `port` up (which it updates); the admin port follows it
+// at kAdminPortOffset.
 inline pid_t startOnFreePort(const char* bin, uint16_t& port, const std::string& journal) {
     for (int attempt = 0; attempt < 10; ++attempt, ++port) {
-        const pid_t pid = startGateway(bin, port, journal);
+        const pid_t pid = startEngine(bin, port,
+                                      {"--journal", journal, "--no-participant-auth",
+                                       "--admin-no-auth",
+                                       "--port", std::to_string(port + kAdminPortOffset),
+                                       "--symbols", "2", "--threads", "2"});
         if (pid > 0) return pid;
     }
     return -1;
+}
+
+// The orders resting on `symbol`, summed over the levels of /book, which lists ten
+// a side: a test counting with this keeps its orders within ten levels. -1 if
+// /book did not answer.
+inline int restingOrders(uint16_t adminPort, SymbolId symbol) {
+    const std::string body = httpGet(adminPort, "/book?symbolId=" + std::to_string(symbol));
+    if (body.empty()) return -1;
+    static const std::string kField = "\"orders\":";
+    int total = 0;
+    for (size_t at = body.find(kField); at != std::string::npos; at = body.find(kField, at + 1)) {
+        total += std::atoi(body.c_str() + at + kField.size());
+    }
+    return total;
+}
+
+// Cancel `id` and report whether /book lost an order for it. The answer alone
+// cannot say: on the async engine a cancel of an unknown id also answers Ack,
+// because the worker decides that (roadmap 1.9-I7), and the ack comes after the
+// worker ran, so /book is settled by then.
+inline bool cancelRemoved(Client& c, uint16_t adminPort, const OrderRequest& cancel) {
+    const int before = restingOrders(adminPort, cancel.symbolId);
+    GatewayResponse r{};
+    if (!c.send(cancel) || !c.answerFor(cancel.orderId, r)) return false;
+    return before >= 0 && restingOrders(adminPort, cancel.symbolId) == before - 1;
 }
 
 // SIGTERM and wait for a clean exit — the path that flushes the journal.

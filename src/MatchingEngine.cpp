@@ -29,7 +29,7 @@ namespace OrderMatcher {
 namespace {
 
 // PROTO-1: every enum an order carries is range-checked here, where every
-// ingress meets — TcpGateway, admin, OUCH, SBE, FIX, in-process callers and
+// ingress meets — TcpGateway, admin, in-process callers and
 // the async queue behind them. In the gateway alone (0.13) the rest handed a
 // side of 2 to the book, which rested it in the asks, and an orderType past
 // LOC rested as a limit. Bounded by the LAST enumerator of each type in
@@ -53,7 +53,7 @@ inline void cpuRelax() {
 
 // Sequence ids for SubmitResult. They must be UNIQUE and must INCREASE for a
 // given caller; nothing consumes a dense global order — the gateway echoes the
-// id straight back to the client (GatewayProtocol.h:234) and AdminServer prints
+// id straight back to the client (GatewayResponse.sequenceId) and AdminServer prints
 // it. This used to be one engine-wide fetch_add on the submit path, contended
 // by every producer on every order.
 //
@@ -162,6 +162,91 @@ void lowerCurrentThreadPriority() {
 
 MatchingEngine::MatchingEngine() {
     ensureDefaultSymbol();
+    killSwitch_.setHaltFunction([this] { syncKillSwitchHalts(); });
+    killSwitch_.setChangeFunction([this] { journalGraduatedKill(); });
+}
+
+// Book before journal, as a checkpoint takes them. A record appended to a
+// halted journal is refused and the change stays in memory only.
+void MatchingEngine::journalGraduatedKill() {
+    std::lock_guard<std::mutex> books(bookMutex_);   // killHalted_
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (!journal_) return;
+    writeGraduatedKill(*journal_, killSwitch_.persistentState(), killHalted_);
+    journal_->flush();
+}
+
+void MatchingEngine::writeGraduatedKill(Journal& journal,
+                                        const GraduatedKillSwitch::PersistentState& state,
+                                        const std::vector<SymbolId>& switchHalted) {
+    journal.logGraduatedKill(GraduatedKillRecord::Begin);
+    for (const auto& [participant, fraction] : state.throttles)
+        journal.logGraduatedKill(GraduatedKillRecord::Throttle, 0, participant, fraction);
+    for (SymbolId s : state.haltedSymbols)
+        journal.logGraduatedKill(GraduatedKillRecord::SymbolHalt, s);
+    if (state.globalHalt) journal.logGraduatedKill(GraduatedKillRecord::GlobalHalt);
+    for (SymbolId s : switchHalted)
+        journal.logGraduatedKill(GraduatedKillRecord::SwitchHaltedBook, s);
+}
+
+// ponytail: each record rebuilds the switch's state, O(records^2) per state
+// written; a handful of throttles and halts at most.
+void MatchingEngine::restoreGraduatedKill(const JournalEntry& e, GraduatedKillRecord kind) {
+    std::lock_guard<std::mutex> books(bookMutex_);
+    GraduatedKillSwitch::PersistentState state = killSwitch_.persistentState();
+    // By value: JournalEntry is packed, so a reference to one of its fields
+    // (bit_cast's and push_back's parameters) is a misaligned reference.
+    const Price rateBits = e.price;
+    const SymbolId symbol = e.symbolId;
+    switch (kind) {
+    case GraduatedKillRecord::Begin:
+        state = {};
+        killHalted_.clear();
+        break;
+    case GraduatedKillRecord::Throttle:
+        state.throttles.emplace_back(static_cast<ParticipantId>(e.minQty),
+                                     std::bit_cast<double>(rateBits));
+        break;
+    case GraduatedKillRecord::SymbolHalt:
+        state.haltedSymbols.push_back(symbol);
+        break;
+    case GraduatedKillRecord::GlobalHalt:
+        state.globalHalt = true;
+        break;
+    case GraduatedKillRecord::SwitchHaltedBook:
+        killHalted_.push_back(symbol);
+        break;
+    }
+    killSwitch_.restoreState(state);
+}
+
+// GW-9: make the books say what the graduated kill switch says. A book it
+// halts goes to Halted — journaled, on its worker — and one it no longer halts,
+// that it halted, goes back to the state it left. A book halted for any other
+// reason is left alone either way. Control plane: waits for the workers.
+void MatchingEngine::syncKillSwitchHalts() {
+    std::vector<SymbolId> toHalt;
+    std::vector<std::pair<SymbolId, TradingState>> toResume;
+    {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        for (SymbolId s : symbolIds_) {
+            const OrderBook* book = getOrderBook(s);
+            if (!book) continue;
+            const auto mine = std::find(killHalted_.begin(), killHalted_.end(), s);
+            if (killSwitch_.isSymbolHalted(s)) {
+                if (mine == killHalted_.end() &&
+                    book->getTradingState() != TradingState::Halted) {
+                    toHalt.push_back(s);
+                    killHalted_.push_back(s);
+                }
+            } else if (mine != killHalted_.end()) {
+                toResume.emplace_back(s, book->preHaltState());
+                killHalted_.erase(mine);
+            }
+        }
+    }
+    if (!toHalt.empty()) (void)setTradingStateBatch(toHalt, TradingState::Halted);
+    for (const auto& [s, state] : toResume) (void)setTradingStateBatch({s}, state);
 }
 
 MatchingEngine::~MatchingEngine() {
@@ -203,9 +288,6 @@ bool MatchingEngine::pushWithBackpressure(size_t threadIndex, const OrderRequest
             bpThresholdFraction_ * requestQueues_[threadIndex]->capacity());
         if (requestQueues_[threadIndex]->approxSize() >= maxDepth) {
             bpRejectCount_.fetch_add(1, std::memory_order_relaxed);
-            if (backpressureCb_) {
-                backpressureCb_(req);
-            }
             return false;
         }
     }
@@ -221,9 +303,6 @@ bool MatchingEngine::pushWithBackpressure(size_t threadIndex, const OrderRequest
     }
 
     droppedCount_.fetch_add(1, std::memory_order_relaxed);
-    if (backpressureCb_) {
-        backpressureCb_(req);
-    }
     return false;
 }
 
@@ -308,6 +387,8 @@ size_t MatchingEngine::sweepAndVerify(ParticipantId pid) {
     // switch; the retry exists so a participant kill racing an in-flight submit
     // still converges, and so the guarantee is VERIFIED rather than asserted.
     constexpr int kMaxSweeps = 3;
+    // Halted, the workers refuse the sweep (JOURNAL-6): nothing to retry.
+    if (journalHalted()) return countResting(pid);
     size_t survivors = 0;
     for (int attempt = 0; attempt < kMaxSweeps; ++attempt) {
         OrderRequest req{};
@@ -440,6 +521,10 @@ void MatchingEngine::startAsync(size_t numThreads, size_t queueSize) {
     if (async_) {
         return;
     }
+    // The gate captures one in-flight request on the caller's thread and the
+    // async ack is given at enqueue; enableDurableClientAcks refuses async for
+    // that reason, so an earlier enable does not survive into it (DA-6).
+    if (durabilityGate_.enabled()) enableDurableClientAcks(false);
     // First, so a bad worker_cores list throws before anything is started.
     const size_t workers = numThreads > 0 ? numThreads : 1;
     std::vector<int> workerCpus = workerCpusFor(workers, workerCores_);
@@ -560,17 +645,11 @@ void MatchingEngine::installCapacityCallbacks() {
         });
     }
 
-    // Deliberately NOT installed, both blocked on a decision this code cannot
-    // make:
-    //   * memory — CapacityThresholds.memoryUsagePct is a fraction of a
-    //     limit, and no limit exists anywhere in the config or the code. RSS
-    //     over total host RAM is not it (the engine shares the host); the
-    //     real ceiling is the container/cgroup limit the deployment sets.
-    //   * replication lag — the ReplicationCoordinator is owned by main.cpp
-    //     and constructed after startAsync(), so there is nothing to read
-    //     here, and installing the callback later would race the running
-    //     monitor thread. Moving coordinator setup ahead of startAsync() is
-    //     the fix, and it is a change to startup ordering, not to this.
+    // Deliberately NOT installed, blocked on a decision this code cannot make:
+    // memory — CapacityThresholds.memoryUsagePct is a fraction of a limit, and
+    // no limit exists anywhere in the config or the code. RSS over total host
+    // RAM is not it (the engine shares the host); the real ceiling is the
+    // container/cgroup limit the deployment sets.
 }
 
 void MatchingEngine::startExpiryTimer(uint64_t intervalMs) {
@@ -780,6 +859,7 @@ void MatchingEngine::workerLoop(size_t threadIndex) {
             }
 
             processRequest(threadIndex, req);
+            if (stepEndHook_) stepEndHook_(threadIndex);
             if (req.ingressTsc != 0) {
                 // Stamp end with the same cheap counter, then convert the tick
                 // delta to ns ONCE here (metrics write, off the matching path).
@@ -938,8 +1018,17 @@ void MatchingEngine::leaseSequenceIds(uint64_t through) {
 void MatchingEngine::restoreCounters(OrderBook* book, const JournalEntry& e) {
     if (book && e.orderId != 0) {
         book->restoreNextTradeId(e.orderId);
+        book->restoreNextArrival(countersNextArrival(e));
+        if (Price minPrice = 0; countersAnchoredRange(e, minPrice))
+            book->restoreAnchoredRange(minPrice);
+        if (uint64_t start = 0; countersVolatilityClock(e, start))
+            book->restoreVolatilityClock(start);
         book->restorePrices({e.price, e.newPrice, e.newQty});
     }
+    // The flag only: the sweep's cancels are journaled records of their own.
+    if (bool engaged = false; countersKillSwitch(e, engaged))
+        killSwitchActive_.store(engaged, std::memory_order_release);
+    if (GraduatedKillRecord kind{}; countersGraduatedKill(e, kind)) restoreGraduatedKill(e, kind);
     if (e.quantity == 0) return;
     uint64_t cur = sequenceLease_.load(std::memory_order_relaxed);
     while (cur < e.quantity &&
@@ -1000,7 +1089,26 @@ void MatchingEngine::holdForCut() {
     --workersAtCut_;
 }
 
+// The write-ahead a request hands its book (OrderBook::RecordFn): append under
+// journalMutex_ (bookLock_ -> journalMutex_, the documented order), report the
+// append ordinal, and say whether the record stands. A halted journal, or an
+// append that halts it, refuses the request.
+template <typename Append>
+bool MatchingEngine::appendFirst(Append&& append, uint64_t& appendOrdinal) {
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    if (journal_->halted()) return false;
+    append(*journal_);
+    appendOrdinal = journal_->entriesAppended();
+    return !journal_->halted();
+}
+
 void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req) {
+    // A halted journal writes nothing more, so nothing may move a book either:
+    // a cancel, modify, replace, kill, session change or expiry queued before
+    // the halt (or posted by the timer after it) would change the live book
+    // with no record, and a restart would undo it (JOURNAL-6, DA-1). A new
+    // order is refused below, where its client hears JournalHalted.
+    if (req.type != OrderRequest::Type::NewOrder && journalHalted()) [[unlikely]] return;
     switch (req.type) {
     case OrderRequest::Type::NewOrder: {
         auto* book = getOrderBook(req.symbolId);
@@ -1017,22 +1125,47 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         // an engaged kill switch" true rather than merely likely.
         if (killSwitchActive_.load(std::memory_order_acquire)) [[unlikely]] {
             killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+            releaseWorking(req.participantId, req.side, req.qty);
+            book->emitReject(req.orderId, req.qty, RejectReason::KillSwitchActive);
+            break;
+        }
+        // GW-9, the same way: a halt or a participant kill since the submit.
+        if (killSwitch_.engaged() && killSwitch_.blocks(req.symbolId, req.participantId))
+            [[unlikely]] {
+            killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+            releaseWorking(req.participantId, req.side, req.qty);
             book->emitReject(req.orderId, req.qty, RejectReason::KillSwitchActive);
             break;
         }
         // D4, the same way: an order queued before the journal halted must
         // not match now. It could never be made durable.
         if (journalHalted()) [[unlikely]] {
+            releaseWorking(req.participantId, req.side, req.qty);
             book->emitReject(req.orderId, req.qty, RejectReason::JournalHalted);
             break;
         }
 
-        // Hierarchical pre-trade risk gate (no-op unless configured). Market
-        // orders have no limit price, so they skip the fat-finger reference
-        // check (pass 0); limit-priced orders use the book mid as an NBBO
-        // proxy. Reading book state here is safe — one writer per book.
-        if (!preTradeRiskCheck(req.participantId, req.side, req.price, req.qty,
-                               req.orderType == OrderType::Market ? 0 : book->getMidPrice())) {
+        if (const RejectReason rr = checkBookValuedNotional(
+                *book, req.symbolId, req.participantId, req.side, req.orderType, req.price,
+                req.qty, req.stopPrice, req.stopLimitPrice, req.trailAmount);
+            rr != RejectReason::None) [[unlikely]] {
+            releaseWorking(req.participantId, req.side, req.qty);
+            book->emitReject(req.orderId, req.qty, rr);
+            break;
+        }
+
+        // Hierarchical pre-trade risk gate (no-op unless configured). A Market
+        // or stop order is valued at the price it can reach (STP-12); Market
+        // orders skip the band (0), the rest measure from the mid. This thread
+        // owns the book, so no lock.
+        if (!preTradeRiskCheck(req.participantId, req.side,
+                               book->notionalPrice(req.side, req.orderType, req.price,
+                                                   req.stopPrice, req.stopLimitPrice,
+                                                   req.trailAmount),
+                               req.qty,
+                               req.orderType == OrderType::Market ? 0 : book->getMidPrice(),
+                               req.qty)) {
+            releaseWorking(req.participantId, req.side, req.qty);
             book->emitReject(req.orderId, req.qty, RejectReason::RiskLimitBreached);
             break;
         }
@@ -1044,22 +1177,21 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
                                                req.expiryTime, req.stopLimitPrice,
                                                req.pegType, req.pegOffset, req.trailAmount,
                                                req.minQty, req.hidden);
-        // P2-9: reserve the resting remainder as working exposure (see the
-        // sync path in submitOrder for the double-count rationale).
-        if (positionLimitsActive_.load(std::memory_order_relaxed) &&
-            std::holds_alternative<OrderId>(result)) {
-            const Order* o = book->getOrder(req.orderId);
-            reservePosition(req.participantId, req.side, o ? o->remainingQty : 0);
+        // Refused: no order lives, nothing traded. Admitted, the book answers
+        // for the reservation from here.
+        if (!std::holds_alternative<OrderId>(result)) {
+            releaseWorking(req.participantId, req.side, req.qty);
+            releaseHierarchical(req.participantId, req.side, req.qty);
         }
         if (journal_ && std::holds_alternative<OrderId>(result)) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
                 journal_->logAddOrder(req.orderId, req.participantId, req.symbolId, req.side,
                                       req.price, req.qty, req.orderType, req.tif,
                                       req.expiryTime, req.stopPrice, req.stopLimitPrice,
                                       req.displayQty, req.pegType, req.pegOffset,
                                       req.trailAmount, req.minQty, req.hidden);
+                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
             }
             maybeTriggerAutoCheckpoint();
         }
@@ -1076,44 +1208,36 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
     }
     case OrderRequest::Type::Cancel: {
         auto* book = getOrderBook(req.symbolId);
-        if (!book || !book->getOrder(req.orderId)) {
+        if (!book) {
             return;
         }
-        // P2-9: release working exposure before the order leaves the book.
-        // H1: read the exposure inside cancelOrderReleasing's own critical
-        // section. The previous form dereferenced an UNLOCKED getOrder()
-        // pointer into orderPool_, with no guarantee the order was still
-        // alive — a concurrent fill or a shutdown sweep frees that slot.
+        // This worker owns the book, so what getOrder finds here is what the
+        // cancel below acts on.
+        const Order* order = book->getOrder(req.orderId);
+        if (!order) {
+            reportAmendOutcome(*book, req.orderId, RejectReason::OrderNotFound);
+            return;
+        }
         // req.participantId is the requester here, not the order's owner: for
         // a Cancel it is whoever asked, and kAnyParticipant when the caller is
-        // internal. A denied cancel must not journal or release exposure, so
-        // bail before either.
-        const auto exposure =
-            book->cancelOrderReleasing(req.orderId, req.participantId);
-        if (exposure.denied) [[unlikely]] {
+        // internal. A denied cancel must not journal, so bail first.
+        if (req.participantId != kAnyParticipant &&
+            order->participantId != req.participantId) [[unlikely]] {
             obSink().log(obEvent("cancel_denied_not_owner", LogSeverity::Warn)
                              .kv("order_id",  (unsigned long long)req.orderId)
                              .kv("symbol_id", (long long)req.symbolId)
                              .kv("requester", (unsigned long long)req.participantId));
+            reportAmendOutcome(*book, req.orderId, RejectReason::NotOrderOwner);
             return;
         }
-        if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-            releasePosition(exposure);
-        }
-        if (journal_) {
-            {
-                std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelOrder(req.orderId, req.symbolId);
-            }
-            maybeTriggerAutoCheckpoint();
-        }
+        // Recorded before it is applied: a cancel whose record the disk
+        // refuses leaves the order resting, as a restart will find it.
+        uint64_t unused = 0;
+        if (!cancelJournaledFirst(*book, req.orderId, unused)) return;
+        if (journal_) maybeTriggerAutoCheckpoint();
         if (catActive_.load(std::memory_order_relaxed)) {
             std::lock_guard<std::mutex> lock(catMutex_);
             catReporter_.recordCancel(nowNs(), req.orderId);
-        }
-        if (ocoActive_.load(std::memory_order_relaxed)) {
-            std::lock_guard<std::mutex> lock(contingencyMutex_);
-            contingency_.onCanceled(req.orderId);   // user-cancelled leg leaves its group
         }
         if (ocoActive_.load(std::memory_order_relaxed) ||
             observersActive_.load(std::memory_order_relaxed)) {
@@ -1126,13 +1250,20 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
-        if (book->modifyOrder(req.orderId, req.newQty, req.participantId) && journal_) {
-            {
-                std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logModifyOrder(req.orderId, req.symbolId, req.newQty);
-            }
+        RejectReason refused = RejectReason::None;
+        // Recorded before it is applied, as the cancel: the book calls this
+        // once it has decided to apply, and a refused record leaves it as it was.
+        uint64_t unused = 0;
+        auto append = [&] {
+            return appendFirst([&](Journal& j) {
+                j.logModifyOrder(req.orderId, req.symbolId, req.newQty);
+            }, unused);
+        };
+        const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+        if (book->modifyOrder(req.orderId, req.newQty, refused, req.participantId, record) &&
+            journal_)
             maybeTriggerAutoCheckpoint();
-        }
+        reportAmendOutcome(*book, req.orderId, refused);
         break;
     }
     case OrderRequest::Type::CancelReplace: {
@@ -1140,14 +1271,26 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         if (!book) {
             return;
         }
-        if (book->cancelReplace(req.orderId, req.newPrice, req.newQty,
-                                req.participantId) && journal_) {
+        const TradingState stateBefore = book->getTradingState();
+        RejectReason refused = RejectReason::None;
+        uint64_t unused = 0;
+        auto append = [&] {
+            return appendFirst([&](Journal& j) {
+                j.logCancelReplace(req.orderId, req.symbolId, req.newPrice, req.newQty);
+            }, unused);
+        };
+        const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+        if (book->cancelReplace(req.orderId, req.newPrice, req.newQty, refused,
+                                req.participantId, record) && journal_) {
             {
                 std::lock_guard<std::mutex> lock(journalMutex_);
-                journal_->logCancelReplace(req.orderId, req.symbolId, req.newPrice, req.newQty);
+                logBreakerTrip(req.symbolId, stateBefore, book->getTradingState());
             }
             maybeTriggerAutoCheckpoint();
         }
+        // A replace that took effect was restated by the book, before its own
+        // sweep, so its fills count from the new leaves. Refusals are told here.
+        if (refused != RejectReason::None) reportAmendOutcome(*book, req.orderId, refused);
         // A repriced order matches as an aggressor: its OCO group and the
         // trade-driven consumers see those fills like any other (GTS-4).
         if (ocoActive_.load(std::memory_order_relaxed) ||
@@ -1176,21 +1319,9 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
             book->forEachOrder([&](const Order& o) {
                 if (everyone || o.participantId == req.participantId) ids.push_back(o.id);
             });
-            for (OrderId id : ids) {
-                // H1: read the exposure inside cancelOrderReleasing's own critical
-                // section. The previous form dereferenced an UNLOCKED getOrder()
-                // pointer into orderPool_, with no guarantee the order was still
-                // alive — a concurrent fill or a shutdown sweep frees that slot.
-                if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                    releasePosition(book->cancelOrderReleasing(id));
-                } else {
-                    book->cancelOrder(id);
-                }
-                if (journal_) {
-                    std::lock_guard<std::mutex> lock(journalMutex_);
-                    journal_->logCancelOrder(id, book->getSymbolId());
-                }
-            }
+            uint64_t unused = 0;
+            for (OrderId id : ids)
+                if (!cancelJournaledFirst(*book, id, unused)) return;
         }
         break;
     }
@@ -1205,6 +1336,7 @@ void MatchingEngine::processRequest(size_t threadIndex, const OrderRequest& req)
         // Built inside the loop: the callback receives only an OrderId, so
         // the symbol has to be captured per book rather than hoisted.
         for (SymbolId symbolId : symbolsByThread_[threadIndex]) {
+            if (journalHalted()) [[unlikely]] return;   // halted by a book before this one
             std::function<void(OrderId)> onExpire;
             if (journal_) {
                 onExpire = [this, symbolId](OrderId id) {
@@ -1235,7 +1367,7 @@ void MatchingEngine::addSymbol(SymbolId symbolId, MatchAlgorithm algo) {
     // Public entry point: take bookMutex_, then delegate the mutation. Every
     // books_/symbolIds_/ocoListeners_ mutation runs under bookMutex_ so it
     // cannot rehash the FlatHashMap (freeing the bucket array) underneath a
-    // concurrent off-hot-path reader (snapshot/checkpoint/replication apply)
+    // concurrent off-hot-path reader (snapshot/checkpoint)
     // iterating symbolIds_ or calling getOrderBook().
     std::lock_guard<std::mutex> lock(bookMutex_);
     addSymbolLocked(symbolId, algo);
@@ -1251,7 +1383,7 @@ void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
     symbolIds_.push_back(symbolId);
 
     // Install the per-book OCO observer (separate from the user listener
-    // slot, so gateway/OUCH market-data listeners are untouched). It only
+    // slot, so market-data listeners are untouched). It only
     // buffers while OCO is active, so this is free until an OCO is registered.
     auto oco = std::make_unique<OcoBookListener>();
     oco->engine = this;
@@ -1265,7 +1397,16 @@ void MatchingEngine::addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo) {
     oco->trades.reserve(kOcoBufferReserve);
     oco->firedScratch.reserve(kOcoBufferReserve);
     oco->tradesScratch.reserve(kOcoBufferReserve);
-    if (auto* bk = getOrderBook(symbolId)) bk->setEngineListener(oco.get());
+    if (auto* bk = getOrderBook(symbolId)) {
+        bk->setEngineListener(oco.get());
+        // THR-10: a book cancels an expired maker its match meets, on the
+        // sweep's clock, journaled as the sweep journals one.
+        bk->setExpiryHooks([this] { return expiryNow(); },
+                           [this, symbolId](OrderId id) {
+                               std::lock_guard<std::mutex> lock(journalMutex_);
+                               if (journal_) journal_->logCancelOrder(id, symbolId);
+                           });
+    }
     ocoListeners_.insert(symbolId, std::move(oco));
 
     rebuildThreadSymbolIndex();
@@ -1277,8 +1418,18 @@ void MatchingEngine::OcoBookListener::onOrderUpdate(const OrderUpdate& u) {
     // execution of any leg wins. Keyed on executed quantity, not status: an
     // order cut short after real fills ends Cancelled / CancelledBySTP with
     // filledQty > 0 (GTDIFF-4), and a zero-fill STP kill still cannot win (C1).
-    if (ocoActive && ocoActive->load(std::memory_order_relaxed) && u.filledQty > 0) {
+    if (!ocoActive || !ocoActive->load(std::memory_order_relaxed)) return;
+    if (u.filledQty > 0) {
+        std::lock_guard<std::mutex> lock(executedMutex);
         executed.push_back(u.orderId);
+    } else if (u.status == OrderStatus::Cancelled || u.status == OrderStatus::CancelledBySTP) {
+        // A leg leaving unfilled ends its link here, not at the next drain: a
+        // caller-thread sweep (session end, kill switch) and an expiry are
+        // followed by no drain, and the ids may be linked again before one
+        // comes. Not Rejected: a refused duplicate carries the live order's
+        // id. contingencyMutex_ is a leaf lock, safe under the book's.
+        std::lock_guard<std::mutex> lock(engine->contingencyMutex_);
+        oco.onCanceled(u.orderId);
     }
 }
 
@@ -1296,9 +1447,11 @@ void MatchingEngine::OcoBookListener::onTrade(const Trade& t) {
     }
 }
 
-void MatchingEngine::registerOco(SymbolId /*symbolId*/, OrderId a, OrderId b) {
+void MatchingEngine::registerOco(SymbolId symbolId, OrderId a, OrderId b) {
+    auto* lp = ocoListeners_.find(symbolId);
+    if (!lp || !*lp) return;  // no such symbol: nothing to link
     std::lock_guard<std::mutex> lock(contingencyMutex_);
-    contingency_.registerOco(a, b);
+    (*lp)->oco.registerOco(a, b);
     ocoActive_.store(true, std::memory_order_relaxed);
 }
 
@@ -1309,25 +1462,28 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
 
     // (1) OCO: cancel the siblings of any leg that executed. Drain first so
     // the cancels below (which re-enter the observer with Cancelled updates,
-    // ignored) cannot grow the buffer mid-iteration.
-    if (!obs->executed.empty()) {
+    // drained next time as no-ops) cannot grow the buffer mid-iteration.
+    // Events exist only once OCO is active, and it never turns back off.
+    if (ocoActive_.load(std::memory_order_relaxed)) {
         // Swap into the persistent scratch (so a re-entrant push during the
         // cancels below cannot grow the buffer mid-iteration), then clear it
-        // afterwards to retain its capacity for the next cycle.
-        obs->firedScratch.swap(obs->executed);
-        for (OrderId id : obs->firedScratch) {
+        // afterwards to retain its capacity for the next cycle. Under the
+        // buffer's lock: a caller-thread sweep may be appending right now.
+        {
+            std::lock_guard<std::mutex> lock(obs->executedMutex);
+            obs->firedScratch.swap(obs->executed);
+        }
+        for (const OrderId id : obs->firedScratch) {
             std::vector<OrderId> siblings;
             {
                 std::lock_guard<std::mutex> lock(contingencyMutex_);
-                siblings = contingency_.onExecuted(id);
+                siblings = obs->oco.onExecuted(id);
             }
+            uint64_t unused = 0;
             for (OrderId sib : siblings) {
                 if (!book->getOrder(sib)) continue;   // already gone
-                book->cancelOrder(sib);
-                if (journal_) {
-                    std::lock_guard<std::mutex> jl(journalMutex_);
-                    journal_->logCancelOrder(sib, book->getSymbolId());  // replay reproduces the OCO cancel
-                }
+                // Journaled, so replay reproduces the OCO cancel.
+                if (!cancelJournaledFirst(*book, sib, unused)) break;
             }
         }
         obs->firedScratch.clear();   // retain capacity for the next drain cycle
@@ -1346,8 +1502,11 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
             }
             if (riskActive_.load(std::memory_order_relaxed)) {
                 std::lock_guard<std::mutex> lock(riskMutex_);
+                // Out of each side's working quantity, into its position.
                 riskManager_.onFill(t.buyerId, Side::Buy, t.price, t.quantity);
+                riskManager_.release(t.buyerId, Side::Buy, t.quantity);
                 riskManager_.onFill(t.sellerId, Side::Sell, t.price, t.quantity);
+                riskManager_.release(t.sellerId, Side::Sell, t.quantity);
             }
             if (catActive_.load(std::memory_order_relaxed)) {
                 std::lock_guard<std::mutex> lock(catMutex_);
@@ -1360,10 +1519,73 @@ void MatchingEngine::driveOco(SymbolId symbolId, OrderBook* book) {
 }
 
 bool MatchingEngine::preTradeRiskCheck(ParticipantId trader, Side side, Price price,
-                                       Quantity qty, Price referencePrice) {
+                                       Quantity qty, Price referencePrice, Quantity reserve) {
     if (!riskActive_.load(std::memory_order_relaxed)) return true;
     std::lock_guard<std::mutex> lock(riskMutex_);
-    return riskManager_.check(trader, side, price, qty, referencePrice).allowed;
+    return riskManager_.checkAndReserve(trader, side, price, qty, referencePrice, reserve)
+        .allowed;
+}
+
+void MatchingEngine::releaseHierarchical(ParticipantId pid, Side side, Quantity qty) {
+    if (!riskActive_.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(riskMutex_);
+    riskManager_.release(pid, side, qty);
+}
+
+// ponytail: the observer's buffers have one drainer per book; the sync path
+// gets that from its caller (one event loop in the gateway). Concurrent sync
+// callers on one book with OCO, fees, CAT or hierarchical risk on would need
+// the swap in driveOco under the book lock and per-call scratch buffers.
+uint64_t MatchingEngine::driveOcoSync(SymbolId symbolId, OrderBook* book,
+                                      uint64_t appendOrdinal) {
+    if (!ocoActive_.load(std::memory_order_relaxed) &&
+        !observersActive_.load(std::memory_order_relaxed))
+        return appendOrdinal;
+    driveOco(symbolId, book);
+    if (!journal_ || appendOrdinal == 0) return appendOrdinal;
+    std::lock_guard<std::mutex> lock(journalMutex_);
+    return journal_->entriesAppended();
+}
+
+// Record first, as the expiry sweep does: an entry the disk refuses halts the
+// journal, and then this cancel never happens, so a sweep stops at the halt
+// with the book still matching the disk (DA-1). Applied first, the order was
+// gone from memory and back after a restart.
+void MatchingEngine::reportAmendOutcome(OrderBook& book, OrderId id, RejectReason refused) {
+#ifndef OB_LEAN_MODE
+    EventListener* listener = book.eventListener();
+    if (!listener) return;
+    const Order* order = book.getOrder(id);
+    OrderUpdate u{};
+    u.orderId = id;
+    u.rejectReason = refused;
+    u.timestamp = nowNs();
+    // Another participant's order is not described to the requester.
+    if (order && refused != RejectReason::NotOrderOwner) {
+        u.status = order->status;
+        u.filledQty = order->cumQty;
+        u.remainingQty = order->remainingQty;
+    } else if (refused == RejectReason::None) {
+        return;   // took effect and the order is gone: the book said Filled/Cancelled
+    } else {
+        u.status = OrderStatus::Rejected;
+    }
+    listener->onOrderUpdate(u);
+#else
+    (void)book; (void)id; (void)refused;
+#endif
+}
+
+bool MatchingEngine::cancelJournaledFirst(OrderBook& book, OrderId id, uint64_t& appendOrdinal) {
+    if (journal_) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        if (journal_->halted()) return false;
+        journal_->logCancelOrder(id, book.getSymbolId());
+        appendOrdinal = journal_->entriesAppended();
+        if (journal_->halted()) return false;
+    }
+    book.cancelOrder(id);  // its working quantity goes back in the book
+    return true;
 }
 
 // ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ────────────────────────
@@ -1395,6 +1617,11 @@ void MatchingEngine::setKillSwitch(bool engaged) {
     // Deactivation (engaged == false) only clears the flag; it does not resurrect
     // cancelled orders.
     killSwitchActive_.store(engaged, std::memory_order_release);
+    if (journal_) {   // so a restart does not release it (JOURNAL-5)
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->logKillSwitch(engaged);
+        journal_->flush();
+    }
     if (!engaged) return;
 
     if (async_) {
@@ -1428,22 +1655,9 @@ uint64_t MatchingEngine::cancelAllRestingOrders(ParticipantId pid) {
         book->forEachOrderLocked([&](const Order& o) {
             if (everyone || o.participantId == pid) ids.push_back(o.id);
         });
-        cancelled += ids.size();
         for (OrderId id : ids) {
-            // H1: read the exposure inside cancelOrderReleasing's own critical
-            // section. The previous form dereferenced an UNLOCKED getOrder()
-            // pointer into orderPool_, with no guarantee the order was still
-            // alive — a concurrent fill or a shutdown sweep frees that slot.
-            if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                releasePosition(book->cancelOrderReleasing(id));
-            } else {
-                book->cancelOrder(id);
-            }
-            if (journal_) {
-                std::lock_guard<std::mutex> jl(journalMutex_);
-                journal_->logCancelOrder(id, book->getSymbolId());
-                appendOrdinal = journal_->entriesAppended();
-            }
+            if (!cancelJournaledFirst(*book, id, appendOrdinal)) break;
+            ++cancelled;
         }
     }
     holdUntilDurable(appendOrdinal);
@@ -1489,20 +1703,7 @@ size_t MatchingEngine::cancelDayOrders(const std::vector<SymbolId>& symbols) {
             if (o.timeInForce == TimeInForce::DAY) dayIds.push_back(o.id);
         });
         for (OrderId id : dayIds) {
-            // H1: read the exposure inside cancelOrderReleasing's own critical
-            // section. The previous form dereferenced an UNLOCKED getOrder()
-            // pointer into orderPool_, with no guarantee the order was still
-            // alive — a concurrent fill or a shutdown sweep frees that slot.
-            if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-                releasePosition(book->cancelOrderReleasing(id));
-            } else {
-                book->cancelOrder(id);
-            }
-            if (journal_) {
-                std::lock_guard<std::mutex> jl(journalMutex_);
-                journal_->logCancelOrder(id, book->getSymbolId());
-                appendOrdinal = journal_->entriesAppended();
-            }
+            if (!cancelJournaledFirst(*book, id, appendOrdinal)) break;
             ++cancelled;
             // "log at session end" — durable, per-order audit line.
             obSink().log(obEvent("day_order_cancelled_at_shutdown")
@@ -1571,32 +1772,78 @@ MatchingEngine::ShutdownReport MatchingEngine::gracefulShutdown(bool cancelDayOr
 void MatchingEngine::setPositionLimit(ParticipantId pid, int64_t maxAbsPosition) {
     if (pid >= MAX_PARTICIPANTS) return;
     positionLimit_[pid].store(maxAbsPosition, std::memory_order_relaxed);
-    positionLimitsActive_.store(true, std::memory_order_relaxed);
     anyRiskActive_.store(true, std::memory_order_relaxed);
+    // The first limit: orders already resting reserved nothing, so count them
+    // or their removal would release what was never held.
+    if (!positionLimitsActive_.exchange(true, std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        rebuildPositionsLocked();
+    }
 }
 
 int64_t MatchingEngine::getPosition(ParticipantId pid) const {
     if (pid >= MAX_PARTICIPANTS) return 0;
-    return positions_[pid].load(std::memory_order_relaxed);
+    return filled_[pid].load(std::memory_order_relaxed) +
+           working_[pid][sideIndex(Side::Buy)].load(std::memory_order_relaxed) -
+           working_[pid][sideIndex(Side::Sell)].load(std::memory_order_relaxed);
 }
 
-void MatchingEngine::reservePosition(ParticipantId pid, Side side, Quantity restingQty) {
-    if (pid >= MAX_PARTICIPANTS || restingQty == 0) return;
-    int64_t signedRest = (side == Side::Buy) ? static_cast<int64_t>(restingQty)
-                                             : -static_cast<int64_t>(restingQty);
-    positions_[pid].fetch_add(signedRest, std::memory_order_relaxed);
+int64_t MatchingEngine::getWorkingQty(ParticipantId pid, Side side) const {
+    if (pid >= MAX_PARTICIPANTS) return 0;
+    return working_[pid][sideIndex(side)].load(std::memory_order_relaxed);
 }
 
-void MatchingEngine::releasePosition(const OrderBook::OrderExposure& e) {
-    if (!e.found || e.participantId >= MAX_PARTICIPANTS || e.remainingQty == 0) return;
-    int64_t signedRest = (e.side == Side::Buy) ? static_cast<int64_t>(e.remainingQty)
-                                               : -static_cast<int64_t>(e.remainingQty);
-    positions_[e.participantId].fetch_sub(signedRest, std::memory_order_relaxed);
+int64_t MatchingEngine::getFilledPosition(ParticipantId pid) const {
+    if (pid >= MAX_PARTICIPANTS) return 0;
+    return filled_[pid].load(std::memory_order_relaxed);
 }
+
+// The limit bounds what this side could reach: working on it plus the filled
+// position in its direction. Checking and adding are one step, because a check
+// followed by a later add let every concurrent admission pass against the same
+// figure before any of them booked (THR-3); on the async path the add came a
+// whole queue later.
+//
+// Read order against settleFill, which moves a fill to `filled_` first and takes
+// it off `working_` second, with release: an acquire of working_ that sees the
+// decrement also sees the filled position it became. A read that misses the
+// decrement sees the fill at most twice, which refuses too much, never too
+// little; and a decrement between the read and the CAS fails the CAS.
+bool MatchingEngine::tryReserveWorking(ParticipantId pid, Side side, Quantity qty) {
+    std::atomic<int64_t>& working = working_[pid][sideIndex(side)];
+    const int64_t limit = positionLimit_[pid].load(std::memory_order_relaxed);
+    int64_t current = working.load(std::memory_order_acquire);
+    for (;;) {
+        const __int128 filled = filled_[pid].load(std::memory_order_relaxed);
+        const __int128 reach = current + (side == Side::Buy ? filled : -filled) + qty;
+        if (limit > 0 && reach > limit) return false;
+        if (working.compare_exchange_weak(current, current + static_cast<int64_t>(qty),
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+            return true;
+    }
+}
+
+void MatchingEngine::releaseWorking(ParticipantId pid, Side side, Quantity qty) {
+    if (!positionLimitsActive_.load(std::memory_order_relaxed) || pid >= MAX_PARTICIPANTS) return;
+    working_[pid][sideIndex(side)].fetch_sub(static_cast<int64_t>(qty), std::memory_order_release);
+}
+
+void MatchingEngine::settleFill(ParticipantId pid, Side side, Quantity qty) {
+    if (pid >= MAX_PARTICIPANTS) return;
+    const int64_t q = static_cast<int64_t>(qty);
+    filled_[pid].fetch_add(side == Side::Buy ? q : -q, std::memory_order_relaxed);
+    working_[pid][sideIndex(side)].fetch_sub(q, std::memory_order_release);
+}
+
 
 void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
                                         double maxDeviationPct, int64_t maxNotional) {
-    if (sym >= MAX_RISK_SYMBOLS) return;
+    // MIDS-12: a limit with nowhere to live used to be dropped silently, so
+    // the symbol traded unchecked. Configuration-time, so it may throw.
+    if (sym >= MAX_RISK_SYMBOLS)
+        throw std::out_of_range("setFatFingerLimits: symbol id " + std::to_string(sym) +
+                                " >= MAX_RISK_SYMBOLS");
     ffMaxQty_[sym].store(maxQty, std::memory_order_relaxed);
     ffMaxDeviationBps_[sym].store(
         static_cast<int64_t>(maxDeviationPct * 10000.0 + 0.5), std::memory_order_relaxed);
@@ -1606,7 +1853,9 @@ void MatchingEngine::setFatFingerLimits(SymbolId sym, Quantity maxQty,
 }
 
 void MatchingEngine::setReferencePrice(SymbolId sym, Price px) {
-    if (sym >= MAX_RISK_SYMBOLS) return;
+    if (sym >= MAX_RISK_SYMBOLS)
+        throw std::out_of_range("setReferencePrice: symbol id " + std::to_string(sym) +
+                                " >= MAX_RISK_SYMBOLS");
     refPrice_[sym].store(px, std::memory_order_relaxed);
 }
 
@@ -1619,7 +1868,8 @@ void MatchingEngine::setOtrLimit(double maxRatio, uint64_t windowMs, uint64_t mi
 }
 
 RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
-                                               Price price, Quantity qty, OrderType type) {
+                                               Price price, Quantity qty, OrderType type,
+                                               Quantity reserve) {
     // ── P2-10 FAT-FINGER (per instrument) ───────────────────────────────────
     if (fatFingerActive_.load(std::memory_order_relaxed) && sym < MAX_RISK_SYMBOLS) {
         const uint64_t maxQty = ffMaxQty_[sym].load(std::memory_order_relaxed);
@@ -1651,19 +1901,13 @@ RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, 
         }
     }
 
-    // ── P2-9 POSITION LIMIT (per participant, net signed exposure) ──────────
-    if (positionLimitsActive_.load(std::memory_order_relaxed) && pid < MAX_PARTICIPANTS) {
-        const int64_t limit = positionLimit_[pid].load(std::memory_order_relaxed);
-        if (limit > 0) {
-            const int64_t signedQty = (side == Side::Buy) ? static_cast<int64_t>(qty)
-                                                          : -static_cast<int64_t>(qty);
-            const int64_t projected = positions_[pid].load(std::memory_order_relaxed) + signedQty;
-            if (projected > limit || projected < -limit) {
-                positionRejects_.fetch_add(1, std::memory_order_relaxed);
-                logRiskReject("position_limit", sym, pid, RejectReason::PositionLimitExceeded);
-                return RejectReason::PositionLimitExceeded;
-            }
-        }
+    // ── P2-9 POSITION LIMIT (per participant, per side, reserved here) ──────
+    const bool reserving = reserve != 0 &&
+        positionLimitsActive_.load(std::memory_order_relaxed) && pid < MAX_PARTICIPANTS;
+    if (reserving && !tryReserveWorking(pid, side, reserve)) {
+        positionRejects_.fetch_add(1, std::memory_order_relaxed);
+        logRiskReject("position_limit", sym, pid, RejectReason::PositionLimitExceeded);
+        return RejectReason::PositionLimitExceeded;
     }
 
     // ── P2-11 ORDER-TO-TRADE RATIO (per participant, rolling window) ────────
@@ -1685,12 +1929,70 @@ RejectReason MatchingEngine::checkRiskControls(SymbolId sym, ParticipantId pid, 
         // Integer form of orders/trades > maxRatio (trades == 0 ⇒ any orders trip).
         if (orders >= otrMinOrders_ &&
             static_cast<double>(orders) > otrMaxRatio_ * static_cast<double>(trades)) {
+            if (reserving) releaseWorking(pid, side, reserve);
             otrRejects_.fetch_add(1, std::memory_order_relaxed);
             logRiskReject("otr", sym, pid, RejectReason::OrderToTradeRatioExceeded);
             return RejectReason::OrderToTradeRatioExceeded;
         }
     }
 
+    return RejectReason::None;
+}
+
+RejectReason MatchingEngine::checkBookValuedNotional(const OrderBook& book, SymbolId sym,
+                                                     ParticipantId pid, Side side, OrderType type,
+                                                     Price price, Quantity qty, Price stopPrice,
+                                                     Price stopLimitPrice, Price trailAmount) {
+    if (!OrderBook::valuedOffTheBook(type) || sym >= MAX_RISK_SYMBOLS ||
+        !fatFingerActive_.load(std::memory_order_relaxed))
+        return RejectReason::None;
+    const int64_t maxNotional = ffMaxNotional_[sym].load(std::memory_order_relaxed);
+    if (maxNotional == 0) return RejectReason::None;
+
+    Price px = book.notionalPrice(side, type, price, stopPrice, stopLimitPrice, trailAmount);
+    if (px == 0) px = refPrice_[sym].load(std::memory_order_relaxed);
+    if (px > 0 && orderNotional(px, qty) <= static_cast<__int128>(maxNotional))
+        return RejectReason::None;
+
+    fatFingerRejects_.fetch_add(1, std::memory_order_relaxed);
+    logRiskReject("fat_finger_notional", sym, pid, RejectReason::FatFingerReject);
+    return RejectReason::FatFingerReject;
+}
+
+// Runs under the book lock, from cancelReplace / modifyOrder once the book's own
+// checks passed. Growth in leaves is reserved like a new order; a shrink is
+// released by the book after this returns None. Kill and halt are I6's.
+RejectReason MatchingEngine::admitAmend(const Order& o, Price newPrice, Quantity newTotal,
+                                        Quantity newLeaves) {
+    const Quantity growth = newLeaves > o.remainingQty ? newLeaves - o.remainingQty : 0;
+    // A shrink at the same price is a partial cancel: it moves no price and
+    // adds no notional, so the band and the notional cap are not asked. The
+    // size cap still is — it may have been tightened since the order arrived.
+    const bool reduceOnly = growth == 0 && newPrice == o.price;
+    // GW-9: anything else is an admission, which a kill switch refuses. Here,
+    // against the order's owner; submitCancelReplace could only ask about the
+    // requester.
+    if (!reduceOnly && (killSwitchActive_.load(std::memory_order_acquire) ||
+                        (killSwitch_.engaged() && killSwitch_.blocks(o.symbolId, o.participantId))))
+        [[unlikely]] {
+        killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+        return RejectReason::KillSwitchActive;
+    }
+    if (!anyRiskActive_.load(std::memory_order_relaxed) &&
+        !riskActive_.load(std::memory_order_relaxed))
+        return RejectReason::None;
+    const Price checkedPrice = reduceOnly ? 0 : newPrice;
+    const RejectReason r = checkRiskControls(o.symbolId, o.participantId, o.side, checkedPrice,
+                                             newTotal, o.type, growth);
+    if (r != RejectReason::None) return r;
+    // The hierarchy too, growth reserved at every tier. The book's lock is
+    // held here, so its mid is read directly.
+    const OrderBook* book = getOrderBook(o.symbolId);
+    const Price mid = (reduceOnly || !book) ? 0 : book->getMidPrice();
+    if (!preTradeRiskCheck(o.participantId, o.side, checkedPrice, newTotal, mid, growth)) {
+        releaseWorking(o.participantId, o.side, growth);
+        return RejectReason::RiskLimitBreached;
+    }
     return RejectReason::None;
 }
 
@@ -1703,18 +2005,13 @@ void MatchingEngine::onRiskFill(const Trade& t) {
         refPrice_[t.symbolId].store(t.price, std::memory_order_relaxed);
     }
 
-    // P2-9: increment the TAKER's position by the filled qty. The maker's
-    // exposure was reserved at its own submit (working) and merely converts to a
-    // filled position here — no net change — so only the taker is accrued,
-    // keeping reserved + filled == full order qty for both sides.
+    // P2-9: both sides reserved at admission, so the taker's fill is no
+    // different from the maker's: working turns into position. Crediting the
+    // taker on top of that counted it twice once a parked or repriced order,
+    // which reserves before it ever aggresses, traded.
     if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-        const ParticipantId taker = (t.aggressorSide == Side::Buy) ? t.buyerId : t.sellerId;
-        const int64_t signedQ = (t.aggressorSide == Side::Buy)
-                                    ? static_cast<int64_t>(t.quantity)
-                                    : -static_cast<int64_t>(t.quantity);
-        if (taker < MAX_PARTICIPANTS) {
-            positions_[taker].fetch_add(signedQ, std::memory_order_relaxed);
-        }
+        settleFill(t.buyerId, Side::Buy, t.quantity);
+        settleFill(t.sellerId, Side::Sell, t.quantity);
     }
 
     // P2-11: a fill counts as a trade for both counterparties' OTR windows.
@@ -1728,6 +2025,9 @@ void MatchingEngine::onRiskFill(const Trade& t) {
     }
 }
 
+// A new mapping puts the trader's resting orders and fills under its tiers:
+// re-book every tier from the books, or the first cancel releases what was
+// never reserved. So does the first configuration of any kind.
 void MatchingEngine::mapParticipant(ParticipantId trader, uint64_t strategyId,
                                     uint64_t accountId, uint64_t firmId) {
     {
@@ -1736,6 +2036,8 @@ void MatchingEngine::mapParticipant(ParticipantId trader, uint64_t strategyId,
     }
     riskActive_.store(true, std::memory_order_relaxed);
     observersActive_.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(bookMutex_);
+    rebuildPositionsLocked();
 }
 
 void MatchingEngine::setRiskTierLimits(RiskTier tier, uint64_t entityId, const TierLimits& limits) {
@@ -1743,13 +2045,21 @@ void MatchingEngine::setRiskTierLimits(RiskTier tier, uint64_t entityId, const T
         std::lock_guard<std::mutex> lock(riskMutex_);
         riskManager_.setLimits(tier, entityId, limits);
     }
-    riskActive_.store(true, std::memory_order_relaxed);
     observersActive_.store(true, std::memory_order_relaxed);
+    if (!riskActive_.exchange(true, std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(bookMutex_);
+        rebuildPositionsLocked();
+    }
 }
 
 int64_t MatchingEngine::riskNetPosition(RiskTier tier, uint64_t entityId) const {
     std::lock_guard<std::mutex> lock(riskMutex_);
     return riskManager_.netPosition(tier, entityId);
+}
+
+int64_t MatchingEngine::riskWorkingQty(RiskTier tier, uint64_t entityId, Side side) const {
+    std::lock_guard<std::mutex> lock(riskMutex_);
+    return riskManager_.workingQty(tier, entityId, side);
 }
 
 void MatchingEngine::setDefaultFeeSchedule(const FeeSchedule& s) {
@@ -1827,6 +2137,16 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         logRiskReject("kill_switch", symbolId, participantId, RejectReason::KillSwitchActive);
         return rejectedAsync(RejectReason::KillSwitchActive);
     }
+    // GW-9: the graduated kill switch. One relaxed load while it is at Normal.
+    if (killSwitch_.engaged()) [[unlikely]] {
+        if (const RejectReason r = killSwitch_.admit(symbolId, participantId);
+            r != RejectReason::None) {
+            (r == RejectReason::KillSwitchActive ? killSwitchRejects_ : rateLimitedCount_)
+                .fetch_add(1, std::memory_order_relaxed);
+            logRiskReject("graduated_kill_switch", symbolId, participantId, r);
+            return rejectedAsync(r);
+        }
+    }
 
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
@@ -1846,7 +2166,7 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
 
     // ENGTEST-1: position and OTR state is indexed by participant id. Past the
     // arrays those controls were skipped, not enforced, so an id there traded
-    // with no limits. Every ingress (gateway, admin, OUCH/DPDK, SBE, FIX) comes
+    // with no limits. Every ingress (gateway, admin) comes
     // through here; checked before the rate limiter so a junk id grows nothing.
     if (participantId >= MAX_PARTICIPANTS) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidFieldValue);
@@ -1857,11 +2177,21 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
     // PRIOR-7: expireOrders skips expiryTime 0, so a GTD order without one,
     // or a DAY order without one where no session end is scheduled, rested as
     // GTC while its owner believed it time-bounded.
+    // MR-8: an IOC, FOK or market order never rests (a market order parked
+    // in an auction leaves at the cross), so its DAY needs no session end.
+    const bool neverRests =
+        type == OrderType::IOC || type == OrderType::FOK || type == OrderType::Market;
     if (expiryTime == 0 &&
         (tif == TimeInForce::GTD ||
-         (tif == TimeInForce::DAY &&
+         (tif == TimeInForce::DAY && !neverRests &&
           !sessionEndScheduled_.load(std::memory_order_acquire)))) [[unlikely]] {
         return rejectedAsync(RejectReason::MissingRequiredField);
+    }
+    // MR-6: an order already past its expiry is refused, not acked and left
+    // to the next sweep. Read only when an expiry is set (GTD, or DAY with
+    // one), so a plain order costs no clock read.
+    if (expiryTime != 0 && expiryTime <= expiryNow()) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
     }
 
     uint64_t sequenceId = nextSequenceId();
@@ -1871,21 +2201,22 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         return rejectedAsync(RejectReason::RateLimitExceeded);
     }
 
+    auto* book = getOrderBook(symbolId);
+    if (!book) {
+        return rejectedAsync(RejectReason::SymbolNotFound);
+    }
+
     // P2-9/10/11 pre-trade risk gate (fat-finger, position, OTR). Enforced at
     // the submitOrder entry point in BOTH sync and async modes, before the order
     // is enqueued or booked. Skipped entirely (one atomic load) when unconfigured.
     if (anyRiskActive_.load(std::memory_order_relaxed)) {
-        RejectReason rr = checkRiskControls(symbolId, participantId, side, price, qty, type);
+        RejectReason rr = checkRiskControls(symbolId, participantId, side, price, qty, type, qty);
         if (rr != RejectReason::None) [[unlikely]] {
             return rejectedAsync(rr);
         }
     }
 
     if (async_) {
-        if (!getOrderBook(symbolId)) {
-            return rejectedAsync(RejectReason::SymbolNotFound);
-        }
-
         OrderRequest req{};
         req.type = OrderRequest::Type::NewOrder;
         req.symbolId = symbolId;
@@ -1907,14 +2238,32 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
         req.hidden = hidden;
         req.ingressTsc = Utils::latencyClockTicks();  // x86: TSC; else steady_clock ns
         if (!enqueueSafe(getThreadIndex(symbolId), req)) {
+            releaseWorking(participantId, side, qty);
             return rejectedAsync(enqueueRejectReason());
         }
         return acceptedAsync(sequenceId);
     }
 
-    auto* book = getOrderBook(symbolId);
-    if (!book) {
-        return rejectedAsync(RejectReason::SymbolNotFound);
+    if (const RejectReason rr = checkBookValuedNotional(*book, symbolId, participantId, side, type,
+                                                        price, qty, stopPrice, stopLimitPrice,
+                                                        trailAmount);
+        rr != RejectReason::None) [[unlikely]] {
+        releaseWorking(participantId, side, qty);
+        return rejectedAsync(rr);
+    }
+
+    // GW-4: the hierarchical gate, which the async worker runs at apply time,
+    // ran on this path not at all.
+    if (riskActive_.load(std::memory_order_relaxed)) [[unlikely]] {
+        // The mid under the book lock: another sync caller may be matching.
+        Price mid = 0;
+        if (type != OrderType::Market) book->withBookLock([&] { mid = book->getMidPrice(); });
+        const Price valued =
+            book->notionalPrice(side, type, price, stopPrice, stopLimitPrice, trailAmount);
+        if (!preTradeRiskCheck(participantId, side, valued, qty, mid, qty)) {
+            releaseWorking(participantId, side, qty);
+            return rejectedAsync(RejectReason::RiskLimitBreached);
+        }
     }
 
     // Capture everything this order emits so none of it reaches the client
@@ -1925,30 +2274,26 @@ SubmitResult MatchingEngine::submitOrder(SymbolId symbolId, OrderId orderId,
                                            type, stopPrice, displayQty, tif, expiryTime,
                                            stopLimitPrice, pegType, pegOffset, trailAmount,
                                            minQty, hidden);
-    // P2-9: reserve the resting remainder as working exposure. Any portion that
-    // filled immediately was already accrued to this (taker) participant by
-    // onRiskFill during the match, so reserving only the remainder avoids double
-    // counting — reserved + filled == full order qty.
-    if (positionLimitsActive_.load(std::memory_order_relaxed) &&
-        std::holds_alternative<OrderId>(result)) {
-        const Order* o = book->getOrder(orderId);
-        reservePosition(participantId, side, o ? o->remainingQty : 0);
+    // Refused: no order lives, nothing traded. Admitted, the book answers for
+    // the reservation from here.
+    const bool admitted = std::holds_alternative<OrderId>(result);
+    if (!admitted) {
+        releaseWorking(participantId, side, qty);
+        releaseHierarchical(participantId, side, qty);
     }
-    if (journal_ && std::holds_alternative<OrderId>(result)) {
-        uint64_t appendOrdinal = 0;
-        {
-            std::lock_guard<std::mutex> lock(journalMutex_);
-            logBreakerTrip(symbolId, stateBefore, book->getTradingState());
-            journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
-                                  expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
-                                  pegOffset, trailAmount, minQty, hidden);
-            appendOrdinal = journal_->entriesAppended();
-        }
-        holdUntilDurable(appendOrdinal);
-        maybeTriggerAutoCheckpoint();
-    } else {
-        holdUntilDurable(0);
+    uint64_t appendOrdinal = 0;
+    if (journal_ && admitted) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->logAddOrder(orderId, participantId, symbolId, side, price, qty, type, tif,
+                              expiryTime, stopPrice, stopLimitPrice, displayQty, pegType,
+                              pegOffset, trailAmount, minQty, hidden);
+        logBreakerTrip(symbolId, stateBefore, book->getTradingState());
+        appendOrdinal = journal_->entriesAppended();
     }
+    // Its fills reach OCO, fees, hierarchical risk and CAT as the worker's do.
+    if (admitted) appendOrdinal = driveOcoSync(symbolId, book, appendOrdinal);
+    holdUntilDurable(appendOrdinal);
+    if (appendOrdinal) maybeTriggerAutoCheckpoint();
     // The append above may be the commit that failed. Then the order is not
     // on disk and a restart will not have it, so its client is told that —
     // not "accepted" — and the gate keeps everything it produced (D4).
@@ -2039,12 +2384,8 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     // OrderExposure already reports `found` from inside the critical section,
     // so the pre-check was both racy and redundant — and dropping it removes a
     // lookup from the cancel path rather than adding one.
-    // P2-9: release the cancelled order's working exposure before it leaves the
-    // book (read remaining qty while the order still exists).
-    // H1: read the exposure inside cancelOrderReleasing's own critical
-    // section. The previous form dereferenced an UNLOCKED getOrder()
-    // pointer into orderPool_, with no guarantee the order was still
-    // alive — a concurrent fill or a shutdown sweep frees that slot.
+    // The order's working quantity goes back to the ledger inside the book
+    // (OrderBook::untrackOrder), on this path and every other way out.
     // One lock acquisition either way: cancelOrderReleasing() does the same
     // work as cancelOrder() plus reading three fields, which is cheaper than
     // taking bookLock_ a second time to ask about ownership separately.
@@ -2052,7 +2393,16 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     // submitOrder does — not only new orders (D7). Same for modify, replace,
     // the expiry sweep and the kill and DAY sweeps.
     durabilityGate_.beginOrder();
-    const auto exposure = book->cancelOrderReleasing(orderId, requester);
+    // Recorded before it is applied: the book calls `record` once it has found
+    // the requester's order, under its lock, and a refused record leaves the
+    // order resting, as a restart will find it.
+    uint64_t appendOrdinal = 0;
+    auto append = [&] {
+        return appendFirst([&](Journal& j) { j.logCancelOrder(orderId, symbolId); },
+                           appendOrdinal);
+    };
+    const auto exposure = book->cancelOrderReleasing(
+        orderId, requester, journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{});
     if (exposure.denied) [[unlikely]] {
         holdUntilDurable(0);
         return rejectedAsync(RejectReason::NotOrderOwner);
@@ -2060,15 +2410,6 @@ SubmitResult MatchingEngine::submitCancel(SymbolId symbolId, OrderId orderId,
     if (!exposure.found) [[unlikely]] {
         holdUntilDurable(0);
         return rejectedAsync(RejectReason::OrderNotFound);
-    }
-    if (positionLimitsActive_.load(std::memory_order_relaxed)) {
-        releasePosition(exposure);
-    }
-    uint64_t appendOrdinal = 0;
-    if (journal_) {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        journal_->logCancelOrder(orderId, symbolId);
-        appendOrdinal = journal_->entriesAppended();
     }
     holdUntilDurable(appendOrdinal);
     if (journal_) maybeTriggerAutoCheckpoint();
@@ -2155,6 +2496,11 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     // client gets: on the async path the request would otherwise be queued, be
     // accepted to the client's face, be refused by the worker, and never be
     // mentioned again. An accept that silently means no is worse than a reject.
+    // ENGTEST-1, as in submitOrder: an id past the risk arrays has no controls
+    // behind it. kAnyParticipant is not an id; it is the venue asking.
+    if (requester >= MAX_PARTICIPANTS && requester != kAnyParticipant) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
+    }
     if (newQty == 0) [[unlikely]] {
         return rejectedAsync(RejectReason::InvalidQuantity);
     }
@@ -2188,13 +2534,14 @@ SubmitResult MatchingEngine::submitModify(SymbolId symbolId, OrderId orderId,
     }
     RejectReason modifyReason = RejectReason::None;
     durabilityGate_.beginOrder();
-    bool modified = book->modifyOrder(orderId, newQty, modifyReason, requester);
     uint64_t appendOrdinal = 0;
-    if (modified && journal_) {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        journal_->logModifyOrder(orderId, symbolId, newQty);
-        appendOrdinal = journal_->entriesAppended();
-    }
+    auto append = [&] {
+        return appendFirst([&](Journal& j) { j.logModifyOrder(orderId, symbolId, newQty); },
+                           appendOrdinal);
+    };
+    const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+    bool modified = book->modifyOrder(orderId, newQty, modifyReason, requester, record);
+    // A refused record halted the journal: appendOrdinal says so below.
     holdUntilDurable(appendOrdinal);
     if (appendOrdinal) maybeTriggerAutoCheckpoint();
     if (appendOrdinal && journalHalted()) [[unlikely]] {
@@ -2215,8 +2562,20 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
     if (!running_.load(std::memory_order_acquire)) {
         return rejectedAsync(RejectReason::EngineStopped);
     }
+    // ENGTEST-1, as in submitOrder: an id past the risk arrays has no controls
+    // behind it. kAnyParticipant is not an id; it is the venue asking.
+    if (requester >= MAX_PARTICIPANTS && requester != kAnyParticipant) [[unlikely]] {
+        return rejectedAsync(RejectReason::InvalidFieldValue);
+    }
     if (journalHalted()) [[unlikely]] {
         return rejectedAsync(RejectReason::JournalHalted);
+    }
+    // GW-9 and P2-8: a replace is an admission. Refused here, on both paths,
+    // from the requester's id; admitAmend re-checks against the order's owner.
+    if (killSwitchActive_.load(std::memory_order_acquire) ||
+        (killSwitch_.engaged() && killSwitch_.blocks(symbolId, requester))) [[unlikely]] {
+        killSwitchRejects_.fetch_add(1, std::memory_order_relaxed);
+        return rejectedAsync(RejectReason::KillSwitchActive);
     }
 
     uint64_t sequenceId = nextSequenceId();
@@ -2247,14 +2606,22 @@ SubmitResult MatchingEngine::submitCancelReplace(SymbolId symbolId, OrderId orde
 
     RejectReason replaceReason = RejectReason::None;
     durabilityGate_.beginOrder();
-    bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
-                                        requester);
+    const TradingState stateBefore = book->getTradingState();
     uint64_t appendOrdinal = 0;
+    auto append = [&] {
+        return appendFirst([&](Journal& j) {
+            j.logCancelReplace(orderId, symbolId, newPrice, newQty);
+        }, appendOrdinal);
+    };
+    const auto record = journal_ ? OrderBook::RecordFn::of(append) : OrderBook::RecordFn{};
+    bool replaced = book->cancelReplace(orderId, newPrice, newQty, replaceReason,
+                                        requester, record);
     if (replaced && journal_) {
         std::lock_guard<std::mutex> lock(journalMutex_);
-        journal_->logCancelReplace(orderId, symbolId, newPrice, newQty);
+        logBreakerTrip(symbolId, stateBefore, book->getTradingState());
         appendOrdinal = journal_->entriesAppended();
     }
+    if (replaced) appendOrdinal = driveOcoSync(symbolId, book, appendOrdinal);  // GTS-4
     holdUntilDurable(appendOrdinal);
     if (appendOrdinal) maybeTriggerAutoCheckpoint();
     if (appendOrdinal && journalHalted()) [[unlikely]] {
@@ -2300,12 +2667,14 @@ MarketDataSnapshot MatchingEngine::getSnapshot(SymbolId symbolId, size_t depth) 
     return {};
 }
 
-// H3: a breaker trip happens inside addOrder. It goes into the journal AHEAD
-// of the order that caused it, so replay enters the auction first and the
-// order replays as an auction arrival; replay never evaluates the breaker
-// itself, so a replaying engine with another threshold or reference — the
-// reference is not in a checkpoint — still lands in the same state. Caller
-// holds journalMutex_.
+// A breaker trip happens inside an add or a replace, at the fill whose print
+// failed the band, possibly after in-band fills and elections (MR-2). Replay
+// evaluates the breaker as live did, and stops the sweep at the same fill:
+// the reference comes only from prints, crosses, setReferencePrice and a
+// checkpoint. The record goes AFTER the operation that tripped, where it is a
+// no-op on replay; ahead, as it once was, it would make the order an auction
+// arrival and drop its in-band fills. Journals written that way still replay
+// as they did. Caller holds journalMutex_.
 void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
                                     TradingState after) {
     if (after != before) journal_->logTradingState(symbolId, after);
@@ -2324,13 +2693,15 @@ void MatchingEngine::logBreakerTrip(SymbolId symbolId, TradingState before,
 // that book's order flow, not as one instant across books.
 uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
     auto* book = getOrderBook(req.symbolId);
-    if (!book) return 0;
+    // Halted: the transition could not be recorded, so it does not happen —
+    // nor does a reopening cross (JOURNAL-6).
+    if (!book || journalHalted()) return 0;
     const auto state = static_cast<TradingState>(req.newQty);
     const auto tradingDate = static_cast<uint32_t>(req.expiryTime);
     if (req.type == OrderRequest::Type::TradingState) {
-        if (state == TradingState::PreOpen) book->beginSession(tradingDate);
-        else book->setTradingState(state);
-        if (book->getTradingState() != state) return 0;  // refused: nothing happened
+        const bool applied = state == TradingState::PreOpen ? book->beginSession(tradingDate)
+                                                            : book->setTradingState(state);
+        if (!applied) return 0;  // refused: nothing happened
     } else {
         book->uncross();
     }
@@ -2339,6 +2710,8 @@ uint64_t MatchingEngine::applySessionControl(const OrderRequest& req) {
         std::lock_guard<std::mutex> lock(journalMutex_);
         if (req.type == OrderRequest::Type::TradingState) {
             journal_->logTradingState(req.symbolId, state, tradingDate);
+            // A reopen's elections may trip the breaker, as an order's can.
+            logBreakerTrip(req.symbolId, state, book->getTradingState());
         } else {
             journal_->logUncross(req.symbolId);
         }
@@ -2441,6 +2814,7 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     // journalMutex_ (the onExpire callback logs under journalMutex_); sync-mode
     // only, where no async worker runs, so it cannot deadlock the worker path.
     std::lock_guard<std::mutex> lock(bookMutex_);
+    if (journalHalted()) return;   // suspended with the journal (JOURNAL-6)
 
     // If the journal is enabled, log each expiration as a CancelOrder
     // BEFORE the cancel actually runs. Replay then reproduces these
@@ -2449,6 +2823,7 @@ void MatchingEngine::expireOrders(uint64_t currentTime) {
     durabilityGate_.beginOrder();
     uint64_t appendOrdinal = 0;
     for (SymbolId symbolId : symbolIds_) {
+        if (journalHalted()) break;
         std::function<void(OrderId)> onExpire;
         if (journal_) {
             onExpire = [this, symbolId, &appendOrdinal](OrderId id) {
@@ -2477,6 +2852,17 @@ void MatchingEngine::commitJournal() {
     if (journal_) journal_->commitPending();
 }
 
+bool MatchingEngine::syncJournalForReports() {
+    if (!journal_) return true;
+    // Immediate synced each append before it returned; anything else may
+    // still hold this request's entries in a batch.
+    if (journal_->syncPolicy() != Journal::SyncPolicy::Immediate) {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        journal_->flush();
+    }
+    return !journal_->halted();
+}
+
 void MatchingEngine::commitJournalIfDue() {
     std::lock_guard<std::mutex> lock(journalMutex_);
     if (journal_) journal_->commitIfDue();
@@ -2492,9 +2878,13 @@ bool MatchingEngine::enableJournal(const std::string& path, Journal::SyncPolicy 
 //
 // `recorded` is the entry's symbolId. Journals written after those records
 // began carrying one name the book directly, which is both correct and O(1).
-// Older journals left the field 0, so fall back to the scan this used to do
-// unconditionally — no worse than before for them, and exact for everything
-// written since.
+// Older journals left the field 0, so for them fall back to the scan this used
+// to do unconditionally. Only for them (MIDS-10): every journal stamped
+// NO_SEEDING was written after records carried their symbol (24ef1df precedes
+// dc807e1), so there a miss in the recorded book is a record for an order
+// already gone, and scanning on would cancel or amend a same-id order on
+// another symbol. Callers replaying records of unknown provenance
+// (TimeMachine) keep the scan.
 //
 // The scan is why duplicate order ids across symbols silently lost orders on
 // recovery: it takes whichever book it reaches first, and nothing enforces
@@ -2504,6 +2894,7 @@ OrderBook* MatchingEngine::bookHoldingOrder(SymbolId recorded, OrderId orderId) 
         book && book->getOrder(orderId)) {
         return book;
     }
+    if (!replayScansAllBooks_) return nullptr;
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId);
             book && book->getOrder(orderId)) {
@@ -2518,25 +2909,52 @@ size_t MatchingEngine::replayJournal() {
         return 0;
     }
 
+    std::vector<JournalEntry> entries;
+    {
+        std::lock_guard<std::mutex> lock(journalMutex_);
+        entries = journal_->readAll(true, true);
+    }
+    replayScansAllBooks_ = journal_->contentEpoch() == JOURNAL_EPOCH_LEGACY;
+    const size_t applied = replayEntries(entries);
+    replayScansAllBooks_ = true;
+    return applied;
+}
+
+size_t MatchingEngine::replayEntries(const std::vector<JournalEntry>& entries) {
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId)) {
             book->setReplayMode(true);
         }
     }
 
-    std::vector<JournalEntry> entries;
-    {
-        std::lock_guard<std::mutex> lock(journalMutex_);
-        entries = journal_->readAll(true, true);
-    }
     size_t replayed = 0;
     uint64_t lastSequence = 0;
+    // The live engine journals an order only once the book admitted it, and a
+    // modify or replace only once it applied, so replay refusing one means the
+    // recovered book is not the journaled one: a band narrowed since, a pool
+    // made smaller, a guard added since. It used to be discarded and counted
+    // as replayed. Now it is counted apart and named, and bootJournal stops.
+    // A cancel that finds no order is not one: the live engine's worker
+    // journals a cancel that found nothing as well, and an order replay lost
+    // is reported by its own refusal.
+    bool applied = true;
+    const auto refuse = [&](const JournalEntry& e, RejectReason why) {
+        applied = false;
+        ++replayRefusals_;
+        obSink().log(obEvent("replay_entry_refused", LogSeverity::Error)
+                         .kv("sequence", (unsigned long long)e.sequenceNumber)
+                         .kv("type", (long long)static_cast<int>(e.entryType))
+                         .kv("symbol", (long long)e.symbolId)
+                         .kv("order", (unsigned long long)e.orderId)
+                         .kv("reason", (long long)static_cast<int>(why)));
+    };
 
     for (const auto& entry : entries) {
         if (entry.sequenceNumber <= lastSequence) {
             continue;
         }
         lastSequence = entry.sequenceNumber;
+        applied = true;
 
         switch (entry.entryType) {
         case JournalEntry::Type::AddOrder: {
@@ -2549,12 +2967,14 @@ size_t MatchingEngine::replayJournal() {
                 }
             }
             if (book) {
-                book->addOrder(entry.orderId, entry.participantId, entry.side,
-                               entry.price, entry.quantity, entry.orderType,
-                               entry.stopPrice, entry.displayQty, entry.timeInForce,
-                               entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                               entry.pegOffset, entry.trailAmount, entry.minQty,
-                               entry.hidden);
+                const AddOrderResult result =
+                    book->addOrder(entry.orderId, entry.participantId, entry.side,
+                                   entry.price, entry.quantity, entry.orderType,
+                                   entry.stopPrice, entry.displayQty, entry.timeInForce,
+                                   entry.expiryTime, entry.stopLimitPrice, entry.pegType,
+                                   entry.pegOffset, entry.trailAmount, entry.minQty,
+                                   entry.hidden);
+                if (const auto* why = std::get_if<RejectReason>(&result)) refuse(entry, *why);
             }
             break;
         }
@@ -2565,17 +2985,20 @@ size_t MatchingEngine::replayJournal() {
             break;
         }
         case JournalEntry::Type::ModifyOrder: {
-            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-                book->modifyOrder(entry.orderId, entry.newQty);
-            }
+            RejectReason why = RejectReason::OrderNotFound;
+            auto* book = bookHoldingOrder(entry.symbolId, entry.orderId);
+            if (!book || !book->modifyOrder(entry.orderId, entry.newQty, why))
+                refuse(entry, why);
             break;
         }
         case JournalEntry::Type::CancelReplace: {
-            if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-                book->cancelReplace(entry.orderId, entry.newPrice,
-                                    journaledReplaceTotal(
-                                        entry, book->getOrder(entry.orderId)->cumQty));
-            }
+            RejectReason why = RejectReason::OrderNotFound;
+            auto* book = bookHoldingOrder(entry.symbolId, entry.orderId);
+            if (!book || !book->cancelReplace(entry.orderId, entry.newPrice,
+                                              journaledReplaceTotal(
+                                                  entry, book->getOrder(entry.orderId)->cumQty),
+                                              why))
+                refuse(entry, why);
             break;
         }
         case JournalEntry::Type::TradingStateChange:
@@ -2624,13 +3047,29 @@ size_t MatchingEngine::replayJournal() {
                     book->setReplayMode(true);
                 }
             }
-            if (book && !book->getOrder(entry.orderId)) {
-                book->addOrder(entry.orderId, entry.participantId, entry.side,
-                               entry.price, entry.quantity, entry.orderType,
-                               entry.stopPrice, entry.displayQty, entry.timeInForce,
-                               entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                               entry.pegOffset, entry.trailAmount, entry.minQty,
-                               entry.hidden);
+            if (book && (entry.newQty & SNAPSHOT_PEG_QUEUE)) {
+                book->restorePegQueue(entry.orderId);
+            } else if (book && (entry.newQty & SNAPSHOT_LOC_QUEUE)) {
+                book->restoreLocQueue(entry.orderId);
+            } else if (book && !book->getOrder(entry.orderId)) {
+                // Put back, not re-admitted: see OrderBook::restoreOrder.
+                const RejectReason why =
+                    book->restoreOrder(entry.orderId, entry.participantId, entry.side,
+                                       entry.price, entry.quantity, entry.orderType,
+                                       entry.stopPrice, entry.displayQty, entry.timeInForce,
+                                       entry.expiryTime, entry.stopLimitPrice, entry.pegType,
+                                       entry.pegOffset, entry.trailAmount, entry.minQty,
+                                       entry.hidden, snapshotArrivalSeq(entry));
+                if (why != RejectReason::None) {
+                    applied = false;
+                    ++restoreRefusals_;
+                    obSink().log(obEvent("checkpoint_restore_refused", LogSeverity::Error)
+                                     .kv("symbol", (long long)entry.symbolId)
+                                     .kv("order", (unsigned long long)entry.orderId)
+                                     .kv("price", (long long)entry.price)
+                                     .kv("reason", (long long)static_cast<int>(why)));
+                    break;
+                }
                 if (entry.newQty & SNAPSHOT_STOP_ELECTED)
                     book->restoreStopElection(entry.orderId, entry.stopPrice);
                 else
@@ -2642,7 +3081,7 @@ size_t MatchingEngine::replayJournal() {
         }
         }
 
-        ++replayed;
+        if (applied) ++replayed;
     }
 
     setReplayModeAllBooks(false);
@@ -2650,8 +3089,7 @@ size_t MatchingEngine::replayJournal() {
 }
 
 void MatchingEngine::setReplayModeAllBooks(bool replay) {
-    // Can run on the promotion path concurrently with the replication apply
-    // thread (which adds symbols), so iterate symbolIds_ under bookMutex_.
+    // Iterate symbolIds_ under bookMutex_, like every other off-hot-path reader.
     std::lock_guard<std::mutex> lock(bookMutex_);
     for (SymbolId symbolId : symbolIds_) {
         if (auto* book = getOrderBook(symbolId)) {
@@ -2662,250 +3100,53 @@ void MatchingEngine::setReplayModeAllBooks(bool replay) {
 }
 
 void MatchingEngine::rebuildPositionsLocked() {
-    // P2-9 position = filled net + signed remaining qty of every working
-    // order, parked ones included: admission reserves the remainder, a fill
-    // accrues to the taker (the maker's reservation turns into its fill), a
-    // cancel releases what was left. Each book's per-participant net position
-    // is the filled part — every fill moves it, replay included, and a
-    // checkpoint's Position record restores it. Unconditional, so a limit set
-    // after the restart also sees what is held.
+    // The P2-9 ledger: working = remaining qty of every live order, parked ones
+    // included, each counted once; filled = each book's per-participant net
+    // position, which every fill moves, replay included, and a checkpoint's
+    // Position record restores. Unconditional, so a limit set after the restart
+    // also sees what is held.
     // ponytail: not atomic against a concurrent admission — an order a worker
     // admits between the zeroing and the walk of its book counts twice.
-    // replayJournal runs before the workers start; on promotion the window is
-    // this walk.
-    // Post it to the workers as a control message if that window matters.
-    for (auto& p : positions_) p.store(0, std::memory_order_relaxed);
+    // replayJournal runs before the workers start, so nothing admits during
+    // this walk there. Post it to the workers as a control message if a caller
+    // ever leaves replay mode on a running engine.
+    for (auto& f : filled_) f.store(0, std::memory_order_relaxed);
+    for (auto& sides : working_)
+        for (auto& w : sides) w.store(0, std::memory_order_relaxed);
     for (SymbolId symbolId : symbolIds_) {
         const OrderBook* book = getOrderBook(symbolId);
         if (!book) continue;
         book->forEachPositionLocked([this](const OrderBook::ParticipantPosition& p) {
             if (p.participant < MAX_PARTICIPANTS)
-                positions_[p.participant].fetch_add(p.netPosition, std::memory_order_relaxed);
+                filled_[p.participant].fetch_add(p.netPosition, std::memory_order_relaxed);
         });
         book->forEachOrderLocked([this](const Order& o) {
-            reservePosition(o.participantId, o.side, o.remainingQty);
+            if (o.participantId < MAX_PARTICIPANTS)
+                working_[o.participantId][sideIndex(o.side)].fetch_add(
+                    static_cast<int64_t>(o.remainingQty), std::memory_order_relaxed);
         });
     }
-}
-
-void MatchingEngine::streamSnapshot(
-        const std::function<void(const JournalEntry&)>& fn) const {
-    if (!fn) return;
-    // Runs on the replication coordinator thread while workers mutate books.
-    // Hold bookMutex_ for a consistent symbolIds_/books_ view, and iterate each
-    // book under its own lock via forEachOrderLocked. Lock order: bookMutex_ ->
-    // book->bookLock_.
-    std::lock_guard<std::mutex> lock(bookMutex_);
+    // The hierarchy the same way (TLA-5): each tier's net position and working
+    // quantity, from the same books. riskMutex_ per call, inside each book's
+    // lock, the order every other path takes them in.
+    {
+        std::lock_guard<std::mutex> lock(riskMutex_);
+        riskManager_.clearPositions();
+    }
     for (SymbolId symbolId : symbolIds_) {
-        const auto* book = getOrderBook(symbolId);
+        const OrderBook* book = getOrderBook(symbolId);
         if (!book) continue;
-        // The state before the orders, as the checkpoint writes it (AUCT-1).
-        if (book->getTradingState() != TradingState::Continuous) {
-            JournalEntry st{};
-            st.entryType = JournalEntry::Type::TradingStateChange;
-            st.symbolId  = symbolId;
-            st.quantity  = static_cast<Quantity>(book->getTradingState());
-            fn(st);
-        }
-        book->forEachOrderLocked([&](const Order& o) {
-            JournalEntry e{};
-            e.entryType    = JournalEntry::Type::Snapshot;
-            e.orderId      = o.id;
-            e.participantId = o.participantId;
-            e.symbolId     = symbolId;
-            e.side         = o.side;
-            e.price        = o.price;
-            // Use remainingQty so the snapshot reflects the live
-            // state (partial fills already applied), not the original
-            // submission size. Re-applying a Snapshot on backup uses
-            // this as the order's qty.
-            e.quantity     = o.remainingQty;
-            e.orderType    = o.type;
-            e.timeInForce  = o.timeInForce;
-            e.expiryTime   = o.expiryTime;
-            e.stopPrice    = o.stopPrice;
-            e.stopLimitPrice = o.stopLimitPrice;
-            e.displayQty   = o.displayQty;
-            e.pegType      = o.pegType;
-            e.pegOffset    = o.pegOffset;
-            e.trailAmount  = o.trailAmount;
-            e.minQty       = o.minQty;
-            e.hidden       = o.isHidden;
-            e.newQty       = o.isStopTriggered ? SNAPSHOT_STOP_ELECTED : 0;
-            e.newPrice     = static_cast<Price>(o.cumQty);  // see snapshotCumQty
-            fn(e);
+        book->forEachPositionLocked([this](const OrderBook::ParticipantPosition& p) {
+            std::lock_guard<std::mutex> lock(riskMutex_);
+            const bool longPos = p.netPosition >= 0;
+            riskManager_.onFill(p.participant, longPos ? Side::Buy : Side::Sell, 0,
+                                static_cast<Quantity>(longPos ? p.netPosition : -p.netPosition));
+        });
+        book->forEachOrderLocked([this](const Order& o) {
+            std::lock_guard<std::mutex> lock(riskMutex_);
+            riskManager_.reserve(o.participantId, o.side, o.remainingQty);
         });
     }
-}
-
-bool MatchingEngine::applyReplicatedEntry(const JournalEntry& entry) {
-    // Mirrors the per-entry dispatch in replayJournal(), but driven
-    // by network-delivered entries instead of disk replay. Backups
-    // are expected to be in replay mode (see setReplayModeAllBooks)
-    // so order updates and market data are suppressed locally — the
-    // primary is the canonical source. When the backup has its own
-    // journal enabled (the production posture), the entry is ALSO
-    // persisted to the backup's local journal so the backup retains
-    // durability of received entries across its own restarts — and
-    // so the chaos suite can observe replication progress via
-    // /journal/head on the backup.
-    // The replication receive thread mutates books_/symbolIds_ via ensureBook
-    // (addSymbol) and iterates symbolIds_ in the Cancel/Modify branches. Hold
-    // bookMutex_ across the whole apply so neither the structural mutation nor
-    // the iterations race a concurrent symbol add / off-hot-path reader. Lock
-    // order bookMutex_ -> book->bookLock_ (taken inside addOrder/cancelOrder),
-    // matching streamSnapshot/checkpoint; no path takes a book lock before
-    // bookMutex_, so there is no inversion. ensureBook uses addSymbolLocked
-    // because we already hold bookMutex_.
-    std::lock_guard<std::mutex> booksLock(bookMutex_);
-
-    auto ensureBook = [this](SymbolId sym) -> OrderBook* {
-        auto* book = getOrderBook(sym);
-        if (!book) {
-            addSymbolLocked(sym);
-            book = getOrderBook(sym);
-            if (book) book->setReplayMode(true);
-        }
-        return book;
-    };
-
-    bool applied = false;
-    Quantity replaceTotal = entry.newQty;  // CancelReplace only; re-logged below
-    switch (entry.entryType) {
-    case JournalEntry::Type::AddOrder: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        book->addOrder(entry.orderId, entry.participantId, entry.side,
-                       entry.price, entry.quantity, entry.orderType,
-                       entry.stopPrice, entry.displayQty, entry.timeInForce,
-                       entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                       entry.pegOffset, entry.trailAmount, entry.minQty,
-                       entry.hidden);
-        applied = true;
-        break;
-    }
-    case JournalEntry::Type::CancelOrder: {
-        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            book->cancelOrder(entry.orderId);
-            applied = true;
-        }
-        break;
-    }
-    case JournalEntry::Type::ModifyOrder: {
-        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            book->modifyOrder(entry.orderId, entry.newQty);
-            applied = true;
-        }
-        break;
-    }
-    case JournalEntry::Type::CancelReplace: {
-        if (auto* book = bookHoldingOrder(entry.symbolId, entry.orderId)) {
-            replaceTotal = journaledReplaceTotal(entry,
-                                                 book->getOrder(entry.orderId)->cumQty);
-            book->cancelReplace(entry.orderId, entry.newPrice, replaceTotal);
-            applied = true;
-        }
-        break;
-    }
-    case JournalEntry::Type::TradingStateChange:
-    case JournalEntry::Type::Uncross: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        applySessionRecord(*book, entry);
-        applied = true;
-        break;
-    }
-    case JournalEntry::Type::Counters:
-        restoreCounters(entry.orderId != 0 ? ensureBook(entry.symbolId) : nullptr, entry);
-        applied = true;
-        break;
-    case JournalEntry::Type::Position: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        applyPositionRecord(*book, entry);
-        applied = true;
-        break;
-    }
-    case JournalEntry::Type::Snapshot: {
-        auto* book = ensureBook(entry.symbolId);
-        if (!book) return false;
-        if (!book->getOrder(entry.orderId)) {
-            book->addOrder(entry.orderId, entry.participantId, entry.side,
-                           entry.price, entry.quantity, entry.orderType,
-                           entry.stopPrice, entry.displayQty, entry.timeInForce,
-                           entry.expiryTime, entry.stopLimitPrice, entry.pegType,
-                           entry.pegOffset, entry.trailAmount, entry.minQty,
-                           entry.hidden);
-            if (entry.newQty & SNAPSHOT_STOP_ELECTED)
-                book->restoreStopElection(entry.orderId, entry.stopPrice);
-            else
-                book->restoreTrailingStop(entry.orderId, entry.stopPrice);
-            book->restoreExecutedQty(entry.orderId, snapshotCumQty(entry));
-            book->restoreIcebergSlice(entry.orderId, snapshotIcebergSlice(entry));
-        }
-        applied = true;
-        break;
-    }
-    }
-
-    // Persist to backup's local journal if one is configured. The
-    // backup's Journal::onCommit is NOT hooked (only the primary's
-    // is, to ship to peers), so this write does not re-replicate
-    // back to the primary — no echo loop.
-    if (applied && journal_) {
-        switch (entry.entryType) {
-        case JournalEntry::Type::AddOrder:
-            journal_->logAddOrder(entry.orderId, entry.participantId,
-                                  entry.symbolId, entry.side, entry.price,
-                                  entry.quantity, entry.orderType,
-                                  entry.timeInForce, entry.expiryTime,
-                                  entry.stopPrice, entry.stopLimitPrice,
-                                  entry.displayQty, entry.pegType,
-                                  entry.pegOffset, entry.trailAmount,
-                                  entry.minQty, entry.hidden);
-            break;
-        case JournalEntry::Type::CancelOrder:
-            journal_->logCancelOrder(entry.orderId, entry.symbolId);
-            break;
-        case JournalEntry::Type::ModifyOrder:
-            journal_->logModifyOrder(entry.orderId, entry.symbolId, entry.newQty);
-            break;
-        case JournalEntry::Type::CancelReplace:
-            // The resolved total: the local journal writes total records only.
-            journal_->logCancelReplace(entry.orderId, entry.symbolId,
-                                       entry.newPrice, replaceTotal);
-            break;
-        case JournalEntry::Type::TradingStateChange:
-            journal_->logTradingState(entry.symbolId, journaledTradingState(entry),
-                                      static_cast<uint32_t>(entry.expiryTime));
-            break;
-        case JournalEntry::Type::Uncross:
-            journal_->logUncross(entry.symbolId);
-            break;
-        case JournalEntry::Type::Counters:
-            journal_->logCounters(entry.symbolId, entry.orderId, entry.quantity,
-                                  entry.price, entry.newPrice, entry.newQty);
-            break;
-        case JournalEntry::Type::Position:
-            journal_->logPosition(entry.symbolId, entry.participantId, entry.price,
-                                  entry.quantity, entry.newQty);
-            break;
-        case JournalEntry::Type::Snapshot:
-            journal_->logSnapshot(entry.orderId, entry.participantId,
-                                  entry.symbolId, entry.side, entry.price,
-                                  entry.quantity, entry.orderType,
-                                  entry.timeInForce, entry.expiryTime,
-                                  entry.stopPrice, entry.stopLimitPrice,
-                                  entry.displayQty, entry.pegType,
-                                  entry.pegOffset, entry.trailAmount,
-                                  entry.minQty, entry.hidden,
-                                  (entry.newQty & SNAPSHOT_STOP_ELECTED) != 0,
-                                  snapshotCumQty(entry), snapshotIcebergSlice(entry));
-            break;
-        }
-    }
-
-    return applied;
 }
 
 void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
@@ -3020,10 +3261,16 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
         // carries the counters they would have restored, and the prices.
         struct BookCounters {
             SymbolId symbolId; uint64_t nextTradeId; OrderBook::CheckpointPrices prices;
+            uint64_t nextArrival; bool anchored; Price anchoredMin;
+            bool volatilityStarted; uint64_t volatilityStart;
         };
         std::vector<BookCounters> counters;
         std::vector<std::pair<SymbolId, OrderBook::ParticipantPosition>> positions;
+        std::vector<std::pair<SymbolId, OrderId>> pegQueue, locQueue;
         uint64_t lease = 0;
+        bool killed = false;
+        GraduatedKillSwitch::PersistentState graduated;
+        std::vector<SymbolId> switchHalted;
         {
             std::lock_guard<std::mutex> booksLock(bookMutex_);
             if (cut) pauseWorkersForCut();
@@ -3035,7 +3282,10 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 }
                 appendsBefore = journal_->entriesAppended();
                 lease = sequenceLease_.load(std::memory_order_acquire);
+                killed = killSwitchActive_.load(std::memory_order_acquire);
             }
+            graduated = killSwitch_.persistentState();
+            switchHalted = killHalted_;   // under bookMutex_
             for (SymbolId symbolId : symbolIds_) {
                 const OrderBook* book = getOrderBook(symbolId);
                 if (!book) {
@@ -3043,13 +3293,27 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 }
                 const uint64_t next = book->nextTradeIdLocked();
                 const OrderBook::CheckpointPrices prices = book->checkpointPricesLocked();
-                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0)
-                    counters.push_back({symbolId, next, prices});   // books that traded or priced
+                const uint64_t nextArrival = book->nextArrivalLocked();
+                Price anchoredMin = 0;
+                const bool anchored = book->anchoredRangeLocked(anchoredMin);
+                uint64_t volatilityStart = 0;
+                const bool volatilityStarted = book->volatilityClockLocked(volatilityStart);
+                if (next > 1 || prices.lastTrade != 0 || prices.reference != 0 ||
+                    nextArrival > 1 || anchored || volatilityStarted)
+                    counters.push_back({symbolId, next, prices, nextArrival, anchored,
+                                        anchoredMin, volatilityStarted,
+                                        volatilityStart});   // books that were used
                 if (book->getTradingState() != TradingState::Continuous || book->sessionBegun())
                     states.push_back({symbolId, book->getTradingState(), book->sessionBegun(),
                                       book->sessionDate(), book->preHaltState()});
                 book->forEachOrderLocked([&](const Order& order) {
                     resting.emplace_back(symbolId, order);
+                });
+                book->forEachPeggedOrderLocked([&](const Order& order) {
+                    pegQueue.emplace_back(symbolId, order.id);
+                });
+                book->forEachReleasedLocLocked([&](OrderId id) {
+                    locQueue.emplace_back(symbolId, id);
                 });
                 book->forEachPositionLocked([&](const OrderBook::ParticipantPosition& p) {
                     positions.emplace_back(symbolId, p);
@@ -3072,6 +3336,21 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                 if (state != replayed) snapshotJournal.logTradingState(symbolId, state);
             }
             if (lease != 0) snapshotJournal.logCounters(0, 0, lease);
+            if (killed) snapshotJournal.logKillSwitch(true);
+            if (!graduated.empty() || !switchHalted.empty())
+                writeGraduatedKill(snapshotJournal, graduated, switchHalted);
+            // Before the orders: the anchored band must be in place before the
+            // first one is put back, or it re-anchors on that order (JOURNAL-2).
+            // The prices may go first too, since restoreOrder puts an order
+            // back without admitting it, so nothing in it reads them; that
+            // is what made them order-sensitive when restore re-admitted.
+            // After the states, whose entry into VolatilityAuction resets the
+            // dwell clock this restores.
+            for (const auto& c : counters)
+                snapshotJournal.logCounters(c.symbolId, c.nextTradeId, 0, c.prices.lastTrade,
+                                            c.prices.reference, c.prices.lastTradeQty,
+                                            c.nextArrival, c.anchored, c.anchoredMin,
+                                            c.volatilityStarted, c.volatilityStart);
             for (const auto& [symbolId, order] : resting) {
                 snapshotJournal.logSnapshot(order.id, order.participantId, symbolId,
                                             order.side, order.price, order.remainingQty,
@@ -3082,14 +3361,15 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
                                             order.minQty, order.isHidden,
                                             order.isStopTriggered, order.cumQty,
                                             order.type == OrderType::Iceberg
-                                                ? order.visibleQty : 0);
+                                                ? order.visibleQty : 0,
+                                            order.arrivalSeq);
             }
-            // After the orders: each restored order's add sweeps stops at the
-            // last trade, which would fire them into a half-restored book.
-            for (const auto& [symbolId, nextTradeId, prices] : counters)
-                snapshotJournal.logCounters(symbolId, nextTradeId, 0,
-                                            prices.lastTrade, prices.reference,
-                                            prices.lastTradeQty);
+            // After the orders, which put the pegs back in level order: the
+            // order each book's reprice pass moves them in.
+            for (const auto& [symbolId, id] : pegQueue)
+                snapshotJournal.logPegQueue(id, symbolId);
+            for (const auto& [symbolId, id] : locQueue)
+                snapshotJournal.logPegQueue(id, symbolId, SNAPSHOT_LOC_QUEUE);
             // After the orders too: their re-adds count as submissions again.
             for (const auto& [symbolId, p] : positions)
                 snapshotJournal.logPosition(symbolId, p.participant, p.netPosition,
@@ -3152,33 +3432,6 @@ void MatchingEngine::checkpointInternal(bool alreadyDrained, bool waitIfBusy) {
 
 void MatchingEngine::checkpoint() {
     checkpointInternal(async_ ? false : true);
-}
-
-void MatchingEngine::processFIXMessage(const std::string& rawFix) {
-    FixMessage msg;
-    if (!msg.parse(rawFix.c_str(), rawFix.size())) {
-        return;
-    }
-
-    auto params = fixToOrderParams(msg);
-    if (!params.valid) {
-        return;
-    }
-
-    switch (params.action) {
-    case FixOrderParams::Action::NewOrder:
-        processOrder(params.symbolId, params.orderId, params.participantId, params.side,
-                     params.price, params.qty, params.orderType, 0, 0, params.tif);
-        break;
-    case FixOrderParams::Action::Cancel:
-        cancelOrder(params.symbolId, params.orderId);
-        break;
-    case FixOrderParams::Action::CancelReplace:
-        cancelReplace(params.symbolId, params.orderId, params.newPrice, params.newQty);
-        break;
-    default:
-        break;
-    }
 }
 
 LatencyTracker MatchingEngine::getAggregateE2ELatency() const {

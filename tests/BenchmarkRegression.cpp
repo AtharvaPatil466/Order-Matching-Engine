@@ -20,12 +20,25 @@ uint64_t steadyNs() {
 // These tests run fixed workloads and assert that p99 latency stays below
 // conservative thresholds. Thresholds are generous to avoid CI flakiness.
 //
+// WHAT THIS CAN CATCH (PERF-7): gross breakage only, not a doubling. Measured
+// p99 on Apple M3 (3 runs, identical): add 84, match 125, cancel 292, snapshot
+// 84 ns against 2,000 / 5,000 / 1,000 / 500 — 6x to 40x headroom, and a hosted
+// x86 VM is ~2x slower than M3 on Path A. The thresholds are not tightened to
+// catch a 2x regression because a single run's p99 on a shared runner moves
+// +102% on unchanged code (benchmark-gate's 40-run noise measurement, see
+// scripts/check_benchmark_regression.py), so an absolute p99 bound tight
+// enough to catch a doubling fails byte-identical builds. A doubling is the
+// job of the A/B gate (benchmark-gate.yml: head and merge base on one runner,
+// min-of-5, p50 +10% / p99 +25%), which runs through MatchingEngine and so
+// with a listener attached. That gate is advisory until "benchmark" is a
+// required status check. The workloads here are listener-free.
+//
 // Thresholds are calibrated for an optimized Release build on x86 bare metal.
 // Debug runs 3-5x slower and fault injection adds per-op hot-path overhead, so
 // enforcing them there yields meaningless false failures. CMake defines
 // OB_ENFORCE_LATENCY_THRESHOLD only for a Release, no-FI build; elsewhere each
-// test still runs its workload and prints its numbers, then GTEST_SKIPs instead
-// of asserting. (Not keyed off NDEBUG: ENABLE_ASSERTIONS=ON compiles -UNDEBUG,
+// test still runs its workload and prints its numbers, then skips instead of
+// asserting. (Not keyed off NDEBUG: ENABLE_ASSERTIONS=ON compiles -UNDEBUG,
 // so NDEBUG is undefined even in Release.)
 #ifdef OB_ENFORCE_LATENCY_THRESHOLD
 #define OB_EXPECT_P99_UNDER(p99, bound, label)                                  \
@@ -33,7 +46,8 @@ uint64_t steadyNs() {
                               << "ns exceeds " #bound "ns threshold"
 #else
 #define OB_EXPECT_P99_UNDER(p99, bound, label)                                  \
-    GTEST_SKIP() << "latency threshold enforced only in a Release build "       \
+    GTEST_SKIP() /* skip-ok: Release-only; CI's Release Latency Gate enforces */ \
+                 << "latency threshold enforced only in a Release build "       \
                     "without fault injection (see file header); this build's "  \
                     "timings are not comparable to the x86 Release calibration"
 #endif

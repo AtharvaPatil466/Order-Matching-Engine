@@ -3,8 +3,9 @@
 //
 // The input is the byte stream one client sends the native gateway. It goes
 // through TcpGateway's own framer (feedBytes -> decodeFrame -> processMessage)
-// into MatchingEngine::submitOrder on a synchronous engine shaped like
-// GatewayServer's (symbols 0 and 1, no credential store, no session end).
+// into MatchingEngine::submitOrder on a synchronous engine (symbols 0 and 1, no
+// credential store, no session end) — OrderEngine runs async, but that reaches
+// the book through the same code, which this can steer on one thread.
 // After the stream, and again after an expiry sweep, every book must pass
 // OrderBook::validateIntegrity; the engine's own asserts are armed (-UNDEBUG)
 // and UBSan halts. Any of the three is a finding.
@@ -70,7 +71,7 @@ void checkBooks(MatchingEngine& engine, const char* when) {
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     MatchingEngine engine;
     for (SymbolId s : kSymbols) engine.addSymbol(s);
-    engine.setSessionEndScheduled(false);  // as GatewayServer
+    engine.setSessionEndScheduled(false);  // as OrderEngine
     engine.start();
     {
         TcpGateway gateway(engine);

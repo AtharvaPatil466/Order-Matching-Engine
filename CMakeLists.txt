@@ -216,10 +216,8 @@ add_library(OrderMatcher
     src/SessionScheduler.cpp
     src/ContingencyManager.cpp
     src/HierarchicalRiskManager.cpp
-    src/EpochStore.cpp
     src/TcpGateway.cpp
     src/FaultInjector.cpp
-    src/DpdkGateway.cpp
 )
 target_link_libraries(OrderMatcher PUBLIC Threads::Threads)
 
@@ -243,60 +241,6 @@ if(ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 endif()
 
-# Optional DPDK + F-Stack kernel-bypass ingestion path (Linux only). When
-# ENABLE_DPDK is on and both libdpdk and F-Stack are found we define OB_HAVE_DPDK
-# and link F-Stack (which bundles + manages its own DPDK internally);
-# src/DpdkGateway.cpp then compiles its real body. Absent it (any non-Linux
-# platform, or DPDK/F-Stack not installed) DpdkGateway.cpp compiles to an empty
-# translation unit and the kernel TcpGateway is the only ingestion path.
-option(ENABLE_DPDK "Build the DPDK/F-Stack kernel-bypass ingestion path" OFF)
-# F-Stack install prefix (meson+ninja default from scripts/dpdk_aws.sh). Its
-# static lib lives at ${FF_PATH}/lib/libfstack.a and bundles DPDK internally.
-set(FF_PATH "/usr/local" CACHE PATH "F-Stack install prefix (contains lib/libfstack.a)")
-if(ENABLE_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(PkgConfig REQUIRED)
-    # Resolve F-Stack's bundled/patched DPDK, installed under /usr/local by
-    # scripts/dpdk_aws.sh (meson+ninja, default prefix) — NOT any distro libdpdk.
-    # Prepend its pkgconfig dirs so pkg_check_modules finds the F-Stack DPDK first.
-    set(ENV{PKG_CONFIG_PATH}
-        "/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-    pkg_check_modules(DPDK REQUIRED libdpdk)  # F-Stack bundled DPDK's libdpdk.pc (static libs only)
-    find_library(FSTACK_LIB fstack)          # F-Stack libfstack (/usr/local/lib)
-    find_path(FSTACK_INCLUDE ff_api.h)
-    if(DPDK_FOUND AND FSTACK_LIB AND FSTACK_INCLUDE)
-        target_compile_definitions(OrderMatcher PUBLIC OB_HAVE_DPDK=1)
-        target_include_directories(OrderMatcher PUBLIC ${DPDK_INCLUDE_DIRS} ${FSTACK_INCLUDE})
-        target_compile_options(OrderMatcher PUBLIC ${DPDK_CFLAGS_OTHER})
-        # libfstack.a already has DPDK's object files compiled IN — including the
-        # tailq init constructors (e.g. tailqinitfn_rte_swx_ipsec_tailq). So linking
-        # ANY librte_*.a alongside it produces a SECOND copy of those same
-        # constructors → "EAL: PANIC in tailqinitfn_*: Cannot initialize tailq".
-        #
-        # Fix: link ONLY libfstack.a statically (inside --whole-archive so its
-        # F-Stack + DPDK PMD constructors, incl. the ENA PMD, survive the static
-        # link and self-register). Do NOT link any DPDK static lib — resolve the
-        # remaining rte_* symbols from the DPDK *shared* libs already installed
-        # beside it. pkg_check_modules(DPDK) above is kept ONLY for
-        # ${DPDK_INCLUDE_DIRS}/${DPDK_CFLAGS_OTHER}; its static lib list
-        # (DPDK_STATIC_LIBRARIES) is deliberately NOT on the link line.
-        target_link_libraries(OrderMatcher PUBLIC
-            -Wl,--no-as-needed
-            -Wl,--whole-archive ${FF_PATH}/lib/libfstack.a -Wl,--no-whole-archive
-            # Point the linker at F-Stack's bundled DPDK shared libs so libfstack's
-            # rte_* references resolve from librte_*.so — NOT a second static copy.
-            # No -lrte_*/librte_*.a on the line; that is the whole point.
-            -L${FF_PATH}/lib/x86_64-linux-gnu
-            # The ENA PMD uses libibverbs *core* (InfiniBand-free) — plain shared
-            # dep. libjitterentropy ships only the versioned .so.3 (no unversioned
-            # dev symlink), so link it by exact name.
-            -libverbs
-            -lz -lzstd -l:libjitterentropy.so.3)
-        message(STATUS "DPDK/F-Stack kernel-bypass ingestion enabled (dpdk ${DPDK_VERSION})")
-    else()
-        message(WARNING "ENABLE_DPDK=ON but libdpdk and/or F-Stack not found — kernel TCP only")
-    endif()
-endif()
-
 if(ENABLE_ASSERTIONS)
     target_compile_options(OrderMatcher PUBLIC -UNDEBUG)
 endif()
@@ -316,10 +260,6 @@ target_link_libraries(OrderMatcherResearch PUBLIC OrderMatcher)
 # Main Executable
 add_executable(OrderEngine src/main.cpp)
 target_link_libraries(OrderEngine PRIVATE OrderMatcher)
-
-# Gateway Server
-add_executable(GatewayServer src/gateway_main.cpp)
-target_link_libraries(GatewayServer PRIVATE OrderMatcher)
 
 # Market Data Subscriber
 add_executable(MdSubscriber src/md_subscriber.cpp)

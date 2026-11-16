@@ -21,8 +21,6 @@
 | Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack; journal at `/tmp/honest_benchmark.journal` — whether that host's `/tmp` was EBS or tmpfs is not recorded | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
 | Safety invariants | TLC: 2,726,157 distinct states, 0 violations (`MatchingEngine.cfg`, MaxOrders=3; small bounds, see docs/Verification.md) | ✅ Model-checked |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
-| **SBE encode: 1.0 ns/op (1015 M ops/s)** | Pure codec microbench, no engine | ✅ Measured |
-| **SBE 110× faster than OUCH encode** | Binary vs ASCII-decimal field formatting | ✅ Measured |
 | Coordinated omission is corrected, not ignored | `CoordinatedOmissionBenchmark` runs open-loop at a fixed offered rate and reports CO-naive *and* CO-corrected | ✅ Measured (ARM only) |
 | Cold-path cost ≈ 10× warm at P50 | `ColdCacheBenchmark`, working set evicted before each timed op | ✅ Measured (ARM only) |
 | Sustained per-window latency | `SustainedLoadTest` latency columns are cumulative, not per-window — harness defect | ❌ Unmeasured |
@@ -48,7 +46,7 @@ The four benchmarks' absolute numbers are not directly comparable to each other.
 **`HonestBenchmark`** (seed=42, 50K orders) is the controlled reproducible
 baseline. Every order is accepted and 43.8% of the timed orders trade on
 arrival; the rest rest. The run prints that share and fails if any order is
-rejected or the paths disagree on the fills. (Its old "100.0% fill rate" line
+rejected or the paths disagree on the fills. (Its old, withdrawn "100.0% fill rate" line
 counted accepted orders, and the figures in this file come from that version:
 no warm-up, orders 1–50,000 timed, `high_resolution_clock`, journal in
 `/tmp`.) It measures the hot path
@@ -138,13 +136,16 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | Components |
 |------|------------|
-| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority (WashTrade and LULD are held by `OrderBook` but never called) |
-| **B** | Path A + `MatchingEngine::submitOrder()` — sequence allocation, rate limiter check |
+| **A** | `OrderBook::addOrder()` — matching, STP, price-time priority; **no listener attached** (no shipped book runs like this) |
+| **L** | Path A with a listener attached that only counts its callbacks — the book-side cost of the shipped configuration (OrderEngine attaches its market-data listener to every book) |
+| **B** | Path L's book + `MatchingEngine::submitOrder()` — sequence allocation, rate limiter check; the listener is the engine's internal OCO observer |
 | **C** | Path B + `Journal` — GroupCommit (batch=64) with `fdatasync` per batch |
+
+RealisticFlow, CoordinatedOmission and ColdCache attach a listener too (`bench::TerminalTracker`), so they compare with Path L, not Path A; each benchmark's header says which listener it runs with.
 
 ### What is NOT Measured
 
-- Network I/O (FIX parsing, TCP/UDP)
+- Network I/O (TCP framing)
 - Async queue delay (all paths are synchronous)
 - OS scheduling jitter (no `isolcpus`, no core pinning)
 - Memory allocator contention (single-threaded)
@@ -155,7 +156,7 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 
 | Path | What's Included | P50 | P90 | P99 | Throughput |
 |------|------------------|----:|----:|----:|-----------:|
-| **A** Core matching | OrderBook + STP (WashTrade and LULD are never called) | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
+| **A** Core matching | OrderBook + STP | **261 ns** | 620 ns | 1,010 ns | 2.80M ops/s |
 | **B** Engine wrapper | + sequence alloc, rate-limiter check (limiter disabled, its default) | 269 ns | 620 ns | 1,001 ns | 2.74M ops/s |
 | **C** Full-stack journal | + GroupCommit (batch=64, async io_uring ack; journal on `/tmp`, backing device not recorded) | 615 ns | 1,048 ns | 3,568 ns | 1.28M ops/s |
 
@@ -164,17 +165,9 @@ Each order is individually timed: `t0 = nowNs()` → operation → `t1 = nowNs()
 > 3.10M ops/s** — the headline figure. The table above is the standard (non-PGO)
 > Release build.
 
-`perf` (**mis-scoped — see the correction below**, 50K orders seed=42):
-
-| Counter | Per-order mean |
-|---|---:|
-| IPC | 1.34 |
-| Branch-misses / order | 17.8 |
-| L1-dcache-misses / order | 152 |
-| Instructions / order | 12,638 |
-
-**These figures are withdrawn. The table above is retained only so the
-correction has something to point at; do not cite the numbers.**
+Per-order `perf` counters from that session (IPC, branch and L1d misses,
+instructions per order) are **withdrawn** and no longer printed here: they were
+whole-process totals divided by the order count, not Path A.
 
 They were labelled "Path A" and they are not Path A. `scripts/aws_benchmark.sh`
 runs `perf stat` around the **entire HonestBenchmark process** — its own echo
@@ -203,7 +196,7 @@ The 261 ns P50 is structurally bound (pointer-chasing L1 misses + data-dependent
 branch mispredicts + Spectre eIBRS), not instruction-bound. This cycle's
 branchless price-cross shaved 10 ns P50 / 62 ns P99 (see Optimization History
 below); next-order prefetch and the price-level arena allocator were both
-implemented and reverted as net-negative on this 100%-fill flow.
+implemented and reverted as net-negative on this no-cancel flow.
 
 ### Reference — Apple Silicon ARM64 (M3 Pro dev machine, NOT an SLA)
 
@@ -246,15 +239,15 @@ multiple of 42 ns should be read as quantization, not measurement.
 | C Full-stack journal | 1,750 ns | 4,096 ns | 1,761,280 ns | 3,899,392 ns | 10,773,458 ns | 24,603 ops/s |
 
 This table is from the old harness (see "The four benchmarks" above): its
-100.0% fill rate counted accepted orders, and Path C's journal sat in `/tmp`
+withdrawn 100.0% fill rate counted accepted orders, and Path C's journal sat in `/tmp`
 on a filesystem nobody recorded. Paths A and B report
 an identical 250 ns P50 (6 ticks) because the wrapper overhead is smaller than
 one tick here; x86 measures it at 8 ns (269 − 261). Path C is a macOS/APFS
 `fdatasync` artifact, **not structural** — 615 ns on Linux x86 with the async
 io_uring ack.
 
-A previous revision of this table reported ~125 ns for Paths A and B. That
-figure did not reproduce and is not retained.
+A previous revision of this table reported a lower figure for Paths A and B.
+It did not reproduce and is withdrawn.
 
 #### `RealisticFlowBenchmark` — closed-loop, cancel-heavy, 500K events, seed=42
 
@@ -403,7 +396,7 @@ Validated on AWS c6in.metal against the same 50K/seed=42 flow:
 | Change | Result |
 |--------|--------|
 | **Branchless price-cross** | Path A −10 ns P50, −62 ns P99 |
-| **Next-order prefetch** | **Stays reverted — re-tested properly, verdict unchanged.** The original basis (L1-dcache-misses 47->152/order) was the mis-scoped whole-process counter corrected in `156acb3`, and the original workload was 100%-fill, where a prefetch cannot pay. Re-measured behind `-DENABLE_MATCH_PREFETCH=ON` (a flag no CI lane built, since deleted; it is in 8a30c12) over 21 round-robin rounds on BOTH flows, deltas judged by Mann-Whitney U: no benefit anywhere (p 0.43-0.95), and the only separable effect is a **penalty** on RealisticFlow IOC mean (+1.2%, p=0.007) — the one sub-path where the matching loop actually iterates, which is the direction the original mechanical argument predicted. **Residual open question:** neither benchmark does a deep multi-order sweep, the regime where a prefetched node would be consumed; Path A fills ~1 resting order per incoming order and RF's Pareto IOCs mostly consume 1-2. So this shows prefetch does not help *these* flows, not that it cannot help a sweep-heavy one. Settled by: x86 + a sweep-heavy workload under `perf stat` scoped via `--only a`, measuring L1-dcache-load-misses per matching-loop *iteration*. |
+| **Next-order prefetch** | **Stays reverted — re-tested properly, verdict unchanged.** The original basis (L1-dcache-misses 47->152/order, now withdrawn) was the mis-scoped whole-process counter corrected in `156acb3`, and the original workload was 100%-fill, where a prefetch cannot pay. Re-measured behind `-DENABLE_MATCH_PREFETCH=ON` (a flag no CI lane built, since deleted; it is in 8a30c12) over 21 round-robin rounds on BOTH flows, deltas judged by Mann-Whitney U: no benefit anywhere (p 0.43-0.95), and the only separable effect is a **penalty** on RealisticFlow IOC mean (+1.2%, p=0.007) — the one sub-path where the matching loop actually iterates, which is the direction the original mechanical argument predicted. **Residual open question:** neither benchmark does a deep multi-order sweep, the regime where a prefetched node would be consumed; Path A fills ~1 resting order per incoming order and RF's Pareto IOCs mostly consume 1-2. So this shows prefetch does not help *these* flows, not that it cannot help a sweep-heavy one. Settled by: x86 + a sweep-heavy workload under `perf stat` scoped via `--only a`, measuring L1-dcache-load-misses per matching-loop *iteration*. |
 | **io_uring async ack (Option 1)** | Path C P99 **−32.8%** (5,312 → 3,568 ns); Path C P50 **+167 ns** — expected, since `submitOrder()` now returns before durability and the completion-reaper thread's overhead surfaces in P50 |
 | **Price-level arena allocator** | **Stays reverted — and now measured, not assumed.** Judged on the cancel-heavy flow it was supposed to win on it is 2.5-3.6% WORSE on mean latency (p~0.002) with no tail benefit; on 100%-fill it is +16% mean, -13% throughput, +33% P99, +62% P99.9 (p < 1e-5 throughout). Those effects are 5-400x the clock noise floor, so the verdict does not rest on ARM timer resolution. It is *correct* (523/523 with it on) — just slower. **Also found:** a repeatable ~185us hot-path stall that GROWS with cumulative orders (9.9us at 5K -> 240us at 200K, while the pooled baseline stays flat at ~10us). `OrderArena::activePriceToSlab_` is claimed to be sized so no rehash hits the hot path, but entries are not bounded by slab count: re-affiliating a slab to a new price orphans every earlier price still mapped to it, so orphans accumulate and the map periodically rehashes mid-match. Not carried in the tree — recoverable from `ff55338` (+ `c9e2260` for the SLAB_SIZE override), and that defect is the first thing to fix if anyone revisits. |
 
@@ -526,31 +519,19 @@ The comparator catches both trade count and counterparty divergence.
 
 ## Binary Codec Microbenchmark
 
-`./bin/BinaryCodecBenchmark` — single-threaded encode/decode rates for the three binary order-entry / market-data protocols. No engine, no transport — isolates the codec cost. 2M iterations per row, M3 Pro / Clang `-O3 -march=native`.
+`./bin/BinaryCodecBenchmark` — single-threaded ITCH encode rate. No engine, no transport — isolates the codec cost. 2M iterations, M3 Pro / Clang `-O3 -march=native`. The OUCH and SBE rows went with those codecs (roadmap 1.2).
 
 | Protocol | Operation | Wire size | ns/op | M ops/s | GB/s |
 |----------|-----------|----------:|------:|--------:|-----:|
-| OUCH 4.2 | EnterOrder encode | 49 B | 112.0 | 8.93 | 0.44 |
-| OUCH 4.2 | EnterOrder decode | 49 B | 10.2 | 98.48 | 4.83 |
 | ITCH 5.0 | AddOrder encode | 36 B | 34.1 | 29.36 | 1.06 |
-| **SBE** | **NewOrderV1 encode** | **32 B** | **1.0** | **1015** | **32.49** |
-| **SBE** | **NewOrderV1 decode** | **32 B** | **0.5** | **2128** | **68.10** |
 
-### Why the gap
-
-The 110× difference between OUCH and SBE encode reflects what each protocol asks the CPU to do:
-
-- **OUCH 4.2** carries ASCII-decimal text in 8 of its fixed slots (order token, stock, firm) — every encode runs `snprintf`-equivalent integer formatting. That's hundreds of cycles per field.
-- **ITCH 5.0** has one ASCII slot (stock); the rest are big-endian binary. Faster than OUCH but still pays byte-swap on a little-endian host.
-- **SBE** is little-endian binary (native to x86/ARM), every field is a plain integer write. The codec compiles down to ~24 bytes of moves — at the limit of the timer's resolution.
-
-The 1.0 ns/op SBE encode number is approaching the floor of what's measurable on a 24 MHz TSC. Real impact depends on whether the codec is the bottleneck (it's usually not — the engine dominates), but for venues moving billions of messages per day the difference is real.
+ITCH has one ASCII slot (stock); the rest are big-endian binary, so it pays a byte swap per field on a little-endian host.
 
 ## Sharding
 
 No benchmark measures `ShardedOrderBook`. The former `ShardedBookStressTest`
 timed mostly circuit-breaker rejects and never checked what `addOrder`
-returned, so it was deleted along with its 5.97x table. The engine's scaling
+returned, so it was deleted along with its speed-up table (withdrawn). The engine's scaling
 mechanism is thread-per-symbol; `ScalingBenchmark` measures that.
 
 ## Reproducing

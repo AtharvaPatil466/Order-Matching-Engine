@@ -9,12 +9,10 @@
 #include "HierarchicalRiskManager.h"
 #include "MpscQueue.h"
 #include "RingBuffer.h"
-#include "FIXParser.h"
 #include "FlatHashMap.h"
 #include "LatencyTracker.h"
 #include "RateLimiter.h"
 #include "GraduatedKillSwitch.h"
-#include "IncidentLogger.h"
 #include "CapacityMonitor.h"
 #include "Utils.h"
 #include "BatchRiskValidator.h"
@@ -290,6 +288,11 @@ public:
     // (any fill) cancels the other. The cancel runs synchronously right
     // after the triggering order is processed — thread-per-symbol makes
     // that race-free — and is journaled so replay reproduces it.
+    // A link names the order with that id on that symbol (MIDS-2), and ends
+    // when the order leaves unfilled by any path, so a later order reusing the
+    // id does not inherit it. The caller links its own orders: there is no
+    // owner argument, and while the order lives its (symbol, id) names one
+    // owner. The gateway makes ids per participant.
     void registerOco(SymbolId symbolId, OrderId a, OrderId b);
 
     // ─── Risk, fees & compliance (opt-in) ────────────────────────────
@@ -300,6 +303,7 @@ public:
                         uint64_t accountId, uint64_t firmId);
     void setRiskTierLimits(RiskTier tier, uint64_t entityId, const TierLimits& limits);
     int64_t riskNetPosition(RiskTier tier, uint64_t entityId) const;
+    int64_t riskWorkingQty(RiskTier tier, uint64_t entityId, Side side) const;
     // Maker-taker fees: configure schedules; query accrued net fees.
     void setDefaultFeeSchedule(const FeeSchedule& s);
     void setParticipantFeeSchedule(ParticipantId p, const FeeSchedule& s);
@@ -347,8 +351,8 @@ public:
     // reopening cross and return it to continuous trading. Returns the
     // count of books reopened. The engine also reopens each one by itself
     // once it has run its dwell (OrderBook::volatilityAuctionDue), from the
-    // expiry hook: the ExpireCheck sweep in async mode, expireOrders() —
-    // GatewayServer's tick — in sync mode.
+    // expiry hook: the ExpireCheck sweep in async mode, expireOrders() in
+    // sync mode.
     size_t resumeVolatilityAuctions();
 
     // End the trading session for `symbols`: move them to PostClose (which
@@ -362,8 +366,8 @@ public:
     // A DAY order with no expiryTime ends with the session, here. With no
     // session end scheduled nothing would end it — it rested as GTC — so
     // while this is false submitOrder refuses one (PRIOR-7). True by default,
-    // for an in-process owner that ends sessions itself; OrderEngine and
-    // GatewayServer set it false, and a SessionScheduler sets it true.
+    // for an in-process owner that ends sessions itself; OrderEngine sets it
+    // false, and a SessionScheduler sets it true.
     void setSessionEndScheduled(bool scheduled) {
         sessionEndScheduled_.store(scheduled, std::memory_order_release);
     }
@@ -393,8 +397,6 @@ public:
                        Journal::SyncPolicy policy = Journal::SyncPolicy::GroupCommit);
 
     // Access the underlying Journal (null if enableJournal not called).
-    // Used by the replication coordinator wiring to attach an onCommit
-    // hook that ships each committed batch to backups.
     Journal* getJournal() { return journal_.get(); }
 
     // ── C4: durable client acknowledgements ─────────────────────────────────
@@ -416,48 +418,45 @@ public:
     // acknowledges at enqueue, before matching has happened at all, so gating
     // the dispatch would leave that ack still undurable and claim a guarantee
     // this does not provide. Refusing is better than half of one.
+    //
+    // Under GroupCommit it is accepted and holds events, but the SubmitResult
+    // is answered before the commit, so durableClientAcks() reports false
+    // (DA-6). startAsync turns the gate off.
     bool enableDurableClientAcks(bool on);
-    bool durableClientAcks() const { return durabilityGate_.enabled(); }
+    // True only when an accepted SubmitResult is on disk: the gate is on, the
+    // engine is sync, and every append syncs before it returns (Immediate).
+    bool durableClientAcks() const {
+        return durabilityGate_.enabled() && !async_ && journal_ &&
+               journal_->syncPolicy() == Journal::SyncPolicy::Immediate;
+    }
 
     // Events held back waiting for a commit. Should sit near zero; a rising
     // value means the journal has stalled and clients are hearing nothing.
     size_t pendingDurableEvents() const { return durabilityGate_.pendingGroups(); }
 
-    // Toggle replay mode across every registered book. Backups run
-    // permanently in replay mode so that applying primary-shipped
-    // journal entries does not re-emit market data or order updates
-    // to local clients (the primary is the canonical source). Leaving
-    // replay mode (promotion; the end of replayJournal) rebuilds every
+    // Toggle replay mode across every registered book: a book in replay mode
+    // re-applies records without re-emitting market data or order updates.
+    // Leaving replay mode (the end of replayJournal) rebuilds every
     // participant's position-limit exposure from the restored books.
     void setReplayModeAllBooks(bool replay);
 
-    // Apply a single deserialized JournalEntry to the engine. Used by
-    // the replication backup path: the coordinator receives an entry
-    // over the wire and dispatches it through this method so the
-    // backup's books stay byte-identical to the primary's. Returns
-    // false if the entry references a symbol unknown to this engine
-    // (caller can decide whether to log/halt).
-    bool applyReplicatedEntry(const struct JournalEntry& entry);
-
-    // Stream a snapshot of all currently-resting orders. For each
-    // order, builds a JournalEntry of type Snapshot and invokes the
-    // callback. Used by the replication primary path to bring a
-    // newly-connected backup up to date before resuming live
-    // replication — closes the "joined-after-orders-existed" gap
-    // surfaced by the rolling-restart chaos scenario.
-    //
-    // Concurrency: takes bookMutex_, then each book's bookLock_ while
-    // iterating it. bookLock_ is a plain std::mutex (it was a shared_mutex
-    // when this note was written), so that hold is EXCLUSIVE — streaming one
-    // book blocks matching on that symbol for the length of its walk. New
-    // orders accepted during iteration may or may not appear in the stream;
-    // the Snapshot handler on the receiver side is idempotent (skips
-    // already-known orderIds), so the overlap is safe — duplicates collapse,
-    // no entries are lost.
-    void streamSnapshot(const std::function<void(const struct JournalEntry&)>& fn) const;
-
     // Replay journal to rebuild order book state (crash recovery)
     size_t replayJournal();
+    // Checkpoint orders replay could not put back, each logged as
+    // checkpoint_restore_refused. A checkpoint is their only record, so
+    // bootJournal refuses to start on any.
+    size_t restoreRefusals() const { return restoreRefusals_; }
+    // Journal entries the live engine applied and replay refused, each logged
+    // as replay_entry_refused with its sequence number: an order it no longer
+    // admits, a modify or replace it no longer applies. The recovered book is
+    // then not the journaled one, so bootJournal refuses to start on any.
+    size_t replayRefusals() const { return replayRefusals_; }
+
+    // The replay itself, over records already read: what replayJournal runs on
+    // this engine's journal, and TimeMachine on a prefix of a journal file.
+    // Records whose sequence does not advance are skipped. Returns how many
+    // were applied: a refused one is not (restoreRefusals, replayRefusals).
+    size_t replayEntries(const std::vector<JournalEntry>& entries);
 
     // Write full snapshot of all active orders to journal (checkpoint)
     void checkpoint();
@@ -476,17 +475,29 @@ public:
     // when one happens. Async workers do it themselves before they park.
     void commitJournal();
 
+    // Async only. Called on a worker after each request it runs, once that
+    // request's journal appends have returned. What the request produced is
+    // released to clients from here (TcpGateway::enableExecutionReports), so
+    // nothing reaches anyone ahead of the entry behind it. Set before
+    // startAsync; unset costs one test per request.
+    void setStepEndHook(std::function<void(size_t threadIndex)> fn) {
+        stepEndHook_ = std::move(fn);
+    }
+
+    // Whether every entry appended so far is on stable storage, making it so
+    // first under a policy that batches. False once the journal has halted:
+    // what produced those entries must never be shown. True with no journal.
+    bool syncJournalForReports();
+
+    // Every symbol added so far. Not while symbols are being added.
+    const std::vector<SymbolId>& symbolIds() const { return symbolIds_; }
+    // The worker that owns `symbol`'s book. Async only.
+    size_t workerOf(SymbolId symbol) const { return getThreadIndex(symbol); }
+
     // Async stats (aggregates across all threads)
     uint64_t getSubmittedCount() const;
     uint64_t getProcessedCount() const;
 
-    // Backpressure handling. The callback fires when the engine's
-    // ingress queue is full and a request is being dropped. Note:
-    // `std::function` may heap-allocate when the captured lambda
-    // exceeds the small-buffer threshold — call this once at startup
-    // (not per-connection) to keep the allocation off the hot path.
-    using BackpressureCallback = std::function<void(const OrderRequest&)>;
-    void setBackpressureCallback(BackpressureCallback cb) { backpressureCb_ = std::move(cb); }
     void setMaxPushRetries(uint32_t retries) { maxPushRetries_ = retries; }
     uint64_t getDroppedCount() const { return droppedCount_.load(std::memory_order_relaxed); }
     // Control-plane enqueues that had to wait for ring space. Never indicates a
@@ -503,9 +514,6 @@ public:
     void setRateLimit(uint64_t ratePerSec, uint64_t burstSize) {
         rateLimiter_.setDefaultRate(ratePerSec, burstSize);
     }
-    void setParticipantRateLimit(ParticipantId id, uint64_t ratePerSec, uint64_t burstSize) {
-        rateLimiter_.setParticipantRate(id, ratePerSec, burstSize);
-    }
     RateLimiter& getRateLimiter() { return rateLimiter_; }
     uint64_t getRateLimitedCount() const { return rateLimitedCount_.load(std::memory_order_relaxed); }
 
@@ -516,20 +524,17 @@ public:
     double getBackpressureThreshold() const { return bpThresholdFraction_; }
     uint64_t getBackpressureRejectCount() const { return bpRejectCount_.load(std::memory_order_relaxed); }
 
-    // Pre-trade risk batching configuration (Phase 1, Week 2)
-    void setRiskBatchSize(size_t size) {
-        riskBatchSize_ = size > 16 ? 16 : (size == 0 ? 1 : size);
-    }
-    size_t getRiskBatchSize() const { return riskBatchSize_; }
-
     // ─── Hot-path pre-trade risk controls (P2-8 … P2-11) ─────────────────────
     // All checks below are O(1), lock-free (atomic ops only) and allocation-free
     // on the accept path. Each control is opt-in: it does nothing until configured
     // at startup, so the existing hot path is unchanged when unused. Per-id state
     // lives in fixed-size arrays indexed by participant/symbol id. submitOrder
-    // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue);
-    // symbol ids at or above MAX_RISK_SYMBOLS bypass the fat-finger arrays.
-    static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // positions_ / OTR array bound
+    // rejects participant ids at or above MAX_PARTICIPANTS (InvalidFieldValue),
+    // as do submitModify and submitCancelReplace for their requester;
+    // symbol ids at or above MAX_RISK_SYMBOLS have no fat-finger slot, so
+    // setFatFingerLimits / setReferencePrice throw std::out_of_range for them
+    // (MIDS-12: they were dropped silently).
+    static constexpr size_t MAX_PARTICIPANTS = kMaxParticipants;  // ledger / OTR array bound
     static constexpr size_t MAX_RISK_SYMBOLS = 256;   // fat-finger array bound
 
     // P2-8 Kill switch. setKillSwitch(true) is callable from a monitoring thread
@@ -540,10 +545,20 @@ public:
         return killSwitchActive_.load(std::memory_order_acquire);
     }
 
-    // P2-9 Position limits. Limit is the max absolute net position (signed
-    // exposure = filled ± working orders). 0 = unlimited.
+    // P2-9 Position limits. The limit bounds the position each side could reach
+    // if everything working on it filled: filled + working buys, and working
+    // sells - filled. Working orders on opposite sides do not net: either side
+    // can fill alone. 0 = unlimited, and the ledger still keeps count once any
+    // limit is set. Set one before traffic; see rebuildPositionsLocked.
     void setPositionLimit(ParticipantId pid, int64_t maxAbsPosition);
+    // Filled net position ± working quantity. Kept once a limit is set, and
+    // rebuilt from the books after a replay whether or not one is.
     int64_t getPosition(ParticipantId pid) const;
+    // The ledger behind it. Working on a side is the sum of the remaining
+    // quantity of that participant's live orders on that side, queued ones
+    // included; filled is the signed net of its executions.
+    int64_t getWorkingQty(ParticipantId pid, Side side) const;
+    int64_t getFilledPosition(ParticipantId pid) const;
 
     // P2-10 Fat-finger, per instrument. maxQty / maxNotional 0 = unset;
     // maxDeviationPct 0 = unset (e.g. 0.10 for ±10% around the reference price).
@@ -551,7 +566,7 @@ public:
                             double maxDeviationPct, int64_t maxNotional);
     // Seed / override the reference price used by the ±deviation band. It is
     // otherwise tracked automatically from the last trade on that symbol.
-    void setReferencePrice(SymbolId sym, Price px);
+    void setReferencePrice(SymbolId sym, Price px);  // throws past MAX_RISK_SYMBOLS
 
     // P2-11 Order-to-trade ratio throttle (per participant, shared limit/window).
     // maxRatio 0 = disabled. A participant whose orders/trades over the rolling
@@ -576,17 +591,9 @@ public:
         return otrRejects_.load(std::memory_order_relaxed);
     }
 
-    // ─── FIX protocol gateway ─────────────────────────────────────────
-    // Process a raw FIX message string and route to appropriate handler
-    void processFIXMessage(const std::string& rawFix);
-
     // ─── Phase 4: Graduated Kill Switch ──────────────────────────────
     GraduatedKillSwitch& getKillSwitch() { return killSwitch_; }
     const GraduatedKillSwitch& getKillSwitch() const { return killSwitch_; }
-
-    // ─── Phase 4: Incident Logger ───────────────────────────────────
-    IncidentLogger& getIncidentLogger() { return incidentLogger_; }
-    bool enableIncidentLog(const std::string& path) { return incidentLogger_.open(path); }
 
     // ─── Phase 4: Capacity Monitor ──────────────────────────────────
     // Live in async mode: startAsync() installs the resource-query callbacks
@@ -612,8 +619,8 @@ private:
     void ensureDefaultSymbol();
     // Raw symbol registration. ASSUMES bookMutex_ is already held by the
     // caller. addSymbol() is the public, self-locking wrapper; internal callers
-    // that already hold bookMutex_ (e.g. applyReplicatedEntry's ensureBook) use
-    // this form to avoid re-locking the non-recursive mutex.
+    // that already hold bookMutex_ use this form to avoid re-locking the
+    // non-recursive mutex.
     void addSymbolLocked(SymbolId symbolId, MatchAlgorithm algo = MatchAlgorithm::PriceTime);
     void workerLoop(size_t threadIndex);
     // commitJournal() once the batch's oldest entry is past the commit delay.
@@ -638,15 +645,20 @@ private:
     uint64_t nextSequenceId();
     void leaseSequenceIds(uint64_t through);
     std::atomic<uint64_t> sequenceLease_{0};   // highest id a record covers
+    size_t restoreRefusals_ = 0;               // see restoreRefusals()
+    size_t replayRefusals_ = 0;                // see replayRefusals()
     // Tags this engine's id blocks: a thread's block is only used by the
     // engine whose lease covers it, never by the next engine on that thread.
     inline static std::atomic<uint64_t> seqOwnerTags_{0};
     const uint64_t seqOwnerTag_ = seqOwnerTags_.fetch_add(1, std::memory_order_relaxed) + 1;
-    // Apply a Counters record (replay, replication): `book` is its symbol's
+    // Apply a Counters record (replay): `book` is its symbol's
     // book, or null when the record names none.
     void restoreCounters(OrderBook* book, const JournalEntry& e);
     // Resolve a Cancel/Modify/CancelReplace record to the book that holds it.
     OrderBook* bookHoldingOrder(SymbolId recorded, OrderId orderId);
+    // Whether a miss in the recorded book scans the others: only for a LEGACY
+    // journal (MIDS-10); replayJournal sets it from the file's epoch.
+    bool replayScansAllBooks_ = true;
     // waitIfBusy: false skips when another checkpoint is in flight (it is
     // doing the same job); true waits for it and then runs. See the .cpp.
     void checkpointInternal(bool alreadyDrained, bool waitIfBusy = false);
@@ -680,6 +692,7 @@ private:
     std::atomic<bool> sessionEndScheduled_{true};  // see setSessionEndScheduled
     std::unique_ptr<Journal> journal_;
     DurabilityGate           durabilityGate_;
+    std::function<void(size_t)> stepEndHook_;
     // Atomic because Journal's io_uring path fires onDurable_ from its reaper
     // thread. The callback now only publishes here; draining the gate is the
     // order-processing thread's job. See enableDurableClientAcks.
@@ -761,7 +774,6 @@ private:
     // thread-local block allocator in the .cpp (see nextSequenceId).
 
     // Backpressure (Gap 7)
-    BackpressureCallback backpressureCb_;
     uint32_t maxPushRetries_{1000};
     std::atomic<uint64_t> droppedCount_{0};
     // Times a control-plane enqueue had to spin on a full ring (C5 telemetry).
@@ -786,11 +798,19 @@ private:
     std::atomic<bool> checkpointPending_{false};
     size_t checkpointThresholdEntries_{250000};
     size_t checkpointThresholdBytes_{64 * 1024 * 1024};
-    size_t riskBatchSize_{8};
 
     // ─── Phase 4 Compliance ──────────────────────────────────────────
     GraduatedKillSwitch killSwitch_;
-    IncidentLogger incidentLogger_;
+    // Books the kill switch halted, so it resumes only those. Under bookMutex_.
+    std::vector<SymbolId> killHalted_;
+    void syncKillSwitchHalts();
+    // The switch's participant and symbol scopes survive a restart, as
+    // setKillSwitch's flag does: journaled on every change (the ChangeFn),
+    // written by a checkpoint, put back by replay.
+    void journalGraduatedKill();
+    static void writeGraduatedKill(Journal& journal, const GraduatedKillSwitch::PersistentState& state,
+                                   const std::vector<SymbolId>& switchHalted);
+    void restoreGraduatedKill(const JournalEntry& e, GraduatedKillRecord kind);
     CapacityMonitor capacityMonitor_;
 
     // Internal helper: push to specific thread's queue with backpressure
@@ -853,6 +873,17 @@ private:
         MatchingEngine* engine = nullptr;                 // for hot-path risk fill accrual
         const std::atomic<bool>* ocoActive = nullptr;     // gates the executed buffer
         const std::atomic<bool>* tradesActive = nullptr;  // gates the trades buffer
+        // This symbol's OCO links (MIDS-2): an order id is unique among a
+        // book's live orders, not across books, so a link is scoped to the
+        // book. Guarded by contingencyMutex_.
+        ContingencyManager oco;
+        // Legs that executed, in book order, for driveOco to cancel their
+        // siblings. (A leg leaving unfilled ends its link in onOrderUpdate.)
+        // Appended under the book's lock by whichever thread reports the
+        // order: the book's worker, or a caller-thread sweep cancelling a
+        // part-filled order (session end, kill switch). Drained by the worker
+        // outside that lock, so it has its own. Only taken while OCO is active.
+        std::mutex executedMutex;
         std::vector<OrderId> executed;
         std::vector<Trade>   trades;
         // Persistent drain buffers reused across driveOco cycles. The drain
@@ -865,17 +896,54 @@ private:
         std::vector<Trade>   tradesScratch;
         void onOrderUpdate(const OrderUpdate& u) override;
         void onTrade(const Trade& t) override;
+        void onWorkingReleased(ParticipantId p, Side side, Quantity qty) override {
+            if (!engine) return;
+            engine->releaseWorking(p, side, qty);
+            engine->releaseHierarchical(p, side, qty);
+        }
+        RejectReason onAmend(const Order& o, Price newPrice, Quantity newTotal,
+                             Quantity newLeaves) override {
+            return engine ? engine->admitAmend(o, newPrice, newTotal, newLeaves)
+                          : RejectReason::None;
+        }
     };
     // Drain a book's observer after a request: OCO sibling cancels, then the
     // trade-driven consumers (fees / risk accrual / audit).
     void driveOco(SymbolId symbolId, OrderBook* book);
-    // Pre-trade hierarchical risk gate; true = admit. No-op (true) when risk
-    // is not configured. Runs on the worker thread, where book reads are safe.
-    bool preTradeRiskCheck(ParticipantId trader, Side side, Price price,
-                           Quantity qty, Price referencePrice);
+    // An engine-initiated cancel (kill, DAY, OCO sibling): journaled FIRST,
+    // then applied, as the expiry sweep does. False, book untouched, when the
+    // journal is or has just become halted. `appendOrdinal` takes the entry's.
+    bool cancelJournaledFirst(OrderBook& book, OrderId id, uint64_t& appendOrdinal);
+    // Worker thread, async cancel/modify/replace: tell the book's listener how
+    // it ended, since its submitter was answered before it ran. None: the
+    // order's state after it took effect (nothing if the order is gone; the
+    // book reported that). Otherwise the refusal, with the order's unchanged
+    // state, or Rejected when there is no such order of the requester's.
+    void reportAmendOutcome(OrderBook& book, OrderId id, RejectReason refused);
+    // Write-ahead for a request the book has decided to apply (RecordFn).
+    template <typename Append>
+    bool appendFirst(Append&& append, uint64_t& appendOrdinal);
+    // P2-10's notional cap for an order valued off the book (OrderBook::
+    // notionalPrice): the submit-time check cannot read a worker-owned book, so
+    // this runs on the book's thread, on both paths (STP-12).
+    RejectReason checkBookValuedNotional(const OrderBook& book, SymbolId sym, ParticipantId pid,
+                                         Side side, OrderType type, Price price, Quantity qty,
+                                         Price stopPrice, Price stopLimitPrice, Price trailAmount);
+    // The sync path's driveOco, after the request as the worker's is. Returns
+    // the journal ordinal its events wait behind: past any sibling cancel the
+    // drain journaled, if the request journaled at all.
+    uint64_t driveOcoSync(SymbolId symbolId, OrderBook* book, uint64_t appendOrdinal);
+    // Pre-trade hierarchical risk gate; true = admit, with `reserve` added to
+    // the working quantity at every tier (TLA-5). No-op (true) when risk is
+    // not configured. Both paths: the worker at apply time, the sync path
+    // before the book, and an amendment from inside the book.
+    // `referencePrice` is the mid (an NBBO proxy) or 0 to skip the band.
+    bool preTradeRiskCheck(ParticipantId trader, Side side, Price price, Quantity qty,
+                           Price referencePrice, Quantity reserve);
+    // Give back hierarchical working quantity. No-op until risk is configured.
+    void releaseHierarchical(ParticipantId pid, Side side, Quantity qty);
 
-    ContingencyManager contingency_;
-    std::mutex contingencyMutex_;
+    std::mutex contingencyMutex_;  // guards each OcoBookListener::oco
     std::atomic<bool> ocoActive_{false};
     FlatHashMap<SymbolId, std::unique_ptr<OcoBookListener>> ocoListeners_{64};
 
@@ -903,10 +971,15 @@ private:
     std::atomic<bool> otrActive_{false};             // P2-11
     std::atomic<bool> anyRiskActive_{false};         // gates onRiskFill()
 
-    // P2-9 positions: signed net exposure (filled ± working orders), and the
-    // per-participant absolute limit (0 = unlimited). Value-initialised to 0.
-    std::atomic<int64_t> positions_[MAX_PARTICIPANTS]{};
+    // P2-9 reservation ledger, roadmap 1.9 I2: signed filled net, and working
+    // quantity per side, plus the per-participant limit (0 = unlimited).
+    // Admission reserves an order's whole quantity before it reaches a book, a
+    // fill moves it from working to filled, and whatever leaves without trading
+    // comes back through OcoBookListener::onWorkingReleased.
+    std::atomic<int64_t> filled_[MAX_PARTICIPANTS]{};
+    std::atomic<int64_t> working_[MAX_PARTICIPANTS][2]{};  // [pid][sideIndex]
     std::atomic<int64_t> positionLimit_[MAX_PARTICIPANTS]{};
+    static constexpr size_t sideIndex(Side side) { return side == Side::Buy ? 0 : 1; }
 
     // P2-10 fat-finger per-symbol config + reference (last-trade) price.
     std::atomic<uint64_t> ffMaxQty_[MAX_RISK_SYMBOLS]{};          // 0 = unset
@@ -935,20 +1008,23 @@ private:
         std::numeric_limits<ParticipantId>::max();
 
     // Combined pre-trade risk gate (fat-finger, position, OTR). Returns
-    // RejectReason::None to admit. Kill switch is checked separately (first).
+    // RejectReason::None to admit, with `reserve` added to the ledger: every
+    // later refusal owes a releaseWorking. A new order reserves its qty, an
+    // amendment its growth. Kill switch is checked separately (first).
     RejectReason checkRiskControls(SymbolId sym, ParticipantId pid, Side side,
-                                   Price price, Quantity qty, OrderType type);
-    // Reserve/release working-order exposure for the position limit.
-    void reservePosition(ParticipantId pid, Side side, Quantity restingQty);
-    // Only the OrderExposure overload exists. The Order* one was removed: it
-    // had no callers, and it dereferenced a pooled Order — the exact hazard
-    // (H1) that OrderExposure was introduced to avoid by copying the fields it
-    // needs while the book lock is held. A dead function that reintroduces a
-    // fixed bug the moment someone reaches for it is worse than no function.
-    // H1 overload: takes the exposure BY VALUE, read under bookLock_ by
-    // OrderBook::cancelOrderReleasing(), so no Order* is dereferenced outside
-    // the lock. Prefer this at every cancel/sweep site.
-    void releasePosition(const OrderBook::OrderExposure& e);
+                                   Price price, Quantity qty, OrderType type,
+                                   Quantity reserve);
+    // GW-2: the engine's admission controls for a replace or modify, from
+    // inside the book (OcoBookListener::onAmend).
+    RejectReason admitAmend(const Order& o, Price newPrice, Quantity newTotal,
+                            Quantity newLeaves);
+    // Reserve qty against the limit in one atomic step (THR-3); false, reserving
+    // nothing, if that would breach it.
+    bool tryReserveWorking(ParticipantId pid, Side side, Quantity qty);
+    // Give back what a refused or departed order held. No-op until a limit is set.
+    void releaseWorking(ParticipantId pid, Side side, Quantity qty);
+    // A fill turns qty of a participant's working quantity into position.
+    void settleFill(ParticipantId pid, Side side, Quantity qty);
     // Recompute every position from the books after they were restored from
     // journal state, which drives them directly: neither the reservations above
     // nor the fill accrual below ran. Caller holds bookMutex_.

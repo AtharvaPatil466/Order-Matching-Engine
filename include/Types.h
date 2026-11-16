@@ -53,12 +53,16 @@ enum class OrderStatus : uint8_t {
     // STP-cancelled order report Filled at full quantity, which then won its
     // OCO group and cancelled innocent siblings.
     //
-    // Placed here rather than appended because OrderStatus — unlike
-    // RejectReason — is never cast to an integer, serialized, journalled, or
-    // put on the wire (SBE carries its own SBE_ORDER_ACK_STATUS_* codes), so
-    // renumbering is not observable. Verified repo-wide before moving it.
+    // Placed here rather than appended when OrderStatus was never cast to an
+    // integer, serialized, journalled, or put on the wire. The gateway's
+    // execution reports now carry it, so new statuses are appended.
     CancelledBySTP,
-    Rejected
+    Rejected,
+    // A stop, stop-limit, MIT or trailing stop was elected: its trigger
+    // printed. Reported once, when the election is latched and before any fill
+    // it makes; not a fill and not terminal. Appended, not inserted: the
+    // execution reports now carry this enum on the gateway wire.
+    Triggered
 };
 
 // Did this status represent an actual execution? The ONLY statuses that may
@@ -101,7 +105,7 @@ constexpr ParticipantId kMaxParticipants = 1024;
 
 enum class RejectReason : uint8_t {
     None,
-    VolatilityCircuitBreaker, // A replace priced outside the breaker threshold
+    VolatilityCircuitBreaker, // No longer emitted (the breaker tests prints); kept for the wire
                               // (a new order trips the breaker instead)
     PostOnlyWouldCross,
     FOKInsufficientLiquidity,
@@ -120,13 +124,13 @@ enum class RejectReason : uint8_t {
     OutsidePriceBand,         // LULD-style price collar violation (no halt)
     MarketClosed,             // Submitted while book is in PostClose state
     DuplicateOrderId,         // AddOrder with an id already in the book
-    UnsupportedFixVersion,    // BeginString outside the session's accept-list
-    MissingRequiredField,     // Required field absent (e.g. TransactTime on FIX 4.4)
+    UnsupportedFixVersion,    // Unused since FIX was deleted; kept so later values keep their wire numbers
+    MissingRequiredField,     // Required field absent
 
     // ─── Hot-path risk controls (P2-8 … P2-11) ──────────────────────────────
     // NOTE: extending this enum requires a matching case in every exhaustive
-    // switch over RejectReason (FixSession.h, OuchProtocol.h, FIXParser.h,
-    // TcpGateway.cpp). The Release build is -Wall -Wextra -Werror, so a missing
+    // switch over RejectReason (TcpGateway.cpp). The Release build is
+    // -Wall -Wextra -Werror, so a missing
     // case is a hard compile error, not a warning.
     KillSwitchActive,          // P2-8: engine kill switch engaged; new orders blocked
     PositionLimitExceeded,     // P2-9: participant net-position limit would be breached
@@ -140,9 +144,8 @@ enum class RejectReason : uint8_t {
     PoolCapacityExceeded,
 
     // Iceberg submitted with displayQty == 0. Appended rather than filed next
-    // to InvalidQuantity on purpose: the raw uint8_t goes on the wire (SBE
-    // field 9, GatewayProtocol.h ExecutionReport.rejectReason), so inserting
-    // mid-enum would silently renumber every later reason for live clients and
+    // to InvalidQuantity on purpose: the raw uint8_t goes on the wire
+    // (GatewayResponse.rejectReason), so inserting mid-enum would silently renumber every later reason for live clients and
     // for any recorded capture. New reasons go at the end, always.
     InvalidDisplayQty,
 
@@ -154,7 +157,7 @@ enum class RejectReason : uint8_t {
     NotOrderOwner,
 
     // A field is present on the wire but carries a value the schema does not
-    // define — an SBE side byte of 7, an orderType of 99. Distinct from
+    // define — a side byte of 7, an orderType of 99. Distinct from
     // MissingRequiredField, which is for a field that is not there at all:
     // telling a client "missing required field" about a field they did send
     // points them at the wrong half of their encoder.

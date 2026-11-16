@@ -13,9 +13,8 @@
 // 64 entries, a kill -9 can lose orders whose fills clients have already acted
 // on — and the venue has no record of trades its participants believe happened.
 //
-// Nothing else closes this. The replication ack is already correctly gated on
-// Journal's durability barrier (it fires onCommit_ strictly after a successful
-// syncFile), but no client-facing path waits for anything.
+// Nothing else closes this. Journal's durability barrier fires onDurable_
+// strictly after a successful syncFile, but no client-facing path waited for it.
 //
 // THE MECHANISM
 //
@@ -44,7 +43,7 @@
 // Arm/capture/commit run on the thread processing the order. releaseThrough()
 // runs from Journal's commit callback. On the synchronous journal path that is
 // the same thread, which is the configuration this supports today. Journal's
-// async io_uring path fires onCommit_ from a reaper thread and documents that
+// async io_uring path fires onDurable_ from a reaper thread and documents that
 // the callback must be lock-free, so enabling the gate alongside it needs a
 // lock-free handoff that does not exist yet — the engine refuses that
 // combination rather than pretending.

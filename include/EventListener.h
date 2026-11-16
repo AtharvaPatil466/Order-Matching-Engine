@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Types.h"
+
 namespace OrderMatcher {
 
 // Forward declarations
@@ -8,6 +10,7 @@ struct OrderUpdate;
 struct MarketDataUpdate;
 struct BookVisibleUpdate;
 struct UncrossReport;
+struct Order;
 
 // Virtual interface replacing std::function callbacks.
 // Zero-cost dispatch via vtable — no heap allocation, no type erasure overhead.
@@ -43,6 +46,23 @@ public:
     // Called once per uncross that printed, after its onTrade calls (each of
     // which carries Trade::auctionCross). Not called in replay.
     virtual void onUncross(const UncrossReport& /*report*/) {}
+
+    // Fired on the engine listener only (OrderBook::setEngineListener), and not
+    // in replay: `qty` of this participant's working quantity on `side` left
+    // the book without trading. The reservation ledger's way back; see
+    // OrderBook::releaseWorking.
+    virtual void onWorkingReleased(ParticipantId /*participant*/, Side /*side*/,
+                                   Quantity /*qty*/) {}
+
+    // Engine listener only, not in replay, under the book lock: a replace or
+    // modify of `order` that passed the book's own checks, about to give it
+    // `newPrice` and a total of `newTotal` with `newLeaves` working. None lets
+    // it through, with any growth in leaves already reserved; anything else
+    // refuses it and the order stays as it was.
+    virtual RejectReason onAmend(const Order& /*order*/, Price /*newPrice*/,
+                                 Quantity /*newTotal*/, Quantity /*newLeaves*/) {
+        return RejectReason::None;
+    }
 };
 
 // Null listener singleton — avoids nullptr checks on hot path.

@@ -97,28 +97,28 @@ private:
 
 // ─── OTR Key: composite participant×symbol lookup ───────────────────────
 //
-// Roadmap Phase 1, Week 2: OTR via FlatHashMap with composite key.
-// The key is a 64-bit composite of participant ID (high 32) and
-// symbol ID (low 32). The hash is the identity function since
-// participant IDs are already well-distributed uint64_t values
-// combined with uint32_t symbol IDs.
+// Roadmap Phase 1, Week 2: OTR via FlatHashMap with composite key. Both ids are
+// kept whole: packing them into one word truncated the participant to 32 bits,
+// so two participants could share a throttle, limits and position (STP-16).
 
 struct OTRKey {
-    uint64_t value;
+    ParticipantId participant{0};
+    SymbolId symbol{0};
 
-    OTRKey() : value(0) {}
-    OTRKey(ParticipantId participant, SymbolId symbol)
-        : value((static_cast<uint64_t>(participant) << 32) |
-                static_cast<uint64_t>(symbol)) {}
+    OTRKey() = default;
+    OTRKey(ParticipantId p, SymbolId s) : participant(p), symbol(s) {}
 
-    bool operator==(const OTRKey& other) const { return value == other.value; }
-    bool operator!=(const OTRKey& other) const { return value != other.value; }
+    bool operator==(const OTRKey&) const = default;
 };
 
 struct OTRKeyHash {
     size_t operator()(const OTRKey& key) const {
-        // Multiplicative hash (Knuth's golden ratio)
-        return static_cast<size_t>(key.value * 0x9E3779B97F4A7C15ULL);
+        // Multiplicative hash (Knuth's golden ratio). FlatHashMap masks the low
+        // bits, and a product's low bits see only its input's low bits, so the
+        // well-mixed high word is folded down.
+        constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ULL;
+        const uint64_t h = (key.participant ^ (uint64_t{key.symbol} << 32)) * kGolden;
+        return static_cast<size_t>(h ^ (h >> 32));
     }
 };
 

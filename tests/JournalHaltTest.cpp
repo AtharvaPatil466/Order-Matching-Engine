@@ -14,6 +14,7 @@
 //   - a checkpoint whose OWN temp file fails (h3: RLIMIT_FSIZE=2000 against a
 //     4 KB book) leaves the live journal as it was, and the process running.
 
+#include "GatewayTestClient.h"
 #include "MatchingEngine.h"
 #include "OrderBook.h"
 #include "TempPath.h"
@@ -99,9 +100,12 @@ size_t restoredFrom(const std::string& path, OrderId maxId) {
     restarted.addSymbol(kSym);
     restarted.enableJournal(path);
     restarted.replayJournal();
+    // By the client's id: through TcpGateway the book's id carries the
+    // participant too (MIDS-3).
     size_t n = 0;
-    for (OrderId id = 1; id <= maxId; ++id)
-        if (restarted.getOrderBook(kSym)->getOrder(id)) ++n;
+    restarted.getOrderBook(kSym)->forEachOrder([&](const Order& o) {
+        if (clientOrderId(o.id) >= 1 && clientOrderId(o.id) <= maxId) ++n;
+    });
     return n;
 }
 
@@ -126,7 +130,7 @@ int inChild(const char* name, const std::function<int()>& body) {
     return WEXITSTATUS(status);
 }
 
-// Sync engine, as GatewayServer runs it: Immediate, durable acks on.
+// Sync engine: Immediate, durable acks on.
 void testSyncPathRejectsAndHolds() {
     const std::string path = uniqueTempPath("journal_halt_sync.wal");
     std::filesystem::remove(path);
@@ -191,6 +195,53 @@ void testAsyncAdmissionRejects() {
     });
     std::filesystem::remove(path);
     assert(rc == kOk && "async engine on a failed journal write");
+}
+
+// OrderEngine's shape: async, Immediate, behind TcpGateway. The write fails on a
+// worker after admission said yes, so the gateway has to look again before it
+// tells the client the order is safe.
+void testAsyncGatewayDoesNotAckAFailedWrite() {
+    const std::string path = uniqueTempPath("journal_halt_gateway.wal");
+    std::filesystem::remove(path);
+    const int rc = inChild("async gateway", [&]() -> int {
+        if (!limitFileSize(midFourthRecord())) return kSetrlimitFailed;
+        MatchingEngine engine;
+        engine.addSymbol(kSym);
+        engine.enableJournal(path, Journal::SyncPolicy::Immediate);
+        engine.startAsync(1);
+        TcpGateway gateway(engine);
+        if (!gateway.start(0)) return kWrongReason;
+        TestClient client;
+        if (!client.connect(gateway.port())) return kWrongReason;
+        client.setRecvTimeout(30);
+
+        const auto answerTo = [&](OrderId id, GatewayResponse& out) {
+            OrderRequest r{};
+            r.type = OrderRequest::Type::NewOrder;
+            r.symbolId = kSym;
+            r.orderId = id;
+            r.participantId = kOwner;
+            r.side = Side::Buy;
+            r.price = 10000 - static_cast<Price>(id);
+            r.qty = 10;
+            r.orderType = OrderType::Limit;
+            return client.sendOrder(r) && client.recvResponse(out);
+        };
+        GatewayResponse resp{};
+        for (OrderId id = 1; id <= kWholeBeforeLimit; ++id) {
+            if (!answerTo(id, resp) || resp.type != GatewayResponse::Type::Ack) return kWrongReason;
+        }
+        // The fourth commit hits the limit mid-record.
+        if (!answerTo(4, resp)) return kWrongReason;
+        if (resp.type == GatewayResponse::Type::Ack) return kAcceptedUndurable;
+        if (resp.rejectReason != RejectReason::JournalHalted) return kWrongReason;
+        return kOk;
+    });
+    const size_t resting = restoredFrom(path, 10);
+    std::filesystem::remove(path);
+    std::printf("  async gateway: %zu resting after restart\n", resting);
+    assert(rc == kOk && "the gateway acked an order the journal refused");
+    assert(resting == static_cast<size_t>(kWholeBeforeLimit));
 }
 
 // h3: a checkpoint under RLIMIT_FSIZE=2000 against a 30-order book. The temp
@@ -264,13 +315,46 @@ void testCheckpointDirectorySyncFailureHalts() {
     assert(resting == static_cast<size_t>(kOrders));
 }
 
+// DA-5: a NEW journal file is a new directory entry, durable only once the
+// directory is synced; a power cut before that can drop the file with every
+// order acked into it. Same 0300 directory as above: the sync must happen, and
+// when it cannot, the journal halts before anything is acknowledged.
+void testNewJournalDirectorySyncFailureHalts() {
+    if (::geteuid() == 0) {
+        std::puts("  new journal directory sync: SKIP (root opens a 0300 directory)");
+        return;
+    }
+    const std::string dir = uniqueTempPath("journal_halt_newdir");
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directory(dir);
+    const std::string path = dir + "/fresh.wal";
+    assert(::chmod(dir.c_str(), 0300) == 0);
+    RejectReason first = RejectReason::None;
+    {
+        MatchingEngine engine;
+        engine.addSymbol(kSym);
+        engine.enableJournal(path, Journal::SyncPolicy::Immediate);
+        engine.start();
+        first = restingBuy(engine, 1).rejectReason;
+        engine.stop();
+    }
+    assert(::chmod(dir.c_str(), 0700) == 0);
+    std::filesystem::remove_all(dir);
+    std::printf("  new journal directory sync: first order %s\n",
+                first == RejectReason::JournalHalted ? "rejected JournalHalted" : "acknowledged");
+    assert(first == RejectReason::JournalHalted &&
+           "an order was acked into a journal whose directory entry was never synced");
+}
+
 }  // namespace
 
 int main() {
     testSyncPathRejectsAndHolds();
     testAsyncAdmissionRejects();
+    testAsyncGatewayDoesNotAckAFailedWrite();
     testCheckpointFailureKeepsTheJournal();
     testCheckpointDirectorySyncFailureHalts();
+    testNewJournalDirectorySyncFailureHalts();
     std::puts("JournalHaltTest passed");
     return 0;
 }

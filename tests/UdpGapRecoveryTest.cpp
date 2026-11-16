@@ -1,22 +1,15 @@
-// UdpGapRecoveryTest — Option A gap recovery on the DPDK UDP order-entry path.
-//
-// Exercises the two DPDK-free units that carry the gap-recovery logic:
+// UdpGapRecoveryTest — gap recovery for a sequenced UDP stream. The two units:
 //   * UdpReorderBuffer  (receiver): in-order delivery, hold-and-drain of
 //     out-of-order datagrams, NAK-only-the-new-gap, duplicate/overflow accounting.
 //   * UdpRetransmitBuffer (sender): record + replay with a bounded window.
 //
-// Both are header-only and DPDK-independent, so all seven tests run on CI with
-// NO NIC. The one path that genuinely needs DPDK — DpdkGateway::sendNak building
-// an mbuf and calling rte_eth_tx_burst — is exercised here through the NAK hook
-// SEAM: Test 7 makes the hook report a drop (as sendNak does when the TX mbuf
-// pool is exhausted) and asserts the RX path keeps running. The real
-// rte_pktmbuf_alloc/rte_eth_tx_burst behaviour is validated on hardware CI behind
-// OB_HAVE_DPDK.
+// Both are header-only. Test 7 makes the NAK hook report a drop and asserts the
+// receive path keeps running.
 
 #include "RxMessage.h"
 #include "UdpReorderBuffer.h"
 #include "UdpRetransmitBuffer.h"
-#include "UdpSequencer.h"
+#include "WireBytes.h"
 
 #include <algorithm>
 #include <cassert>
@@ -32,7 +25,7 @@ namespace {
 // A test datagram's payload is just its 8-byte big-endian sequence, so the
 // delivered stream can be checked for exact order and content.
 void encodeSeqPayload(uint64_t seq, uint8_t out[8]) {
-    UdpSequencer::writeSeqBE(out, seq);
+    writeU64BE(out, seq);
 }
 
 // Receiver-side harness: a reorder buffer wired to recording deliver + NAK hooks.
@@ -48,11 +41,10 @@ struct RxHarness {
     RxHarness() {
         rb.setDeliverHook([this](const RxMessage& m) {
             assert(m.len >= 8 && "test payloads carry an 8-byte seq");
-            delivered.push_back(UdpSequencer::readSeqBE(m.bytes));
+            delivered.push_back(readU64BE(m.bytes));
         });
         rb.setNakHook([this](uint64_t start, uint32_t count) {
             naks.push_back({start, count});
-            // Mirror DpdkGateway::sendNak's success/drop accounting behind the seam.
             if (nakAlwaysDrops) ++txNakDrops; else ++txNaksSent;
         });
     }
@@ -200,7 +192,7 @@ void testRetransmitBufferMiss() {
     std::vector<uint64_t> replayed;
     auto sendFn = [&](const void* d, uint16_t len) {
         assert(len >= 8);
-        replayed.push_back(UdpSequencer::readSeqBE(static_cast<const uint8_t*>(d)));
+        replayed.push_back(readU64BE(static_cast<const uint8_t*>(d)));
     };
 
     uint32_t n = tb.replay(1, 5, sendFn);
@@ -220,8 +212,7 @@ void testRetransmitBufferMiss() {
 }
 
 // ── Test 7 ───────────────────────────────────────────────────────────────────
-// Models "TX mbuf pool exhausted" via the NAK seam (real rte_eth_tx_burst is
-// hardware-gated). The contract under test: a dropped NAK is counted and the RX
+// A NAK that could not be sent. The contract under test: a dropped NAK is counted and the RX
 // path keeps processing — no stall, no exception.
 void testNakTxDropDoesNotStallRx() {
     std::printf("Running testNakTxDropDoesNotStallRx...\n");
@@ -306,7 +297,7 @@ void testReplayWorkIsBoundedByTheRing() {
     }
     std::vector<uint64_t> replayed;
     const uint32_t n = tb.replay(1, 1u << 20, [&](const void* d, uint16_t) {
-        replayed.push_back(UdpSequencer::readSeqBE(static_cast<const uint8_t*>(d)));
+        replayed.push_back(readU64BE(static_cast<const uint8_t*>(d)));
     });
     std::printf("  replayed %u, misses %llu\n", n,
                 static_cast<unsigned long long>(tb.misses()));

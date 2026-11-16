@@ -73,20 +73,24 @@ struct alignas(64) ParticipantRiskState {
         }
 
         // Max order notional, in whole currency units (see orderNotional).
+        // price == 0: a market order with no touch and no reference to value
+        // it at — a cap cannot pass what it cannot value (STP-12).
         if (maxOrderNotional > 0) {
-            if (orderNotional(price, qty) > static_cast<__int128>(maxOrderNotional)) {
+            if (price == 0 || orderNotional(price, qty) > static_cast<__int128>(maxOrderNotional)) {
                 return false;
             }
         }
 
         // Max position: project new exposure
         if (maxPositionSize > 0) {
-            int64_t delta = (side == Side::Buy)
-                ? static_cast<int64_t>(qty)
-                : -static_cast<int64_t>(qty);
-            int64_t projected = currentExposure + delta;
-            int64_t absProjected = projected >= 0 ? projected : -projected;
-            if (static_cast<Quantity>(absProjected) > maxPositionSize) {
+            // 128 bits: no quantity and no exposure can overflow the sum or
+            // make its negation undefined.
+            const __int128 delta = (side == Side::Buy)
+                ? static_cast<__int128>(qty)
+                : -static_cast<__int128>(qty);
+            const __int128 projected = currentExposure + delta;
+            if ((projected >= 0 ? projected : -projected) >
+                static_cast<__int128>(maxPositionSize)) {
                 return false;
             }
         }

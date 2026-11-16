@@ -3,7 +3,6 @@
 #include "LatencyTracker.h"
 #include "Metrics.h"
 #include "Journal.h"
-#include "ReplicationProtocol.h"
 #include <cerrno>
 #include <charconv>
 #include <cstdlib>
@@ -94,7 +93,7 @@ bool AdminServer::start() {
     // setAuthDisabled(true).
     if (adminToken_.empty() && !authDisabled_) {
         std::cerr << "[AdminServer] REFUSING TO START: no admin token configured.\n"
-                  << "              The admin port exposes /book, /otr, /risk and\n"
+                  << "              The admin port exposes /book, /otr, /audit and\n"
                   << "              (with OB_CHAOS_INJECT) order injection.\n"
                   << "              Set a token via setAdminToken()/OB_ADMIN_TOKEN, or\n"
                   << "              call setAuthDisabled(true) to run it open on purpose.\n";
@@ -352,28 +351,23 @@ void AdminServer::handleConnection(int clientSocket) {
     } else if (path == "/otr") {
         ParticipantId pid = parseQueryUInt<ParticipantId>(query, "participantId");
         body = generateOtrResponse(pid);
+    } else if ((path == "/book" || path == "/auction" || path == "/audit") &&
+               engine_.getJournal() && engine_.getJournal()->halted()) [[unlikely]] {
+        // Rule 2.7: a halted engine's books may hold the one request whose
+        // record the disk refused, which a restart will not have. The views
+        // of the book refuse rather than show it; the journal is the truth.
+        const std::string resp = serviceUnavailable("{\"status\":\"journal_halted\"}");
+        ::send(clientSocket, resp.c_str(), resp.size(), MSG_NOSIGNAL);
+        return;
     } else if (path == "/book") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateBookResponse(sym);
     } else if (path == "/auction") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateAuctionResponse(sym);
-    } else if (path == "/fees") {
-        ParticipantId pid = parseQueryUInt<ParticipantId>(query, "participantId");
-        body = generateFeesResponse(pid);
-    } else if (path == "/risk") {
-        uint32_t tier = parseQueryUInt<uint32_t>(query, "tier");
-        uint64_t ent = parseQueryUInt<uint64_t>(query, "entityId");
-        body = generateRiskResponse(tier, ent);
-    } else if (path == "/cat") {
-        body = generateCatResponse();
     } else if (path == "/audit") {
         SymbolId sym = parseQueryUInt<SymbolId>(query, "symbolId");
         body = generateAuditResponse(sym);
-    } else if (path == "/role") {
-        body = generateRoleResponse();
-    } else if (path == "/replication") {
-        body = generateReplicationResponse();
     } else if (path == "/journal/head") {
         body = generateJournalHeadResponse();
     } else if (path == "/version") {
@@ -385,8 +379,6 @@ void AdminServer::handleConnection(int clientSocket) {
                "\"/metrics\",\"/prometheus\",\"/health\",\"/readyz\","
                "\"/otr?participantId=X\",\"/book?symbolId=Y\","
                "\"/auction?symbolId=Y\",\"/audit?symbolId=Y\","
-               "\"/fees?participantId=X\",\"/risk?tier=T&entityId=E\",\"/cat\","
-               "\"/role\",\"/replication\","
                "\"/journal/head\",\"/version\"]}";
     }
 
@@ -424,7 +416,10 @@ std::string AdminServer::generateReadyzResponse() const {
     if (ready_.load(std::memory_order_acquire)) {
         return buildHttpResponse("{\"status\":\"ready\"}");
     }
-    const std::string body = "{\"status\":\"not_ready\"}";
+    return serviceUnavailable("{\"status\":\"not_ready\"}");
+}
+
+std::string AdminServer::serviceUnavailable(const std::string& body) {
     return "HTTP/1.1 503 Service Unavailable\r\n"
            "Content-Type: application/json\r\n"
            "Content-Length: " + std::to_string(body.size()) + "\r\n"
@@ -602,67 +597,6 @@ std::string AdminServer::generateAuctionResponse(SymbolId sym) const {
         << "\"pairedVolume\":" << a.pairedVolume << ","
         << "\"imbalanceQty\":" << a.imbalanceQty << ","
         << "\"imbalanceSide\":\"" << (a.imbalanceSide == Side::Buy ? "buy" : "sell") << "\""
-        << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateFeesResponse(ParticipantId pid) const {
-    std::ostringstream oss;
-    oss << "{\"participantId\":" << pid
-        << ",\"accruedFee\":" << engine_.accruedFee(pid) << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateRiskResponse(uint32_t tier, uint64_t entityId) const {
-    std::ostringstream oss;
-    if (tier > 3) {
-        oss << "{\"error\":\"tier must be 0=Trader,1=Strategy,2=Account,3=Firm\"}";
-        return oss.str();
-    }
-    static const char* kTierNames[] = {"Trader", "Strategy", "Account", "Firm"};
-    oss << "{\"tier\":\"" << kTierNames[tier] << "\",\"entityId\":" << entityId
-        << ",\"netPosition\":"
-        << engine_.riskNetPosition(static_cast<RiskTier>(tier), entityId) << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateCatResponse() const {
-    std::ostringstream oss;
-    oss << "{\"auditRecordCount\":" << engine_.auditRecordCount() << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateRoleResponse() const {
-    std::ostringstream oss;
-    if (!coord_) {
-        // Replication not configured for this engine — report
-        // standalone explicitly so chaos harnesses / operators can
-        // distinguish from "coordinator exists but is down".
-        oss << "{\"role\":\"standalone\",\"replicationEnabled\":false}";
-        return oss.str();
-    }
-    const char* role = (coord_->role() == NodeRole::Primary) ? "primary" : "backup";
-    oss << "{"
-        << "\"role\":\"" << role << "\","
-        << "\"replicationEnabled\":true,"
-        << "\"epoch\":" << coord_->epoch() << ","
-        << "\"isLeader\":" << (coord_->isLeader() ? "true" : "false") << ","
-        << "\"running\":" << (coord_->isRunning() ? "true" : "false")
-        << "}";
-    return oss.str();
-}
-
-std::string AdminServer::generateReplicationResponse() const {
-    std::ostringstream oss;
-    if (!coord_) {
-        oss << "{\"replicationEnabled\":false}";
-        return oss.str();
-    }
-    oss << "{"
-        << "\"replicationEnabled\":true,"
-        << "\"peerAlive\":" << (coord_->isPeerAlive() ? "true" : "false") << ","
-        << "\"running\":" << (coord_->isRunning() ? "true" : "false") << ","
-        << "\"epoch\":" << coord_->epoch()
         << "}";
     return oss.str();
 }

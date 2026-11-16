@@ -291,8 +291,10 @@ jobs:
           path: results/
 
       # Smoke: fails only if the workload was not the one described (an order
-      # rejected at submit or by its book, or processed != submitted). It has
-      # no latency threshold; the old one was uncalibrated (BENCH-7).
+      # rejected at submit or by its book, processed != submitted, or more
+      # than 100 ms of offered load still queued when the offered window
+      # ended: the engine fell behind, PERF-2). It has no latency threshold;
+      # the old one was uncalibrated (BENCH-7).
       - name: Run Sustained Load Test (smoke)
         if: steps.changes.outputs.relevant == 'true'
         run: |

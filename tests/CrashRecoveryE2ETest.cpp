@@ -5,29 +5,39 @@
 // WHY THE BINARY. JRN-1 (the journal was never replayed at boot) and JRN-3
 // (acks went out while the entry sat in a user-space batch) both survived
 // every in-process test, because each was about what the shipped binary does,
-// not about what a function can do. GatewayServer is the binary that takes
-// orders over TCP and journals them; OrderEngine has no order-entry port.
+// not about what a function can do. OrderEngine is the binary that takes orders
+// over TCP and journals them.
 //
 // THE FLOW. One session pipelines a seeded stream of adds and cancels with up
 // to kWindow requests in flight, and the process is SIGKILLed the instant the
 // K-th answer arrives (K random), so the kill lands with requests still
-// unanswered. After a restart on the same journal, through the order port:
+// unanswered. After a restart on the same journal, cancelling through the order
+// port and reading /book:
 //   - every order whose add was ACKED and that no cancel was sent for must
-//     be there (a cancel for it is acknowledged);
-//   - every order whose cancel was ACKED must still be gone (a cancel for it
-//     is refused with OrderNotFound) — an acked cancel must not come back.
+//     be there (cancelling it takes an order off the book);
+//   - every order whose cancel was ACKED must still be gone (cancelling it takes
+//     nothing off) — an acked cancel must not come back.
 // Requests that were in flight at the kill may land either way.
 //
 // Adds are all buys below one another, so nothing trades and presence is the
-// whole state. Quantity after a modify is not observable through this port.
+// whole state. They sit on ten price levels, all that /book lists.
 //
-// Usage: CrashRecoveryE2ETest <path-to-GatewayServer>
+// THE CROSSING ROUND (N6/DA-3). Two participants on one session send sells and
+// buys at one price, so nearly every order trades, and the process is
+// SIGKILLed mid-stream the same way. Every fill a TradeNotification told the
+// session about must be in the journal: replaying it rebuilds a trade with the
+// same trade id, price and quantity. A report sent ahead of its entry's fsync
+// can name a trade the replay never makes; with the reports' wiring deleted
+// from OrderEngine's main, the round is told of no fill and fails too.
+//
+// Usage: CrashRecoveryE2ETest <path-to-OrderEngine>
 
 #include "GatewayProcess.h"
 
 #include <cassert>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -60,7 +70,7 @@ OrderRequest request(const Op& op) {
     r.orderId = op.id;
     r.participantId = kOwner;
     r.side = Side::Buy;
-    r.price = 10000 - static_cast<Price>(op.id % 50);
+    r.price = 10000 - static_cast<Price>(op.id % 10);
     r.qty = 10;
     r.orderType = OrderType::Limit;
     r.tif = TimeInForce::GTC;
@@ -85,7 +95,7 @@ std::vector<Op> generate(std::mt19937& rng, OrderId firstId) {
     return ops;
 }
 
-// Stream `ops`, SIGKILL the gateway once `killAfter` answers are in, and
+// Stream `ops`, SIGKILL the engine once `killAfter` answers are in, and
 // record which adds and cancels were acknowledged before that.
 void streamThenKill(pid_t pid, uint16_t port, const std::vector<Op>& ops, int killAfter,
                     std::vector<Fate>& fates, OrderId firstId) {
@@ -121,14 +131,9 @@ void streamThenKill(pid_t pid, uint16_t port, const std::vector<Op>& ops, int ki
                 inFlight.size());
 }
 
-// Cancel answers as the probe: Ack means the order was there.
-bool present(Client& c, OrderId id) {
-    assert(c.send(request({OrderRequest::Type::Cancel, id})));
-    GatewayResponse r{};
-    assert(c.answerFor(id, r) && "no answer to the probe");
-    if (r.type == GatewayResponse::Type::Ack) return true;
-    assert(r.rejectReason == RejectReason::OrderNotFound && "probe refused for another reason");
-    return false;
+// Cancel as the probe: /book losing an order means the order was there.
+bool present(Client& c, uint16_t adminPort, OrderId id) {
+    return cancelRemoved(c, adminPort, request({OrderRequest::Type::Cancel, id}));
 }
 
 void crashRound(const char* bin, uint16_t& port, uint32_t seed) {
@@ -141,12 +146,13 @@ void crashRound(const char* bin, uint16_t& port, uint32_t seed) {
     std::vector<Fate> fates(kOps + 1);
 
     pid_t pid = startOnFreePort(bin, port, journal);
-    assert(pid > 0 && "GatewayServer never started listening");
+    assert(pid > 0 && "OrderEngine never started listening");
     streamThenKill(pid, port, ops, killAfter, fates, firstId);
 
     ++port;
     pid = startOnFreePort(bin, port, journal);
-    assert(pid > 0 && "GatewayServer did not restart on its own journal");
+    assert(pid > 0 && "OrderEngine did not restart on its own journal");
+    const uint16_t admin = static_cast<uint16_t>(port + kAdminPortOffset);
     int mustBeThere = 0, mustBeGone = 0, lost = 0, resurrected = 0;
     {
         Client c;
@@ -156,13 +162,13 @@ void crashRound(const char* bin, uint16_t& port, uint32_t seed) {
             const OrderId id = firstId + k;
             if (f.addAcked && !f.cancelSent) {
                 ++mustBeThere;
-                if (!present(c, id)) {
+                if (!present(c, admin, id)) {
                     ++lost;
                     std::printf("  LOST: order %llu was acknowledged\n", (unsigned long long)id);
                 }
             } else if (f.cancelAcked) {
                 ++mustBeGone;
-                if (present(c, id)) {
+                if (present(c, admin, id)) {
                     ++resurrected;
                     std::printf("  RESURRECTED: order %llu's cancel was acknowledged\n",
                                 (unsigned long long)id);
@@ -180,12 +186,92 @@ void crashRound(const char* bin, uint16_t& port, uint32_t seed) {
     ++port;
 }
 
+struct Told { Price price; Quantity qty; };
+
+void crossingRound(const char* bin, uint16_t& port, uint32_t seed) {
+    constexpr ParticipantId kSeller = 7, kBuyer = 8;
+    const std::string journal = tempJournalPath("ob_crash_cross_" + std::to_string(seed));
+    std::remove(journal.c_str());
+    std::mt19937 rng(seed);
+    const int killAfter = 10 + static_cast<int>(rng() % (kOps - 20));
+
+    pid_t pid = startOnFreePort(bin, port, journal);
+    assert(pid > 0 && "OrderEngine never started listening");
+    std::map<uint64_t, Told> told;   // trade id -> what the session was told
+    {
+        Client c;
+        assert(c.connect(port));
+        size_t sent = 0, inFlight = 0;
+        int answered = 0;
+        while (answered < killAfter) {
+            while (sent < static_cast<size_t>(kOps) && inFlight < static_cast<size_t>(kWindow)) {
+                OrderRequest r{};
+                r.type = OrderRequest::Type::NewOrder;
+                r.symbolId = kSymbol;
+                r.orderId = sent + 1;
+                const bool sell = sent % 2 == 0;
+                r.participantId = sell ? kSeller : kBuyer;
+                r.side = sell ? Side::Sell : Side::Buy;
+                r.price = 10000;
+                r.qty = 1 + rng() % 10;
+                r.orderType = OrderType::Limit;
+                r.tif = TimeInForce::GTC;
+                assert(c.send(r));
+                ++sent;
+                ++inFlight;
+            }
+            GatewayResponse f{};
+            assert(c.next(f) && "the gateway went quiet before the kill");
+            if (f.type == GatewayResponse::Type::TradeNotification) {
+                told[f.trade.tradeId] = Told{f.trade.price, f.trade.quantity};
+                continue;
+            }
+            if (f.type == GatewayResponse::Type::OrderUpdateNotification) continue;
+            assert(f.type == GatewayResponse::Type::Ack && "a crossing order was refused");
+            --inFlight;
+            ++answered;
+        }
+        kill(pid, SIGKILL);
+        waitpid(pid, nullptr, 0);
+    }
+    ++port;
+
+    // Replay the journal the way every boot does, and read back its trades.
+    MatchingEngine replayed;
+    replayed.addSymbol(0);
+    replayed.addSymbol(1);
+    replayed.enableJournal(journal);
+    replayed.replayJournal();
+    // Single-threaded here, so draining the book's trade ring is safe.
+    auto& ring = const_cast<RingBuffer<Trade>&>(
+        replayed.getOrderBook(kSymbol)->getTradeRingBuffer());
+    std::map<uint64_t, Told> rebuilt;
+    for (Trade t{}; ring.pop(t);) rebuilt[t.tradeId] = Told{t.price, t.quantity};
+    std::remove(journal.c_str());
+
+    int missing = 0;
+    for (const auto& [id, t] : told) {
+        const auto it = rebuilt.find(id);
+        if (it == rebuilt.end() || it->second.price != t.price || it->second.qty != t.qty) {
+            ++missing;
+            std::printf("  MISSING: trade %llu (%lld x %llu) was reported, replay has %s\n",
+                        (unsigned long long)id, (long long)t.price, (unsigned long long)t.qty,
+                        it == rebuilt.end() ? "no such trade" : "a different one");
+        }
+    }
+    std::printf("  seed %u: %zu reported fills checked against %zu replayed trades\n", seed,
+                told.size(), rebuilt.size());
+    assert(!told.empty() && "the session was told of no fill: are execution reports wired?");
+    assert(missing == 0 && "a fill reported to a client is not in the journal after kill -9");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    assert(argc == 2 && "usage: CrashRecoveryE2ETest <path-to-GatewayServer>");
-    uint16_t port = 28500;
+    assert(argc == 2 && "usage: CrashRecoveryE2ETest <path-to-OrderEngine>");
+    uint16_t port = 31540;
     for (uint32_t seed : {1u, 2u, 3u}) crashRound(argv[1], port, seed);
+    for (uint32_t seed : {4u, 5u, 6u}) crossingRound(argv[1], port, seed);
     std::puts("CrashRecoveryE2ETest passed");
     return 0;
 }

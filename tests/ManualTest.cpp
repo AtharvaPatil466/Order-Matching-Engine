@@ -9,7 +9,6 @@
 #include "TempPath.h"
 #include "MatchingEngine.h"
 #include "Journal.h"
-#include "FIXParser.h"
 #include "Types.h"
 #include <thread>
 
@@ -179,6 +178,7 @@ void testCircuitBreaker() {
     TestListener listener;
     book.setEventListener(&listener);
 
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
     // A bid 6% above the reference is a quote, not a print: it rests and the
     // book stays Continuous (roadmap 1.8-H3).
@@ -298,6 +298,7 @@ void testCircuitBreakerBoundaries() {
     OrderBook book;
     TestListener listener;
     book.setEventListener(&listener);
+    book.setReferencePrice(1000000);  // an order does not set it (MR-1)
     book.addOrder(1, 1, Side::Buy, 1000000, 100, OrderType::Limit);
 
     // A first fill 4.9% from the reference trades.
@@ -856,12 +857,13 @@ void testMinQty() {
     assert(book.getBestBid() == 0);      // and the book is not locked
     assert(book.getBestAsk() == 1000000);
 
-    // A NON-crossing minQty order still rests and waits for liquidity — that
-    // is the useful case and the one the semantic exists for.
+    // A NON-crossing minQty order is cancelled too: resting, its first
+    // execution as a maker was whatever the next aggressor brought, below its
+    // minimum (Rule 9.5, MR-5). It used to rest and wait.
     book.addOrder(4, 4, Side::Buy, 999000, 100, OrderType::Limit, 0, 0,
                   TimeInForce::GTC, 0, 0, PegType::None, 0, 0, 50);
-    assert(book.getOrder(4) != nullptr);
-    assert(book.getBestBid() < book.getBestAsk());
+    assert(book.getOrder(4) == nullptr);
+    assert(book.getBestBid() == 0);
 
     // IOC with minQty that can't be met -> cancel
     book.addOrder(3, 3, Side::Buy, 1000000, 100, OrderType::IOC, 0, 0,
@@ -1240,97 +1242,6 @@ void testDepthLimit() {
     std::cout << "testDepthLimit PASSED" << std::endl;
 }
 
-// ─── FIX Protocol ───────────────────────────────────────────────────────────
-
-void testFIXAdapter() {
-    std::cout << "Running testFIXAdapter..." << std::endl;
-
-    // Test NewOrderSingle parsing via fixToOrderParams
-    std::string raw;
-    raw += "35=D"; raw += '\x01';
-    raw += "11=42"; raw += '\x01';
-    raw += "49=10"; raw += '\x01';
-    raw += "55=1"; raw += '\x01';
-    raw += "54=1"; raw += '\x01';
-    raw += "44=100000"; raw += '\x01';
-    raw += "38=500"; raw += '\x01';
-    raw += "40=2"; raw += '\x01';
-    raw += "59=1"; raw += '\x01';
-
-    FixMessage msg;
-    assert(msg.parse(raw.c_str(), raw.size()));
-    auto params = fixToOrderParams(msg);
-
-    assert(params.valid);
-    assert(params.orderId == 42);
-    assert(params.participantId == 10);
-    assert(params.symbolId == 1);
-    assert(params.side == Side::Buy);
-    assert(params.price == 100000);
-    assert(params.qty == 500);
-    assert(params.orderType == OrderType::Limit);
-    assert(params.tif == TimeInForce::GTC);
-
-    // Test IOC via TimeInForce=3
-    std::string rawIOC;
-    rawIOC += "35=D"; rawIOC += '\x01';
-    rawIOC += "11=43"; rawIOC += '\x01';
-    rawIOC += "49=20"; rawIOC += '\x01';
-    rawIOC += "55=2"; rawIOC += '\x01';
-    rawIOC += "54=2"; rawIOC += '\x01';
-    rawIOC += "44=50000"; rawIOC += '\x01';
-    rawIOC += "38=100"; rawIOC += '\x01';
-    rawIOC += "40=2"; rawIOC += '\x01';
-    rawIOC += "59=3"; rawIOC += '\x01';
-
-    FixMessage msgIOC;
-    assert(msgIOC.parse(rawIOC.c_str(), rawIOC.size()));
-    auto paramsIOC = fixToOrderParams(msgIOC);
-    assert(paramsIOC.valid);
-    assert(paramsIOC.orderType == OrderType::IOC);
-    assert(paramsIOC.side == Side::Sell);
-
-    // Test Cancel parsing (35=F)
-    std::string rawCancel;
-    rawCancel += "35=F"; rawCancel += '\x01';
-    rawCancel += "41=42"; rawCancel += '\x01';
-    rawCancel += "55=1"; rawCancel += '\x01';
-
-    FixMessage msgCancel;
-    assert(msgCancel.parse(rawCancel.c_str(), rawCancel.size()));
-    auto cancelParams = fixToOrderParams(msgCancel);
-    assert(cancelParams.valid);
-    assert(cancelParams.action == FixOrderParams::Action::Cancel);
-    assert(cancelParams.orderId == 42);
-    assert(cancelParams.symbolId == 1);
-
-    // Test CancelReplace parsing (35=G)
-    std::string rawCR;
-    rawCR += "35=G"; rawCR += '\x01';
-    rawCR += "41=42"; rawCR += '\x01';
-    rawCR += "55=1"; rawCR += '\x01';
-    rawCR += "44=105000"; rawCR += '\x01';
-    rawCR += "38=300"; rawCR += '\x01';
-
-    FixMessage msgCR;
-    assert(msgCR.parse(rawCR.c_str(), rawCR.size()));
-    auto crParams = fixToOrderParams(msgCR);
-    assert(crParams.valid);
-    assert(crParams.action == FixOrderParams::Action::CancelReplace);
-    assert(crParams.orderId == 42);
-    assert(crParams.newPrice == 105000);
-    assert(crParams.newQty == 300);
-
-    // Test ExecutionReport serialization
-    std::string report = FixSerializer::buildExecutionReport(
-        42, 1, '2', '2', Side::Buy, 100000, 100, 100, 0, 100000, 100);
-    assert(report.find("35=8") != std::string::npos);
-    assert(report.find("8=FIX.4.2") != std::string::npos);
-    assert(report.find("10=") != std::string::npos);
-
-    std::cout << "testFIXAdapter PASSED" << std::endl;
-}
-
 void testIngressRateLimit() {
     std::cout << "Running testIngressRateLimit..." << std::endl;
 
@@ -1405,7 +1316,6 @@ int main() {
         testMarketDataCallbacks();
         testInputValidation();
         testDepthLimit();
-        testFIXAdapter();
         testIngressRateLimit();
         testFuzzWithNewFeatures(100000);
 

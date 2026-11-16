@@ -1,26 +1,11 @@
-// BinaryCodecBenchmark — measures encode/decode rates for the three
-// binary order-entry/market-data protocols we ship:
+// BinaryCodecBenchmark — measures the encode rate of the ITCH 5.0 AddOrder
+// message (36B): big-endian, ASCII-decimal stock slot, hand-coded fixed offsets.
 //
-//   * OUCH 4.2  EnterOrder (49B)   + OrderAccepted (66B)
-//   * ITCH 5.0  AddOrder (36B)
-//   * SBE       NewOrderV1 (32B = 8B header + 24B block)
-//
-// Pure user-space, single-thread, single-message-type microbench.
-// No engine, no transport, no network — this isolates the codec
-// cost so a reader can compare paradigms apples-to-apples:
-//
-//   - OUCH/ITCH:   big-endian, ASCII-decimal field slots, hand-coded
-//                  fixed offsets.
-//   - SBE:         little-endian (matches x86/ARM native byte order),
-//                  binary integer fields, no string parsing.
-//
-// Output is messages/sec and ns/message for each protocol's encode
-// and decode paths. Results vary by CPU; treat absolute numbers as
-// indicative, ratios as more stable.
+// Pure user-space, single-thread, single-message-type microbench. No engine,
+// no transport, no network — this isolates the codec cost. Results vary by CPU;
+// treat absolute numbers as indicative.
 
 #include "ItchProtocol.h"
-#include "OuchProtocol.h"
-#include "SbeProtocol.h"
 
 #include <chrono>
 #include <cstdint>
@@ -100,56 +85,6 @@ int main() {
                 static_cast<unsigned long long>(kIters));
     printHeader();
 
-    // ─── OUCH EnterOrder encode ─────────────────────────────────────────────
-    {
-        uint8_t buf[OUCH_SIZE_ENTER_ORDER];
-        auto r = run("OUCH EnterOrder encode (49B)",
-                     OUCH_SIZE_ENTER_ORDER, kIters,
-                     [&](uint64_t i) {
-            doNotOptimize(i);
-            std::memset(buf, ' ', OUCH_SIZE_ENTER_ORDER);
-            buf[0] = OUCH_MT_ENTER_ORDER;
-            writeAsciiDecimal(buf + 1, 14, i);
-            buf[15] = 'B';
-            writeU32BE(buf + 16, 100);
-            writeAsciiDecimal(buf + 20, 8, 42);
-            writeU32BE(buf + 28, 1000);
-            writeU32BE(buf + 32, OUCH_TIF_DAY);
-            writeAsciiDecimal(buf + 36, 4, 1);
-            buf[40] = 'Y'; buf[41] = 'O'; buf[42] = 'N';
-            writeU32BE(buf + 43, 0);
-            buf[47] = 'N'; buf[48] = 'R';
-            clobber(buf);  // force buf to be considered observed
-        });
-        printRow(r);
-    }
-
-    // ─── OUCH EnterOrder decode ─────────────────────────────────────────────
-    {
-        uint8_t buf[OUCH_SIZE_ENTER_ORDER];
-        std::memset(buf, ' ', OUCH_SIZE_ENTER_ORDER);
-        buf[0] = OUCH_MT_ENTER_ORDER;
-        writeAsciiDecimal(buf + 1, 14, 12345);
-        buf[15] = 'B';
-        writeU32BE(buf + 16, 100);
-        writeAsciiDecimal(buf + 20, 8, 42);
-        writeU32BE(buf + 28, 1000);
-        writeU32BE(buf + 32, OUCH_TIF_DAY);
-        writeAsciiDecimal(buf + 36, 4, 1);
-        buf[40] = 'Y'; buf[41] = 'O'; buf[42] = 'N';
-        writeU32BE(buf + 43, 0);
-        buf[47] = 'N'; buf[48] = 'R';
-
-        OuchEnterOrder o;
-        auto r = run("OUCH EnterOrder decode (49B)",
-                     OUCH_SIZE_ENTER_ORDER, kIters,
-                     [&](uint64_t) {
-            decodeEnterOrder(buf, OUCH_SIZE_ENTER_ORDER, o);
-            doNotOptimize(o);
-        });
-        printRow(r);
-    }
-
     // ─── ITCH AddOrder encode ───────────────────────────────────────────────
     {
         uint8_t buf[ITCH_SIZE_ADD_ORDER];
@@ -164,58 +99,6 @@ int main() {
         });
         printRow(r);
     }
-
-    // ─── SBE NewOrderV1 encode ──────────────────────────────────────────────
-    {
-        constexpr size_t kSbeSize = SBE_MESSAGE_HEADER_BYTES +
-                                     SBE_NEW_ORDER_V1_BLOCK_BYTES;
-        uint8_t buf[kSbeSize];
-        SbeNewOrderV1 msg;
-        msg.orderId = 0; msg.price = 1000; msg.quantity = 100;
-        msg.side = 1; msg.orderType = 1;
-
-        auto r = run("SBE NewOrderV1 encode (32B)",
-                     kSbeSize, kIters,
-                     [&](uint64_t i) {
-            msg.orderId = i;
-            doNotOptimize(msg);
-            encodeSbeNewOrderV1(buf, msg);
-            clobber(buf);
-        });
-        printRow(r);
-    }
-
-    // ─── SBE NewOrderV1 decode ──────────────────────────────────────────────
-    {
-        constexpr size_t kSbeSize = SBE_MESSAGE_HEADER_BYTES +
-                                     SBE_NEW_ORDER_V1_BLOCK_BYTES;
-        uint8_t buf[kSbeSize];
-        SbeNewOrderV1 in;
-        in.orderId = 12345; in.price = 1000; in.quantity = 100;
-        in.side = 1; in.orderType = 1;
-        encodeSbeNewOrderV1(buf, in);
-
-        SbeNewOrderV1 out;
-        auto r = run("SBE NewOrderV1 decode (32B)",
-                     kSbeSize, kIters,
-                     [&](uint64_t) {
-            auto h = readSbeMessageHeader(buf);
-            doNotOptimize(h);
-            readSbeNewOrderV1Block(buf + SBE_MESSAGE_HEADER_BYTES, out);
-            doNotOptimize(out);
-        });
-        printRow(r);
-    }
-
-    std::printf("\nNotes:\n");
-    std::printf("  * OUCH carries ASCII-decimal fields in the wire — encode/\n");
-    std::printf("    decode cost includes snprintf-style integer formatting.\n");
-    std::printf("  * SBE uses native-endian binary integers — no string\n");
-    std::printf("    conversion. Expected to be the fastest of the three.\n");
-    std::printf("  * ITCH is bigger per message than SBE on this comparison\n");
-    std::printf("    because it includes more metadata (tracking #, locate,\n");
-    std::printf("    side, stock) — but no ASCII conversion overhead beyond\n");
-    std::printf("    the stock field.\n\n");
 
     return 0;
 }

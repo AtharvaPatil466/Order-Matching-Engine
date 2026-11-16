@@ -122,17 +122,16 @@ TEST(BuildObservations, AdvIsPassedThrough) {
     EXPECT_NEAR(obs[0].adv, 12345.0, 1e-9);
 }
 
-// Size-mismatch guard: in release (NDEBUG) the function returns empty;
-// in debug the assert fires and we skip rather than crash the test run.
+// Size-mismatch guard: the assert fires where assertions are compiled in
+// (every default build: ENABLE_ASSERTIONS); under NDEBUG the result is empty.
 TEST(BuildObservations, SizeMismatchDefensiveReturn) {
-#ifdef NDEBUG
     std::vector<Trade>  trades{ makeTrade(100, Side::Buy),
                                  makeTrade(200, Side::Sell) };
     std::vector<double> mids{ 100.0, 101.0 }; // needs 3, only 2 provided
-    auto obs = buildObservations(trades, mids, 5000.0);
-    EXPECT_TRUE(obs.empty());
+#ifdef NDEBUG
+    EXPECT_TRUE(buildObservations(trades, mids, 5000.0).empty());
 #else
-    GTEST_SKIP() << "Size-mismatch triggers assert() in debug build; skipped.";
+    EXPECT_DEATH((void)buildObservations(trades, mids, 5000.0), "must equal trades.size");
 #endif
 }
 

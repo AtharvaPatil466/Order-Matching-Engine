@@ -46,7 +46,11 @@ bool rejectedWith(const AddOrderResult& r, RejectReason want) {
     return std::holds_alternative<RejectReason>(r) && std::get<RejectReason>(r) == want;
 }
 
-void relaxed(OrderBook& b) { b.setCircuitBreakerThreshold(1e9); }
+// These pin how far an elected order walks, not the collar (MarketCollarTest).
+void relaxed(OrderBook& b) {
+    b.setCircuitBreakerThreshold(1e9);
+    b.setMarketProtectionPct(0.0);
+}
 
 // Bids 4950x1, 4900x5, 4000x5. A sell Stop 30 triggers at 4950; the print is
 // a sell 1 @ 4950 against the top bid.

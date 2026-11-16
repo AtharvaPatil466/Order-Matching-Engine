@@ -9,8 +9,8 @@
 // Under the default GroupCommit(64) that is up to 63 orders whose fills
 // clients have acted on and the venue has no record of.
 //
-// Distinct from JournalAckDurabilityTest, which covers the REPLICATION ack
-// (that onCommit_ fires only after a successful sync). That path was already
+// Distinct from JournalAckDurabilityTest, which covers the journal's barrier
+// (that onDurable_ fires only after a successful sync). That path was already
 // correct; this one is about what reaches the client.
 
 #include "MatchingEngine.h"
@@ -186,6 +186,35 @@ void test_DisablingReleasesHeldEvents() {
     PASS();
 }
 
+// ─── 6: durableClientAcks() reports true only when an ack IS durable (DA-6) ──
+//
+// The gate holds EVENTS; the SubmitResult is durable only because an Immediate
+// append syncs before it returns, and only on the sync path. Under GroupCommit
+// the gate still holds events but the ack is not durable; after startAsync the
+// ack is given at enqueue. In both the getter reported true.
+void test_ReportsDurableOnlyWhenAcksAre() {
+    TEST(ReportsDurableOnlyWhenAcksAre);
+    {
+        Fixture f("groupcommit");   // GroupCommit/64
+        assert(f.engine.enableDurableClientAcks(true) && "events are still held");
+        assert(!f.engine.durableClientAcks() && "a GroupCommit ack is not durable");
+    }
+    const std::string path = tempJournalPath("immediate");
+    {
+        MatchingEngine e;
+        e.addSymbol(kSym);
+        e.enableJournal(path, Journal::SyncPolicy::Immediate);
+        e.start();
+        assert(e.enableDurableClientAcks(true));
+        assert(e.durableClientAcks() && "sync + Immediate: the ack is durable");
+        e.startAsync(1);
+        assert(!e.durableClientAcks() && "an async ack is given at enqueue");
+        e.stopAsync();
+    }
+    std::filesystem::remove(path);
+    PASS();
+}
+
 }  // namespace
 
 int main() {
@@ -196,6 +225,7 @@ int main() {
     test_ReleasedInProductionOrder();
     test_RejectedOrderIsNotHeldForever();
     test_DisablingReleasesHeldEvents();
+    test_ReportsDurableOnlyWhenAcksAre();
 
     std::cout << "\n" << passed << " passed\n\n";
     return 0;

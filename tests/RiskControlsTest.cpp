@@ -16,6 +16,10 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
+#include <variant>
+#include <vector>
+
 using namespace OrderMatcher;
 
 namespace {
@@ -250,4 +254,89 @@ TEST_F(RiskFixture, ParticipantIdCapHoldsWithNoRiskConfigured) {
     EXPECT_TRUE(buy(1, MatchingEngine::MAX_PARTICIPANTS - 1, 990'000, 10).isAccepted());
     EXPECT_EQ(buy(2, MatchingEngine::MAX_PARTICIPANTS, 990'000, 10).rejectReason,
               RejectReason::InvalidFieldValue);
+}
+
+// ─── ENGTEST-1: the cap on every admission path ─────────────────────────────
+//
+// A new order carries the id it trades under; a modify or replace carries the
+// requester's. The async path answers at enqueue, so a request refused only by
+// the worker's ownership check was "accepted" to the client's face.
+
+TEST(ParticipantCap, HoldsOnEveryPathSyncAndAsync) {
+    for (const bool async : {false, true}) {
+        SCOPED_TRACE(async ? "async" : "sync");
+        MatchingEngine engine;
+        engine.addSymbol(kSym);
+        if (async) engine.startAsync(1); else engine.start();
+
+        ASSERT_TRUE(engine.submitOrder(kSym, 1, 7, Side::Buy, kRef, 100, OrderType::Limit)
+                        .isAccepted());
+        engine.waitForDrain();
+
+        for (const ParticipantId pid : {ParticipantId{MatchingEngine::MAX_PARTICIPANTS},
+                                        ParticipantId{5000}}) {
+            SCOPED_TRACE(pid);
+            EXPECT_EQ(engine.submitOrder(kSym, 2, pid, Side::Buy, kRef, 100, OrderType::Limit)
+                          .rejectReason, RejectReason::InvalidFieldValue);
+            EXPECT_EQ(engine.submitModify(kSym, 1, 50, pid).rejectReason,
+                      RejectReason::InvalidFieldValue);
+            EXPECT_EQ(engine.submitCancelReplace(kSym, 1, kRef, 80, pid).rejectReason,
+                      RejectReason::InvalidFieldValue);
+        }
+        EXPECT_EQ(engine.submitOrder(kSym, 2, kAnyParticipant, Side::Buy, kRef, 100,
+                                     OrderType::Limit).rejectReason,
+                  RejectReason::InvalidFieldValue);
+
+        // kAnyParticipant is not an id: it is "the venue is asking", the requester
+        // an unauthenticated gateway and the admin path pass. The owner still may.
+        EXPECT_TRUE(engine.submitModify(kSym, 1, 90, kAnyParticipant).isAccepted());
+        EXPECT_TRUE(engine.submitModify(kSym, 1, 80, 7).isAccepted());
+        EXPECT_TRUE(engine.submitCancelReplace(kSym, 1, kRef, 70, 7).isAccepted());
+        engine.waitForDrain();
+        EXPECT_EQ(engine.getOrderBook(kSym)->getOrder(1)->remainingQty, 70u);
+
+        if (async) engine.stopAsync(); else engine.stop();
+    }
+}
+
+// ─── STP-16: the OTR key keeps all 64 bits of the participant id ────────────
+//
+// The key was participant << 32 | symbol, so ids equal in their low 32 bits
+// shared one throttle, one set of limits and one position.
+
+TEST(OtrKey, ParticipantsDifferingOnlyAboveBit32HaveSeparateState) {
+    constexpr ParticipantId kLow = 7;
+    constexpr ParticipantId kHigh = (ParticipantId{1} << 32) | kLow;
+    OrderBook book(kSym);
+
+    RiskLimits limits;
+    limits.maxOrderSize = 10;
+    book.setRiskLimits(kHigh, limits);
+
+    EXPECT_TRUE(std::holds_alternative<OrderId>(
+        book.addOrder(1, kLow, Side::Buy, kRef, 1000, OrderType::Limit)));
+    EXPECT_EQ(std::get<RejectReason>(book.addOrder(2, kHigh, Side::Buy, kRef, 1000, OrderType::Limit)),
+              RejectReason::RiskLimitBreached);
+
+    EXPECT_EQ(book.getParticipantStats(kLow).ordersSubmitted, 1u);
+    EXPECT_EQ(book.getParticipantStats(kLow).rejectedOrders, 0u);
+    EXPECT_EQ(book.getParticipantStats(kHigh).ordersSubmitted, 0u);
+    EXPECT_EQ(book.getParticipantStats(kHigh).rejectedOrders, 1u);
+
+    // What a checkpoint saves is keyed the same way; the id comes back whole.
+    std::vector<ParticipantId> saved;
+    book.forEachPositionLocked([&](const OrderBook::ParticipantPosition& p) {
+        saved.push_back(p.participant);
+    });
+    EXPECT_EQ(saved, std::vector<ParticipantId>{kLow});
+}
+
+TEST(OtrKey, HashSpreadsParticipantsOfOneSymbolAcrossTheTable) {
+    // FlatHashMap masks the hash's low bits, and the low bits of a product
+    // depend only on the low bits of its input: with the participant in the high
+    // word every participant of a book hashed to the same slot.
+    std::set<size_t> slots;
+    for (ParticipantId pid = 0; pid < MatchingEngine::MAX_PARTICIPANTS; ++pid)
+        slots.insert(OTRKeyHash{}(OTRKey(pid, kSym)) & 2047);
+    EXPECT_GT(slots.size(), MatchingEngine::MAX_PARTICIPANTS / 2);
 }

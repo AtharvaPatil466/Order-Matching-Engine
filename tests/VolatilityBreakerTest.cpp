@@ -15,12 +15,16 @@
 //      breaker: the book enters VolatilityAuction, nothing prints, the order
 //      takes part in the auction (a limit rests, a market order is parked, an
 //      IOC is cancelled). The breaker_trip event is still logged.
-//   3. Only the first fill counts: a sweep that starts in band is not stopped.
+//   3. Every print counts, not only the first: a sweep that starts in band
+//      stops at the band and trips (MR-2). It used to run on through it.
 //   4. The breaker never trips while the book is already in an auction state.
 //   5. The auction reopens on the engine's own clock after the dwell (default
 //      5 minutes), sync and async, with the reopening cross.
-//   6. Replay reproduces a trip exactly, whatever the replaying engine's
-//      breaker configuration: the trip is journaled.
+//   6. Replay reproduces a trip exactly. It evaluates the breaker as live did
+//      (the reference comes only from prints, crosses and configuration), so
+//      a trip mid-sweep keeps its in-band fills; the trip is journaled after
+//      the order, which is how a replaying engine with no breaker still ends
+//      in the auction.
 
 #include "EventListener.h"
 #include "MatchingEngine.h"
@@ -55,9 +59,10 @@ struct Recorder : EventListener {
 
 bool accepted(const AddOrderResult& r) { return std::holds_alternative<OrderId>(r); }
 
-// Reference 10000 (the first priced order), threshold 5%.
+// Reference 10000 (configured: an order does not set it, MR-1), threshold 5%.
 void seed(OrderBook& book) {
     book.setCircuitBreakerThreshold(0.05);
+    book.setReferencePrice(kRef);
     assert(accepted(book.addOrder(1, 1, Side::Buy, kRef, 100, OrderType::Limit)));
 }
 
@@ -137,7 +142,7 @@ void trippingMarketOrderIsParkedAndIocCancelled() {
     std::puts("  a tripping market order is parked; a tripping IOC is cancelled");
 }
 
-void onlyTheFirstFillCounts() {
+void everyPrintCounts() {
     OrderBook book(1);
     Recorder rec;
     book.setEventListener(&rec);
@@ -145,9 +150,12 @@ void onlyTheFirstFillCounts() {
     assert(accepted(book.addOrder(2, 2, Side::Sell, kRef + 100, 10, OrderType::Limit)));  // 1%
     assert(accepted(book.addOrder(3, 3, Side::Sell, kRef * 2, 10, OrderType::Limit)));    // 100%
     assert(accepted(book.addOrder(4, 4, Side::Buy, kRef * 2, 20, OrderType::Limit)));
-    assert(book.getTradingState() == TradingState::Continuous);
-    assert(rec.trades.size() == 2 && "a sweep whose first fill is in band was stopped");
-    std::puts("  a sweep that starts in band is not stopped");
+    assert(book.getTradingState() == TradingState::VolatilityAuction &&
+           "a sweep that started in band printed through it");
+    assert(rec.trades.size() == 1 && rec.trades[0].price == kRef + 100);
+    assert(book.getOrder(4) && book.getOrder(4)->remainingQty == 10 &&
+           "the rest of the order waits for the reopening cross");
+    std::puts("  a sweep that starts in band stops at the band and trips");
 }
 
 void neverTripsInAnAuction() {
@@ -166,6 +174,7 @@ void neverTripsInAnAuction() {
 // A book that trips on order 3; `extra` runs while it is in the auction.
 void tripThroughEngine(MatchingEngine& e) {
     e.getOrderBook(kSym)->setCircuitBreakerThreshold(0.05);
+    e.getOrderBook(kSym)->setReferencePrice(kRef);
     e.submitOrder(kSym, 1, 1, Side::Buy, kRef, 100, OrderType::Limit);
     e.submitOrder(kSym, 2, 2, Side::Sell, kRef * 2, 100, OrderType::Limit);
     e.submitOrder(kSym, 3, 3, Side::Buy, kRef * 2, 60, OrderType::Limit);
@@ -212,11 +221,13 @@ void replayReproducesTheTrip() {
         tripThroughEngine(e);
         e.stop();
     }
-    // A replaying engine with no breaker at all must still land in the auction
-    // with order 3 resting, not matched.
+    // A replaying engine configured as the live one was lands in the auction
+    // with order 3 resting, not matched: replay evaluates the breaker. It used
+    // to be journaled ahead of the order and replay never evaluated it, which
+    // made a trip mid-sweep replay with none of its in-band fills.
     MatchingEngine r;
     r.addSymbol(kSym);
-    r.getOrderBook(kSym)->setCircuitBreakerThreshold(1e9);
+    r.getOrderBook(kSym)->setReferencePrice(kRef);  // configuration, as live
     assert(r.enableJournal(path.string()));
     r.replayJournal();
     OrderBook* book = r.getOrderBook(kSym);
@@ -226,7 +237,7 @@ void replayReproducesTheTrip() {
            "replay matched the order that tripped the breaker");
     assert(book->getTradeCount() == 0);
     fs::remove(path);
-    std::puts("  replay reproduces a trip whatever its own breaker setting");
+    std::puts("  replay reproduces a trip");
 }
 
 }  // namespace
@@ -235,7 +246,7 @@ int main() {
     farPassiveOrderIsAdmitted();
     outOfBandFirstFillTrips();
     trippingMarketOrderIsParkedAndIocCancelled();
-    onlyTheFirstFillCounts();
+    everyPrintCounts();
     neverTripsInAnAuction();
     reopensOnTheEngineClock(false);
     reopensOnTheEngineClock(true);

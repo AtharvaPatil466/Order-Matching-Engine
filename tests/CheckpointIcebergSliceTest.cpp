@@ -8,11 +8,8 @@
 // order queued behind it.
 //
 // Each probe runs on the book as it is, on one restarted from the plain
-// journal, on one restarted from a checkpoint, on a JournalFollower's standby
-// promoted over that checkpoint, and on an engine that applied the checkpoint
-// record by record as a backup does; all five must agree.
+// journal and on one restarted from a checkpoint; all three must agree.
 
-#include "JournalFollower.h"
 #include "MatchingEngine.h"
 #include "TempPath.h"
 
@@ -28,14 +25,12 @@ namespace {
 constexpr SymbolId kSym = 0;
 constexpr Price kPx = 10000;
 
-enum class Life { Uninterrupted, Replayed, Checkpointed, Followed, Applied };
+enum class Life { Uninterrupted, Replayed, Checkpointed };
 const char* name(Life l) {
     switch (l) {
     case Life::Uninterrupted: return "uninterrupted";
     case Life::Replayed:      return "replayed";
     case Life::Checkpointed:  return "checkpointed";
-    case Life::Followed:      return "followed";   // a promoted JournalFollower
-    case Life::Applied:       return "applied";    // applyReplicatedEntry
     }
     return "";
 }
@@ -76,21 +71,6 @@ long long after(Life life, const Probe& probe) {
         result = probe(*restarted.getOrderBook(kSym));
         restarted.stop();
     }
-    if (life == Life::Followed) {
-        OrderBook standby(kSym);
-        JournalFollower follower(path, kSym, standby);
-        follower.promote();
-        result = probe(standby);
-    }
-    if (life == Life::Applied) {
-        MatchingEngine backup;
-        backup.addSymbol(kSym);
-        backup.setReplayModeAllBooks(true);
-        Journal journal(path);
-        for (const JournalEntry& e : journal.readAll(true, true)) backup.applyReplicatedEntry(e);
-        backup.setReplayModeAllBooks(false);
-        result = probe(*backup.getOrderBook(kSym));
-    }
     std::remove(path.c_str());
     return result;
 }
@@ -105,8 +85,7 @@ long long queueProbe(OrderBook& b) {
 
 int check(const char* what, const Probe& probe, long long want) {
     int failures = 0;
-    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed, Life::Followed,
-                      Life::Applied}) {
+    for (Life life : {Life::Uninterrupted, Life::Replayed, Life::Checkpointed}) {
         const long long got = after(life, probe);
         std::printf("  %-13s %-38s %lld%s\n", name(life), what, got, got == want ? "" : "  <- differs");
         failures += got != want;

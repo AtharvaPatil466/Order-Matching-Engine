@@ -4,7 +4,7 @@
 
 ---
 
-## 1. Memory Sizing
+## 1. Memory Sizing (estimates; one measured figure, labelled)
 
 ### Per-Order Memory
 | Component | Size | Notes |
@@ -19,7 +19,7 @@
 ```
 Memory = (max_live_orders × 248 bytes)
        + (price_range × 8 bytes × num_symbols)      # FlatPriceMap
-       + (num_symbols × 64KB)                         # per-book overhead
+       + (num_symbols × 64KB)                         # per-book overhead (withdrawn)
        + (queue_capacity × sizeof(OrderRequest))      # MPSC queues
        + 256MB                                        # framework overhead
 ```
@@ -27,7 +27,7 @@ Memory = (max_live_orders × 248 bytes)
 > **This formula does not describe the engine.** A book is allocated in full
 > when its symbol is added, whether or not an order ever arrives: measured
 > **10.3 MiB per empty book** at the defaults (10,000 order slots, 65,536-trade
-> ring — see `config/engine.conf.example`), not 64 KB. Memory scales with
+> ring — see `config/engine.conf.example`), not the withdrawn 64 KB. Memory scales with
 > `symbols × order_pool_capacity`, not with live orders; the ~248 B above is
 > only the marginal cost of one more order (Runbook §6).
 
@@ -46,22 +46,20 @@ for 2,000, before any other overhead.
 
 ---
 
-## 2. CPU Sizing
+## 2. CPU Sizing (estimates)
 
 ### Thread Allocation
 | Thread | Count | CPU Affinity |
 |--------|-------|-------------|
 | Worker (matching) | 1 per partition | Pin to isolated core |
-| Gateway (FIX I/O) | 1 | Pin to core |
+| Gateway (order-port I/O) | 1 | Pin to core |
 | Admin HTTP | 1 | Shared core OK |
 | Journal flush | 1 (background) | Shared core OK |
-| Replication | 1 (if HA) | Shared core OK |
-| **Total** | **N + 3-4** | |
+| **Total** | **N + 3** | |
 
 ### Sizing Formula
 ```
 Cores = num_worker_threads + 3 (gateway + admin + journal)
-      + 1 if replication enabled
       + 1 headroom for OS/monitoring
 ```
 
@@ -96,12 +94,12 @@ taskset -c 2-5 ./bin/OrderEngine --threads 4   # or worker_cores = 2,3,4,5 (Runb
 
 ---
 
-## 3. Disk Sizing (Journal)
+## 3. Disk Sizing (Journal; estimates unless a row names its measurement)
 
 ### Journal Entry Size
 Every record is a packed `JournalEntry` of **134 bytes**, whatever its type
 (`include/Journal.h`); the file starts with a 24-byte header. An earlier table
-here gave 24-100 bytes by type.
+here gave 24-100 bytes by type (withdrawn).
 
 | Entry Type | Size | Notes |
 |------------|------|-------|
@@ -134,16 +132,16 @@ first.
 ### Disk IOPS Requirements
 | Sync Policy | IOPS Needed | Latency Impact |
 |-------------|-------------|----------------|
-| `GroupCommit` (OrderEngine) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the ~1-5 µs this table used to give |
-| `Immediate` (GatewayServer) | 10K-100K | one `fdatasync` per entry |
+| `GroupCommit` (library default) | ~1K-5K | one `fdatasync` per 64-entry batch — the only in-repo measurement is ~438 µs on x86 CI ext4 (`include/Journal.h`), not the withdrawn ~1-5 µs this table used to give |
+| `Immediate` (OrderEngine) | 10K-100K | one `fdatasync` per entry |
 
 There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
-`{Immediate, GroupCommit}`, and each binary hard-codes its choice.
+`{Immediate, GroupCommit}`, and `OrderEngine` hard-codes `Immediate`: its order port acks only once an entry is synced.
 
 ### Recommended Disk
 - **Development**: Any SSD
 - **Production**: NVMe SSD with ≥100K IOPS write
-- **Ultra-low-latency**: Intel Optane. tmpfs only if losing the journal on a host reboot is acceptable: replication, which this line used to lean on, is disabled by default and has known CRITICAL defects
+- **Ultra-low-latency**: Intel Optane. tmpfs only if losing the journal on a host reboot is acceptable: there is no replication to cover it
 
 ### Journal Storage Backing — HARD Deployment Constraint
 
@@ -157,7 +155,7 @@ There is no `None` or `EveryEntry` policy: `Journal::SyncPolicy` is
 
 | Backing | Journal flush latency | Verdict |
 |---------|-----------------------|---------|
-| RAM tmpfs (`/dev/shm`) | ~0 | ⚠️ Lost on host reboot. Replication, which was supposed to cover that, is disabled by default with known CRITICAL defects — no durability across a host failure |
+| RAM tmpfs (`/dev/shm`) | ~0 | ⚠️ Lost on host reboot, and there is no replication to cover that — no durability across a host failure |
 | Instance-store NVMe (e.g. `c6id.metal`, `c6gd`, `i4i`) | ~10–30 µs | ✅ Required minimum for production |
 | Local physical NVMe (bare metal) | ~10–30 µs | ✅ Equivalent to instance-store NVMe |
 | **EBS / PD / Managed Disk / SAN / NFS** | **~1–4 ms round-trip** | ❌ **NOT acceptable for the journal** |
@@ -178,53 +176,31 @@ achievable production tail.
 NVMe instance-store — `c6id`/`c7gd`/`m6id`/`i4i`/`c6gd` — and place the
 journal on the mounted instance-store volume (or a tmpfs). Do **not** put
 the journal on the root EBS volume. A RAM tmpfs journal is only durable if
-something else is, and replication is disabled by default with known CRITICAL
-defects.
+something else is, and there is no replication.
 
 ---
 
-## 4. Network Sizing
+## 4. Network Sizing (estimates)
 
 ### Bandwidth per Protocol
 | Protocol | Message Size | At 10K msg/s | At 100K msg/s |
 |----------|-------------|-------------|--------------|
-| FIX 4.4 inbound | 200-400 bytes | 4 MB/s | 40 MB/s |
-| FIX 4.4 outbound | 300-600 bytes | 6 MB/s | 60 MB/s |
+| Order entry inbound (V2 frame) | 150 bytes | 1.5 MB/s | 15 MB/s |
+| Order entry outbound (V2 answer) | 332 bytes | 3.3 MB/s | 33 MB/s |
 | Market data (SHM) | sizeof(ShmEntry) ≈ 300 bytes | 3 MB/s | 30 MB/s |
-| Replication | ~100 bytes/entry | 1 MB/s | 10 MB/s |
 | Admin HTTP | ~500 bytes/req | negligible | negligible |
-| **Total** | | **~14 MB/s** | **~140 MB/s** |
+| **Total** | | **~8 MB/s** | **~78 MB/s** |
 
 ### Network Requirements
 | Scenario | NIC | Latency |
 |----------|-----|---------|
 | Development | 1 GbE | ~50-100μs |
 | Production | 10 GbE | ~5-10μs |
-| HFT | 25 GbE + kernel bypass (DPDK/Solarflare) | ~1-2μs |
+| HFT | 25 GbE + kernel bypass (none in this repo) | ~1-2μs |
 
 ---
 
-## 5. Replication Sizing (HA)
-
-### Replication Lag Budget
-```
-Replication lag = network_rtt + journal_entry_size / bandwidth
-```
-
-| Network | RTT | Lag per Entry | Max Sustainable Rate |
-|---------|-----|---------------|---------------------|
-| Same rack | 10μs | ~11μs | 90K entries/s |
-| Same DC | 100μs | ~101μs | 10K entries/s |
-| Cross-DC | 1ms | ~1.1ms | 1K entries/s |
-
-### Recommendation
-- **Same rack**: Full synchronous replication viable
-- **Same DC**: Semi-synchronous (ack after write, don't wait for fsync)
-- **Cross-DC**: Async replication only — accept data loss window
-
----
-
-## 6. Quick Sizing Calculator
+## 5. Quick Sizing Calculator (estimates)
 
 For a given target:
 
@@ -240,7 +216,7 @@ Network: 10 GbE
 
 ---
 
-## 7. Monitoring Checklist
+## 6. Monitoring Checklist
 
 Run these checks daily:
 
@@ -249,5 +225,4 @@ Run these checks daily:
 - [ ] `curl /prometheus | grep queue_depth` — queue < 50% capacity
 - [ ] `curl /prometheus | grep p99` — latency within SLA
 - [ ] `curl /health` — returns 200
-- [ ] Backup replication lag < 1 second
 - [ ] Journal size < 80% of checkpoint threshold

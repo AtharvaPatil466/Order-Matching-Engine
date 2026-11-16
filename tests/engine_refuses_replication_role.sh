@@ -1,34 +1,27 @@
 #!/bin/sh
-# Replication must not switch on just because a role is set.
+# A replication role refuses to boot: replication was removed (roadmap 1.1 R1).
 #
-# WHY. OrderEngine started a ReplicationCoordinator whenever --role /
-# OB_NODE_ROLE was set, and docker-compose.yml set it on both of its engines —
-# so the default deployment ran primary/backup replication. That path has known
-# CRITICAL defects (REPL-1..6), among them:
-#   REPL-1  nothing fences a deposed primary; the lease only delays promotion
-#   REPL-2  a promoted backup keeps applying the old primary's stream into its
-#           now-live books, so orders execute twice
-#   REPL-3  a replication send blocks the journal commit path with no timeout,
-#           so a slow or paused backup freezes client acks indefinitely
-#   REPL-4  entries lost across a disconnect are never re-sent, so the backup
-#           silently diverges and a failover trades against orders that are gone
+# WHY. OrderEngine started replication whenever --role /
+# OB_NODE_ROLE was set, and docker-compose.yml once set it on both of its
+# engines. That path had no fencing, a promoted backup kept applying the old
+# primary's stream, its send blocked the journal commit path and resync only
+# added orders (REPL-1..9), so it was deleted rather than finished. A deployment
+# that still sets a role must hear that at boot, not run as a single node it did
+# not ask for. The old opt-in, OB_ALLOW_UNSAFE_REPLICATION, opens nothing now.
 #
-# So a role now refuses to boot unless it is explicitly acknowledged with
-# --allow-unsafe-replication (OB_ALLOW_UNSAFE_REPLICATION=1) — the same shape as
-# --no-participant-auth and --replay-legacy-journal. The chaos suite
-# (deploy/chaos), which exists to exercise this path, opts in; nothing else does.
-#
-# Each refusing case runs under a deadline: at HEAD the engine STARTS with a
-# role and serves, and a serving engine never exits, so an exit-code check alone
-# could not see the failure this test is for.
+# Each refusing case runs under a deadline: a serving engine never exits, so an
+# exit-code check alone could not see an engine that ignored the role.
 #
 # Usage: engine_refuses_replication_role.sh <path-to-OrderEngine>
 
 set -u
 
 unset OB_NODE_ROLE OB_ALLOW_UNSAFE_REPLICATION OB_JOURNAL_PATH OB_CONFIG_PATH \
-      OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_PRIMARY_HOST OB_PRIMARY_REPLICATION_PORT \
-      OB_REPLICATION_PORT OB_NODE_ID OB_CHAOS_INJECT OB_CHAOS_TOKEN
+      OB_ADMIN_TOKEN OB_ADMIN_NO_AUTH OB_CHAOS_INJECT OB_CHAOS_TOKEN
+# The order port is not what this test is about: no credentials, any free port.
+export OB_NO_PARTICIPANT_AUTH=1 OB_GATEWAY_PORT=0
+# Nor are the band, journal and position limits (engine_requires_controls.sh).
+export OB_NO_PRICE_BAND=1 OB_NO_JOURNAL=1 OB_NO_RISK_LIMITS=1
 
 ENGINE="$1"
 TMP="${TMPDIR:-/tmp}/ob_repl_role_$$"
@@ -37,7 +30,7 @@ PID=""
 cleanup() { [ -n "$PID" ] && kill -9 "$PID" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
-ADMIN_PORT=28170
+ADMIN_PORT=31640
 fails=0
 note_fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
 
@@ -66,11 +59,11 @@ except Exception: sys.exit(1)" 2>/dev/null; then
 
     if [ "$want" = "refuse" ]; then
         if [ "$state" = "running" ]; then
-            note_fail "$label: engine STARTED — a role switched replication on"
-            grep -E "Replication|Ready" "$log" | head -3; return
+            note_fail "$label: engine STARTED with a role set"
+            grep -E "Ready" "$log" | head -3; return
         fi
         if [ "$state" -eq 0 ]; then note_fail "$label: exited 0 instead of refusing"; cat "$log"; return; fi
-        if ! grep -q "replication is disabled" "$log"; then
+        if ! grep -q "replication was removed" "$log"; then
             note_fail "$label: exited $state, but not for the replication reason"; cat "$log"; return
         fi
         echo "  ok  $label — refused, and said why"
@@ -83,10 +76,11 @@ except Exception: sys.exit(1)" 2>/dev/null; then
 }
 
 run_case "--role primary"                 refuse "$ENGINE" --role primary
-run_case "OB_NODE_ROLE=backup"            refuse OB_NODE_ROLE=backup OB_PRIMARY_HOST=127.0.0.1 "$ENGINE"
-run_case "role + explicit opt-in"         start  OB_NODE_ROLE=primary OB_REPLICATION_PORT=28190 \
-                                                 "$ENGINE" --allow-unsafe-replication
+run_case "OB_NODE_ROLE=backup"            refuse OB_NODE_ROLE=backup "$ENGINE"
+run_case "role + the old opt-in"          refuse OB_NODE_ROLE=primary OB_ALLOW_UNSAFE_REPLICATION=1 \
+                                                 "$ENGINE"
+run_case "no role"                        start  "$ENGINE"
 
 if [ "$fails" -ne 0 ]; then echo "FAIL: $fails case(s) failed"; exit 1; fi
-echo "PASS: a role refuses to boot unless replication is explicitly acknowledged"
+echo "PASS: a replication role refuses to boot; without one the engine starts"
 exit 0

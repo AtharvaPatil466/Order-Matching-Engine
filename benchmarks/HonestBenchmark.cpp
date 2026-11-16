@@ -1,11 +1,21 @@
 // HonestBenchmark — the same deterministic order flow through four paths,
 // from leanest to fullest stack:
 //
-//   Path A: OrderBook::addOrder() only
-//           Core matching engine with STP + WashTrade + LULD
+//   Path A: OrderBook::addOrder() only, NO listener attached
+//           Core matching engine with STP. No shipped book runs like this:
+//           it is the floor, and the configuration the latency gate times.
+//
+//   Path L: Path A with a listener attached (PERF-5)
+//           The listener only counts its callbacks, so this is what the BOOK
+//           does for a listener: it builds and stamps every order, trade,
+//           level and displayed-book update and dispatches each one. OrderEngine
+//           attaches its market-data listener to every book, so this is the
+//           book-side cost of the shipped configuration, without the feed's own.
 //
 //   Path B: MatchingEngine::submitOrder() (sync mode, no journal)
-//           Adds: sequence allocation, rate limiter check, risk validation
+//           Adds: sequence allocation, rate limiter check, risk validation.
+//           LISTENER ATTACHED: every engine book carries the engine's internal
+//           OCO observer, so Paths B-D pay what Path L pays (no user listener).
 //
 //   Path C: Path B + journal, SyncPolicy::GroupCommit (batch=64)
 //           The ack PRECEDES durability: up to 63 acknowledged orders are not
@@ -53,7 +63,7 @@
 //
 // Usage:
 //   HonestBenchmark [--orders N] [--warmup N] [--seed S] [--journal PATH]
-//                   [--no-journal] [--no-immediate] [--only a|b|c|d]
+//                   [--no-journal] [--no-immediate] [--only a|l|b|c|d]
 
 #include "MatchingEngine.h"
 #include "BenchLatencyRecorder.h"  // vendored recorder — full P50..P99.99 tail (P2-21)
@@ -145,15 +155,9 @@ static void printResult(const PathResult& r) {
                 (unsigned long long)r.trades);
     std::printf("  Throughput: %.0f orders/sec\n",
                 r.durationSec > 0 ? static_cast<double>(n) / r.durationSec : 0);
-    std::printf("  ─────────────────────────\n");
-    std::printf("  Min:     %6llu ns\n", (unsigned long long)r.tracker.getMin());
-    std::printf("  P50:     %6llu ns\n", (unsigned long long)r.tracker.getP50());
-    std::printf("  P90:     %6llu ns\n", (unsigned long long)r.tracker.getP90());
-    std::printf("  P99:     %6llu ns\n", (unsigned long long)r.tracker.getP99());
-    std::printf("  P99.9:   %6llu ns\n", (unsigned long long)r.tracker.getP999());
-    std::printf("  P99.99:  %6llu ns\n", (unsigned long long)r.tracker.getP9999());
-    std::printf("  Max:     %6llu ns\n", (unsigned long long)r.tracker.getMax());
-    std::printf("  Mean:    %6.0f ns\n", r.tracker.getMean());
+    // The shared table: a percentile inside the sub-tick band prints "<tick",
+    // the mean says when sub-tick samples pulled it down (PERF-8).
+    r.tracker.printTable("latency");
 }
 
 // The filesystem the journal actually lands on. A Path C/D number means
@@ -214,18 +218,33 @@ static void runOrders(PathResult& r, const std::vector<TestOrder>& orders, size_
     r.trades = tradeCount() - tradesAtStart;
 }
 
-// ─── Path A: OrderBook::addOrder() only ─────────────────────────────────────
+// ─── Paths A and L: OrderBook::addOrder() ───────────────────────────────────
 
-static PathResult runPathA(const std::vector<TestOrder>& orders, size_t warmup) {
+// Takes every callback and does nothing else with it, so Path L - Path A is
+// what the book spends on having a listener at all.
+struct CountingListener : EventListener {
+    uint64_t events = 0;
+    void onTrade(const Trade&) override { ++events; }
+    void onOrderUpdate(const OrderUpdate&) override { ++events; }
+    void onMarketData(const MarketDataUpdate&) override { ++events; }
+    void onBookVisible(const BookVisibleUpdate&) override { ++events; }
+};
+
+static PathResult runBookPath(const std::vector<TestOrder>& orders, size_t warmup,
+                              CountingListener* listener) {
     PathResult result;
-    result.name = "Path A: OrderBook::addOrder() [core matching + STP/WashTrade/LULD]";
+    result.name = listener
+        ? "Path L: OrderBook::addOrder() [listener attached: the shipped book]"
+        : "Path A: OrderBook::addOrder() [core matching + STP, no listener]";
     OrderBook book(0, MatchAlgorithm::PriceTime);
+    book.setEventListener(listener);
     runOrders(result, orders, warmup,
               [&](const TestOrder& o) {
                   return std::holds_alternative<OrderId>(book.addOrder(
                       o.orderId, o.participantId, o.side, o.price, o.qty, OrderType::Limit));
               },
               [&] { return book.getTradeCount(); });
+    book.setEventListener(nullptr);
     return result;
 }
 
@@ -298,8 +317,8 @@ int main(int argc, char* argv[]) {
             runImmediate = false;
         else if (std::strcmp(argv[i], "--only") == 0 && i + 1 < argc) {
             const char* v = argv[++i];
-            if (v[0] == '\0' || v[1] != '\0' || v[0] < 'a' || v[0] > 'd') {
-                std::fprintf(stderr, "--only takes exactly one of: a, b, c, d (got \"%s\")\n", v);
+            if (v[0] == '\0' || v[1] != '\0' || std::strchr("albcd", v[0]) == nullptr) {
+                std::fprintf(stderr, "--only takes exactly one of: a, l, b, c, d (got \"%s\")\n", v);
                 return 2;
             }
             onlyPath = v[0];
@@ -307,7 +326,7 @@ int main(int argc, char* argv[]) {
         else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf("Usage: HonestBenchmark [--orders N] [--warmup N] [--seed S]\n"
                         "                       [--journal PATH] [--no-journal]\n"
-                        "                       [--no-immediate] [--only a|b|c|d]\n\n"
+                        "                       [--no-immediate] [--only a|l|b|c|d]\n\n"
                         "  --journal PATH  journal file for Paths C and D (default\n"
                         "                  ./honest_benchmark.journal); its filesystem\n"
                         "                  type is printed. Put it on the storage you\n"
@@ -344,13 +363,22 @@ int main(int argc, char* argv[]) {
 #endif
     );
 
-    std::printf("\nNOT MEASURED: network I/O, async queue delay, OS scheduling\n");
+    std::printf("  Listener:    Path A none; Path L a counting listener; Paths B-D the\n"
+                "               engine's internal OCO observer (no user listener)\n");
+    std::printf("\nNOT MEASURED: network I/O, async queue delay, OS scheduling,\n"
+                "              what a real market-data listener does with its callbacks\n");
 
     OrderGenerator gen(seed, warmup + orderCount);
     const auto& orders = gen.orders();
 
-    PathResult a, b, c, d;
-    if (wanted('a')) { a = runPathA(orders, warmup); printResult(a); }
+    PathResult a, l, b, c, d;
+    if (wanted('a')) { a = runBookPath(orders, warmup, nullptr); printResult(a); }
+    if (wanted('l')) {
+        CountingListener listener;
+        l = runBookPath(orders, warmup, &listener);
+        printResult(l);
+        std::printf("  Callbacks: %llu taken by the listener\n", (unsigned long long)listener.events);
+    }
     if (wanted('b')) {
         b = runEnginePath("Path B: MatchingEngine::submitOrder() [+ sequence alloc, rate limiter]",
                           orders, warmup, nullptr, Journal::SyncPolicy::GroupCommit);
@@ -370,7 +398,7 @@ int main(int argc, char* argv[]) {
     // Workload check: the numbers above describe this flow only if every order
     // was accepted, and identical input must give identical matching.
     bool workloadOk = true;
-    const PathResult* ran[] = {&a, &b, &c, &d};
+    const PathResult* ran[] = {&a, &l, &b, &c, &d};
     const PathResult* first = nullptr;
     for (const PathResult* r : ran) {
         if (!r->ran) continue;
@@ -388,15 +416,17 @@ int main(int argc, char* argv[]) {
     // Every line is a DIFFERENCE between two paths, so it needs both. Under
     // --only the skipped path is empty, and a subtraction from it would print a
     // confident number computed from a zero.
+    // Printed as the percentiles are: a P50 inside the sub-tick band, or a
+    // difference taken from one, is "<tick" rather than a number (PERF-8).
     auto diff = [](const PathResult& x, const PathResult& y) {
-        return static_cast<long long>(x.tracker.getP50()) -
-               static_cast<long long>(y.tracker.getP50());
+        return bench::BenchLatencyRecorder::deltaText(x.tracker, y.tracker, 0.50);
     };
-    if (a.ran) std::printf("  Core matching + compliance:   %lld ns (Path A P50)\n",
-                           static_cast<long long>(a.tracker.getP50()));
-    if (a.ran && b.ran) std::printf("  Engine overhead (seq+rate):    %+lld ns (Path B - A)\n", diff(b, a));
-    if (b.ran && c.ran) std::printf("  Journal, ack before durable:   %+lld ns (Path C - B)\n", diff(c, b));
-    if (b.ran && d.ran) std::printf("  Journal, durable ack:          %+lld ns (Path D - B)\n", diff(d, b));
+    if (a.ran) std::printf("  Core matching + compliance:   %s (Path A P50)\n",
+                           a.tracker.text(0.50).c_str());
+    if (a.ran && l.ran) std::printf("  Listener attached:            %s (Path L - A)\n", diff(l, a).c_str());
+    if (l.ran && b.ran) std::printf("  Engine overhead (seq+rate):   %s (Path B - L)\n", diff(b, l).c_str());
+    if (b.ran && c.ran) std::printf("  Journal, ack before durable:  %s (Path C - B)\n", diff(c, b).c_str());
+    if (b.ran && d.ran) std::printf("  Journal, durable ack:         %s (Path D - B)\n", diff(d, b).c_str());
     if (onlyPath) std::printf("  (--only %c: differences between paths suppressed)\n", onlyPath);
 
     std::printf("\n=======================================================\n");

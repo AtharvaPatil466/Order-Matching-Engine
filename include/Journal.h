@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Types.h"
+#include <bit>
 #include "FaultInjector.h"
 #include "Metrics.h"
 #include "StructuredLog.h"
@@ -150,6 +151,19 @@ inline constexpr Quantity SNAPSHOT_STOP_ELECTED = 1;
 // flag, not the field, says so: an older record's stopLimitPrice holds
 // whatever the client sent, and older readers test only the bit above.
 inline constexpr Quantity SNAPSHOT_ICEBERG_SLICE = 2;
+// PEG_QUEUE: not an order. After a book's orders, one record per peg in the
+// order its reprice pass moves them, carrying only the id and this flag; each
+// sends its peg to the back of that list, which rebuilds it. An older reader
+// finds the order already restored and skips the record.
+inline constexpr Quantity SNAPSHOT_PEG_QUEUE = 4;
+// LOC_QUEUE: the same for the LOC orders a close released into the book, in
+// the order the book tracks them, which is the order PostClose cancels the
+// unfilled ones in. Restore put them back in level order.
+inline constexpr Quantity SNAPSHOT_LOC_QUEUE = 8;
+// Above the flags, an order's Snapshot record carries its arrivalSeq, the age
+// an auction's self-cross resolution compares (MIDS-1); restore gives it back
+// instead of a fresh one. 0, which every older record holds, carries none.
+inline constexpr unsigned SNAPSHOT_ARRIVAL_SHIFT = 8;
 
 inline constexpr uint64_t JOURNAL_EPOCH_LEGACY     = 0;  // may hold seeded orders
 inline constexpr uint64_t JOURNAL_EPOCH_NO_SEEDING = 1;  // writer seeded nothing
@@ -222,6 +236,64 @@ inline Quantity snapshotCumQty(const JournalEntry& e) {
     return static_cast<Quantity>(e.newPrice);
 }
 
+inline uint64_t snapshotArrivalSeq(const JournalEntry& e) {
+    return e.newQty >> SNAPSHOT_ARRIVAL_SHIFT;
+}
+
+// A book's Counters record also carries, in expiryTime, the book's next
+// arrivalSeq (0: none), so orders after a restart are younger than every
+// restored one by the same margin as live.
+inline uint64_t countersNextArrival(const JournalEntry& e) { return e.expiryTime; }
+
+// An engine record (orderId 0) with participantId set carries the engine-wide
+// kill switch (MatchingEngine::setKillSwitch): KILL_SWITCH_ENGAGED or
+// KILL_SWITCH_RELEASED. 0, which every lease record and every older record
+// holds, says nothing about it. Written on each change and by a checkpoint
+// while engaged, so a restart does not release it (JOURNAL-5).
+inline constexpr ParticipantId KILL_SWITCH_ENGAGED = 1;
+inline constexpr ParticipantId KILL_SWITCH_RELEASED = 2;
+inline bool countersKillSwitch(const JournalEntry& e, bool& engaged) {
+    if (e.orderId != 0 || e.participantId == 0) return false;
+    engaged = e.participantId == KILL_SWITCH_ENGAGED;
+    return true;
+}
+
+// An engine record (orderId 0) with participantId 0, quantity 0 (what an older
+// reader skips) and newQty GRADUATED_KILL_MARK carries one piece of the graduated
+// kill switch (MatchingEngine::getKillSwitch), its kind in displayQty. A Begin
+// starts the whole state, and the records after it add to it: a Throttle
+// (participant in minQty, fraction's bits in price), a SymbolHalt or a
+// SwitchHaltedBook (a book the switch halted, so releasing it resumes the book)
+// in symbolId, a GlobalHalt. Written on every change and by a checkpoint while
+// anything is set, so a restart keeps the participant and symbol scopes.
+inline constexpr Quantity GRADUATED_KILL_MARK = 0x4752414455415445ULL;  // "GRADUATE"
+enum class GraduatedKillRecord : uint8_t {
+    Begin = 1, Throttle = 2, SymbolHalt = 3, GlobalHalt = 4, SwitchHaltedBook = 5
+};
+inline bool countersGraduatedKill(const JournalEntry& e, GraduatedKillRecord& kind) {
+    if (e.orderId != 0 || e.participantId != 0 || e.quantity != 0 ||
+        e.newQty != GRADUATED_KILL_MARK)
+        return false;
+    kind = static_cast<GraduatedKillRecord>(e.displayQty);
+    return true;
+}
+
+// And, in displayQty, when the book's volatility-auction dwell started, plus
+// one (0: not started), so a restart keeps the dwell's clock (JOURNAL-7).
+inline bool countersVolatilityClock(const JournalEntry& e, uint64_t& start) {
+    if (e.displayQty == 0) return false;
+    start = e.displayQty - 1;
+    return true;
+}
+
+// And, when hidden is set, the low end of the price band the book anchored
+// on its first resting order (no configured band) in stopPrice (JOURNAL-2).
+inline bool countersAnchoredRange(const JournalEntry& e, Price& minPrice) {
+    if (!e.hidden) return false;
+    minPrice = e.stopPrice;
+    return true;
+}
+
 // An iceberg Snapshot's remaining slice; 0 restores nothing (see ICEBERG_SLICE).
 inline Quantity snapshotIcebergSlice(const JournalEntry& e) {
     return (e.newQty & SNAPSHOT_ICEBERG_SLICE) ? static_cast<Quantity>(e.stopLimitPrice) : 0;
@@ -279,16 +351,19 @@ public:
           batchSize_(batchSize == 0 ? 1 : batchSize) {
         // NOTE: the stale-".tmp" cleanup deliberately does NOT live here.
         // Constructing a Journal must not modify anything on disk, because
-        // several consumers construct one purely to READ — JournalFollower
-        // does it on every poll (1ms by default), and ResearchHarness and the
-        // CLI tools do it once. Removing the sibling here meant a follower
-        // tailing a live leader DELETED the leader's in-progress checkpoint:
-        // the leader went on writing to an unlinked inode, its rename failed
-        // with ENOENT, and the checkpoint silently never happened.
+        // several consumers construct one purely to READ — ResearchHarness
+        // and the CLI tools. Removing the sibling here meant a reader of a
+        // live journal DELETED the writer's in-progress checkpoint: the writer
+        // went on writing to an unlinked inode, its rename failed with ENOENT,
+        // and the checkpoint silently never happened.
         // The cleanup now runs in prepareRewrite(), which is the only place
         // that is about to create a .tmp and therefore the only place that
         // has any business removing a stale one.
 
+        // A file this open creates is a new directory entry: synced before
+        // its first record (writePendingHeader), not here, so a reader that
+        // creates an empty file by opening it syncs nothing (DA-5).
+        dirSyncPending_ = ::access(filePath_.c_str(), F_OK) != 0;
         open("ab+");
         sequence_ = recoverSequenceFromDisk();
         checkRecoverable();
@@ -303,7 +378,7 @@ public:
         if (useIoUring_) {
             // Pre-size each inflight slot's copy buffer so the hot commit path
             // never allocates (Hazard A). Then start the completion reaper that
-            // fires onCommit_ once the write→fdatasync chain is durable.
+            // fires onDurable_ once the write→fdatasync chain is durable.
             for (auto& slot : inflight_) {
                 slot.buf.reserve(batchSize_);
             }
@@ -313,7 +388,7 @@ public:
     }
 
     ~Journal() {
-        flush();  // commits + drains the final batch; reaper fires its onCommit
+        flush();  // commits + drains the final batch; reaper fires its onDurable
 #if defined(__linux__) && defined(OB_HAVE_LIBURING)
         // After flush() the ring is idle (inflightCount_ == 0). Stop and join
         // the reaper BEFORE closing the fd / tearing the ring down, so it can
@@ -412,11 +487,13 @@ public:
                      Quantity displayQty = 0, PegType pegType = PegType::None,
                      Price pegOffset = 0, Price trailAmount = 0, Quantity minQty = 0,
                      bool hidden = false, bool stopElected = false,
-                     Quantity cumQty = 0, Quantity icebergSlice = 0) {
+                     Quantity cumQty = 0, Quantity icebergSlice = 0,
+                     uint64_t arrivalSeq = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Snapshot;
         entry.newQty = (stopElected ? SNAPSHOT_STOP_ELECTED : 0) |
-                       (icebergSlice != 0 ? SNAPSHOT_ICEBERG_SLICE : 0);
+                       (icebergSlice != 0 ? SNAPSHOT_ICEBERG_SLICE : 0) |
+                       (arrivalSeq << SNAPSHOT_ARRIVAL_SHIFT);
         entry.newPrice = static_cast<Price>(cumQty);  // see snapshotCumQty
         entry.timestamp = now();
         entry.orderId = id;
@@ -462,9 +539,15 @@ public:
 
     void logCounters(SymbolId symbolId, uint64_t nextTradeId, uint64_t sequenceLease,
                      Price lastTradePrice = 0, Price referencePrice = 0,
-                     Quantity lastTradeQty = 0) {
+                     Quantity lastTradeQty = 0, uint64_t nextArrival = 0,
+                     bool anchored = false, Price anchoredMin = 0,
+                     bool volatilityStarted = false, uint64_t volatilityStart = 0) {
         JournalEntry entry{};
         entry.entryType = JournalEntry::Type::Counters;
+        entry.expiryTime = nextArrival;  // see countersNextArrival
+        entry.hidden = anchored;         // see countersAnchoredRange
+        entry.stopPrice = anchoredMin;
+        entry.displayQty = volatilityStarted ? volatilityStart + 1 : 0;  // see countersVolatilityClock
         entry.timestamp = now();
         entry.symbolId = symbolId;
         entry.orderId = nextTradeId;
@@ -472,6 +555,37 @@ public:
         entry.price = lastTradePrice;
         entry.newPrice = referencePrice;
         entry.newQty = lastTradeQty;
+        appendEntry(entry);
+    }
+
+    void logKillSwitch(bool engaged) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Counters;
+        entry.timestamp = now();
+        entry.participantId = engaged ? KILL_SWITCH_ENGAGED : KILL_SWITCH_RELEASED;
+        appendEntry(entry);
+    }
+
+    void logGraduatedKill(GraduatedKillRecord kind, SymbolId symbolId = 0,
+                          ParticipantId participant = 0, double fraction = 0.0) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Counters;
+        entry.timestamp = now();
+        entry.newQty = GRADUATED_KILL_MARK;
+        entry.displayQty = static_cast<Quantity>(kind);
+        entry.symbolId = symbolId;
+        entry.minQty = participant;
+        entry.price = std::bit_cast<Price>(fraction);
+        appendEntry(entry);
+    }
+
+    void logPegQueue(OrderId id, SymbolId symbolId, Quantity queue = SNAPSHOT_PEG_QUEUE) {
+        JournalEntry entry{};
+        entry.entryType = JournalEntry::Type::Snapshot;
+        entry.newQty = queue;
+        entry.timestamp = now();
+        entry.orderId = id;
+        entry.symbolId = symbolId;
         appendEntry(entry);
     }
 
@@ -519,7 +633,7 @@ public:
         }
         // Barrier: on the async io_uring path commitBatch() only *submits* the
         // durability chain — block here until the reaper has reaped it and
-        // fired onCommit. On the synchronous path (macOS, or Linux without
+        // fired onDurable. On the synchronous path (macOS, or Linux without
         // liburing) this is a no-op: commits are already durable-and-acked
         // inline. Guarantees read-after-flush consistency for readAll(),
         // truncate(), rewriteAtomically(), and the destructor.
@@ -527,9 +641,9 @@ public:
     }
 
     // Block until every in-flight durability chain has been reaped and its
-    // onCommit callback has fired. On the synchronous commit path this is a
+    // onDurable callback has fired. On the synchronous commit path this is a
     // no-op. Callers that submitted orders asynchronously use this to
-    // establish a happens-before edge before observing onCommit side effects.
+    // establish a happens-before edge before observing onDurable side effects.
     void quiesce() { drainCompletions(); }
 
     void truncate() {
@@ -609,6 +723,8 @@ public:
             // the synthetic orders into a file marked trusted, and the next boot
             // replayed them with no flag and no refusal.
             temp.contentEpoch_ = contentEpoch_;
+            // Its entry only matters once renamed, and the rename syncs it.
+            temp.dirSyncPending_ = false;
             writer(temp);
             temp.flush();
             // The snapshot is about to REPLACE the live journal, so publishing
@@ -845,122 +961,16 @@ public:
         return bytes;
     }
 
-    // Result of readTailFromPath(): the anchors a tailing reader needs to
-    // decide WHICH file it is looking at, plus the records it has not seen yet,
-    // all taken from ONE fopen.
-    //
-    // WHY ONE OPEN. A reader that tails a live journal has to answer two
-    // questions per poll — "is this still the file I was following?" and "what
-    // is new in it?" — and a checkpoint can rename(2) a fresh file over the
-    // path between them. Asking them through two separate opens pairs one
-    // file's identity with another file's contents, which is the same window
-    // that made st_ino useless here (see JournalFollower::classify). Both
-    // answers come off the same handle, so what is checked IS what is read.
-    struct TailRead {
-        JournalEntry first{};          // record 1, the file-identity anchor
-        bool         hasFirst{false};  // false: empty/unreadable/invalid first
-        JournalEntry beforeTail{};     // the record at startIndex-1
-        bool         hasBeforeTail{false};  // false: the file is shorter than that
-        std::vector<JournalEntry> tail;     // records [startIndex, end)
-        // Whole records pulled off the disk by this call — the cost of the
-        // read, independent of how many records were kept. Lets a caller assert
-        // that polling a large unchanging file stays cheap.
-        size_t recordsRead{0};
-    };
-
-    // Reads `path` from `startIndex` onward WITHOUT re-reading (or re-CRCing)
-    // the prefix, and returns the two identity anchors alongside the tail.
-    //
-    // Validation is per-record and identical to readEntriesFromPath's: a short,
-    // CRC-invalid or out-of-sequence record ends the read and is not returned.
-    // Because records are numbered contiguously from 1, the tail's expected
-    // sequence is seeded at startIndex+1 — exactly the number a full strict
-    // read would have reached by then.
-    //
-    // WHAT SKIPPING THE PREFIX GIVES UP: corruption STRICTLY INSIDE the already
-    // consumed prefix — not at record 1, not at startIndex-1 — is no longer
-    // seen, because those bytes are never read again. Both anchors are still
-    // CRC- and sequence-checked, so a caller still detects a replaced file and
-    // a prefix that lost records; what it no longer detects is a record it
-    // already consumed rotting afterwards, which it could not have un-applied
-    // anyway. Corruption at or after startIndex ends the tail exactly as
-    // before.
-    //
-    // Returns false only when the file could not be opened.
-    static bool readTailFromPath(const std::string& path, size_t startIndex,
-                                 bool validateCRC, bool validateSequence,
-                                 TailRead& out) {
-        out = TailRead{};
-        FILE* file = std::fopen(path.c_str(), "rb");
-        if (!file) return false;
-
-        const long dataOffset = static_cast<long>(headerBytesOfStream(file));
-        const long recordSize = static_cast<long>(sizeof(JournalEntry));
-        auto offsetOf = [&](size_t index) {
-            return dataOffset + static_cast<long>(index) * recordSize;
-        };
-
-        // One record at a known index, validated the same way the streaming
-        // loop validates it. A record that is absent, torn, CRC-invalid or
-        // misnumbered reports false — the same thing a full read would show by
-        // stopping short of it.
-        auto readAt = [&](size_t index, JournalEntry& entry) {
-            if (std::fseek(file, offsetOf(index), SEEK_SET) != 0) return false;
-            if (std::fread(&entry, sizeof(entry), 1, file) != 1) return false;
-            ++out.recordsRead;
-            if (validateCRC &&
-                entry.checksum !=
-                    computeCRC32(&entry, offsetof(JournalEntry, checksum))) {
-                return false;
-            }
-            return !validateSequence || entry.sequenceNumber == index + 1;
-        };
-
-        if (startIndex > 0) {
-            out.hasFirst = readAt(0, out.first);
-            out.hasBeforeTail = readAt(startIndex - 1, out.beforeTail);
-        }
-        if (std::fseek(file, offsetOf(startIndex), SEEK_SET) == 0) {
-            out.recordsRead +=
-                readRecords(file, validateCRC, validateSequence,
-                            static_cast<uint64_t>(startIndex) + 1, out.tail);
-        }
-        // From record 1 the tail already carries the identity anchor; no
-        // second read for it.
-        if (startIndex == 0 && !out.tail.empty()) {
-            out.first = out.tail.front();
-            out.hasFirst = true;
-        }
-
-        std::fclose(file);
-        return true;
-    }
-
     const std::string& path() const { return filePath_; }
 
-    // Callback fired once per batch immediately after a successful
-    // commit (entries are fsync-durable on disk). Used to feed
-    // committed entries into the replication coordinator without
-    // intruding on the matching-engine hot path. Receives a pointer
-    // to the prefix of committed entries and the count.
-    //
-    // Lifetime: the entries pointer is only valid for the duration
-    // of the callback. Copy the bytes if you need them longer.
-    using OnCommitFn = std::function<void(const JournalEntry* entries, size_t count)>;
-    void setOnCommit(OnCommitFn fn) { onCommit_ = std::move(fn); }
-    OnCommitFn onCommit() const { return onCommit_; }
-
-    // Second post-barrier hook, reserved for the owning MatchingEngine, fired
-    // under exactly the same durability guarantee as onCommit_. Separate slot
-    // rather than chaining onto onCommit_ because that one belongs to the
-    // application (main.cpp installs the replication ack there): whichever set
-    // it last would silently disable the other, and one of the two would be a
-    // durability guarantee that stopped holding without any sign.
-    // `n` is the number of entries that just became durable.
+    // Post-barrier hook, reserved for the owning MatchingEngine: fired once per
+    // batch, strictly after a successful commit, so the entries it counts are
+    // fsync-durable on disk. `n` is the number of entries that just became
+    // durable. See the contract on onDurable_.
     void setOnDurable(std::function<void(size_t)> fn) { onDurable_ = std::move(fn); }
 
     // Total entries handed to appendEntry() since construction. Pair with the
-    // count reported to onCommit_ to learn which appends are durable.
+    // count reported to onDurable_ to learn which appends are durable.
     uint64_t entriesAppended() const { return entriesAppended_; }
 
     // Durability configuration, so a caller (or a test) can assert what a
@@ -1076,7 +1086,7 @@ protected:
         commitBatchSync();
     }
 
-    // Synchronous commit path: write(2) → fdatasync, then fire onCommit inline
+    // Synchronous commit path: write(2) → fdatasync, then fire onDurable inline
     // once the sync is durable. Used on macOS, on Linux without liburing (or
     // when the ring failed to init), and as the io_uring SQE-exhaustion
     // fallback. A real error at either step halts the journal (see halt()).
@@ -1140,12 +1150,11 @@ protected:
             return;
         }
 
-        // Durability barrier. The replication ack (onCommit_, fired below)
-        // must happen STRICTLY AFTER a successful durable sync — never before,
-        // and never when the sync was skipped or failed. Otherwise the backup
-        // would ack entries the primary has not durably written; a crash
-        // between flush and fsync then loses them on the primary while the
-        // backup keeps them (ack-before-fsync hazard / backup divergence).
+        // Durability barrier. The ack (onDurable_, fired below) must happen
+        // STRICTLY AFTER a successful durable sync — never before, and never
+        // when the sync was skipped or failed. Otherwise a client would hold an
+        // ack for an entry a crash between flush and fsync then loses
+        // (ack-before-fsync hazard).
         //
         // Fault: skip the durability barrier when armed, modelling an fsync
         // that did not make the data durable. (Data still sits in the buffer
@@ -1176,22 +1185,19 @@ protected:
             "Total journal entries successfully written to disk");
         kEntriesCommitted.increment(toWrite);
 
-        // Fire the commit callback ONLY after a successful durable sync (see
-        // the durability barrier above), and BEFORE erasing the prefix so the
-        // pointer remains valid for the duration of the callback. The callback
-        // runs synchronously on the writer thread — implementers should keep it
-        // short (the replication coordinator queues bytes for an async send,
-        // which is the intended use).
+        // Fire the callback ONLY after a successful durable sync (see the
+        // durability barrier above). It runs synchronously on the writer
+        // thread, so implementers should keep it short.
         //
         // `durable` is false only when the fsync_fail fault skipped the sync.
-        // The bytes are not on stable storage, so they must not be acked to
-        // the backup — withholding the ack is what closes the ack-before-fsync
-        // hazard.
-        if (durable && onCommit_) {
-            onCommit_(batch_.data(), toWrite);
-        }
-        if (durable && onDurable_) {
-            onDurable_(toWrite);
+        // The bytes are not on stable storage, so they must not be acked —
+        // withholding the ack is what closes the ack-before-fsync hazard.
+        // A sync covers the whole file, so it also makes durable what earlier
+        // skipped syncs wrote; those are acked now, keeping the count FIFO
+        // with the appends DurabilityGate releases against (DA-7).
+        const size_t acked = ackAfterSync(toWrite, durable);
+        if (acked > 0 && onDurable_) {
+            onDurable_(acked);
         }
 
         // Pop the persisted prefix. Anything past it stays in batch_ and
@@ -1202,6 +1208,18 @@ protected:
             e.sequenceNumber = 0;
             e.checksum = 0;
         }
+    }
+
+    // `n` entries were written; returns how many are now durable to report.
+    // Written without a sync (the fsync_fail fault), they wait for the next
+    // sync, which covers them too. Only ever touched by one committer at a
+    // time: the writer, or the reaper under ringMu_ with no chain behind it.
+    size_t ackAfterSync(size_t n, bool synced) {
+        writtenUnsynced_ += n;
+        if (!synced) return 0;
+        const size_t all = writtenUnsynced_;
+        writtenUnsynced_ = 0;
+        return all;
     }
 
     // A commit of the first `n` entries did not happen: give back the sequence
@@ -1225,7 +1243,7 @@ protected:
     // Async durability commit (Hazards A–D). Assigns sequence + CRC, copies the
     // prefix into a free inflight slot, submits a write→fdatasync linked chain,
     // and returns WITHOUT waiting. The reaper thread reaps both CQEs and fires
-    // onCommit only once the chain is durable. Called on the writer thread.
+    // onDurable only once the chain is durable. Called on the writer thread.
     void commitBatchAsync() {
         // The ring appends at EOF, so the header has to be on disk before the
         // first record goes down this path as well. (A no-op once halted.)
@@ -1414,7 +1432,7 @@ protected:
         io_uring_sqe_set_data64(sqe, kStopUserData);
     }
 
-    // Reaper thread loop: reap CQEs, finalize chains, fire onCommit. Runs until
+    // Reaper thread loop: reap CQEs, finalize chains, fire onDurable. Runs until
     // stopReaper() sets reaperStop_ and posts the NOP shutdown token.
     void reaperLoop() {
         for (;;) {
@@ -1466,12 +1484,12 @@ protected:
         finalizeChain(slotIdx);
     }
 
-    // Chain complete: compute durability, update counters, fire onCommit iff
+    // Chain complete: compute durability, update counters, fire onDurable iff
     // durable, or — on a real error — halt and hand the chain back to the
     // writer; then free the slot.
     void finalizeChain(uint32_t slotIdx) {
-        const JournalEntry* bufPtr = nullptr;
         size_t written = 0;
+        size_t acked = 0;
         bool durable = false;
         std::string failed;   // non-empty: what failed
         int failedErr = 0;
@@ -1511,7 +1529,7 @@ protected:
             } else {
                 written = slot.count;
                 durable = slot.wantAck;
-                bufPtr = slot.buf.data();
+                acked = ackAfterSync(written, durable);   // DA-7, under ringMu_
             }
         }
 
@@ -1537,13 +1555,9 @@ protected:
 
         // Fire the ack STRICTLY after durability, on this reaper thread. The
         // slot stays active (inflightCount_ still 1) until after the callback,
-        // so the writer cannot reuse the slot's buffer mid-callback. The
-        // ReplicationCoordinator locks internally, so this is safe from here.
-        if (durable && onCommit_ && written > 0) {
-            onCommit_(bufPtr, written);
-        }
-        if (durable && onDurable_ && written > 0) {
-            onDurable_(written);
+        // so quiesce() returning means the callback has run.
+        if (durable && onDurable_ && acked > 0) {
+            onDurable_(acked);
         }
 
         {
@@ -1652,6 +1666,16 @@ private:
         cutTornTail();   // never write behind a torn record
         upgradeOldHeader();
         if (halted() || !pendingHeader_ || !file_) return;
+        // A file this journal created is not durable until its directory
+        // entry is: a power cut could otherwise drop it with every record
+        // acked into it (DA-5). Unsyncable, nothing is written or acked.
+        if (dirSyncPending_) {
+            if (!syncDirOf(filePath_)) {
+                halt("syncing the directory of the new journal file", errno);
+                return;
+            }
+            dirSyncPending_ = false;
+        }
         // makeHeader() stamps this journal's own epoch: NO_SEEDING for a file
         // this build created, since it seeds no synthetic orders. A checkpoint
         // rewrite comes through
@@ -1755,8 +1779,8 @@ private:
     //     fsync — so the file holds exactly what was reported durable, and a
     //     restart replays neither a torn record nor an order a client was
     //     refused (the engine answers the failed request JournalHalted);
-    //   * the entries stay in memory and are never reported durable: onCommit
-    //     and onDurable do not fire and the persisted counters do not move;
+    //   * the entries stay in memory and are never reported durable: onDurable
+    //     does not fire and the persisted counters do not move;
     //   * every later commit is a no-op, so nothing lands behind the failure;
     //   * the engine rejects every new request (MatchingEngine::submit*).
     // Sticky. Resuming in-process would mean rolling the in-memory book back
@@ -1799,8 +1823,8 @@ private:
     }
 
     // Returns true iff the durable barrier actually made the bytes durable.
-    // Callers gate the replication ack (onCommit_) on this: an ack may only
-    // be sent once the data is provably on stable storage.
+    // Callers gate the ack (onDurable_) on this: an ack may only be sent once
+    // the data is provably on stable storage.
     bool syncFile() const {
         if (!file_) {
             return false;
@@ -1882,10 +1906,9 @@ private:
         const long size = std::ftell(file_);
         if (size <= 0) {
             // Deferred, NOT written here. Opening must not modify the file:
-            // JournalFollower, ResearchHarness, JournalReplayCLI and
-            // TimeMachine all construct a Journal purely to READ, and writing
-            // a header at construction made a read-only consumer mutate the
-            // file it was tailing — which broke the follower outright. The
+            // ResearchHarness, JournalReplayCLI and TimeMachine all construct
+            // a Journal purely to READ, and writing a header at construction
+            // made a read-only consumer mutate the file it was reading. The
             // header goes down immediately before the first record instead.
             pendingHeader_ = true;
             dataOffset_ = sizeof(JournalFileHeader);
@@ -2040,8 +2063,7 @@ private:
 
         // How many records a STRICT read would return, computed from the lax
         // read rather than by reading the file a second time — the sequence
-        // numbers are already in hand, and this runs in the constructor, which
-        // JournalFollower invokes on every poll.
+        // numbers are already in hand, and this runs in every constructor.
         //
         // Mirrors readEntriesFromPath's strict mode exactly: expect 1, then
         // +1, stop at the first gap.
@@ -2077,8 +2099,7 @@ private:
                    ? sizeof(JournalFileHeader) : 0;
     }
 
-    // The record loop, shared by readEntriesFromPath and readTailFromPath so
-    // the two cannot drift on what counts as a valid record. Reads whole
+    // The record loop behind readEntriesFromPath. Reads whole
     // records from an already-positioned handle and stops at the first one that
     // is short, CRC-invalid or out of sequence; that record is not appended.
     // `expectedSequence` is the number the NEXT record must carry.
@@ -2148,6 +2169,8 @@ private:
     size_t dataOffset_{0};
     // A header is owed to this file but not yet written. See establishHeader().
     bool   pendingHeader_{false};
+    bool   dirSyncPending_{false};   // created by this journal, directory not yet synced
+    size_t writtenUnsynced_{0};      // written under fsync_fail, not yet acked (DA-7)
     // The existing header is v1 or v2; upgradeOldHeader() marks it before a write.
     bool   headerIsOld_{false};
     // A torn final write still to cut: tornBytes_ bytes from offset tornFrom_.
@@ -2162,19 +2185,16 @@ private:
     std::atomic<bool>   halted_{false};
     uint64_t            entriesAppended_{0};
     std::vector<JournalEntry> batch_;
-    // CONTRACT: onCommit_ fires on the reaper thread — must be lock-free and
+    // CONTRACT: onDurable_ fires on the reaper thread — must be lock-free and
     // must not touch OrderBook state.
     //
-    // On the async io_uring path finalizeChain() invokes onCommit_ from the
+    // On the async io_uring path finalizeChain() invokes onDurable_ from the
     // reaper thread, concurrently with the matching thread that owns and mutates
     // the OrderBook. A callback that grabbed a lock the matching thread also
     // holds, or that read/wrote OrderBook state without external synchronization,
     // would either stall the durability reaper or race the matching thread. On
     // the synchronous path it fires inline on the writer thread, but the same
     // discipline is required so a single callback body is safe under both paths.
-    // Keep it to lock-free byte-shipping only — e.g. hand committed bytes to the
-    // ReplicationCoordinator's transport; never reach back into engine state.
-    OnCommitFn onCommit_;
     std::function<void(size_t)> onDurable_;
     size_t maxSizeMb_{0};
     // Records in the replacement the last prepareRewrite() built.

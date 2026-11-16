@@ -1,15 +1,14 @@
-// JournalAckDurabilityTest — proves the on-commit replication ack is gated on
-// durability. The onCommit_ callback ships committed bytes to the replication
-// backup; it must fire ONLY AFTER the durable sync (fdatasync / F_FULLFSYNC)
-// has actually happened. If it fired before — or when the sync was skipped /
-// failed — the backup would ack entries the primary never durably wrote. On a
-// primary crash between flush and fsync those entries vanish on restart and the
-// backup diverges (the classic ack-before-fsync hazard).
+// JournalAckDurabilityTest — proves the on-durable ack is gated on durability.
+// The onDurable_ callback tells the engine which appends are on stable storage,
+// and DurabilityGate releases client events on it, so it must fire ONLY AFTER
+// the durable sync (fdatasync / F_FULLFSYNC) has actually happened. If it fired
+// before — or when the sync was skipped / failed — a client would hold an ack
+// for an entry that vanishes on restart (the classic ack-before-fsync hazard).
 //
 // Mechanism: the FaultInjector key "journal.commit.fsync_fail" makes commitBatch
 // skip the durability barrier (modelling an fsync that did not make data
-// durable). With the fault armed, NO bytes may be acked to the backup. With the
-// fault disarmed, exactly one ack must fire per commit, strictly after the sync.
+// durable). With the fault armed, NO entry may be acked. With the fault
+// disarmed, exactly one ack must fire per commit, strictly after the sync.
 //
 // Requires: cmake -DENABLE_FAULT_INJECTION=ON .. (otherwise the injection point
 // compiles to constexpr-false and there is nothing to falsify — we skip).
@@ -35,12 +34,11 @@ std::string tmpJournalPath(const char* tag) {
     return p.string();
 }
 
-// A tiny stand-in for the replication coordinator: it records every byte the
-// journal acks as "durable" to the backup.
+// Records every entry the journal reports durable.
 struct AckSink {
-    uint64_t acks = 0;       // number of onCommit invocations
+    uint64_t acks = 0;       // number of onDurable invocations
     uint64_t entries = 0;    // total entries acked across all invocations
-    void operator()(const JournalEntry*, size_t count) {
+    void operator()(size_t count) {
         ++acks;
         entries += count;
     }
@@ -59,19 +57,19 @@ struct AckSink {
     {
         // Immediate policy + batchSize 1: every log triggers a full commit.
         Journal j(path, Journal::SyncPolicy::Immediate, /*batchSize=*/1);
-        j.setOnCommit([&sink](const JournalEntry* e, size_t n) { sink(e, n); });
+        j.setOnDurable([&sink](size_t n) { sink(n); });
 
         j.logAddOrder(1, 1, 1, Side::Buy, 10000, 100, OrderType::Limit);
         j.flush();
         // Async path: flush() submits + drains, but make the completion
         // dependency explicit — block until the reaper has reaped the
-        // write→fdatasync chain and fired onCommit before observing `sink`.
+        // write→fdatasync chain and fired onDurable before observing `sink`.
         j.quiesce();
 
         // The durable sync succeeded, so the ack must have fired exactly once
         // for exactly one entry.
-        assert(sink.acks == 1 && "onCommit must fire exactly once after a durable sync");
-        assert(sink.entries == 1 && "onCommit must ack exactly the committed entry");
+        assert(sink.acks == 1 && "onDurable must fire exactly once after a durable sync");
+        assert(sink.entries == 1 && "onDurable must ack exactly the committed entry");
     }
     fs::remove(path);
     std::printf("  ok: acks=%llu entries=%llu\n",
@@ -93,7 +91,7 @@ struct AckSink {
     std::string path = tmpJournalPath("fsyncfail");
     {
         Journal j(path, Journal::SyncPolicy::Immediate, /*batchSize=*/1);
-        j.setOnCommit([&sink](const JournalEntry* e, size_t n) { sink(e, n); });
+        j.setOnDurable([&sink](size_t n) { sink(n); });
 
         j.logAddOrder(1, 1, 1, Side::Buy, 10000, 100, OrderType::Limit);
         j.flush();
@@ -107,11 +105,10 @@ struct AckSink {
                     static_cast<unsigned long long>(fires));
         assert(fires > 0 && "fsync_fail never fired — injector wiring broken");
 
-        // THE CONTRACT: nothing was durably synced, so nothing may be acked to
-        // the backup. A non-zero ack count here is the ack-before-fsync hazard.
+        // THE CONTRACT: nothing was durably synced, so nothing may be acked. A
+        // non-zero ack count here is the ack-before-fsync hazard.
         assert(sink.acks == 0 &&
-               "ack-before-fsync hazard: backup acked an entry the primary did "
-               "not durably sync");
+               "ack-before-fsync hazard: acked an entry that was not durably synced");
         assert(sink.entries == 0 && "no entries may be acked when sync is skipped");
     }
 
@@ -129,6 +126,38 @@ struct AckSink {
 
 }  // namespace
 
+// ---- DA-7: a skipped sync's entries are acked by the next real one ----------
+// fsync_fail models an fsync that has not happened YET. The entries it wrote
+// become durable with the next successful sync (which covers the whole file),
+// and must be reported then: popped and never counted, the durable count lagged
+// the appended count forever and DurabilityGate held every later group.
+[[maybe_unused]] void testSkippedSyncIsAckedByTheNext() {
+    std::printf("Running testSkippedSyncIsAckedByTheNext...\n");
+    auto& fi = FaultInjector::instance();
+    fi.reset();
+    AckSink sink;
+    std::string path = tmpJournalPath("catchup");
+    {
+        Journal j(path, Journal::SyncPolicy::Immediate, /*batchSize=*/1);
+        j.setOnDurable([&sink](size_t n) { sink(n); });
+        fi.arm("journal.commit.fsync_fail", 1.0);
+        j.logAddOrder(1, 1, 1, Side::Buy, 10000, 100, OrderType::Limit);
+        j.quiesce();
+        assert(sink.entries == 0 && "nothing is durable yet");
+        fi.disarm();
+        j.logAddOrder(2, 1, 1, Side::Buy, 9999, 100, OrderType::Limit);
+        j.flush();
+        j.quiesce();
+        std::printf("  acked %llu of %llu appended\n",
+                    static_cast<unsigned long long>(sink.entries),
+                    static_cast<unsigned long long>(j.entriesAppended()));
+        assert(sink.entries == j.entriesAppended() &&
+               "the durable count lags the appends: the gate would hold forever");
+    }
+    fs::remove(path);
+    std::printf("testSkippedSyncIsAckedByTheNext PASSED\n");
+}
+
 int main() {
 #ifndef OB_ENABLE_FAULT_INJECTION
     std::puts("JournalAckDurabilityTest: OB_ENABLE_FAULT_INJECTION not defined — "
@@ -138,6 +167,7 @@ int main() {
     std::printf("\n=== Journal Ack-Durability Tests ===\n");
     testAckFiresAfterSuccessfulSync();
     testNoAckWhenSyncFails();
+    testSkippedSyncIsAckedByTheNext();
     std::puts("\nJournalAckDurabilityTest passed");
     return 0;
 #endif

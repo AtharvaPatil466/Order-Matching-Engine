@@ -3,10 +3,11 @@
 # -fsanitize=fuzzer (Apple Clang doesn't ship with it; Homebrew LLVM does).
 #
 # Usage:
-#   ./fuzz/run_libfuzzer.sh                    # fuzz_fix_parser, default
-#   ./fuzz/run_libfuzzer.sh framer             # fuzz_fix_framer
-#   ./fuzz/run_libfuzzer.sh parser 60          # 60-second timeout
-#   ./fuzz/run_libfuzzer.sh parser 0 corpus/   # use a specific corpus dir
+#   ./fuzz/run_libfuzzer.sh                     # fuzz_gateway_engine, 30 s
+#   ./fuzz/run_libfuzzer.sh gateway 60          # 60-second timeout
+#   ./fuzz/run_libfuzzer.sh gateway 0 corpus/   # use a specific corpus dir
+#
+# Without a corpus dir, seeds are generated into build-libfuzzer/gw-corpus.
 #
 # After the run, crashes (if any) are written to fuzz/crashes/<target>/
 # and can be replayed with:
@@ -18,20 +19,18 @@ cd "$(dirname "$0")/.."
 PROJECT_ROOT=$(pwd)
 BUILD_DIR="$PROJECT_ROOT/build-libfuzzer"
 
-TARGET_SHORT="${1:-parser}"
+TARGET_SHORT="${1:-gateway}"
 TIMEOUT="${2:-30}"
-CORPUS="${3:-fuzz/corpus}"
+CORPUS="${3:-$BUILD_DIR/gw-corpus}"
 
 case "$TARGET_SHORT" in
-    parser)    TARGET=fuzz_fix_parser ;;
-    framer)    TARGET=fuzz_fix_framer ;;
-    roundtrip) TARGET=fuzz_fix_roundtrip ;;
-    gateway)   TARGET=fuzz_gateway_engine ;;  # corpus: fuzz/gen_gateway_seeds.py <dir>
+    gateway)   TARGET=fuzz_gateway_engine ;;
     *)
-        echo "unknown target: $TARGET_SHORT (parser|framer|roundtrip|gateway)"
+        echo "unknown target: $TARGET_SHORT (gateway)"
         exit 2
         ;;
 esac
+[ -d "$CORPUS" ] || python3 fuzz/gen_gateway_seeds.py "$CORPUS"
 
 # --- Locate a libFuzzer-capable clang -------------------------------------
 

@@ -9,6 +9,9 @@
 //  5. Protected endpoint with wrong token → 401.
 //  6. Protected endpoint with correct token → 200.
 //  7. /readyz returns 200 after setReady(true).
+//  8-11. 401 framing, fail-closed start, explicit opt-out, bind failure.
+// 12. /chaos/order: off unless armed, fails closed without OB_CHAOS_TOKEN, and
+//     refuses a missing or wrong X-Chaos-Token behind a valid bearer token.
 
 #include "AdminServer.h"
 #include "MatchingEngine.h"
@@ -17,6 +20,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -36,8 +40,10 @@ namespace {
 // Send a minimal HTTP GET and return the full response, or "" on
 // failure. `authHeader` is inserted verbatim as the Authorization
 // header value (e.g. "Bearer secret123"). Leave empty for no header.
+// `extraHeader` is one more whole header line, without its CRLF.
 std::string httpGet(uint16_t port, const std::string& path,
-                    const std::string& authHeader = "") {
+                    const std::string& authHeader = "",
+                    const std::string& extraHeader = "") {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return {};
 
@@ -67,6 +73,8 @@ std::string httpGet(uint16_t port, const std::string& path,
     std::string req = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n";
     if (!authHeader.empty())
         req += "Authorization: " + authHeader + "\r\n";
+    if (!extraHeader.empty())
+        req += extraHeader + "\r\n";
     req += "Connection: close\r\n\r\n";
     ::send(fd, req.data(), req.size(), MSG_NOSIGNAL);
 
@@ -137,8 +145,8 @@ int main() {
     // The README promises the token on every endpoint but the two probes, and
     // case 4 alone would pass with any other route served ahead of the check.
     for (const char* path : {"/prometheus", "/otr?participantId=1", "/book?symbolId=0",
-                             "/auction", "/fees", "/risk", "/cat", "/audit?symbolId=0",
-                             "/role", "/replication", "/journal/head", "/version",
+                             "/auction", "/audit?symbolId=0",
+                             "/journal/head", "/version",
                              "/chaos/order"}) {
         auto r = httpGet(port, path);
         if (r.find("HTTP/1.1 401") == std::string::npos) {
@@ -201,7 +209,7 @@ int main() {
     // ── 9. Fail closed: no token and no explicit opt-out → never binds ──
     // The regression this guards: an operator who forgets to configure a
     // token used to get a fully open admin port serving /book, /otr and
-    // /risk to anyone with network reach. Omitting the token must now be a
+    // /audit to anyone with network reach. Omitting the token must now be a
     // startup failure, not a silent exposure.
     {
         AdminServer unconfigured(engine, 0);
@@ -245,6 +253,61 @@ int main() {
 
         second.stop();  // no-op; never started
         first.stop();
+    }
+
+    // ── 12. /chaos/order is gated twice: armed by env, then its own token ─
+    // It submits real orders, so a valid admin token alone must not reach it.
+    // The gate is read when the server is constructed, hence one per case.
+    {
+        const std::string order =
+            "/chaos/order?orderId=800001&participantId=1&price=100000&qty=1";
+        const std::string bearer = "Bearer secret123";
+        const auto chaosGet = [&](uint16_t p, const std::string& header) {
+            return httpGet(p, order, bearer, header);
+        };
+
+        ::unsetenv("OB_CHAOS_INJECT");
+        ::unsetenv("OB_CHAOS_TOKEN");
+        {
+            AdminServer off(engine, 0);
+            off.setAdminToken("secret123");
+            assert(off.start());
+            assert(chaosGet(off.port(), "").find("\"enabled\":false") != std::string::npos &&
+                   "/chaos/order must stay off unless OB_CHAOS_INJECT is set");
+            off.stop();
+        }
+
+        ::setenv("OB_CHAOS_INJECT", "1", 1);
+        {
+            AdminServer noToken(engine, 0);
+            noToken.setAdminToken("secret123");
+            assert(noToken.start());
+            assert(chaosGet(noToken.port(), "").find("\"enabled\":false") != std::string::npos &&
+                   "armed without OB_CHAOS_TOKEN, /chaos/order must stay off");
+            noToken.stop();
+        }
+
+        ::setenv("OB_CHAOS_TOKEN", "chaos-secret", 1);
+        {
+            AdminServer armed(engine, 0);
+            armed.setAdminToken("secret123");
+            assert(armed.start());
+            assert(httpGet(armed.port(), order).find("HTTP/1.1 401") != std::string::npos &&
+                   "/chaos/order must still require the bearer token");
+            assert(chaosGet(armed.port(), "").find("\"error\":\"unauthorized\"") !=
+                       std::string::npos &&
+                   "a missing X-Chaos-Token must be refused");
+            assert(chaosGet(armed.port(), "X-Chaos-Token: not-the-secret")
+                           .find("\"error\":\"unauthorized\"") != std::string::npos &&
+                   "a wrong X-Chaos-Token must be refused");
+            const std::string ok = chaosGet(armed.port(), "X-Chaos-Token: chaos-secret");
+            assert(ok.find("\"accepted\":true") != std::string::npos &&
+                   "the matching X-Chaos-Token must pass the gate");
+            armed.stop();
+        }
+        ::unsetenv("OB_CHAOS_INJECT");
+        ::unsetenv("OB_CHAOS_TOKEN");
+        std::puts("/chaos/order: off unless armed, refuses a missing or wrong token");
     }
 
     engine.stopAsync();

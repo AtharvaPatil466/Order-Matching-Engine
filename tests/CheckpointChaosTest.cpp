@@ -113,7 +113,7 @@ int main() {
             // 90 rewrites GREW the file and the shrink case — the production
             // shape — was never once exercised.
             //
-            // That gap is not hypothetical. JournalFollower tracked its
+            // That gap is not hypothetical. A journal tailer once tracked its
             // position as an index into a re-read vector, which is correct for
             // every replacement that grows and silently freezes forever on one
             // that shrinks (fixed in 7832e89). A rewrite soak that only ever

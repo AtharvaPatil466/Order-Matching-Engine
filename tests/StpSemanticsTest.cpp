@@ -600,20 +600,16 @@ TEST(StpUncross, OtherParticipantsStillCrossNormally) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Step 4 — outbound protocol mapping for CancelledBySTP.
 //
-// Survey result: ITCH is the ONLY protocol that consumes OrderStatus.
-// FixSession is never registered as an EventListener; OuchSession is one but
-// overrides only onTrade; SbeSession and the gateway carry accept/reject at
-// entry time and no order-status stream. So no order-entry client currently
+// Survey result: ITCH is the ONLY protocol that consumes OrderStatus. The
+// gateway carries accept/reject at entry time and no order-status stream. So no
+// order-entry client currently
 // learns about ANY engine-initiated cancellation — STP, kill switch, expiry or
 // OCO. These tests pin the encoder-side mapping so it is correct when the
 // lifecycle is wired, and close the ITCH gap that already exists in production.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#include "FixSession.h"
 #include "ItchProtocol.h"
 #include "ItchPublisher.h"
-#include "OuchProtocol.h"
-#include "OuchSession.h"
 
 #include <string>
 #include <string_view>
@@ -657,175 +653,4 @@ TEST(StpProtocol, ItchEmitsOrderDeleteForCancelledBySTP) {
     EXPECT_FALSE(sawExecuted) << "nothing traded, so no 'E' may be emitted";
 
     book.setEventListener(nullptr);
-}
-
-// ─── FIX: ExecType='4' / OrdStatus='4', identical in 4.2 and 4.4 ────────────
-
-namespace {
-
-std::string fixFieldOf(const std::string& msg, const char* tagEq) {
-    // Fields are SOH-delimited; find "<tag>=" at a field boundary.
-    const std::string needle = std::string("\x01") + tagEq;
-    size_t p = msg.find(needle);
-    if (p == std::string::npos) {
-        if (msg.rfind(tagEq, 0) != 0) return {};
-        p = 0;
-    } else {
-        p += 1;
-    }
-    const size_t vs = p + std::strlen(tagEq);
-    const size_t ve = msg.find('\x01', vs);
-    return msg.substr(vs, ve - vs);
-}
-
-}  // namespace
-
-TEST(StpProtocol, FixCancellationIsExecType4OrdStatus4WithStpText) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-
-    std::string sent;
-    FixSession sess(engine, [&](std::string_view m) { sent.assign(m); });
-
-    sess.sendCancelled(/*id=*/42, Side::Buy, /*price=*/1000, /*orderQty=*/100,
-                       /*cumQty=*/40, /*bySTP=*/true);
-
-    ASSERT_FALSE(sent.empty());
-    EXPECT_EQ(fixFieldOf(sent, "150="), "4") << "ExecType Canceled";
-    EXPECT_EQ(fixFieldOf(sent, "39="),  "4") << "OrdStatus Canceled";
-    // The quantity that really executed before STP stopped the order.
-    EXPECT_EQ(fixFieldOf(sent, "14="), "40") << "CumQty must be the real fill";
-    EXPECT_EQ(fixFieldOf(sent, "151="), "0") << "LeavesQty zero — order is gone";
-    EXPECT_NE(sent.find("self-trade prevention"), std::string::npos)
-        << "no standard STP ExecType exists, so the distinction rides in Text";
-}
-
-TEST(StpProtocol, FixCancelExecTypeIsIdenticalIn42And44) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-
-    std::string v42, v44;
-    FixSession s42(engine, [&](std::string_view m) { v42.assign(m); });
-    FixSession s44(engine, [&](std::string_view m) { v44.assign(m); });
-    s44.setAcceptedVersions({"FIX.4.4"});
-
-    s42.sendCancelled(1, Side::Buy, 1000, 100, 0, true);
-    s44.sendCancelled(1, Side::Buy, 1000, 100, 0, true);
-
-    ASSERT_FALSE(v42.empty());
-    ASSERT_FALSE(v44.empty());
-    // The serializer rewrites ExecType only for '1'/'2' -> 'F' on 4.4;
-    // '4' Canceled is unchanged in both versions.
-    EXPECT_EQ(fixFieldOf(v42, "150="), "4");
-    EXPECT_EQ(fixFieldOf(v44, "150="), "4")
-        << "FIX 4.4 does not remap ExecType Canceled";
-    EXPECT_EQ(fixFieldOf(v42, "39="), fixFieldOf(v44, "39="));
-}
-
-// ─── OUCH: Order Canceled with a reason distinct from a user cancel ─────────
-
-TEST(StpProtocol, OuchCanceledBySTPCarriesTheStpReasonNotUserRequested) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-
-    std::vector<uint8_t> sent;
-    OuchSession sess(engine, [&](std::string_view m) {
-        sent.assign(m.begin(), m.end());
-    });
-
-    sess.sendCanceledBySTP(/*orderToken=*/7, /*canceledShares=*/100);
-
-    ASSERT_EQ(sent.size(), OUCH_SIZE_ORDER_CANCELED);
-    EXPECT_EQ(sent[0], OUCH_MT_ORDER_CANCELED);
-    EXPECT_EQ(static_cast<char>(sent[27]), OUCH_CANCEL_REASON_STP);
-    EXPECT_NE(static_cast<char>(sent[27]), OUCH_CANCEL_REASON_USER)
-        << "the client did not request this cancellation";
-
-    // A client-requested cancel still reports 'U', so the two are separable on
-    // the wire. Checked against the encoder directly rather than widening
-    // OuchSession::sendCanceled's visibility just for a test.
-    uint8_t userBuf[OUCH_SIZE_ORDER_CANCELED];
-    encodeOrderCanceled(userBuf, /*ts=*/1, /*orderToken=*/8, /*shares=*/100);
-    EXPECT_EQ(static_cast<char>(userBuf[27]), OUCH_CANCEL_REASON_USER)
-        << "the default reason must remain 'user requested'";
-    EXPECT_NE(static_cast<char>(userBuf[27]), OUCH_CANCEL_REASON_STP);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Phase 0 — order-lifecycle delivery groundwork. No protocol messages yet.
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ─── Fix 1: OuchSession no longer leaks map entries on engine-side removal ──
-//
-// tokenToOrderId_ / engineIdToToken_ / firmOf_ were erased on full fill and on
-// a client Cancel Order, but not when the ENGINE removed the order — because
-// onOrderUpdate was a no-op. Every STP / kill-switch / expiry / OCO
-// cancellation leaked one entry in each map.
-TEST(LifecycleGroundwork, OuchSessionReapsMapsOnEngineInitiatedCancel) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-    engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
-    // Sync mode: submitOrder rejects with EngineStopped until started, and
-    // sync keeps the callbacks on this thread so the test observes exactly the
-    // dispatch context Phase 0's threading argument is about.
-    engine.start();
-
-    OuchSession sess(engine, [](std::string_view) {});
-    ASSERT_TRUE(sess.attachFillListener(1));
-
-    // Enter one order over OUCH so the session owns a token mapping.
-    uint8_t enter[OUCH_SIZE_ENTER_ORDER];
-    OuchEnterOrder o{};
-    o.orderToken = 99;
-    o.side  = Side::Buy;
-    o.shares = 100;
-    o.stock = 1;
-    o.price = 10000;
-    o.firm  = 7;
-    // OUCH TimeInForce 0 means IOC, which would cancel immediately against an
-    // empty book — and be reaped, masking what this test is checking. DAY rests.
-    o.timeInForce = OUCH_TIF_DAY;
-    const size_t n = encodeEnterOrder(enter, o);
-    ASSERT_TRUE(sess.feed(reinterpret_cast<const char*>(enter), n));
-
-    ASSERT_EQ(sess.knownOrderCount(), 1u) << "setup: the order must be tracked";
-    ASSERT_EQ(sess.staleEntriesReaped(), 0u);
-
-    // The ENGINE removes it — nothing the client asked for.
-    engine.setKillSwitch(true);
-
-    EXPECT_EQ(sess.knownOrderCount(), 0u)
-        << "pre-fix this stayed at 1 forever: one leaked entry per "
-           "engine-cancelled order, in each of three maps";
-    EXPECT_EQ(sess.staleEntriesReaped(), 1u);
-}
-
-// A fill still reaps through the existing onTrade path, and the new override
-// must not double-count or disturb it.
-TEST(LifecycleGroundwork, OuchSessionStillReapsOnFullFillWithoutDoubleCounting) {
-    MatchingEngine engine;
-    engine.addSymbol(1);
-    engine.getOrderBook(1)->setCircuitBreakerThreshold(1e9);
-    // Sync mode: submitOrder rejects with EngineStopped until started, and
-    // sync keeps the callbacks on this thread so the test observes exactly the
-    // dispatch context Phase 0's threading argument is about.
-    engine.start();
-
-    OuchSession sess(engine, [](std::string_view) {});
-    ASSERT_TRUE(sess.attachFillListener(1));
-
-    uint8_t enter[OUCH_SIZE_ENTER_ORDER];
-    OuchEnterOrder o{};
-    o.orderToken = 5; o.side = Side::Buy; o.shares = 100; o.stock = 1;
-    o.price = 10000; o.firm = 7;
-    o.timeInForce = OUCH_TIF_DAY;   // 0 would be IOC — see the test above
-    ASSERT_TRUE(sess.feed(reinterpret_cast<const char*>(enter),
-                          encodeEnterOrder(enter, o)));
-    ASSERT_EQ(sess.knownOrderCount(), 1u);
-
-    // A different participant fills it completely.
-    engine.processOrder(1, /*id=*/777, /*pid=*/2, Side::Sell, 10000, 100,
-                        OrderType::Limit);
-
-    EXPECT_EQ(sess.knownOrderCount(), 0u) << "the fill path still reaps";
 }

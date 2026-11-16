@@ -19,7 +19,7 @@
 // missing ranges from a separate SoupBinTCP-style Request Server. This codec
 // produces the multicast frames only; the recovery channel is the caller's.
 
-#include "OuchProtocol.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
+#include "WireBytes.h"  // readU16BE, readU32BE, writeU16BE, writeU64BE, writeFixedAscii
 
 #include <algorithm>
 #include <atomic>
@@ -92,8 +92,8 @@ public:
     using SendBytes = std::function<void(std::string_view)>;
     // Called on each group commit (flush / end-of-session) with the new
     // high-water mark = the sequence number the NEXT packet will carry.
-    // Persisting this durably (e.g. via EpochStore) lets a restarted
-    // publisher resume the counter instead of resetting to 1 — see
+    // Persisting this durably (an fsync'd file the caller owns) lets a
+    // restarted publisher resume the counter instead of resetting to 1 — see
     // setNextSequence() and P3-3.
     using SeqPersistFn = std::function<void(uint64_t)>;
 
@@ -114,7 +114,7 @@ public:
     // feed resumes contiguously — a reconnecting subscriber that held
     // seq N-1 sees N next, not a false gap back to 1. We also anchor the
     // persistence floor here so a resumed counter never regresses on
-    // disk (monotonicity, matching spec/EpochDurability.tla).
+    // disk.
     //
     // Deliberately NOT covered by assertPublishThread(): this is pre-publish
     // configuration, made by whichever thread reads the persisted high-water
@@ -129,7 +129,7 @@ public:
 
     // Install the durability hook for the sequence high-water mark. The
     // callback fires on every group commit with a strictly increasing
-    // value, so a durable sink (EpochStore) never records a regression.
+    // value, so a durable sink never records a regression.
     void setSequencePersistence(SeqPersistFn fn) { persistSeq_ = std::move(fn); }
 
     // Queue an application message into the current batch. Returns

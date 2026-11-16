@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 
 namespace bench {
 
@@ -104,6 +105,25 @@ public:
         uint64_t rank = static_cast<uint64_t>(std::ceil(p * static_cast<double>(count_)));
         if (rank == 0) rank = 1;
         return rank > subTick_;
+    }
+
+    // Percentile p as text, the way printTable prints it: "<tick" inside the
+    // sub-tick band, where the clock produced no number.
+    std::string text(double p) const {
+        if (!isResolved(p)) return "<tick (below clock resolution)";
+        return std::to_string(percentile(p)) + " ns";
+    }
+
+    // x - y at percentile p as text. A difference taken from a value inside
+    // either side's sub-tick band is no measurement either (PERF-8): deltas
+    // between paths and the cold-cache penalty used to subtract one tick as
+    // though it were a latency.
+    static std::string deltaText(const BenchLatencyRecorder& x, const BenchLatencyRecorder& y,
+                                 double p) {
+        if (!x.isResolved(p) || !y.isResolved(p)) return "<tick (a side is below clock resolution)";
+        const long long d = static_cast<long long>(x.percentile(p)) -
+                            static_cast<long long>(y.percentile(p));
+        return (d >= 0 ? "+" : "") + std::to_string(d) + " ns";
     }
 
     // RAII scope timer for ad-hoc measurement.

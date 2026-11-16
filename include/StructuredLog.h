@@ -174,9 +174,6 @@ namespace events {
     constexpr const char* kCircuitBreaker     = "risk.circuit_breaker";
     constexpr const char* kKillSwitch         = "risk.kill_switch";
     constexpr const char* kRateLimitExceeded  = "risk.rate_limit";
-    constexpr const char* kReplicationLag     = "replication.lag_high";
-    constexpr const char* kSnapshotStart      = "replication.snapshot_start";
-    constexpr const char* kSnapshotEnd        = "replication.snapshot_end";
     constexpr const char* kConfigReloaded     = "config.reloaded";
     constexpr const char* kJournalCheckpoint  = "journal.checkpoint";
     constexpr const char* kJournalCorruption  = "journal.corruption";

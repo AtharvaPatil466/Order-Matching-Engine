@@ -1,5 +1,8 @@
 // DeterministicBenchmark — reproducible benchmark with HW timestamps.
 //
+// LISTENER: the engine's internal OCO observer only (every MatchingEngine book
+// carries one), so the book builds and dispatches its updates; no user listener.
+//
 // Roadmap Phase 5, Week 17: Deterministic Benchmark Harness
 //
 // Accepts a fixed seed, runs the exact same workload N times, reports

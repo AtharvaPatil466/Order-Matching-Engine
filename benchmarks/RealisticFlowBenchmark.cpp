@@ -1,5 +1,9 @@
 // RealisticFlowBenchmark (P2-18) — latency on a realistic, cancel-heavy order flow.
 //
+// LISTENER: attached (bench::TerminalTracker). Every timed op pays the book's
+// listener work and the tracker's callbacks (they run inside the timed call).
+// Compare with HonestBenchmark Path L, not Path A.
+//
 // The PGO headline is a seed=42 stream where ~44% of submissions trade and there
 // is no cancel traffic. Real venues are cancel-dominated churn. This benchmark
 // drives the core matching path with the venue-shaped event mix:
@@ -20,7 +24,8 @@
 // Timing uses the SAME infrastructure as HonestBenchmark: bench::nowNs() around
 // each engine call and bench::BenchLatencyRecorder for the percentile tables
 // (P50/P90/P99/P99.9/P99.99/max). Only the engine operation is timed — RNG draws
-// and resting-pool bookkeeping happen outside the timed region.
+// and resting-pool bookkeeping happen outside the timed region; the listener's
+// callbacks (see LISTENER above) happen inside it, as a shipped book's do.
 //
 // Every timed op must do its job, and the run fails (exit 1, before any
 // latency is printed) if one did not: a cancel or modify that hit a dead id, an

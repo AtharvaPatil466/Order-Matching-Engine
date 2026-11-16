@@ -1,17 +1,19 @@
 # Operational Runbook
 
-This runbook covers the two binaries this repository builds and ships:
-`OrderEngine` (`src/main.cpp`) and `GatewayServer` (`src/gateway_main.cpp`).
-It describes what they do today, including what they do not do.
+This runbook covers the one binary this repository builds and ships,
+`OrderEngine` (`src/main.cpp`), which takes client orders on one TCP port in one
+protocol. It describes what it does today, including what it does not do.
 
-**Every `bash` block below is executed.** `scripts/runbook_smoke.sh` builds both
-binaries and `JournalReplayCLI` in an `ubuntu:24.04` container, puts them on
+**Every `bash` block below is executed.** `scripts/runbook_smoke.sh` builds
+`OrderEngine` and `JournalReplayCLI` in an `ubuntu:24.04` container, puts them on
 `PATH`, and runs the blocks top to bottom in one shell, as an operator working
 through this page would. A block preceded by a `runbook-smoke: skip` marker is
 not run, and the marker says why (it needs systemd, Docker, a real NIC, or it
 is a config file or sample output rather than a command). The script prints
 every block it skips. It also fails if a flag listed in a table here is not in
-the `--help` of the binary that table describes.
+`OrderEngine --help`. The `runbook-smoke` job in `.github/workflows/ci.yml` is
+runs it on every push and pull request. The job was added in round 8 and first
+ran, and passed, on that round's pull request.
 
 ---
 
@@ -19,33 +21,31 @@ the `--help` of the binary that table describes.
 
 | Binary | Takes client orders | Admin HTTP port | Journal | Market data |
 |---|---|---|---|---|
-| `OrderEngine` | No TCP order-entry port. Orders reach it only through the admin port's `/chaos/order` (off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set), or as OUCH in a build with `-DENABLE_DPDK=ON` (off by default) started with `OB_DPDK=1`. | Yes (default 8080) | Optional (`--journal`), group commit | None |
-| `GatewayServer` | Yes: a TCP port (default 9876) speaking the binary protocol in `include/GatewayProtocol.h` | None | Optional (`--journal`), each order synced before its ack | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
+| `OrderEngine` | Yes: a TCP port (default 9001) speaking the native binary protocol in `include/TcpGateway.h` (§8). Also the admin port's `/chaos/order`, off unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set | Yes (default 8080) | Required (`--journal`) unless `--no-journal`, each entry synced; the order port acks once its entry is on disk | Shared memory `orderbook_md`, read by `MdSubscriber orderbook_md` |
 
 `OrderEngine` runs a multi-threaded engine (`--threads`) over `--symbols`
-symbols numbered from 0. `GatewayServer` runs a single-threaded engine over
-symbols 0 and 1. The two do not talk to each other: each has its own book and
-its own journal.
+symbols numbered from 0. FIX, OUCH, SBE, the DPDK path and the separate
+`GatewayServer` binary were deleted (roadmap 1.2).
 
-Both binaries refuse an argument they do not understand, and a value flag with
+`OrderEngine` refuses an argument it does not understand, and a value flag with
 nothing after it, before doing anything else:
 
 <!-- runbook-smoke: skip — sample output, not a command -->
 ```text
 [Config] FATAL: unknown argument '--lean' — refusing to start. See --help.
-[Gateway] FATAL: --journal needs a value — refusing to start. See --help.
+[Config] FATAL: --journal needs a value — refusing to start. See --help.
 ```
 
-`--help` on either binary prints every flag it accepts, generated from the same
-table the check uses. A flag always wins over its environment variable.
+`--help` prints every flag it accepts, generated from the same table the check
+uses. A flag always wins over its environment variable.
 
-Both binaries write progress lines to stdout without flushing and FATAL lines
-to stderr. Under systemd or with stdout redirected to a file, stdout is block
+`OrderEngine` writes progress lines to stdout without flushing (the order
+port's `listening` line is the exception) and FATAL lines to stderr. Under systemd or with stdout redirected to a file, stdout is block
 buffered, so progress lines can arrive late; the commands below run
 `OrderEngine` under `stdbuf -oL` (coreutils) to get them line by line.
 
 The commands below assume the binaries are on `PATH`. A CMake build puts
-`OrderEngine`, `GatewayServer` and `MdSubscriber` in the build directory and
+`OrderEngine` and `MdSubscriber` in the build directory and
 `JournalReplayCLI` in its `tools/` subdirectory.
 
 ---
@@ -87,7 +87,7 @@ Builds before `cdd45ac` seeded up to 200 synthetic Limit orders
 per symbol, as participants 1 and 2, at startup, and journaled them. A journal
 whose lineage began with such a build carries content epoch 0 in its header;
 journals this build creates carry 1, and a checkpoint keeps the epoch of the
-journal it was taken from. Both binaries refuse to replay an epoch-0 journal
+journal it was taken from. `OrderEngine` refuses to replay an epoch-0 journal
 that holds entries:
 
 <!-- runbook-smoke: skip — sample output, not a command -->
@@ -124,28 +124,54 @@ sweep's low and high print, and they run after the triggering order is final
 ([MatchingRules.md](MatchingRules.md) §5-6). To carry the book across rather
 than re-run its history, stop the old `OrderEngine` with `SIGTERM`, which
 checkpoints (§5), so the new build restores the resting orders instead of
-replaying the trades (`GatewayServer` does not checkpoint at shutdown). A
-resting order the new rules refuse is still dropped by that restore: cancel or
-replace it before the upgrade.
+replaying the trades. The
+restore puts each order back as it rested, without judging it again under the
+new rules; one the new build cannot hold at all (a price outside its band, a
+smaller order pool) stops the boot (§5).
 
 ---
 
 ## 3. Starting OrderEngine
 
-`OrderEngine` refuses to start without an admin token (or an explicit
-`--admin-no-auth`). Without `--journal` it keeps no journal, and a restart loses
-every resting order.
+`OrderEngine` refuses to start without each control below, unless that one is
+waived by name. Each waiver is a deliberate choice that shows in the log.
+
+| Control | Set by | Waiver |
+|---|---|---|
+| Admin token | `--admin-token` / `OB_ADMIN_TOKEN` | `--admin-no-auth` |
+| Order-port credentials (§8) | `--participant-credentials` | `--no-participant-auth` |
+| Journal (§7) | `--journal` / `OB_JOURNAL_PATH` | `--no-journal`: every acked order is lost on restart |
+| A price band for every symbol | `instrument.<s>.min_price` / `max_price` (§6) | `--no-price-band`: a symbol without one centres its band on its first rest |
+| A position limit for every participant the order port serves | `participants`, `participant.<id>.position_limit` (§6) | `--no-risk-limits`: a participant without one is unlimited |
+
+With credentials, every participant id they name needs a limit. Without them
+(`--no-participant-auth`) any id can trade, so `participants` must still be set
+but only the ids it lists are limited.
 
 ```bash
 mkdir -p /var/lib/orderengine /etc/orderengine
+install -m 600 /dev/null /etc/orderengine/participants.conf
+echo 'firm-a:replace-with-a-secret:100,101' > /etc/orderengine/participants.conf
+cat > /etc/orderengine/engine.conf <<'CONF'
+instrument.0.min_price = 90000
+instrument.0.max_price = 110000
+instrument.1.min_price = 90000
+instrument.1.max_price = 110000
+participants = 100,101
+participant.100.position_limit = 1000000
+participant.101.position_limit = 1000000
+CONF
 export OB_ADMIN_TOKEN=replace-with-a-long-random-secret
+export OB_PARTICIPANT_CREDENTIALS=/etc/orderengine/participants.conf
 stdbuf -oL OrderEngine --threads 2 --symbols 2 --port 8080 \
+    --config /etc/orderengine/engine.conf \
     --journal /var/lib/orderengine/journal.wal \
     > /var/lib/orderengine/engine.log 2>&1 &
 echo $! > /var/lib/orderengine/engine.pid
 # The admin port opens only after the journal is replayed; retry until it answers.
 curl -sf --retry 50 --retry-delay 1 --retry-connrefused http://127.0.0.1:8080/readyz
 grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
+grep -F "Order Gateway listening on 0.0.0.0:9001" /var/lib/orderengine/engine.log
 ```
 
 ### Flags
@@ -158,54 +184,69 @@ grep -F "[Engine] Ready for traffic." /var/lib/orderengine/engine.log
 | `--admin-bind ADDR` | `OB_ADMIN_BIND` | 127.0.0.1 | Admin listen address (IPv4). The Docker image sets 0.0.0.0. |
 | `--admin-token TOKEN` | `OB_ADMIN_TOKEN` | — | Bearer token for every endpoint except `/health` and `/readyz` |
 | `--admin-no-auth` | `OB_ADMIN_NO_AUTH=1` | off | Run the admin port without a token, on purpose |
-| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6). With one, every symbol needs a price band |
+| `--gateway-port P` | `OB_GATEWAY_PORT` | 9001 | Order-entry port (§8); 0 picks a free one. Also `gateway_port` in the config file |
+| `--gateway-bind ADDR` | `OB_GATEWAY_BIND` | 0.0.0.0 | Order-entry listen address (IPv4). Also `gateway_bind` |
+| `--participant-credentials FILE` | `OB_PARTICIPANT_CREDENTIALS` | — | Order-port credentials, one per line as `user:secret:id[,id...]` (§8). Also `participant_credentials` |
+| `--no-participant-auth` | `OB_NO_PARTICIPANT_AUTH=1` | off | Accept every claimed participant id on the order port, on purpose |
+| `--config PATH` | `OB_CONFIG_PATH` | — | Config file (§6); one that cannot be read, or has a line that is not `key = value`, is fatal |
 | `--journal PATH` | `OB_JOURNAL_PATH` | — | Journal file; replayed at boot (§7) |
+| `--no-journal` | `OB_NO_JOURNAL=1` | off | Run with no journal, on purpose |
+| `--no-price-band` | `OB_NO_PRICE_BAND=1` | off | Let a symbol with no configured band centre it on its first rest, on purpose |
+| `--no-risk-limits` | `OB_NO_RISK_LIMITS=1` | off | Serve participants that have no position limit, on purpose |
 | `--journal-max-mb MB` | `OB_JOURNAL_MAX_SIZE_MB` | off | Checkpoint once the journal reaches MB megabytes |
 | `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | off | Replay an epoch-0 journal (§2) |
 | `--session-schedule PRE,OPEN,CLOSE_AUCTION,CLOSE` | `OB_SESSION_SCHEDULE` | off | Session timetable, HH:MM UTC |
-| `--role primary\|backup` | `OB_NODE_ROLE` | standalone | Replication role; refused without the next flag (§10) |
-| `--allow-unsafe-replication` | `OB_ALLOW_UNSAFE_REPLICATION=1` | off | Run replication despite its known defects |
-| `--node-id N` | `OB_NODE_ID` | 1 | Replication node id |
-| `--repl-port P` | `OB_REPLICATION_PORT` | 9002 | Primary's replication listen port |
-| `--primary-host HOST` | `OB_PRIMARY_HOST` | — | Backup only: the primary's host |
-| `--primary-port P` | `OB_PRIMARY_REPLICATION_PORT` | 9002 | Backup only: the primary's port |
+| `--role ROLE` | `OB_NODE_ROLE` | — | Removed with replication; any value refuses to boot (§10) |
 | `--help` | — | — | Print the flags and exit |
 
 Other environment variables `OrderEngine` reads: `OB_CHAOS_INJECT` and
-`OB_CHAOS_TOKEN` (arm `/chaos/order`, §4), every config key as `OB_<KEY>` (§6),
-and in a DPDK build `OB_DPDK=1` and `OB_DPDK_PORT`.
+`OB_CHAOS_TOKEN` (arm `/chaos/order`, §4) and every config key as `OB_<KEY>` (§6).
 
 ### What happens at boot, in order
 
 1. Arguments are checked; an unknown one is fatal.
-2. The config file is loaded, if one is named. A file that cannot be read is a
-   `[Config] WARNING`, and the engine goes on without it — and then stops at
-   step 4, which finds no price bands (unless the environment supplies them,
-   §6).
-3. Startup validation: the `instrument.*` and `participant.*` keys, the journal
-   path's parent directory, and a replication role without
-   `--allow-unsafe-replication`. Any failure prints
-   `[Config] FATAL: startup configuration is invalid` with one line per
-   problem and exits 1.
-4. With a config file, each symbol's price band is set from
-   `instrument.<s>.min_price` / `max_price` (§6), before any order exists.
-   A symbol with no band prints `[Config] FATAL: symbol <s> has no price band`
-   and exits 1; a band the book cannot hold is fatal too. On success:
-   `[Config] Price bands set for <S> symbols`. Without a config file every
-   book centres its band on its first resting order instead.
+2. The config file is loaded, if one is named. A file that cannot be read, or
+   that has a line that is not `key = value` (named on stderr), prints
+   `[Config] FATAL: could not load` and exits 1. Nothing is loaded around a bad
+   line.
+3. Startup validation: every symbol's band and every listed participant's
+   limit (§6), the journal (one is required unless `--no-journal`; its parent
+   directory must be writable), and a replication role (§10). Any failure
+   prints `[Config] FATAL: startup configuration is invalid` with one line per
+   problem, each naming its waiver where there is one, and exits 1.
+   Then the order port's settings: a gateway port that is not a number is
+   fatal, and so are no credentials without `--no-participant-auth`, an
+   unreadable credentials file and one that holds none (`[Auth] FATAL`), and a
+   credentialed participant id with no position limit unless `--no-risk-limits`.
+4. Each symbol's price band is set from `instrument.<s>.min_price` /
+   `max_price` (§6), before any order exists, and each listed participant's
+   position limit: `[Config] Price bands set for <B> of <S> symbols` and
+   `[Risk] Position limits set for <N> participant(s)`. Under `--no-price-band`
+   a symbol with no band centres it on its first resting order. The default
+   rate limit is applied if `rate_limit.default_rate` and `default_burst` are
+   set (`[Config] Rate limit: ...`).
 5. The journal is opened, a torn final write is cut, and the journal is
-   replayed (§7). The legacy-epoch and unreadable-journal refusals happen here.
+   replayed (§7). The legacy-epoch and unreadable-journal refusals happen here,
+   and so does `replay_entry_refused`: any entry replay cannot apply stops the
+   boot.
 6. The alert webhook is set up if `alert_webhook_url` is set (§6). An
    `https://` URL is refused: the dispatcher has no TLS client, so point it at
-   a local TLS terminator on `http://127.0.0.1`.
-7. Worker threads, the GTD/DAY expiry timer and, with `--session-schedule`,
-   the session scheduler start.
-8. Replication starts, if a role was allowed.
-9. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
+   a local TLS terminator on `http://127.0.0.1`. The session schedule, if one
+   is given, is parsed; a malformed one is fatal.
+7. The market-data segment `/orderbook_md` opens (a failure is a
+   `[MarketData] WARNING` and no feed). Execution reports are switched on; the
+   feed is published from the order port's thread, behind them, once the
+   journal entry behind each update is synced. Then the worker threads, the
+   GTD/DAY expiry timer and, with `--session-schedule`, the session scheduler
+   start.
+8. The admin port binds. No token and no `--admin-no-auth` is fatal, and so
    is a failed bind.
+9. The order port binds: `[Gateway] Order Gateway listening on ADDR:PORT`. A
+   failed bind is fatal.
 10. `[Engine] Ready for traffic.` `/readyz` answers 200 from here on.
 
-Because the admin port opens only at step 9, a probe during replay gets
+Because the admin port opens only at step 8, and the order port at step 9,
+a probe during replay gets
 connection refused rather than 503. Give a liveness probe enough initial delay
 for your replay time.
 
@@ -219,14 +260,10 @@ for your replay time.
 | `GET /readyz` | none | 200 `{"status":"ready"}`, or 503 before the engine is ready |
 | `GET /metrics` | token | JSON: `submitted`, `processed`, `rateLimited`, `backpressureRejected`, `queueDropped`, `pendingOrders`, `e2eLatency` percentiles in ns |
 | `GET /prometheus` | token | Text exposition of the metrics registry |
-| `GET /book?symbolId=N` | token | 10 levels per side and the last trade |
-| `GET /auction?symbolId=N` | token | Trading state and indicative auction price, paired and imbalance quantity |
-| `GET /audit?symbolId=N` | token | Best bid/ask, spread, 5 levels |
+| `GET /book?symbolId=N` | token | 10 levels per side and the last trade; 503 `journal_halted` while the journal is halted (§7) |
+| `GET /auction?symbolId=N` | token | Trading state and indicative auction price, paired and imbalance quantity; 503 while halted |
+| `GET /audit?symbolId=N` | token | Best bid/ask, spread, 5 levels; 503 while halted |
 | `GET /otr?participantId=N` | token | Order and trade counts and order-to-trade ratio, **symbol 0 only** |
-| `GET /fees?participantId=N` | token | Accrued fee (no fee schedule is set by this binary) |
-| `GET /risk?tier=T&entityId=E` | token | Net position at a risk tier (0 Trader … 3 Firm) |
-| `GET /cat` | token | Audit-record count |
-| `GET /role`, `GET /replication` | token | `standalone` unless replication runs |
 | `GET /journal/head` | token | Whether a journal is on and its sequence number |
 | `GET /version` | token | Git SHA and build time |
 | `GET /chaos/order?...` | token + `X-Chaos-Token` | Submits an order. `{"enabled":false}` unless `OB_CHAOS_INJECT=1` and `OB_CHAOS_TOKEN` are set |
@@ -247,13 +284,9 @@ test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/metrics)" =
 
 Prometheus series `OrderEngine` can export (each appears once it is first
 used): `orders_accepted_total`, `orders_rejected_total`,
-`journal_entries_committed_total`, `order_pool_utilization_percent{symbol="N"}`,
-and with replication `replication_entries_shipped_total`,
-`replication_bytes_sent_total`, `replication_snapshot_streams_total`,
-`replication_snapshot_entries_total`. `pendingOrders` and the latency
-percentiles are in `/metrics` JSON only. `GatewayServer` keeps
-`gateway_connections_total` and `gateway_disconnects_total` but has no port to
-read them from.
+`journal_entries_committed_total`, `order_pool_utilization_percent{symbol="N"}`.
+`pendingOrders` and the latency percentiles are in `/metrics` JSON only. The
+order port adds `gateway_connections_total` and `gateway_disconnects_total`.
 
 <!-- runbook-smoke: skip — Prometheus configuration, not a command -->
 ```yaml
@@ -270,8 +303,8 @@ scrape_configs:
 
 ## 5. Stopping and restarting
 
-`SIGTERM` or `SIGINT` shuts `OrderEngine` down cleanly: the admin port closes,
-new orders are refused, the queues drain, and with a journal the engine
+`SIGTERM` or `SIGINT` shuts `OrderEngine` down cleanly: the order port and the
+admin port close, new orders are refused, the queues drain, and with a journal the engine
 checkpoints every resting order, DAY orders included (§7). `SIGHUP` reloads the
 config (§6). No other signal is handled; anything else takes its default
 action, which for most signals ends the process without the checkpoint.
@@ -283,9 +316,21 @@ while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
 grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
 ```
 
-A restart on the same journal replays it before the admin port opens. This one
-also names a config file, used in §6. A config file must give every symbol a
-price band, or the engine refuses to start:
+A restart on the same journal replays it before the admin port opens, and the
+book comes back in the state it was stopped in, halted or closed included, with
+every resting and parked order. A checkpoint order the restart cannot put back
+(a price outside a band narrowed since, a smaller order pool) is logged as
+`checkpoint_restore_refused` and the engine refuses to start (`FATAL: ...
+could not be restored`), leaving the journal as it was: start it with the
+configuration that wrote the checkpoint. Any other journal entry the engine
+applied when it wrote it and that replay refuses — an order it no longer
+admits, a modify or replace it no longer applies — is logged as
+`replay_entry_refused` with its sequence number and stops the start the same
+way (`FATAL: ... could not be replayed`). Under `--replay-legacy-journal` on
+a legacy journal it is a `WARNING` instead, and the engine starts. This one
+also names a config file, used in §6. It gives every symbol a price band and
+every credentialed participant a position limit, or the engine refuses to start
+(§3):
 
 ```bash
 cat > /etc/orderengine/engine.conf <<'EOF'
@@ -294,6 +339,9 @@ instrument.0.min_price = 1
 instrument.0.max_price = 200000
 instrument.1.min_price = 1
 instrument.1.max_price = 200000
+participants = 100,101
+participant.100.position_limit = 1000000
+participant.101.position_limit = 1000000
 rate_limit.default_rate = 1000
 rate_limit.default_burst = 100
 EOF
@@ -318,28 +366,29 @@ file. Keys `OrderEngine` reads:
 |---|---|---|
 | `log_sink` | startup | `stderr` sends structured JSON logs to stderr; `null` (default) discards them |
 | `alert_webhook_url`, `alert_webhook_format` (`generic`/`slack`/`pagerduty`), `alert_min_level` (`info`/`warning`/`critical`/`fatal`), `alert_routing_key` | startup | Webhook alerts; an unknown format or level, or an `https://` URL, is fatal |
-| `instrument.<s>.min_price`, `instrument.<s>.max_price` | startup | Required for every symbol 0..S-1 whenever a config file is named. The symbol's price band in ticks, at most 200,000 wide, set before replay. An order or replace priced outside it is rejected with `OutOfPriceRange` before it is acked ([MatchingRules.md](MatchingRules.md) Rule 1.4) |
-| `instruments`, `instrument.<id>.{tick_size,lot_size}` | startup | Validated only (with `min_price` / `max_price`, for each id listed in `instruments`) |
-| `participants`, `participant.<id>.{position_limit,otr_limit}` | startup | Validated only |
-| `journal_path` | startup | Validated only; the journal is `--journal` / `OB_JOURNAL_PATH` |
-| `rate_limit.default_rate`, `rate_limit.default_burst` | `SIGHUP` only | Default rate limit for every participant, applied when the rate is above 0 |
+| `instrument.<s>.min_price`, `instrument.<s>.max_price` | startup | Required for every symbol 0..S-1 unless `--no-price-band`. The symbol's price band in ticks of 0.0001, `0 < min_price < max_price`, at most 200,000 ticks wide (a book is 200,001 one-tick slots; the tick is fixed), set before replay. An order or replace priced outside it is rejected with `OutOfPriceRange` before it is acked ([MatchingRules.md](MatchingRules.md) Rule 1.4) |
+| `participants`, `participant.<id>.position_limit` | startup | Required unless `--no-risk-limits`: the ids, each below 1024, and each one's position limit (> 0), applied before replay. An order that would take the participant's filled-plus-working position past it is rejected |
+| `instrument.<s>.tick_size`, `instrument.<s>.lot_size`, `participant.<id>.otr_limit` | startup | Refused: nothing applies them (the tick is fixed, there is no lot size, the OTR throttle is engine-wide) |
+| `gateway_port`, `gateway_bind`, `participant_credentials` | startup | The order port (§8), when the flag is not given |
+| `rate_limit.default_rate`, `rate_limit.default_burst` | startup and `SIGHUP` | Default token bucket for every participant: messages a second and the burst it may send at once. Both > 0 or neither (no rate limit); anything else refuses to boot, and on `SIGHUP` keeps the running limit. An order over it is rejected `RateLimitExceeded` |
 | `worker_cores` | startup | The CPU each async worker pins itself to, in worker order, numbered as `taskset -c` numbers them (`2,3,4,5`). Unset, worker i takes the i-th CPU the process may run on (its `taskset`, systemd `CPUAffinity=` or cpuset mask), which is CPU i when every CPU is allowed. The `engine_start` log line names each worker's CPU (`worker_cores`, `-` = unpinned). A non-number, a repeat, a CPU outside the process's mask, fewer entries than `--threads`, or any list on macOS (no affinity mask) is fatal |
 | `order_pool_capacity`, `trade_history_capacity` | book creation | Book sizing. Read from the file named by `OB_CONFIG_PATH` and from `OB_<KEY>`, **not** from `--config` |
 
-Nothing else in `config/engine.conf.example` is read by either binary.
-`GatewayServer` reads no config file.
+Nothing else in `config/engine.conf.example` is read.
 
-`SIGHUP` re-reads the `--config` file and applies only the rate limit. The main
-loop checks for it every 100 ms:
+`SIGHUP` re-reads the `--config` file and applies only the rate limit. A file
+that no longer loads, or a bad rate, is logged as `[Config] ERROR` and changes
+nothing. The main loop checks for it every 100 ms:
 
 ```bash
 kill -HUP "$(cat /var/lib/orderengine/engine.pid)"
 sleep 1
-grep -F "[Config] Rate limiter reconfigured: 1000 msg/s" /var/lib/orderengine/engine.log
+grep -F "[Config] Reload applied" /var/lib/orderengine/engine.log
+grep -F "[Config] Rate limit: 1000 msg/s, burst 100 per participant" /var/lib/orderengine/engine.log
 ```
 
-Thread count, symbol count, ports, the journal path and the replication role
-take effect only at a restart.
+Thread count, symbol count, ports and the journal path take effect only at a
+restart.
 
 ---
 
@@ -349,9 +398,21 @@ take effect only at a restart.
 
 Each accepted order, cancel, modify and trading-state change is appended as a
 fixed-size record.
-`OrderEngine` uses group commit: appends are batched and synced together.
-`GatewayServer` syncs each append before returning, and holds every event a
-client can see (acks, fills, market data) until the entry behind it is on disk.
+Each append is synced before it returns (`Immediate`), and the order port
+answers a request only after the worker has run it, so an Ack means its entry is
+on disk and survives `kill -9`. That costs one fsync per order. Execution
+reports and `/orderbook_md` are held to the same rule: what a request produced
+leaves only once its entries are synced, and never if the journal halted
+(`gateway_reports_undelivered_total` counts reports for a participant with no
+session; they are not replayed on reconnect).
+
+A write or sync error halts the journal (`journal_write_failures_total`, a
+`journal.halted` log line). From then on the books are frozen: every request,
+the kill switch included, is answered `JournalHalted`, and expiry, DAY and
+session sweeps do not run. The admin port's `/book`, `/audit` and `/auction`
+answer 503 `journal_halted` until the restart: the book in memory may hold the
+request whose record failed. Read the journal for the durable state. Fix the
+disk and restart; replay restores what was acknowledged (MatchingRules Rule 2.7).
 
 ### Checkpoints
 
@@ -363,44 +424,53 @@ history. What it keeps:
   to back, so a restored level keeps its time priority, then the parked ones
   (stops, trailing stops, auction market and on-close orders), each list in its
   queue order, which decides which elected stops fire first and which market
-  orders an uncross fills first. A stop keeps its election latch, a trailing
-  stop the trigger its trail had ratcheted to, and an iceberg what is left of
-  its displayed slice;
+  orders an uncross fills first, and the LOC orders a close released in the
+  order PostClose cancels the unfilled ones. A stop keeps its election latch, a trailing
+  stop the trigger its trail had ratcheted to, an iceberg what is left of
+  its displayed slice, and every order its age (`arrivalSeq`), which an
+  auction's self-cross resolution compares;
 - each book's session: a begun session's `PreOpen` with its trading date (0 when
   undated), a halted book's pre-halt state, and any state but `Continuous`;
-- per book, the trade-id counter, the last trade's price and quantity and the
+- per book, before its orders, the price band it anchored on its first resting
+  order when no band is configured (so a restart without `--config` keeps it);
+- per book, the trade-id and arrival counters, the last trade's price and quantity and the
   reference price (the circuit breaker's), so a restored book trips and crosses
   as the one that wrote it would have;
+- per book, when a volatility auction's dwell started, so a restart reopens
+  it when the live book would have;
+- the engine-wide kill switch (`setKillSwitch`) while it is engaged. Each
+  engage and release is also journaled when it happens, so any restart, from
+  a checkpoint or from the plain journal, comes back with the switch as it was;
+- the graduated kill switch (`getKillSwitch()`) while anything is set: each
+  participant throttle (a fraction of 0 is a killed participant), each halted
+  symbol, a global halt, and which books the switch itself halted, so releasing
+  it after a restart resumes them. Every change is journaled too. Throttle
+  credit restarts at zero, and `kill()`, which ends the process, is not kept;
 - per participant per book, the net position and the orders submitted and
   trades executed (`Position` records), which `maxPositionSize` and `/otr` read.
 
 The engine-wide position limit's positions (`setPositionLimit`) are not
-recorded: when the books leave replay mode — the end of any replay, checkpoint
-or not, and a backup's promotion — each is rebuilt as the participant's net
-position summed over the books plus the signed remaining quantity of its
+recorded: when the books leave replay mode, at the end of any replay,
+checkpoint or not, each is rebuilt as the participant's net position summed over the books plus the signed remaining quantity of its
 working orders, parked ones included.
 
 It does not keep a book's VWAP or trade count (read only by the research
 bindings) or rejected-order counts. Full replay does not rebuild those either,
 nor the order-to-trade throttle's window, which starts at zero after any
 restart (it spans a second by default, less than a restart takes), nor the
-hierarchical risk manager's tier positions. A backup that joined late got only
-the resting orders (`streamSnapshot` sends no `Position` records), so its
-rebuilt positions miss what was filled before it joined.
+hierarchical risk manager's tier positions.
 
 Checkpoints run:
 
-- automatically at 250,000 entries or 64 MiB, in both binaries (compiled in;
-  no key changes it);
+- automatically at 250,000 entries or 64 MiB (compiled in; no key changes it);
 - in `OrderEngine`, when `--journal-max-mb` is set and the journal reaches it;
-- on every clean `OrderEngine` shutdown (§5). `GatewayServer` does not
-  checkpoint at shutdown.
+- on every clean `OrderEngine` shutdown (§5).
 
 There is no other way to trigger one.
 
 ### Inspecting a journal
 
-`JournalReplayCLI` reads a journal without starting either binary. Point it at
+`JournalReplayCLI` reads a journal without starting the engine. Point it at
 a copy, never at the file a running engine is writing:
 
 ```bash
@@ -417,8 +487,7 @@ copy in memory and prints the resulting book.
 
 ### What boot does with it
 
-Both binaries run the same sequence (`include/JournalBoot.h`) and print the
-result: `[Engine] Replayed X of Y recoverable journal entries`.
+Boot runs `include/JournalBoot.h` and prints the result: `[Engine] Replayed X of Y recoverable journal entries`.
 
 - **Torn final write.** Less than one record after the last whole record, which
   is what a crash partway through a write leaves, is cut at boot and appended
@@ -438,14 +507,25 @@ result: `[Engine] Replayed X of Y recoverable journal entries`.
 - **Replayed nothing.** If the journal holds recoverable entries and replay
   applied none, the engine refuses to start rather than serve an empty book.
 
-The replay count is entries consumed, not entries applied: an entry that
-replays and is refused (a duplicate order id, for one) is still counted.
+The replay count is entries applied. An entry the engine applied when it wrote
+it and replay refuses (a narrower band at the restart, for one) is logged as
+`replay_entry_refused` with its sequence number, and the engine refuses to
+start (`[Engine] FATAL: <n> journal entries ... could not be replayed`). Under
+`--replay-legacy-journal` on a legacy journal it warns and starts instead. A
+cancel that finds no order is not a refusal.
 
 ### Write failures
 
 If a write, flush or sync of the journal fails (a full disk, for one), the
-process prints `[Journal] FATAL: <what> failed for <path>` and aborts. A
-restart replays up to the last whole record. Free space before restarting.
+journal halts: the process prints `[Journal] HALTED: <what> failed for <path>`,
+logs `journal.halted`, and **keeps running with every book frozen**. Every
+request is answered `JournalHalted`, expiry and session transitions stop, and
+`/book`, `/auction` and `/audit` answer 503 (§4). Nothing clears a halt but a
+restart. Free space, then restart: replay restores everything that was
+acknowledged. A cancel, modify or replace whose own record failed changed
+nothing: it is recorded before it is applied. A new order, a session transition
+or an uncross whose own record failed may have been applied in memory before the
+halt; it was never acknowledged, and the restart drops it (MatchingRules Rule 2.7).
 
 Stop the engine before the next section:
 
@@ -458,76 +538,48 @@ grep -F "[Engine] Shutdown complete." /var/lib/orderengine/engine.log
 
 ---
 
-## 8. GatewayServer
+## 8. Order entry
 
-### Flags
-
-`GatewayServer [PORT] [options]`. `PORT` is the listen port (default 9876) and
-is read only as the first argument.
+`OrderEngine` takes orders on one TCP port, in the native binary protocol
+(`include/TcpGateway.h`): length-prefixed frames, a bare V1 `OrderRequest` or a
+V2 frame with a 24-byte header. Each request gets one answer, Ack or Error.
+Execution reports follow unasked (V2, `clientRequestId` 0): a
+`TradeNotification` to both sides of every fill and an
+`OrderUpdateNotification` to the owner for every status change and for the
+outcome of each cancel, modify and replace (MatchingRules Rule 2.6). They leave
+only after the journal entry behind them is synced. A stop's election is
+reported once, as `Triggered` (status value 7), before any fill it makes. A report for a participant with no live session is
+dropped and counted (`gateway_reports_undelivered_total`); a session that stops
+reading is disconnected at 1 MiB of queued output. Order ids are scoped by
+participant: a cancel, modify or replace names the participant that entered
+the order.
 
 | Flag | Environment | Meaning |
 |---|---|---|
+| `--gateway-port P` | `OB_GATEWAY_PORT` | Listen port, default 9001 |
+| `--gateway-bind ADDR` | `OB_GATEWAY_BIND` | Listen address, default `0.0.0.0` |
 | `--participant-credentials FILE` | `OB_PARTICIPANT_CREDENTIALS` | Credentials, one per line as `user:secret:id[,id...]` |
 | `--no-participant-auth` | `OB_NO_PARTICIPANT_AUTH=1` | Accept every claimed participant id, on purpose |
-| `--journal PATH` | `OB_JOURNAL_PATH` | Journal every accepted order and replay it at start |
-| `--replay-legacy-journal` | `OB_REPLAY_LEGACY_JOURNAL=1` | Replay an epoch-0 journal (§2) |
-| `--help`, `-h` | — | Print the flags and exit |
-
-`OB_ENGINE_HOST` and `OB_ENGINE_PORT`, both set and non-empty, switch to
-forwarding mode (below).
 
 It refuses to start with no credentials and no `--no-participant-auth`, and
 with a credentials file that is unreadable or holds no credentials. A file
-readable by group or other draws a warning.
+readable by group or other draws a warning. A client sends a login frame
+(`GATEWAY_FLAG_LOGIN`) before its first order and may then act only as the
+participants its credential covers; a failed login closes the connection.
 
-```bash
-install -m 600 /dev/null /etc/orderengine/participants.conf
-echo 'firm-a:replace-with-a-secret:100,101' > /etc/orderengine/participants.conf
-GatewayServer 9876 --participant-credentials /etc/orderengine/participants.conf \
-    --journal /var/lib/orderengine/gateway.wal \
-    > /var/lib/orderengine/gateway.log 2>&1 &
-echo $! > /var/lib/orderengine/gateway.pid
-for _ in $(seq 50); do grep -qF "Order Gateway listening" /var/lib/orderengine/gateway.log && break; sleep 0.2; done
-grep -F "Order Gateway listening on port 9876" /var/lib/orderengine/gateway.log
-```
-
-Once a second, between orders, it runs order expiry and publishes a 5-level
-snapshot of each symbol to the shared-memory feed. It logs every trade to
-stdout.
+**What an Ack means.** With a journal, the request's entry is on disk (§7). It
+does not mean the book took the order: a reject decided while matching
+(post-only, FOK, a duplicate id, a cancel of an unknown id) still answers Ack,
+and the execution report that follows says what happened.
 
 A participant's `KillSwitch` message (type 5) cancels all of that
 participant's resting orders. Each cancel is journaled. It is a one-shot sweep,
 not a halt: the participant can send new orders straight away.
 
-### Forwarding mode
-
-With `OB_ENGINE_HOST` and `OB_ENGINE_PORT` set, `GatewayServer` runs no engine:
-it relays each request frame to that host and port and relays the response
-back. The only binary that speaks this protocol on a port is another
-`GatewayServer`. The proxy does not check credentials and ignores
-`--participant-credentials` and `--journal`; the gateway it forwards to does
-both.
-
-```bash
-OB_ENGINE_HOST=127.0.0.1 OB_ENGINE_PORT=9876 GatewayServer 9877 \
-    > /var/lib/orderengine/proxy.log 2>&1 &
-PROXY=$!
-for _ in $(seq 50); do grep -qF "Proxy listening" /var/lib/orderengine/proxy.log && break; sleep 0.2; done
-grep -F "Proxy listening on port 9877 -> 127.0.0.1:9876" /var/lib/orderengine/proxy.log
-kill -TERM "$PROXY"
-```
-
-### Stopping
-
-`SIGTERM` or `SIGINT` stops the listener, the market-data publisher and the
-engine. There is no checkpoint, so the next start replays the whole journal.
-
-```bash
-PID=$(cat /var/lib/orderengine/gateway.pid)
-kill -TERM "$PID"
-while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
-grep -F "Shutting down..." /var/lib/orderengine/gateway.log
-```
+Market data goes to the shared-memory segment `orderbook_md`, written from the
+order port's thread once the journal entry behind each update is synced. There are no L2 snapshots on it, so a subscriber that falls a
+lap behind (`[GAP]` in `MdSubscriber`) has nothing to resync from until it
+restarts.
 
 ---
 
@@ -535,9 +587,10 @@ grep -F "Shutting down..." /var/lib/orderengine/gateway.log
 
 | Symptom | Where to look | Action |
 |---|---|---|
-| Process exits at start | The `FATAL` line on stderr | Each names its cause and the fix: §3 for `OrderEngine`, §8 for `GatewayServer`, §7 for the journal |
+| Process exits at start | The `FATAL` line on stderr | Each names its cause and the fix: §3 for flags and config, §8 for the order port, §7 for the journal |
+| An acked order is not on `/book` | The execution reports the client received | A reject decided while matching still answers Ack; the outcome follows as an `OrderUpdateNotification` (§8) |
 | `OrderEngine` probes refused for a long time after a restart | Journal size | Replay runs before the admin port opens; check `JournalReplayCLI --stats` on a copy |
-| `[Journal] FATAL: ... failed` and an abort | Disk space, I/O errors | §7 "Write failures" |
+| `[Journal] HALTED: ... failed`, every request answered `JournalHalted` | Disk space, I/O errors | §7 "Write failures": fix the disk and restart |
 | `[Journal] REFUSING TO APPEND` | The repair line in the message | §7; keep a copy of the file before truncating |
 | Webhook alerts never arrive | Startup `[Alert]` line | Only `http://` is delivered; check the sidecar |
 | A client keeps trading after a kill message | Nothing is wrong | The kill is a one-shot cancel, not a halt (§8) |
@@ -549,15 +602,24 @@ Trading behaviour (STP, the circuit breaker, auctions, order types) is in
 
 ## 10. Replication
 
-Replication between two `OrderEngine` nodes exists but is refused unless
-`--allow-unsafe-replication` (`OB_ALLOW_UNSAFE_REPLICATION=1`) is passed with a
-role, because of open CRITICAL defects (REPL-1..6): a deposed primary is never
-fenced, a promoted backup can execute orders twice, a slow backup freezes acks,
-and entries lost in a disconnect are never re-sent. A backup promotes itself
-when the primary's heartbeats and lease lapse and logs
-`[Replication] PROMOTED to primary — exiting replay mode`; there is no
-operator step and no client failover, since `OrderEngine` has no order-entry
-port. Do not rely on it for business continuity.
+There is none, and no failover: an `OrderEngine` is a single node, and it
+recovers by restarting on its journal (§7). Primary/backup replication was
+removed rather than finished (roadmap 1.1), so a host loss is an outage until
+the node, or its journal on another host, comes back. Anything `OrderEngine`
+acknowledged but had not yet synced is gone with the host.
+
+`--role` / `OB_NODE_ROLE` refuse to boot, so a deployment that sets one finds
+out at startup rather than running as a single node it did not ask for:
+
+<!-- runbook-smoke: skip — sample output, not a command -->
+```text
+[Config] FATAL: startup configuration is invalid — refusing to start:
+  - --role / OB_NODE_ROLE = 'primary': replication was removed. This engine runs as a single node and recovers from its journal; unset the role
+```
+
+Unset the role. `--allow-unsafe-replication`, `--node-id`, `--repl-port`,
+`--primary-host` and `--primary-port` are gone too, and an unknown argument is
+fatal.
 
 ---
 
@@ -574,7 +636,8 @@ After=network.target
 [Service]
 Type=simple
 Environment=OB_ADMIN_TOKEN=<token>
-ExecStart=/usr/bin/stdbuf -oL /opt/orderengine/OrderEngine --threads 4 --symbols 4 --port 8080 --journal /var/lib/orderengine/journal.wal
+Environment=OB_PARTICIPANT_CREDENTIALS=/etc/orderengine/participants.conf
+ExecStart=/usr/bin/stdbuf -oL /opt/orderengine/OrderEngine --threads 4 --symbols 4 --port 8080 --config /etc/orderengine/engine.conf --journal /var/lib/orderengine/journal.wal
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
@@ -589,15 +652,22 @@ WantedBy=multi-user.target
 ### Docker
 
 The image (`Dockerfile`) runs `OrderEngine --threads 4 --port 8080 --symbols 4`
-and sets `OB_ADMIN_BIND=0.0.0.0`. `docker-compose.yml` adds
-`OB_JOURNAL_PATH=/app/journal/primary.wal` on a volume and requires
-`OB_ADMIN_TOKEN`. It mounts `config/engine.conf.example` at
-`/app/config/engine.conf` but passes no `--config` or `OB_CONFIG_PATH`, so that
-file is not loaded.
+and sets `OB_ADMIN_BIND=0.0.0.0`, `OB_CONFIG_PATH=/app/config/engine.conf` (a
+copy of `config/engine.conf.example`: bands for symbols 0-3, position limits for
+participants 100 and 101) and `OB_JOURNAL_PATH=/app/journal/engine.wal` on a
+volume. `docker-compose.yml` uses `/app/journal/primary.wal`, mounts
+`OB_ENGINE_CONFIG` (default `config/engine.conf.example`) over the image's
+config, publishes 8080 and 9001, and requires `OB_ADMIN_TOKEN` and
+`OB_PARTICIPANT_CREDENTIALS_FILE`. Every participant id in the credentials file
+needs a position limit in that config, or the engine refuses to start (§3). Its
+`md-subscriber` shares the engine's IPC namespace and reads the `orderbook_md`
+segment the engine creates.
 
 <!-- runbook-smoke: skip — needs a Docker daemon -->
 ```bash
-OB_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up -d engine-primary
+OB_ADMIN_TOKEN=$(openssl rand -hex 32) \
+OB_PARTICIPANT_CREDENTIALS_FILE=/etc/orderengine/participants.cred \
+    docker compose up -d
 curl -sf http://localhost:8080/health
 ```
 

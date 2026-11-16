@@ -50,7 +50,7 @@
 //
 // tests/RefMatcher.h:165 already refuses newQty == 0, so the differential
 // fuzzer's corpus case for this defect stops diverging once the engine agrees;
-// it is promoted from .known.flow to .flow in the same commit.
+// it is promoted from a known-divergence case to a .flow in the same commit.
 
 #include "MatchingEngine.h"
 #include "OrderBook.h"

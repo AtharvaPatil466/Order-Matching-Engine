@@ -85,7 +85,13 @@ uint64_t jsonU64(const std::string& body, const std::string& key) {
 // covers symbols 0 and 1, and a toggler flips symbol 1's state throughout.
 void scrapeUnderLiveFlow() {
     constexpr SymbolId kSyms = 2;  // symbols 0 and 1
+    // At least kMinScrapes, then on to kScrapes while the budget lasts. Each
+    // read waits for the book's lock, and a worker that never idles (a slow
+    // runner under TSan) hands it over rarely: 2000 fixed scrapes took 15 s
+    // on one CI runner and passed the 120 s limit on the next.
     constexpr int kScrapes = 2000;
+    constexpr int kMinScrapes = 200;
+    constexpr auto kBudget = std::chrono::seconds(20);
     constexpr OrderId kProducers = 16;
     MatchingEngine engine;
     for (SymbolId s = 0; s < kSyms; ++s) engine.addSymbol(s);
@@ -121,7 +127,11 @@ void scrapeUnderLiveFlow() {
         }
     });
 
-    for (int i = 0; i < kScrapes; ++i) {
+    const auto deadline = std::chrono::steady_clock::now() + kBudget;
+    int scrapes = 0;
+    for (; scrapes < kScrapes &&
+           (scrapes < kMinScrapes || std::chrono::steady_clock::now() < deadline);
+         ++scrapes) {
         const std::string audit = httpGet(admin.port(), "/audit?symbolId=1");
         assert(audit.find("\"bidLevels\":") != std::string::npos);
 
@@ -146,7 +156,8 @@ void scrapeUnderLiveFlow() {
     toggler.join();
     admin.stop();
     engine.stopAsync();
-    std::puts("/audit, /metrics, /otr and /auction under live order flow: ok");
+    std::printf("/audit, /metrics, /otr and /auction under live order flow: ok (%d scrapes)\n",
+                scrapes);
 }
 
 }  // namespace

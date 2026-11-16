@@ -107,9 +107,12 @@ so nothing yet shows that either can fail.
 ### Last run
 
 Every number below is from one run on 2026-11-14 of the files in this tree,
-through `spec/check.sh` (deadlock check on) with the tlaplus `v1.8.0` release
-jar CI uses, `-workers auto`, on the Apple Silicon dev box shared with other
-jobs. Distinct-state counts of an exhaustive run are exact; for a broken cfg
+through `spec/check.sh` (deadlock check on) with a tlaplus `v1.8.0`
+pre-release jar, `-workers auto`, on the Apple Silicon dev box shared with
+other jobs. CI and `check.sh` now use the `v1.7.4` release jar (TLC 2.19),
+because the `v1.8.0` jar is rebuilt in place and cannot be pinned by hash; a
+run on 2026-11-16 with `v1.7.4` gave the same distinct-state count for every
+cfg that passes and the expected violation for every broken cfg. Distinct-state counts of an exhaustive run are exact; for a broken cfg
 the count when TLC stopped depends on worker scheduling and varies run to run.
 
 ```

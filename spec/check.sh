@@ -22,16 +22,18 @@ if [ ! -f tla2tools.jar ]; then
     echo "tla2tools.jar missing — fetching..."
     curl -L --silent --fail \
         -o tla2tools.jar \
-        https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+        https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 fi
 
-# The v1.8.0 release jar. A different jar (a local newer build) is allowed
-# with TLA2TOOLS_ANY_JAR=1; a fetched one must match.
-JAR_SHA256=e1f11b75c4b5bc4478ba0ac5cb6ae28e40a01b0016bc33e0aa97da22dfdbcd7f
+# The v1.7.4 release jar (TLC 2.19), the last stable release. Not v1.8.0:
+# that tag is a pre-release whose jar is rebuilt in place, so its hash changes
+# from one day to the next and cannot be pinned. A different jar (a local
+# newer build) is allowed with TLA2TOOLS_ANY_JAR=1; a fetched one must match.
+JAR_SHA256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 if [ "${TLA2TOOLS_ANY_JAR:-0}" != 1 ]; then
     actual=$( (sha256sum tla2tools.jar 2>/dev/null || shasum -a 256 tla2tools.jar) | cut -d' ' -f1)
     if [ "$actual" != "$JAR_SHA256" ]; then
-        echo "tla2tools.jar sha256 $actual is not the v1.8.0 release ($JAR_SHA256)" >&2
+        echo "tla2tools.jar sha256 $actual is not the v1.7.4 release ($JAR_SHA256)" >&2
         exit 2
     fi
 fi

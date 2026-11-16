@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: spec/tla2tools.jar
-          key: tla2tools-jar-v1.8.0
+          key: tla2tools-jar-v1.7.4
 
       - name: Check fast specs
         working-directory: spec

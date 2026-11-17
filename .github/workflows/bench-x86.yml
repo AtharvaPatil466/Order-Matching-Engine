@@ -17,9 +17,10 @@
 # what the published figures used) and PGO, reported separately.
 #
 # It is workflow_dispatch only, on purpose — the same reasoning as
-# journal-contention.yml and scaling.yml: it is a measurement, not a gate, it
-# asserts no threshold, and it runs for the better part of an hour. A hosted
-# runner is a shared VM, not a venue host: the numbers are labelled with it.
+# journal-contention.yml and scaling.yml: it is a measurement, not a gate, and it
+# asserts no threshold. At the default workload it takes about four minutes
+# (run 44027950500). A hosted runner is a shared VM, not a venue host, and two
+# dispatches can draw different CPUs: the numbers are labelled with the machine.
 #
 # Run:   gh workflow run bench-x86.yml --ref <branch> [-f reps=5]
 # Land:  scripts/import_bench_results.sh <run-id>   (gh run list --workflow bench-x86.yml)

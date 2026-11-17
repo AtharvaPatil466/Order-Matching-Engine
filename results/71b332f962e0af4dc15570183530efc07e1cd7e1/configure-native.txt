@@ -1,0 +1,27 @@
+$ cmake -S . -B build-bench-native -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++-18 -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON -DBUILD_TOOLS=OFF -DOB_ARCH=native
+-- The CXX compiler identification is Clang 18.1.3
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/clang++-18 - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Enabling HFT Optimizations: -O3 -march=native -mtune=native (OB_ARCH=native)
+-- Performing Test HAS_WNO_ERROR_character_conversion
+-- Performing Test HAS_WNO_ERROR_character_conversion - Failed
+-- Performing Test HAS_WNO_ERROR_invalid_feature_combination
+-- Performing Test HAS_WNO_ERROR_invalid_feature_combination - Success
+-- Build metadata: git=71b332f962e0, time=2026-11-17T06:00:59Z
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- io_uring journal path enabled (liburing: /usr/lib/x86_64-linux-gnu/liburing.so)
+-- The C compiler identification is GNU 13.3.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Found Python3: /usr/bin/python3.12 (found version "3.12.3") found components: Interpreter
+-- Configuring done (1.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-bench-native

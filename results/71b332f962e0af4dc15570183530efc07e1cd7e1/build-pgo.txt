@@ -1,0 +1,191 @@
+$ bash scripts/pgo_build.sh
+
+[1m=== PGO pipeline ===[0m
+  repo:          /home/runner/work/Order-Matching-Engine/Order-Matching-Engine
+  compiler:      clang++-18 (Ubuntu clang version 18.1.3 (1ubuntu1))
+  llvm-profdata: llvm-profdata
+  jobs:          4
+
+[1m=== Phase 1/3: INSTRUMENT build (-fprofile-instr-generate) ===[0m
+-- The CXX compiler identification is Clang 18.1.3
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/clang++-18 - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Enabling HFT Optimizations: -O3 -march=native -mtune=native (OB_ARCH=native)
+-- Performing Test HAS_WNO_ERROR_character_conversion
+-- Performing Test HAS_WNO_ERROR_character_conversion - Failed
+-- Performing Test HAS_WNO_ERROR_invalid_feature_combination
+-- Performing Test HAS_WNO_ERROR_invalid_feature_combination - Success
+-- PGO: INSTRUMENT build (-fprofile-instr-generate)
+-- Build metadata: git=71b332f962e0, time=2026-11-17T06:01:08Z
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- io_uring journal path enabled (liburing: /usr/lib/x86_64-linux-gnu/liburing.so)
+-- Configuring done (0.6s)
+-- Generating done (0.0s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    CMAKE_C_COMPILER
+
+
+-- Build files have been written to: /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-pgo-instr
+[  9%] Building CXX object CMakeFiles/OrderMatcher.dir/src/AdminServer.cpp.o
+[ 18%] Building CXX object CMakeFiles/OrderMatcher.dir/src/OrderBook.cpp.o
+[ 27%] Building CXX object CMakeFiles/OrderMatcher.dir/src/MatchingEngine.cpp.o
+[ 36%] Building CXX object CMakeFiles/OrderMatcher.dir/src/SessionScheduler.cpp.o
+[ 45%] Building CXX object CMakeFiles/OrderMatcher.dir/src/ContingencyManager.cpp.o
+[ 54%] Building CXX object CMakeFiles/OrderMatcher.dir/src/HierarchicalRiskManager.cpp.o
+[ 63%] Building CXX object CMakeFiles/OrderMatcher.dir/src/TcpGateway.cpp.o
+[ 72%] Building CXX object CMakeFiles/OrderMatcher.dir/src/FaultInjector.cpp.o
+[ 81%] Linking CXX static library libOrderMatcher.a
+[ 81%] Built target OrderMatcher
+[ 90%] Building CXX object benchmarks/CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o
+[100%] Linking CXX executable HonestBenchmark
+[100%] Built target HonestBenchmark
+instrumented binary: build-pgo-instr/benchmarks/HonestBenchmark
+
+[1m=== Phase 2/3: PROFILE run + merge ===[0m
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Honest Benchmark — Four-Path Latency Measurement
+=======================================================
+
+Configuration:
+  Orders:      50000 timed after 5000 warm-up
+  Seed:        7
+  Journal:     honest_benchmark.journal
+  Platform:    x86_64
+  Listener:    Path A none; Path L a counting listener; Paths B-D the
+               engine's internal OCO observer (no user listener)
+
+NOT MEASURED: network I/O, async queue delay, OS scheduling,
+              what a real market-data listener does with its callbacks
+
+── Path A: OrderBook::addOrder() [core matching + STP, no listener] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     21672 of the timed orders (43.3%); 43392 fills in all
+  Throughput: 2532470 orders/sec
+  latency        samples=50000
+    Min:            143 ns
+    P50:            265 ns
+    P90:            628 ns
+    P99:           1226 ns
+    P99.9:         4832 ns
+    P99.99:       19712 ns
+    Max:          30838 ns
+    Mean:           358 ns
+
+── Path L: OrderBook::addOrder() [listener attached: the shipped book] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     21672 of the timed orders (43.3%); 43392 fills in all
+  Throughput: 2479644 orders/sec
+  latency        samples=50000
+    Min:            206 ns
+    P50:            287 ns
+    P90:            646 ns
+    P99:           1058 ns
+    P99.9:         2078 ns
+    P99.99:       12544 ns
+    Max:          14834 ns
+    Mean:           372 ns
+  Callbacks: 251666 taken by the listener
+
+── Path B: MatchingEngine::submitOrder() [+ sequence alloc, rate limiter] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     21672 of the timed orders (43.3%); 43392 fills in all
+  Throughput: 2170822 orders/sec
+  latency        samples=50000
+    Min:            260 ns
+    P50:            335 ns
+    P90:            715 ns
+    P99:           1149 ns
+    P99.9:         3143 ns
+    P99.99:       11840 ns
+    Max:          17184 ns
+    Mean:           430 ns
+
+  journal honest_benchmark.journal on ext2/3/4
+
+── Path C: + Journal GroupCommit/64 [ack BEFORE durability] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     21672 of the timed orders (43.3%); 43392 fills in all
+  Throughput: 374043 orders/sec
+  latency        samples=50000
+    Min:            373 ns
+    P50:            658 ns
+    P90:           1440 ns
+    P99:         101888 ns
+    P99.9:       148480 ns
+    P99.99:      194560 ns
+    Max:         253623 ns
+    Mean:          2627 ns
+
+── Overhead Breakdown (P50) ──
+  Core matching + compliance:   265 ns (Path A P50)
+  Listener attached:            +22 ns (Path L - A)
+  Engine overhead (seq+rate):   +48 ns (Path B - L)
+  Journal, ack before durable:  +323 ns (Path C - B)
+
+=======================================================
+raw profiles:
+-rw-r--r-- 1 runner runner 520504 Nov 17 06:01 build-pgo-instr/pgo-3288.profraw
+merged profile: /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-pgo-instr/default.profdata
+
+[1m=== Phase 3/3: OPTIMIZED build (-fprofile-instr-use) ===[0m
+-- The CXX compiler identification is Clang 18.1.3
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/clang++-18 - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Enabling HFT Optimizations: -O3 -march=native -mtune=native (OB_ARCH=native)
+-- Performing Test HAS_WNO_ERROR_character_conversion
+-- Performing Test HAS_WNO_ERROR_character_conversion - Failed
+-- Performing Test HAS_WNO_ERROR_invalid_feature_combination
+-- Performing Test HAS_WNO_ERROR_invalid_feature_combination - Success
+-- PGO: OPTIMIZED build (-fprofile-instr-use=/home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-pgo-instr/default.profdata)
+-- Build metadata: git=71b332f962e0, time=2026-11-17T06:01:20Z
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- io_uring journal path enabled (liburing: /usr/lib/x86_64-linux-gnu/liburing.so)
+-- Configuring done (0.5s)
+-- Generating done (0.0s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    CMAKE_C_COMPILER
+
+
+-- Build files have been written to: /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-pgo
+[  9%] Building CXX object CMakeFiles/OrderMatcher.dir/src/AdminServer.cpp.o
+[ 18%] Building CXX object CMakeFiles/OrderMatcher.dir/src/OrderBook.cpp.o
+[ 27%] Building CXX object CMakeFiles/OrderMatcher.dir/src/MatchingEngine.cpp.o
+[ 36%] Building CXX object CMakeFiles/OrderMatcher.dir/src/SessionScheduler.cpp.o
+warning: no profile data available for file "SessionScheduler.cpp" [-Wprofile-instr-unprofiled]
+1 warning generated.
+[ 45%] Building CXX object CMakeFiles/OrderMatcher.dir/src/ContingencyManager.cpp.o
+warning: no profile data available for file "AdminServer.cpp" [-Wprofile-instr-unprofiled]
+[ 54%] Building CXX object CMakeFiles/OrderMatcher.dir/src/HierarchicalRiskManager.cpp.o
+1 warning generated.
+[ 63%] Building CXX object CMakeFiles/OrderMatcher.dir/src/TcpGateway.cpp.o
+[ 72%] Building CXX object CMakeFiles/OrderMatcher.dir/src/FaultInjector.cpp.o
+warning: no profile data available for file "TcpGateway.cpp" [-Wprofile-instr-unprofiled]
+1 warning generated.
+[ 81%] Linking CXX static library libOrderMatcher.a
+[ 81%] Built target OrderMatcher
+[ 90%] Building CXX object benchmarks/CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o
+[100%] Linking CXX executable HonestBenchmark
+[100%] Built target HonestBenchmark
+
+[1m=== PGO build complete ===[0m
+  optimized binary: build-pgo/benchmarks/HonestBenchmark
+  profile used:     /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-pgo-instr/default.profdata
+  "command": "/usr/bin/clang++-18 -DOB_BUILD_TIME=\\\"2026-11-17T06:01:20Z\\\" -DOB_GIT_SHA=\\\"71b332f962e0\\\" -DOB_HAVE_LIBURING=1 -I/home/runner/work/Order-Matching-Engine/Order-Matching-Engine/include -O3 -DNDEBUG -O3 -march=native -mtune=native -std=c++20 -Wall -Wextra -Werror -Wno-error=invalid-feature-combination -fprofile-instr-use=/home/runner/work/Order-Matching-Engine/Order-Matching-Engine/build-pgo-instr/default.profdata -Wno-error=profile-instr-unprofiled -Wno-error=profile-instr-out-of-date -UNDEBUG -o CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o -c /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/benchmarks/HonestBenchmark.cpp",

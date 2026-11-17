@@ -1,0 +1,86 @@
+$ taskset -c 1 build-pgo/benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal --no-immediate
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Honest Benchmark — Four-Path Latency Measurement
+=======================================================
+
+Configuration:
+  Orders:      50000 timed after 5000 warm-up
+  Seed:        42
+  Journal:     /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal
+  Platform:    x86_64
+  Listener:    Path A none; Path L a counting listener; Paths B-D the
+               engine's internal OCO observer (no user listener)
+
+NOT MEASURED: network I/O, async queue delay, OS scheduling,
+              what a real market-data listener does with its callbacks
+
+── Path A: OrderBook::addOrder() [core matching + STP, no listener] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 5215618 orders/sec
+  latency        samples=50000
+    Min:             74 ns
+    P50:            118 ns
+    P90:            302 ns
+    P99:            547 ns
+    P99.9:          950 ns
+    P99.99:       11584 ns
+    Max:          19886 ns
+    Mean:           163 ns
+
+── Path L: OrderBook::addOrder() [listener attached: the shipped book] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 3502867 orders/sec
+  latency        samples=50000
+    Min:            142 ns
+    P50:            188 ns
+    P90:            463 ns
+    P99:            746 ns
+    P99.9:         1178 ns
+    P99.99:       11008 ns
+    Max:          17582 ns
+    Mean:           257 ns
+  Callbacks: 253810 taken by the listener
+
+── Path B: MatchingEngine::submitOrder() [+ sequence alloc, rate limiter] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 3341426 orders/sec
+  latency        samples=50000
+    Min:            152 ns
+    P50:            204 ns
+    P90:            476 ns
+    P99:            751 ns
+    P99.9:         1212 ns
+    P99.99:       11392 ns
+    Max:          12774 ns
+    Mean:           270 ns
+
+  journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal on ext2/3/4
+
+── Path C: + Journal GroupCommit/64 [ack BEFORE durability] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 352412 orders/sec
+  latency        samples=50000
+    Min:            239 ns
+    P50:            309 ns
+    P90:            696 ns
+    P99:         119296 ns
+    P99.9:       138240 ns
+    P99.99:     2015232 ns
+    Max:        2539038 ns
+    Mean:          2808 ns
+
+── Overhead Breakdown (P50) ──
+  Core matching + compliance:   118 ns (Path A P50)
+  Listener attached:            +70 ns (Path L - A)
+  Engine overhead (seq+rate):   +16 ns (Path B - L)
+  Journal, ack before durable:  +105 ns (Path C - B)
+
+=======================================================

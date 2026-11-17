@@ -2,9 +2,9 @@
 
 > **What this is.** A C++20 order matching engine: one binary, `OrderEngine`, that takes orders over TCP in its own binary protocol, matches them on per-symbol worker threads, journals them, and publishes an L2 feed to shared memory. It is a single node with no replication. It is **not production-ready**, and §9 and §10 list why.
 >
-> **What this document describes.** Branch `round8/integration` as of commit `a48cc27`, which has every fix lane of this round and its documentation; after it come one added test case and edits to this document, and no source file changed. Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
+> **What this document describes.** `main` at `71b332f`, the merge of this round's branch (`round8/integration`, pull request #1); "this branch" below means that branch. `a48cc27` has every fix lane of the round and its documentation; after it come one added test case, fixes to one test and to the TLA+ workflow found on the pull request (§11), and edits to this document. One engine source line changed after `a48cc27`: the print band's upper edge now saturates (§11). Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
 >
-> **State of this branch, plainly.** The branch is pushed as a pull request to `main` and has been through CI (§11); it is not merged. No benchmark has been run on this branch on x86, so **no latency or throughput figure in this document describes this code** (§5). The full suite passes on macOS, and the Linux Release, TSan, fault-injection and ASan/UBSan lanes pass in a local container, all at `a48cc27` and all run by hand. CI then ran on the pull request: at `88b8e32` every job passed except one of two ThreadSanitizer runs, which timed out in one test; that test is fixed in the commit after (§11).
+> **State of this branch, plainly.** The branch is merged to `main` (merge commit `71b332f`) and CI passed on the merge (§11). **One x86 benchmark run exists for this code, on a shared GitHub-hosted VM** (§5); nothing has been measured on bare metal, and nothing measures the shipped binary end to end. The full suite passes on macOS, and the Linux Release, TSan, fault-injection and ASan/UBSan lanes pass in a local container, all at `a48cc27` and all run by hand. CI then ran on the pull request: at `88b8e32` every job passed except one of two ThreadSanitizer runs, which timed out in one test; that test is fixed in the commit after (§11).
 
 ---
 
@@ -12,7 +12,7 @@
 
 The engine's core is an O(1) price-level array (`FlatPriceMap`), intrusive order lists, lock-free MPSC queues feeding thread-per-symbol workers, a CRC-32 journal replayed on boot, a session and auction state machine, self-trade prevention, a volatility breaker that checks every continuous print, and per-participant authentication on the order port. Around it sit library components that the binary does not switch on: pro-rata matching and market-maker roles, OCO links, hierarchical risk, fees, a CAT trail, and an ITCH 5.0 / MoldUDP64 / SoupBinTCP market-data stack. Those are tested as libraries and labelled as such below.
 
-Compared with `main` (`adc7b5b`), this branch **deleted** the second binary (`GatewayServer`), the FIX, OUCH and SBE codecs, the DPDK path, primary/backup replication, `JournalFollower`, `EpochStore`, LULD and wash-trade detection. Of the protocols, only the native binary protocol remains served. Replication was deleted rather than finished: it split the brain when a backup was merely slow, and a promoted backup kept applying the old primary's stream. Asking for a role (`--role`, `OB_NODE_ROLE`) now refuses to boot. <!-- claim:repl-refuses-role -->
+Compared with `main` before this round (`adc7b5b`), this branch **deleted** the second binary (`GatewayServer`), the FIX, OUCH and SBE codecs, the DPDK path, primary/backup replication, `JournalFollower`, `EpochStore`, LULD and wash-trade detection. Of the protocols, only the native binary protocol remains served. Replication was deleted rather than finished: it split the brain when a backup was merely slow, and a promoted backup kept applying the old primary's stream. Asking for a role (`--role`, `OB_NODE_ROLE`) now refuses to boot. <!-- claim:repl-refuses-role -->
 
 ### What the shipped binary does
 
@@ -122,29 +122,30 @@ Compared with `main` (`adc7b5b`), this branch **deleted** the second binary (`Ga
 
 ## 5. Performance: what is known
 
-**Nothing has been measured on this branch.** There is no headline figure. The figures that earlier versions of this document led with (a core-matching P50 from one unlogged bare-metal session at `d2e688c`, with a PGO profile trained on the workload it was measured on) are withdrawn from this document; they predate a rewrite of the match path and every change below.
+**One run, on a shared VM, and no headline figure.** `bench-x86.yml` ran once on `main` at `71b332f` (run 44027950500, 2026-11-17): a GitHub-hosted Ubuntu 24.04 VM, Intel Xeon 6975P-C, 4 vCPU, clang 18, pinned to one core, five repetitions of `HonestBenchmark`. Every step exited 0, and its raw output is in [`results/71b332f962e0af4dc15570183530efc07e1cd7e1/`](./results/71b332f962e0af4dc15570183530efc07e1cd7e1/). A shared VM supports order-of-magnitude statements, not an SLA. The figures that earlier versions of this document led with (a core-matching P50 from one unlogged bare-metal session at `d2e688c`, with a PGO profile trained on the workload it was measured on) stay withdrawn from this document.
 
-The only raw benchmark output that exists for recent code is one `bench-x86.yml` run at `adc7b5b` (`main`, **before** this branch's changes): a GitHub-hosted Ubuntu VM, AMD EPYC 9V74, 4 vCPU, five repetitions, a clock on a roughly 10 ns grid. The workflow recorded the run as failed because its `perf` steps had no hardware counters; its outputs are kept with the adversarial review, not in this repository. A shared VM supports order-of-magnitude statements, not an SLA.
-
-| At `adc7b5b`, hosted x86 VM, five runs (not this branch) | Result |
+| At `71b332f`, hosted x86 VM, production build (x86-64-v3, no io_uring) | Result |
 |---|---|
-| Core matching, no listener (`HonestBenchmark` Path A), median of five | P50 280 ns (251–290), P99 1.1 µs |
-| Venue-shaped flow (`RealisticFlowBenchmark`) | combined P50 391 ns, P99 4.0 µs; cancel 441 ns against 251 ns for a new order |
-| First touch after eviction (`ColdCacheBenchmark`) | 4.96 µs P50 against 450 ns warm |
-| Journal on, ack before durable (Path C) | P50 451 ns, P99 224 µs, 37–147k orders/s |
-| Durable ack (Path D, one fsync per order) | P50 173 µs, P99 1.2–3 ms, 1.7–3.5k orders/s |
-| Sustained async load (`SustainedLoadTest`) | held 50k/s; at 400k/s offered the rate decayed to about 107k/s with 9 s queueing, and the run exited 0 |
+| Core matching, no listener (`HonestBenchmark` Path A), median of five | P50 143 ns (136–149), P99 596 ns |
+| The book with a counting listener attached (Path L), median of five | P50 208 ns, P99 797 ns |
+| Engine submit (Path B), median of five | P50 226 ns, P99 834 ns |
+| Journal on, ack before durable (Path C) | P50 325 ns, P99 132 µs, 334–402k orders/s |
+| Durable ack (Path D, one fsync per order) | P50 95 µs, P99 141–171 µs, 10.7–11.0k orders/s |
+| Venue-shaped flow (`RealisticFlowBenchmark`) | combined P50 204 ns, P99 506 ns; cancel 331 ns against 171 ns for a new order |
+| First touch after eviction (`ColdCacheBenchmark`) | 3.47 µs P50 against 366 ns warm |
+| Open loop on one core (`CoordinatedOmissionBenchmark`, fixed arrivals, latency from the intended start) | P99 8.8 µs at 2M ops/s; at 3M ops/s 58.0% of operations start late and P99 is 995 µs; at 4M ops/s every operation starts late |
+| Sustained async load (`SustainedLoadTest`, four producers, eight symbols) | held 50k/s and 400k/s for 20 s each: every order processed inside the offered window, no backlog at the end |
 
-What changed since that run and could move every row:
-- **Listener cost.** At `adc7b5b` a book with a listener attached walked every order at a price level on each add, fill and cancel, so cost grew with level depth; every number above is listener-free, and the shipped binary always attaches one. Level totals are now maintained incrementally; `LevelTotalsTest` proves the per-update work is independent of depth by counting, not by timing. HonestBenchmark gained Path L (Path A with a counting listener). **Neither has been run on x86.**
-- **Breaker.** Every fill now consults the price band.
-- **Order age.** A per-book counter replaced a clock read per order.
-- **Execution reports.** Each request's events pass through an MPSC queue to the order port's thread, which waits for the journal sync.
-- **Write-ahead amends.** A cancel, modify or replace now writes its journal record from inside the book's lock, before it changes the book.
-- **SustainedLoadTest** now fails when the backlog at the end of the offered window exceeds 100 ms of offered load, so the 400k/s run above would fail.
+How to read it:
+- **It is not comparable with the earlier run.** The one earlier dispatch (at `adc7b5b`, before this branch's changes) drew an AMD EPYC 9V74, and its Path A P50 was 280 ns. This one drew an Intel Xeon. The difference is the machine, so the two runs together say nothing about what this round's changes cost or saved; that needs both commits on one machine, which has not been done.
+- **The listener's cost is now measured once.** Every number at `adc7b5b` was listener-free, and the shipped binary always attaches one. Level totals are now maintained incrementally; `LevelTotalsTest` proves the per-update work is independent of depth by counting, not by timing, and Path L above is the same book as Path A with a listener that only counts.
+- **This run includes every change of the round** that could move a row: the price band consulted on every fill, a per-book counter in place of a clock read per order, execution reports passed through an MPSC queue, and a cancel, modify or replace journaled from inside the book's lock before it changes the book.
+- **The durable-ack row measures the runner's disk.** The script's probe on the journal directory took 0.21 s for 1,000 synced 4 KiB writes.
+- **The other two builds are in the raw output, not in the table.** With a PGO profile trained on this same workload, Path A's median P50 was 119 ns. The `-march=native` build with io_uring was no faster than the production build (152 ns), and one of its five Path C repetitions fell to 28.9k orders/s.
+- **`SustainedLoadTest`** fails when the backlog at the end of the offered window exceeds 100 ms of offered load. At `adc7b5b`, on the other machine, the 400k/s run decayed to about 107k/s; here it held.
 
 What that leaves:
-- **The latency and throughput of the shipped configuration are not measured anywhere.** `OrderEngine` syncs one journal entry per request and its order port waits for it, so its throughput is bounded by the disk's fsync latency; the Path D row (a synchronous engine, not `OrderEngine`) is the nearest measurement and is from a different commit.
+- **The latency and throughput of the shipped configuration are not measured anywhere.** `OrderEngine` syncs one journal entry per request and its order port waits for it, so its throughput is bounded by the disk's fsync latency; the Path D row (a synchronous engine, not `OrderEngine`) is the nearest measurement.
 - The lanes of this round ran `HonestBenchmark` before and after their changes on an Apple Silicon laptop to look for regressions. Those runs are indicative only (a ~41 ns clock tick, other lanes loading the machine), their outputs are not in the repository, and none is quoted here.
 - The latency gate in CI (`BenchmarkRegression`) cannot catch a doubling: its thresholds sit far above what it measures, and a hosted runner's single-run P99 moves by about as much on unchanged code. The A/B gate in `benchmark-gate.yml` is the instrument for that, and it is not a required check.
 - `BENCHMARKS.md` keeps the history of earlier measurements with their provenance; `docs/PERF_SOURCES.md` gives every number in these documents its source.
@@ -307,9 +308,10 @@ Open on this commit.
 - No CI step runs `docker compose`; the feed was not checked end to end through compose.
 
 **Performance and measurement**
-- Nothing measured on this branch, on any machine, that this document will quote (§5).
+- One benchmark run, on a shared hosted VM (§5): no bare-metal run, and no before-and-after on one machine for this round's changes.
 - No latency gate times a deep-level or listener-heavy workload.
-- `bench_x86.sh`'s handling of a VM with `perf` but no hardware counters has not run on x86.
+- `bench_x86.sh`'s handling of a VM with `perf` but no hardware counters has not run on x86: the one run's VM had counters.
+- The `perf` counters in that run are whole-process totals for one path each (`perf-prod-*.txt`), which include order generation and warm-up; no per-order figure is derived from them.
 - Running all HonestBenchmark paths in one process has an order effect; `--only` runs one path per process.
 
 **Formal methods**
@@ -323,7 +325,7 @@ Open on this commit.
 
 ## 11. Verification record of this branch
 
-All of it was run by hand on one machine; none of it is CI.
+The first two blocks were run by hand on one machine; the third is CI.
 
 **At `a48cc27`, the commit this document describes:**
 - macOS (Apple clang, Release), full suite: 715/715; `WorkerPinTest` skips by design on macOS.
@@ -332,7 +334,7 @@ All of it was run by hand on one machine; none of it is CI.
   - ThreadSanitizer: 714/714.
   - Fault injection: 714/714.
   - ASan/UBSan: 710/710 through ctest, plus five tests that time out in this slow container and pass when run directly without a time limit (`PropertyTest`, `CheckpointEquivalenceTest`, `SessionControlRaceTest`, `MarketDataTornReadTest`, `AdminServerEndpointsTest`).
-- After `a48cc27`: one added test case (`7214ac6`, the reopen-trips-the-breaker restart in `CheckpointCompleteStateTest`), which passes on macOS and under ASan/UBSan on Linux, and edits to this document. No source file changed.
+- After `a48cc27`: one added test case (`7214ac6`, the reopen-trips-the-breaker restart in `CheckpointCompleteStateTest`), which passes on macOS and under ASan/UBSan on Linux, and edits to this document. No source file changed before the pull request.
 
 **What integration and the Linux lanes caught on the way** (each fixed before the run above):
 - a client that reset its connection killed the engine with `SIGPIPE` (on `main` too; missed by the review);
@@ -346,7 +348,12 @@ All of it was run by hand on one machine; none of it is CI.
 - The timeout was a test that could not finish on a slow runner, not a race. Under TSan a saturated worker hands the book's lock to the admin thread rarely, so a fixed number of scrapes that took seconds on one runner passed the limit on another. The test now runs a minimum number of scrapes and then stops at a time budget (`1bd383c`); in a container held to two CPUs with competing load it finishes inside the budget with no TSan report.
 - The two earlier failures were in the TLA+ job's own setup and are described in §6.
 
-- **Not done:** a merge to `main`; any x86 benchmark on this branch (`bench-x86.yml` runs only when dispatched and has not been).
+**After the pull request:**
+- At `5f882f7`, the pull request's head: all 27 checks passed, both ThreadSanitizer runs among them.
+- Merged to `main` as `71b332f`, whose tree is identical to `5f882f7`; `ci.yml` and `tla.yml` passed on the merge commit.
+- `bench-x86.yml` was dispatched once on `main` at `71b332f` (run 44027950500): every step exited 0 (§5).
+- On the pull request that landed that run, the fuzzer job (`fuzz_gateway_engine`, ten minutes per CI run) found a signed overflow in `OrderBook::printBand`. For a reference price near the top of the 64-bit range, the reference plus the band's half-width passed the largest price. That is undefined behaviour; in a plain build the edge wrapped below zero, so a print at the reference itself tripped the breaker. A client could reach it with two crossing orders at such a price. The edge now saturates (`8f96fc0`), `PrintBandTest` has the case, and the fuzzer's input replays clean under ASan and UBSan. The fuzzer had passed on every earlier run of this code, so ten minutes of it is a sample, not a proof. The benchmark run predates the fix, which adds one comparison to each band computation.
+- **Not done:** a benchmark on bare metal; a benchmark of the two commits on one machine.
 
 ---
 

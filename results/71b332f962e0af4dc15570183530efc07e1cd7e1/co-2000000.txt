@@ -1,0 +1,54 @@
+$ taskset -c 1 build-bench-prod/benchmarks/CoordinatedOmissionBenchmark --orders 200000 --seed 7 --rate 2000000
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 29 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=29
+=======================================================
+  Coordinated-Omission Benchmark (P2-19)
+=======================================================
+
+Configuration:
+  Ops:          200000 (New+Cancel realistic mix)
+  Warmup:       5000
+  Seed:         7
+  Offered rate: 2000000 ops/sec
+  Arrivals:     fixed cadence (deterministic, D/G/1: the queue's best case)
+  Total ops:    310625, period = 500.0 ns/op
+
+Running open-loop (spin to intended start time)...
+  [open-loop] workload: rejected new 0, dead cancels 0, cancels skipped untimed (target gone) 54952
+
+── CO-NAIVE (completion − actual_start) ──
+  Hides backlog: late issue never charged.
+  co-naive       samples=250673
+    Min:            152 ns
+    P50:            195 ns
+    P90:            365 ns
+    P99:            823 ns
+    P99.9:         3369 ns
+    P99.99:       11264 ns
+    Max:          24664 ns
+    Mean:           261 ns
+
+── CO-CORRECTED (completion − intended_start) ──
+  Charges backlog: each op owes from when it *should* have started.
+  co-corrected   samples=250673
+    Min:            153 ns
+    P50:            215 ns
+    P90:            772 ns
+    P99:           8768 ns
+    P99.9:        15552 ns
+    P99.99:       21504 ns
+    Max:          25241 ns
+    Mean:           627 ns
+
+── Delta (corrected − naive) ──
+  Backlogged samples: 22516 / 250673 (9.0%)
+  P50   : +20 ns
+  P99   : +7945 ns
+  P99.9 : +12183 ns
+  P99.99: +10240 ns
+
+  If the offered rate is below service capacity the two tables
+  nearly coincide (little backlog). Raise --rate past what the box
+  can serve and the CO-corrected tail diverges upward: that gap is
+  the latency a closed-loop harness would have silently omitted.
+  (Apple-Silicon absolute numbers are NOT authoritative — x86 CI is.)
+=======================================================

@@ -1,0 +1,54 @@
+$ taskset -c 1 build-bench-prod/benchmarks/CoordinatedOmissionBenchmark --orders 200000 --seed 7 --rate 4000000 --arrivals poisson
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 29 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=29
+=======================================================
+  Coordinated-Omission Benchmark (P2-19)
+=======================================================
+
+Configuration:
+  Ops:          200000 (New+Cancel realistic mix)
+  Warmup:       5000
+  Seed:         7
+  Offered rate: 4000000 ops/sec
+  Arrivals:     poisson (exponential gaps from the workload, M/G/1)
+  Total ops:    310625, period = 250.0 ns/op
+
+Running open-loop (spin to intended start time)...
+  [open-loop] workload: rejected new 0, dead cancels 0, cancels skipped untimed (target gone) 54952
+
+── CO-NAIVE (completion − actual_start) ──
+  Hides backlog: late issue never charged.
+  co-naive       samples=250673
+    Min:            153 ns
+    P50:            188 ns
+    P90:            361 ns
+    P99:            869 ns
+    P99.9:         3660 ns
+    P99.99:       12160 ns
+    Max:          22830 ns
+    Mean:           261 ns
+
+── CO-CORRECTED (completion − intended_start) ──
+  Charges backlog: each op owes from when it *should* have started.
+  co-corrected   samples=250673
+    Min:            275 ns
+    P50:        9830400 ns
+    P90:       14221312 ns
+    P99:       14680064 ns
+    P99.9:     14680064 ns
+    P99.99:    14680064 ns
+    Max:       14741514 ns
+    Mean:       9002952 ns
+
+── Delta (corrected − naive) ──
+  Backlogged samples: 250672 / 250673 (100.0%)
+  P50   : +9830212 ns
+  P99   : +14679195 ns
+  P99.9 : +14676404 ns
+  P99.99: +14667904 ns
+
+  If the offered rate is below service capacity the two tables
+  nearly coincide (little backlog). Raise --rate past what the box
+  can serve and the CO-corrected tail diverges upward: that gap is
+  the latency a closed-loop harness would have silently omitted.
+  (Apple-Silicon absolute numbers are NOT authoritative — x86 CI is.)
+=======================================================

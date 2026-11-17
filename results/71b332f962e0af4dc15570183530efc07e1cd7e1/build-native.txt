@@ -1,0 +1,13 @@
+$ cmake --build build-bench-native --parallel 4 --target HonestBenchmark
+[1/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/SessionScheduler.cpp.o
+[2/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/ContingencyManager.cpp.o
+[3/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/AdminServer.cpp.o
+[4/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/HierarchicalRiskManager.cpp.o
+[5/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/FaultInjector.cpp.o
+[6/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/OrderBook.cpp.o
+[7/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/TcpGateway.cpp.o
+[8/11] Building CXX object benchmarks/CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o
+[9/11] Building CXX object CMakeFiles/OrderMatcher.dir/src/MatchingEngine.cpp.o
+[10/11] Linking CXX static library libOrderMatcher.a
+[11/11] Linking CXX executable benchmarks/HonestBenchmark
+  "command": "/usr/bin/clang++-18 -DOB_BUILD_TIME=\\\"2026-11-17T06:00:59Z\\\" -DOB_GIT_SHA=\\\"71b332f962e0\\\" -DOB_HAVE_LIBURING=1 -I/home/runner/work/Order-Matching-Engine/Order-Matching-Engine/include -O3 -DNDEBUG -O3 -march=native -mtune=native -std=c++20 -Wall -Wextra -Werror -Wno-error=invalid-feature-combination -UNDEBUG -o benchmarks/CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o -c /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/benchmarks/HonestBenchmark.cpp",

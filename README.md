@@ -94,13 +94,18 @@ In `OrderEngine`, self-match prevention (cancel-incoming), the 5% circuit breake
 
 ## 📊 Performance
 
-**No benchmark has been run on this branch, so this README quotes no latency or
-throughput figure.** [Project_Overview.md](./Project_Overview.md) §5 gives the
-one recent x86 run, which is of `main` at `adc7b5b` on a shared GitHub-hosted
-VM, labelled as such, and says what has changed since. [BENCHMARKS.md](./BENCHMARKS.md)
-keeps earlier measurements with their provenance, and
-[docs/PERF_SOURCES.md](./docs/PERF_SOURCES.md) gives every number in these
-documents its source; none has a raw artifact in this repository.
+**One x86 run exists for this code, on a shared GitHub-hosted VM.** `bench-x86.yml`
+ran on `main` at `71b332f`, and its raw output is in
+[`results/71b332f…/`](./results/71b332f962e0af4dc15570183530efc07e1cd7e1/). Core matching alone (`HonestBenchmark` Path A,
+production build, median of five repetitions) had a P50 of 143 ns; with the
+journal on and a durable ack per order (Path D) the P50 was 95 µs, which is the
+runner's disk. [Project_Overview.md](./Project_Overview.md) §5 gives the full
+table and how to read it: a shared VM supports order-of-magnitude statements,
+not an SLA, and nothing has been measured on bare metal.
+[BENCHMARKS.md](./BENCHMARKS.md) keeps earlier measurements with their
+provenance, and [docs/PERF_SOURCES.md](./docs/PERF_SOURCES.md) gives every
+number in these documents its source; only this run has a raw artifact in the
+repository.
 
 The benchmarks: `HonestBenchmark` (Path A the book, L the book with a counting
 listener, B the engine, C with a group-commit journal, D with a durable ack),

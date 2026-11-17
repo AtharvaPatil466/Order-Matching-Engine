@@ -12,18 +12,22 @@
 > of the x86 run is in the repository, and it has not been re-run since —
 > including after `0c3115e` rewrote the match hot path. The x86 figures describe
 > that commit.
+> **Raw output:** the only run whose raw output is in this repository is a
+> GitHub-hosted VM run of `main` at `71b332f` (first table under Results). It is
+> a shared VM, not this platform, and it is quoted separately.
 
 ## TL;DR
 
 | Claim | Evidence | Status |
 |-------|----------|--------|
+| Core matching (x86 hosted VM, production build): **143 ns** P50 | `bench-x86.yml` at `71b332f`, median of five repetitions; raw output in `results/71b332f962e0af4dc15570183530efc07e1cd7e1/` | ✅ Measured once, on a shared VM |
 | Core matching (x86, PGO): **237 ns** P50 · 3.10M ops/s | Clang IR-PGO on the seed=42 workload (AWS c6in.metal); 261 ns non-PGO baseline | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
 | Full-stack with journal (x86): **615 ns** P50 | GroupCommit batch=64, async io_uring ack; journal at `/tmp/honest_benchmark.journal` — whether that host's `/tmp` was EBS or tmpfs is not recorded | ⚠️ Measured at `d2e688c`; no raw log; not re-run |
 | Safety invariants | TLC: 2,726,157 distinct states, 0 violations (`MatchingEngine.cfg`, MaxOrders=3; small bounds, see docs/Verification.md) | ✅ Model-checked |
 | Shadow mode | FIFO violation detected via trade divergence | ✅ Validated |
-| Coordinated omission is corrected, not ignored | `CoordinatedOmissionBenchmark` runs open-loop at a fixed offered rate and reports CO-naive *and* CO-corrected | ✅ Measured (ARM only) |
-| Cold-path cost ≈ 10× warm at P50 | `ColdCacheBenchmark`, working set evicted before each timed op | ✅ Measured (ARM only) |
-| Sustained per-window latency | `SustainedLoadTest` latency columns are cumulative, not per-window — harness defect | ❌ Unmeasured |
+| Coordinated omission is corrected, not ignored | `CoordinatedOmissionBenchmark` runs open-loop at a fixed offered rate and reports CO-naive *and* CO-corrected | ✅ Measured (ARM; one x86 hosted-VM run) |
+| Cold-path cost ≈ 10× warm at P50 | `ColdCacheBenchmark`, working set evicted before each timed op | ✅ Measured (ARM; one x86 hosted-VM run) |
+| Sustained load | `SustainedLoadTest`'s windows were cumulative; fixed (see Sustained Load below). On the x86 hosted VM it held both offered rates with no backlog | ✅ Measured once, on a shared VM |
 
 ## The four benchmarks
 
@@ -151,6 +155,81 @@ RealisticFlow, CoordinatedOmission and ColdCache attach a listener too (`bench::
 - Memory allocator contention (single-threaded)
 
 ## Results
+
+### x86 hosted VM at `71b332f` — the one run with raw output in this repository
+
+`bench-x86.yml` run 44027950500 (2026-11-17) on `main` at `71b332f`: a
+GitHub-hosted Ubuntu 24.04 VM, Intel Xeon 6975P-C, 4 vCPU, clang 18, pinned with
+`taskset -c 1`, seed 42, the journal on the runner's ext4. Every step exited 0.
+Raw files: [`results/71b332f962e0af4dc15570183530efc07e1cd7e1/`](./results/71b332f962e0af4dc15570183530efc07e1cd7e1/); `env.txt` there records the machine.
+
+It is one run on a shared VM, not a venue host: read it for orders of magnitude.
+It is **not comparable** with the bare-metal table below (another machine,
+another commit, and that session kept no log), nor with the one earlier dispatch
+at `adc7b5b`, which drew an AMD EPYC 9V74.
+
+`HonestBenchmark`, 50,000 timed orders after 5,000 warm-up, median of five
+repetitions (range of the five in brackets):
+
+| Build | Path | P50 | P99 | P99.9 | Throughput |
+|---|---|---:|---:|---:|---:|
+| prod | **A** book, no listener | **143 ns** (136–149) | 596 ns | 958 ns | 4.56M orders/s |
+| prod | **L** book, counting listener | 208 ns (205–212) | 797 ns | 1,261 ns | 3.23M orders/s |
+| prod | **B** engine submit | 226 ns (220–235) | 834 ns | 1,340 ns | 3.01M orders/s |
+| prod | **C** journal, ack before durable | 325 ns (323–329) | 132 µs | 154 µs | 383k orders/s |
+| prod | **D** journal, durable ack | 95.2 µs (94.2–95.7) | 145 µs | 276 µs | 10.8k orders/s |
+| native | A | 152 ns (147–154) | 726 ns | 1,473 ns | 4.25M orders/s |
+| native | L | 209 ns (208–217) | 811 ns | 1,316 ns | 3.23M orders/s |
+| native | B | 228 ns (224–233) | 824 ns | 1,314 ns | 3.01M orders/s |
+| native | C | 347 ns (344–401) | 115 µs | 140 µs | 347k orders/s |
+| PGO | A | 119 ns (118–122) | 547 ns | 885 ns | 5.22M orders/s |
+| PGO | L | 192 ns (188–196) | 746 ns | 1,178 ns | 3.49M orders/s |
+| PGO | B | 199 ns (198–204) | 737 ns | 1,150 ns | 3.36M orders/s |
+| PGO | C | 309 ns (307–328) | 113 µs | 138 µs | 352k orders/s |
+
+- **prod** is the Dockerfile's build (`-march=x86-64-v3`, no io_uring); **native**
+  is `-march=native` with io_uring; **PGO** is the native build with a profile
+  trained on this same seed-42 workload, so it flatters this workload.
+- Path D is the runner's disk: the script's probe took 0.21 s for 1,000 synced
+  4 KiB writes on the journal directory.
+- One of the five native Path C repetitions fell to 28.9k orders/s with a P99 of
+  2.69 ms; the median hides it and the range does not.
+
+`CoordinatedOmissionBenchmark`, 200,000 operations, open loop, latency from the
+intended start time:
+
+| Offered rate | P50 | P99 | P99.9 | Started late | P99, Poisson arrivals |
+|---:|---:|---:|---:|---:|---:|
+| 100k ops/s | 232 ns | 1,435 ns | 7,488 ns | 0.1% | 3,077 ns |
+| 500k ops/s | 220 ns | 3,877 ns | 11,008 ns | 1.3% | 4,544 ns |
+| 1M ops/s | 217 ns | 5,984 ns | 18,176 ns | 2.6% | 5,216 ns |
+| 2M ops/s | 215 ns | 8,768 ns | 15,552 ns | 9.0% | 10,816 ns |
+| 3M ops/s | 5,120 ns | 995 µs | 1,049 µs | 58.0% | 647 µs |
+| 4M ops/s | 9.37 ms | 13.8 ms | 13.8 ms | 100.0% | 14.7 ms |
+| 6M ops/s | 19.4 ms | 32.5 ms | 32.6 ms | 100.0% | 33.0 ms |
+
+On this VM one core keeps up through 2M ops/s and is saturated at 4M.
+
+`RealisticFlowBenchmark` (500,000 events) and `ColdCacheBenchmark` (20,000 orders):
+
+| Operation | P50 | P99 |
+|---|---:|---:|
+| Cancel | 331 ns | 435 ns |
+| New order | 171 ns | 210 ns |
+| IOC | 211 ns | 827 ns |
+| Modify (cancel and resubmit) | 494 ns | 633 ns |
+| Combined flow | 204 ns | 506 ns |
+| Combined flow, sparse book (300,000 events) | 254 ns | 489 ns |
+| Warm cache | 366 ns | 1,203 ns |
+| Cold cache (working set evicted before each operation) | 3,469 ns | 11,328 ns |
+
+`SustainedLoadTest`, four producers, eight symbols, 20 s: at 50k/s and at 400k/s
+offered it processed every order inside the offered window, with no backlog at
+the end, no rejects and no memory growth.
+
+Hardware counters (`perf-prod-*.txt`) are whole-process totals for one path
+each. They include order generation and warm-up, so no per-order figure is
+derived from them here.
 
 ### Authoritative — x86 bare metal (AWS c6in.metal, standard Release build)
 
@@ -372,18 +451,19 @@ The exit-1 verdict is therefore also meaningless: the gate compares the
 cumulative aggregate, so one bad early window latches it to failing.
 **Sustained per-window latency and degradation over time are unmeasured.**
 
-#### Not yet measured (needs x86)
+#### Not yet measured on bare-metal x86
+
+The hosted-VM run at `71b332f` (first table under Results) now covers the
+cancel path, the CO-corrected tail, `RealisticFlowBenchmark` and
+`ColdCacheBenchmark` on x86, once, on a shared VM. None of the gaps below is
+closed by it.
 
 | Gap | Why |
 |---|---|
-| True cancel-path P50 | Below the 41 ns ARM tick; needs x86 TSC |
+| Any of the above on bare metal | The only x86 run of current code is on a shared VM |
 | Engine-wrapper overhead on ARM | Smaller than one tick; x86 measures 8 ns |
 | CO knee (saturation rate) | 2M–3M/s not reproducible without `isolcpus`/pinning |
-| CO-corrected tail on x86, any rate | `CoordinatedOmissionBenchmark` has never run on x86 |
-| `RealisticFlowBenchmark` on x86 | Never run there; all realistic-flow numbers are ARM |
-| `ColdCacheBenchmark` on x86 | Never run there |
-| instructions/order, IPC, L1d misses | No `perf`/HW counters on Apple Silicon (see withdrawal above) |
-| Sustained per-window latency | Harness defective — see above |
+| instructions/order, IPC, L1d misses | No `perf`/HW counters on Apple Silicon; the hosted-VM run's counters are whole-process (see withdrawal above) |
 
 The ARM-vs-x86 gap on core matching is microarchitectural (wider OoO window +
 stronger branch prediction on pointer-chasing code), not a build-flag or

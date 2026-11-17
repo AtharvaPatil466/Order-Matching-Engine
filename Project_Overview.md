@@ -2,7 +2,7 @@
 
 > **What this is.** A C++20 order matching engine: one binary, `OrderEngine`, that takes orders over TCP in its own binary protocol, matches them on per-symbol worker threads, journals them, and publishes an L2 feed to shared memory. It is a single node with no replication. It is **not production-ready**, and §9 and §10 list why.
 >
-> **What this document describes.** `main` at `71b332f`, the merge of this round's branch (`round8/integration`, pull request #1); "this branch" below means that branch. `a48cc27` has every fix lane of the round and its documentation; after it come one added test case, fixes to one test and to the TLA+ workflow found on the pull request (§11), and edits to this document, and no engine source file changed. Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
+> **What this document describes.** `main` at `71b332f`, the merge of this round's branch (`round8/integration`, pull request #1); "this branch" below means that branch. `a48cc27` has every fix lane of the round and its documentation; after it come one added test case, fixes to one test and to the TLA+ workflow found on the pull request (§11), and edits to this document. One engine source line changed after `a48cc27`: the print band's upper edge now saturates (§11). Every capability below says whether the shipped binary does it, which test fails if it stops doing it, and where the code is. Where nothing proves a sentence, it says "not verified"; where nothing measured a number, it says "not measured".
 >
 > **State of this branch, plainly.** The branch is merged to `main` (merge commit `71b332f`) and CI passed on the merge (§11). **One x86 benchmark run exists for this code, on a shared GitHub-hosted VM** (§5); nothing has been measured on bare metal, and nothing measures the shipped binary end to end. The full suite passes on macOS, and the Linux Release, TSan, fault-injection and ASan/UBSan lanes pass in a local container, all at `a48cc27` and all run by hand. CI then ran on the pull request: at `88b8e32` every job passed except one of two ThreadSanitizer runs, which timed out in one test; that test is fixed in the commit after (§11).
 
@@ -334,7 +334,7 @@ The first two blocks were run by hand on one machine; the third is CI.
   - ThreadSanitizer: 714/714.
   - Fault injection: 714/714.
   - ASan/UBSan: 710/710 through ctest, plus five tests that time out in this slow container and pass when run directly without a time limit (`PropertyTest`, `CheckpointEquivalenceTest`, `SessionControlRaceTest`, `MarketDataTornReadTest`, `AdminServerEndpointsTest`).
-- After `a48cc27`: one added test case (`7214ac6`, the reopen-trips-the-breaker restart in `CheckpointCompleteStateTest`), which passes on macOS and under ASan/UBSan on Linux, and edits to this document. No source file changed.
+- After `a48cc27`: one added test case (`7214ac6`, the reopen-trips-the-breaker restart in `CheckpointCompleteStateTest`), which passes on macOS and under ASan/UBSan on Linux, and edits to this document. No source file changed before the pull request.
 
 **What integration and the Linux lanes caught on the way** (each fixed before the run above):
 - a client that reset its connection killed the engine with `SIGPIPE` (on `main` too; missed by the review);
@@ -352,6 +352,7 @@ The first two blocks were run by hand on one machine; the third is CI.
 - At `5f882f7`, the pull request's head: all 27 checks passed, both ThreadSanitizer runs among them.
 - Merged to `main` as `71b332f`, whose tree is identical to `5f882f7`; `ci.yml` and `tla.yml` passed on the merge commit.
 - `bench-x86.yml` was dispatched once on `main` at `71b332f` (run 44027950500): every step exited 0 (§5).
+- On the pull request that landed that run, the fuzzer job (`fuzz_gateway_engine`, ten minutes per CI run) found a signed overflow in `OrderBook::printBand`. For a reference price near the top of the 64-bit range, the reference plus the band's half-width passed the largest price. That is undefined behaviour; in a plain build the edge wrapped below zero, so a print at the reference itself tripped the breaker. A client could reach it with two crossing orders at such a price. The edge now saturates (`8f96fc0`), `PrintBandTest` has the case, and the fuzzer's input replays clean under ASan and UBSan. The fuzzer had passed on every earlier run of this code, so ten minutes of it is a sample, not a proof. The benchmark run predates the fix, which adds one comparison to each band computation.
 - **Not done:** a benchmark on bare metal; a benchmark of the two commits on one machine.
 
 ---

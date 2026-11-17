@@ -1,0 +1,94 @@
+$ taskset -c 1 build-bench-prod/benchmarks/RealisticFlowBenchmark --sparse --events 300000 --seed 42
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Realistic Flow Benchmark (P2-18)
+=======================================================
+
+Configuration:
+  Events:            300000 (warmup 5000, seed 42)
+  Drawn mix:         48% cancel / 49% new / 2% IOC / 1% modify
+                     (cancel/modify skipped at a depth floor of 50 live
+                      orders; the realized mix is below)
+  Order sizes:       Pareto(alpha=1.50), clamp 10000
+  Mid random walk:   +/-5 ticks/event from 100000
+  Participants:      8
+
+── Realized workload (warm ops only) ──
+  Timed ops:         294890
+  Cancel:    141362 (47.9%)   [skipped at depth floor 50: 106]
+  New:       144755 (49.1%)
+  IOC:         5929 (2.0%)   [filled: 3472 (58.6%)]
+  Modify:      2844 (1.0%)   [skipped at depth floor: 4]
+  Occupied price levels: 314.8  ->  1.42 orders/level
+  Cancel-to-trade ratio: 40.7:1   (>20:1 — sparse-regime target met)
+  Mean resting depth: 446.7 orders (tracked-id pool: 455.5)
+
+── Workload check ──
+  dead cancels 0, dead modifies 0, rejected new 0, rejected IOC 0, rejected modify 0, final state Continuous
+  OK: every timed op hit a live order or was accepted
+
+── Latency: CANCEL ──
+  cancel         samples=141362
+    Min:            301 ns
+    P50:            327 ns
+    P90:            348 ns
+    P99:            465 ns
+    P99.9:          751 ns
+    P99.99:        9984 ns
+    Max:          17469 ns
+    Mean:           335 ns
+
+── Latency: NEW ──
+  new            samples=144755
+    Min:            158 ns
+    P50:            175 ns
+    P90:            189 ns
+    P99:            240 ns
+    P99.9:          418 ns
+    P99.99:        8640 ns
+    Max:          70532 ns
+    Mean:           180 ns
+
+── Latency: IOC ──
+  ioc            samples=5929
+    Min:            125 ns
+    P50:            237 ns
+    P90:            418 ns
+    P99:            897 ns
+    P99.9:         1841 ns
+    P99.99:        3653 ns
+    Max:           3653 ns
+    Mean:           267 ns
+
+── Latency: MODIFY (cancel+resubmit) ──
+  modify         samples=2844
+    Min:            454 ns
+    P50:            493 ns
+    P90:            518 ns
+    P99:            670 ns
+    P99.9:         1258 ns
+    P99.99:       12800 ns
+    Max:          12859 ns
+    Mean:           505 ns
+
+── Latency: COMBINED flow ──
+  combined       samples=294890
+    Min:            125 ns
+    P50:            254 ns
+    P90:            340 ns
+    P99:            489 ns
+    P99.9:          768 ns
+    P99.99:        9408 ns
+    Max:          70532 ns
+    Mean:           259 ns
+
+── instructions/order ──
+  NOT measured here: this is Apple Silicon (no perf / HW counters).
+  Run on the x86 CI box:
+    numactl --cpunodebind=0 --membind=0 \
+      perf stat -e instructions,cycles,branch-misses,L1-dcache-load-misses \
+      -r 5 ./build/benchmarks/RealisticFlowBenchmark --events 500000 --seed 42
+  instructions/order = <instructions> / 294890 (timed ops).
+  (Apple-Silicon absolute latencies above are NOT authoritative —
+   trust the x86 CI baseline for magnitudes.)
+=======================================================

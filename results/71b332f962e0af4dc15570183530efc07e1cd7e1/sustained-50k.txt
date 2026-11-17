@@ -1,0 +1,54 @@
+$ build-bench-prod/benchmarks/SustainedLoadTest --rate 50000 --threads 4 --duration 20
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 15 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=15
+=== Sustained Load Test ===
+Duration:      20 sec
+Window:        1 sec
+Target rate:   50000 orders/sec (aggregate across producers)
+Threads:       4
+Symbols:       8
+Mode:          full
+Max backlog:   100 ms of offered load at the end of the window
+
+Order pool:    157274 slots per book (~230 MB of orders in all)
+
+Window  0:   50002 orders |     50002/s | backlog        0 | P50=  1608ns P99= 13312ns P99.9=  82944ns | Mem=1208536KB
+Window  1:   50012 orders |     50012/s | backlog        0 | P50=  1584ns P99= 12608ns P99.9=  39168ns | Mem=1208536KB
+Window  2:   50006 orders |     50006/s | backlog        0 | P50=  1616ns P99= 12992ns P99.9=  30848ns | Mem=1208536KB
+Window  3:   50006 orders |     50006/s | backlog        0 | P50=  1608ns P99= 12928ns P99.9=  69632ns | Mem=1208536KB
+Window  4:   50006 orders |     50006/s | backlog        0 | P50=  1632ns P99= 13248ns P99.9=  28544ns | Mem=1208536KB
+Window  5:   50006 orders |     50006/s | backlog        0 | P50=  1592ns P99= 13376ns P99.9=  28416ns | Mem=1208536KB
+Window  6:   50006 orders |     50006/s | backlog        0 | P50=  1576ns P99= 12416ns P99.9=  24448ns | Mem=1208536KB
+Window  7:   50006 orders |     50006/s | backlog        2 | P50=  1608ns P99= 12928ns P99.9= 428032ns | Mem=1208536KB
+Window  8:   50008 orders |     50008/s | backlog        0 | P50=  1616ns P99= 13440ns P99.9=1802240ns | Mem=1208536KB
+Window  9:   50006 orders |     50006/s | backlog        0 | P50=  1608ns P99= 14336ns P99.9=1810432ns | Mem=1208536KB
+Window 10:   50006 orders |     50006/s | backlog        0 | P50=  1624ns P99= 15744ns P99.9=2916352ns | Mem=1208536KB
+Window 11:   50006 orders |     50006/s | backlog        0 | P50=  1640ns P99= 14080ns P99.9=1572864ns | Mem=1208536KB
+Window 12:   50006 orders |     50006/s | backlog        0 | P50=  1656ns P99= 13504ns P99.9=1605632ns | Mem=1208536KB
+Window 13:   50006 orders |     50006/s | backlog        0 | P50=  1616ns P99= 16256ns P99.9=2048000ns | Mem=1208536KB
+Window 14:   50006 orders |     50006/s | backlog        0 | P50=  1600ns P99= 13376ns P99.9=2072576ns | Mem=1208536KB
+Window 15:   50004 orders |     50004/s | backlog        0 | P50=  1632ns P99= 14016ns P99.9=1646592ns | Mem=1208536KB
+Window 16:   50006 orders |     50006/s | backlog        0 | P50=  1616ns P99= 13952ns P99.9=2031616ns | Mem=1208536KB
+Window 17:   50006 orders |     50006/s | backlog        0 | P50=  1616ns P99= 15872ns P99.9=1744896ns | Mem=1208536KB
+Window 18:   50006 orders |     50006/s | backlog        0 | P50=  1624ns P99= 12992ns P99.9=1818624ns | Mem=1208536KB
+Window 19:   50006 orders |     50006/s | backlog        0 | P50=  1640ns P99= 14976ns P99.9=2228224ns | Mem=1208536KB
+
+=== Summary ===
+Offered window:   20.0 sec, then 0.0 sec of drain
+Total submitted:  1000124
+Total rejected:   0
+Total processed:  1000124
+Book rejects:     0
+Offered rate:     50000 orders/sec (admitted over the offered window)
+Achieved rate:    50000 orders/sec (processed within the offered window, 100.0% of offered)
+Backlog at end:   0 orders (0.0 ms of offered load)
+Memory growth:    0.0%
+
+Workload check OK: every order admitted, processed and accepted by its book, and the engine kept up with the offered rate

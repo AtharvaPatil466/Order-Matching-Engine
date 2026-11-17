@@ -1,0 +1,104 @@
+$ taskset -c 1 build-bench-prod/benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Honest Benchmark — Four-Path Latency Measurement
+=======================================================
+
+Configuration:
+  Orders:      50000 timed after 5000 warm-up
+  Seed:        42
+  Journal:     /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal
+  Platform:    x86_64
+  Listener:    Path A none; Path L a counting listener; Paths B-D the
+               engine's internal OCO observer (no user listener)
+
+NOT MEASURED: network I/O, async queue delay, OS scheduling,
+              what a real market-data listener does with its callbacks
+
+── Path A: OrderBook::addOrder() [core matching + STP, no listener] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 4462598 orders/sec
+  latency        samples=50000
+    Min:             87 ns
+    P50:            149 ns
+    P90:            355 ns
+    P99:            608 ns
+    P99.9:          958 ns
+    P99.99:       13312 ns
+    Max:          21374 ns
+    Mean:           197 ns
+
+── Path L: OrderBook::addOrder() [listener attached: the shipped book] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 3232282 orders/sec
+  latency        samples=50000
+    Min:            159 ns
+    P50:            210 ns
+    P90:            501 ns
+    P99:            797 ns
+    P99.9:         1258 ns
+    P99.99:       11392 ns
+    Max:          16612 ns
+    Mean:           283 ns
+  Callbacks: 253810 taken by the listener
+
+── Path B: MatchingEngine::submitOrder() [+ sequence alloc, rate limiter] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 3065588 orders/sec
+  latency        samples=50000
+    Min:            174 ns
+    P50:            222 ns
+    P90:            516 ns
+    P99:            812 ns
+    P99.9:         1280 ns
+    P99.99:       11136 ns
+    Max:          13353 ns
+    Mean:           298 ns
+
+  journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal on ext2/3/4
+
+── Path C: + Journal GroupCommit/64 [ack BEFORE durability] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 334360 orders/sec
+  latency        samples=50000
+    Min:            242 ns
+    P50:            323 ns
+    P90:            757 ns
+    P99:         145408 ns
+    P99.9:       194560 ns
+    P99.99:      237568 ns
+    Max:        2426410 ns
+    Mean:          2959 ns
+
+  journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal on ext2/3/4
+
+── Path D: + Journal Immediate [submit to DURABLE ack] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 11001 orders/sec
+  latency        samples=50000
+    Min:          54579 ns
+    P50:          94208 ns
+    P90:         103936 ns
+    P99:         142336 ns
+    P99.9:       197632 ns
+    P99.99:      432128 ns
+    Max:        1703894 ns
+    Mean:         90814 ns
+
+── Overhead Breakdown (P50) ──
+  Core matching + compliance:   149 ns (Path A P50)
+  Listener attached:            +61 ns (Path L - A)
+  Engine overhead (seq+rate):   +12 ns (Path B - L)
+  Journal, ack before durable:  +101 ns (Path C - B)
+  Journal, durable ack:         +93986 ns (Path D - B)
+
+=======================================================

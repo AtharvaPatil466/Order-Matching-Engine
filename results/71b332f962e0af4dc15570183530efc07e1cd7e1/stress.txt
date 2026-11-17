@@ -1,0 +1,27 @@
+$ build-bench-prod/tests/StressTest
+
+=== Multi-Threaded Stress Tests ===
+Running testConcurrentProducers...
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+  Submitted: 20000 orders, Trades: 5482
+testConcurrentProducers PASSED
+Running testMixedWorkloadContention...
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+  Trades: 4827
+testMixedWorkloadContention PASSED
+Running testKillSwitchUnderLoad...
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+testKillSwitchUnderLoad PASSED
+Running testMultiSymbolConcurrent...
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+  Total trades across 4 symbols: 4864
+testMultiSymbolConcurrent PASSED
+Running testHighThroughputBurst...
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+  50000 orders in 20600 us (2M ops/sec), trades: 20564
+testHighThroughputBurst PASSED
+
+ALL STRESS TESTS PASSED!

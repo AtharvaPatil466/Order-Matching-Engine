@@ -1,0 +1,27 @@
+$ cmake --build build-bench-prod --parallel 4 --target HonestBenchmark RealisticFlowBenchmark CoordinatedOmissionBenchmark ColdCacheBenchmark BinaryCodecBenchmark SustainedLoadTest MemoryProbe StressTest
+[1/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/SessionScheduler.cpp.o
+[2/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/AdminServer.cpp.o
+[3/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/ContingencyManager.cpp.o
+[4/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/HierarchicalRiskManager.cpp.o
+[5/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/FaultInjector.cpp.o
+[6/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/OrderBook.cpp.o
+[7/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/TcpGateway.cpp.o
+[8/25] Building CXX object tests/CMakeFiles/StressTest.dir/StressTest.cpp.o
+[9/25] Building CXX object CMakeFiles/OrderMatcher.dir/src/MatchingEngine.cpp.o
+[10/25] Linking CXX static library libOrderMatcher.a
+[11/25] Building CXX object benchmarks/CMakeFiles/SustainedLoadTest.dir/SustainedLoadTest.cpp.o
+[12/25] Building CXX object benchmarks/CMakeFiles/BinaryCodecBenchmark.dir/BinaryCodecBenchmark.cpp.o
+[13/25] Building CXX object benchmarks/CMakeFiles/MemoryProbe.dir/MemoryProbe.cpp.o
+[14/25] Building CXX object benchmarks/CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o
+[15/25] Linking CXX executable tests/StressTest
+[16/25] Linking CXX executable benchmarks/SustainedLoadTest
+[17/25] Linking CXX executable benchmarks/HonestBenchmark
+[18/25] Linking CXX executable benchmarks/MemoryProbe
+[19/25] Linking CXX executable benchmarks/BinaryCodecBenchmark
+[20/25] Building CXX object benchmarks/CMakeFiles/RealisticFlowBenchmark.dir/RealisticFlowBenchmark.cpp.o
+[21/25] Linking CXX executable benchmarks/RealisticFlowBenchmark
+[22/25] Building CXX object benchmarks/CMakeFiles/ColdCacheBenchmark.dir/ColdCacheBenchmark.cpp.o
+[23/25] Linking CXX executable benchmarks/ColdCacheBenchmark
+[24/25] Building CXX object benchmarks/CMakeFiles/CoordinatedOmissionBenchmark.dir/CoordinatedOmissionBenchmark.cpp.o
+[25/25] Linking CXX executable benchmarks/CoordinatedOmissionBenchmark
+  "command": "/usr/bin/clang++-18 -DOB_BUILD_TIME=\\\"2026-11-17T06:00:43Z\\\" -DOB_GIT_SHA=\\\"71b332f962e0\\\" -I/home/runner/work/Order-Matching-Engine/Order-Matching-Engine/include -O3 -DNDEBUG -O3 -march=x86-64-v3 -std=c++20 -Wall -Wextra -Werror -UNDEBUG -o benchmarks/CMakeFiles/HonestBenchmark.dir/HonestBenchmark.cpp.o -c /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/benchmarks/HonestBenchmark.cpp",

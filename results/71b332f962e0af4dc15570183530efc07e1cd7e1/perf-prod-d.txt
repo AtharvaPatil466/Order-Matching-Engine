@@ -1,0 +1,52 @@
+$ perf stat -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles taskset -c 1 build-bench-prod/benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal --only d
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Honest Benchmark — Four-Path Latency Measurement
+=======================================================
+
+Configuration:
+  Orders:      50000 timed after 5000 warm-up
+  Seed:        42
+  Journal:     /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal
+  Platform:    x86_64
+  Listener:    Path A none; Path L a counting listener; Paths B-D the
+               engine's internal OCO observer (no user listener)
+
+NOT MEASURED: network I/O, async queue delay, OS scheduling,
+              what a real market-data listener does with its callbacks
+
+  journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal on ext2/3/4
+
+── Path D: + Journal Immediate [submit to DURABLE ack] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 7185 orders/sec
+  latency        samples=50000
+    Min:          98295 ns
+    P50:         135168 ns
+    P90:         148480 ns
+    P99:         264192 ns
+    P99.9:       405504 ns
+    P99.99:      548864 ns
+    Max:        1239904 ns
+    Mean:        139144 ns
+
+── Overhead Breakdown (P50) ──
+  (--only d: differences between paths suppressed)
+
+=======================================================
+
+ Performance counter stats for 'taskset -c 1 build-bench-prod/benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal --only d':
+
+          39285724      L1-dcache-load-misses                                                 
+           4910641      branch-misses                                                         
+         366095893      branches                                                              
+        2150345621      instructions                                                          
+        2468259683      cycles                                                                
+
+       7.686208439 seconds time elapsed
+
+       0.088002000 seconds user
+       3.392431000 seconds sys
+
+

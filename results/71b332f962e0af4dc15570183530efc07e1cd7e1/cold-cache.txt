@@ -1,0 +1,53 @@
+$ taskset -c 1 build-bench-prod/benchmarks/ColdCacheBenchmark --orders 20000 --seed 7
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Cold-Cache Benchmark (P2-20)
+=======================================================
+
+Configuration:
+  Ops:        20000 (realistic New+Cancel mix)
+  Warmup:     2000
+  Seed:       7
+  Evict buf:  64 MB (portable bulk thrash, no CLFLUSH)
+  Total ops:  30934
+
+Running WARM pass...
+Running COLD pass (evict before each op)...
+  [warm] workload: rejected new 0, dead cancels 0, cancels skipped untimed (target gone) 2173
+  [cold] workload: rejected new 0, dead cancels 0, cancels skipped untimed (target gone) 2173
+
+── WARM cache ──
+  warm           samples=26761
+    Min:            186 ns
+    P50:            366 ns
+    P90:            625 ns
+    P99:           1203 ns
+    P99.9:         8000 ns
+    P99.99:       23168 ns
+    Max:          37932 ns
+    Mean:           437 ns
+
+── COLD cache (working set evicted before each op) ──
+  cold           samples=26761
+    Min:           1571 ns
+    P50:           3469 ns
+    P90:           8640 ns
+    P99:          11328 ns
+    P99.9:        29824 ns
+    P99.99:      129024 ns
+    Max:         227359 ns
+    Mean:          4718 ns
+
+── Cold penalty (cold − warm) ──
+  P50   : +3103 ns
+  P90   : +8015 ns
+  P99   : +10125 ns
+  P99.9 : +21824 ns
+
+  Cold P50 is the honest first-touch latency after an idle gap or
+  context switch; warm P50 is the steady-state hot path. Production
+  tail SLAs must budget for the cold number, not just the warm one.
+  (Apple-Silicon absolute numbers are NOT authoritative — x86 CI is.)
+  (thrash sink=0)
+=======================================================

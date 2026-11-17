@@ -1,0 +1,9 @@
+$ taskset -c 1 build-bench-prod/benchmarks/BinaryCodecBenchmark
+
+=== Binary Codec Benchmark ===
+Single-thread microbench, no engine / no network.
+2000000 iterations per benchmark.
+
+Benchmark                                   Iters        ns/op    M ops/s     GB/s
+----------                                  -----        -----    -------     ----
+ITCH AddOrder encode (36B)                2000000         29.1      34.38     1.24

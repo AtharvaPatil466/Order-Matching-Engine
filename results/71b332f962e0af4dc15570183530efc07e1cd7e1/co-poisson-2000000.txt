@@ -1,0 +1,54 @@
+$ taskset -c 1 build-bench-prod/benchmarks/CoordinatedOmissionBenchmark --orders 200000 --seed 7 --rate 2000000 --arrivals poisson
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 29 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=29
+=======================================================
+  Coordinated-Omission Benchmark (P2-19)
+=======================================================
+
+Configuration:
+  Ops:          200000 (New+Cancel realistic mix)
+  Warmup:       5000
+  Seed:         7
+  Offered rate: 2000000 ops/sec
+  Arrivals:     poisson (exponential gaps from the workload, M/G/1)
+  Total ops:    310625, period = 500.0 ns/op
+
+Running open-loop (spin to intended start time)...
+  [open-loop] workload: rejected new 0, dead cancels 0, cancels skipped untimed (target gone) 54952
+
+── CO-NAIVE (completion − actual_start) ──
+  Hides backlog: late issue never charged.
+  co-naive       samples=250673
+    Min:            153 ns
+    P50:            194 ns
+    P90:            366 ns
+    P99:            804 ns
+    P99.9:         3104 ns
+    P99.99:       11136 ns
+    Max:          64922 ns
+    Mean:           260 ns
+
+── CO-CORRECTED (completion − intended_start) ──
+  Charges backlog: each op owes from when it *should* have started.
+  co-corrected   samples=250673
+    Min:            155 ns
+    P50:            383 ns
+    P90:           1692 ns
+    P99:          10816 ns
+    P99.9:        24192 ns
+    P99.99:       60928 ns
+    Max:          65258 ns
+    Mean:           973 ns
+
+── Delta (corrected − naive) ──
+  Backlogged samples: 57745 / 250673 (23.0%)
+  P50   : +189 ns
+  P99   : +10012 ns
+  P99.9 : +21088 ns
+  P99.99: +49792 ns
+
+  If the offered rate is below service capacity the two tables
+  nearly coincide (little backlog). Raise --rate past what the box
+  can serve and the CO-corrected tail diverges upward: that gap is
+  the latency a closed-loop harness would have silently omitted.
+  (Apple-Silicon absolute numbers are NOT authoritative — x86 CI is.)
+=======================================================

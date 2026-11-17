@@ -1,0 +1,51 @@
+$ perf stat -e L1-dcache-load-misses,branch-misses,branches,instructions,cycles taskset -c 1 build-bench-prod/benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal --only l
+[hugepages] WARNING: /proc/sys/vm/nr_hugepages=0 but the configured working set needs 1 x 2MB pages. Huge-page allocations will fall back to 4KB pages (correct, but with more dTLB pressure). Reserve with: sysctl -w vm.nr_hugepages=1
+=======================================================
+  Honest Benchmark — Four-Path Latency Measurement
+=======================================================
+
+Configuration:
+  Orders:      50000 timed after 5000 warm-up
+  Seed:        42
+  Journal:     /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal
+  Platform:    x86_64
+  Listener:    Path A none; Path L a counting listener; Paths B-D the
+               engine's internal OCO observer (no user listener)
+
+NOT MEASURED: network I/O, async queue delay, OS scheduling,
+              what a real market-data listener does with its callbacks
+
+── Path L: OrderBook::addOrder() [listener attached: the shipped book] ──
+  Orders:     50000 timed, 0 rejected
+  Traded:     22022 of the timed orders (44.0%); 44347 fills in all
+  Throughput: 3158274 orders/sec
+  latency        samples=50000
+    Min:            159 ns
+    P50:            220 ns
+    P90:            512 ns
+    P99:            839 ns
+    P99.9:         1335 ns
+    P99.99:       12352 ns
+    Max:          14983 ns
+    Mean:           289 ns
+  Callbacks: 253810 taken by the listener
+
+── Overhead Breakdown (P50) ──
+  (--only l: differences between paths suppressed)
+
+=======================================================
+
+ Performance counter stats for 'taskset -c 1 build-bench-prod/benchmarks/HonestBenchmark --orders 50000 --seed 42 --journal /home/runner/work/Order-Matching-Engine/Order-Matching-Engine/bench-journal/hb.journal --only l':
+
+            244392      L1-dcache-load-misses                                                 
+            136056      branch-misses                                                         
+          28362289      branches                                                              
+         173527316      instructions                                                          
+          95130983      cycles                                                                
+
+       0.025816332 seconds time elapsed
+
+       0.019538000 seconds user
+       0.006170000 seconds sys
+
+

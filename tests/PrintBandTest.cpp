@@ -347,4 +347,26 @@ TEST(PrintBand, ReplayReproducesAMidSweepTrip) {
     std::filesystem::remove(path);
 }
 
+// ─── A reference near the top of the price range ───────────────────────────
+
+// Found by fuzz_gateway_engine. The band's upper edge was reference + 5% with
+// no guard: for a reference this high the sum passes the largest Price, which
+// is undefined (UBSan aborts) and in a plain build wraps below zero, so the
+// next print at the reference itself tripped the breaker.
+TEST(PrintBand, TheUpperEdgeSaturatesAtTheTopOfThePriceRange) {
+    constexpr Price kHuge = 8863084066665146128;  // the fuzzer's reference
+    OrderBook book(0, MatchAlgorithm::PriceTime);
+    Recorder rec;
+    book.setEventListener(&rec);
+    OrderId id = 1;
+    // The first print sets the reference; the second is tested against it.
+    for (int print = 0; print < 2; ++print) {
+        ASSERT_TRUE(accepted(book.addOrder(id++, 1, Side::Sell, kHuge, 1, OrderType::Limit)));
+        ASSERT_TRUE(accepted(book.addOrder(id++, 2, Side::Buy, kHuge, 1, OrderType::Limit)));
+    }
+    EXPECT_EQ(rec.trades.size(), 2u);
+    EXPECT_EQ(book.getTradingState(), TradingState::Continuous)
+        << "a print at the reference price tripped the breaker";
+}
+
 }  // namespace

@@ -417,7 +417,10 @@ OrderBook::PrintBand OrderBook::printBand([[maybe_unused]] Price reference) cons
     const double half = static_cast<double>(reference) * cbThreshold_;
     if (reference <= 0 || !(half < 1e18)) return kOpen;  // 1e18: a breaker set out of reach
     const Price h = static_cast<Price>(half);
-    return {reference - h, reference + h};
+    // The upper edge saturates as collarAbove does: reference + h can pass the
+    // largest Price, and wrapping would put the edge below every price.
+    const Price top = std::numeric_limits<Price>::max();
+    return {reference - h, h > top - reference ? top : reference + h};
 #endif
 }
 

@@ -397,15 +397,17 @@ int main(int argc, char* argv[]) {
     std::printf("\n── Latency: COMBINED flow ──\n"); recAll.printTable("combined");
 
     std::printf("\n── instructions/order ──\n");
-    std::printf("  NOT measured here: this is Apple Silicon (no perf / HW counters).\n");
-    std::printf("  Run on the x86 CI box:\n");
+    std::printf("  NOT measured by this binary: it reads no hardware counters.\n");
+    std::printf("  On x86 Linux, around the whole process:\n");
     std::printf("    numactl --cpunodebind=0 --membind=0 \\\n");
     std::printf("      perf stat -e instructions,cycles,branch-misses,L1-dcache-load-misses \\\n");
     std::printf("      -r 5 ./build/benchmarks/RealisticFlowBenchmark --events 500000 --seed 42\n");
     std::printf("  instructions/order = <instructions> / %llu (timed ops).\n",
                 (unsigned long long)timed);
+#if defined(__APPLE__) && defined(__aarch64__)
     std::printf("  (Apple-Silicon absolute latencies above are NOT authoritative —\n");
     std::printf("   trust the x86 CI baseline for magnitudes.)\n");
+#endif
     std::printf("=======================================================\n");
     return 0;
 }

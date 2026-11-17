@@ -197,7 +197,9 @@ int main(int argc, char* argv[]) {
     std::printf("  nearly coincide (little backlog). Raise --rate past what the box\n");
     std::printf("  can serve and the CO-corrected tail diverges upward: that gap is\n");
     std::printf("  the latency a closed-loop harness would have silently omitted.\n");
+#if defined(__APPLE__) && defined(__aarch64__)
     std::printf("  (Apple-Silicon absolute numbers are NOT authoritative — x86 CI is.)\n");
+#endif
     std::printf("=======================================================\n");
     return 0;
 }

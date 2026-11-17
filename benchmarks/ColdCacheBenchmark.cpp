@@ -170,7 +170,9 @@ int main(int argc, char* argv[]) {
     std::printf("\n  Cold P50 is the honest first-touch latency after an idle gap or\n");
     std::printf("  context switch; warm P50 is the steady-state hot path. Production\n");
     std::printf("  tail SLAs must budget for the cold number, not just the warm one.\n");
+#if defined(__APPLE__) && defined(__aarch64__)
     std::printf("  (Apple-Silicon absolute numbers are NOT authoritative — x86 CI is.)\n");
+#endif
     // Keep the thrasher result observable so the eviction is not optimized away.
     std::printf("  (thrash sink=%llu)\n", (unsigned long long)thrasher.sink());
     std::printf("=======================================================\n");
